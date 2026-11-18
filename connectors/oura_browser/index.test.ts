@@ -304,3 +304,75 @@ test("an explicit range wins over the full-history floor and stored cursor", asy
     [["2026-08-01", "2026-08-31"], ["2026-08-31", "2026-09-01"]]);
   noSkip(h);
 });
+
+test("one dense chunk walks all 60 pages before advancing STATE", async () => {
+  const expected = Array.from({ length: 60 }, (_, n) => id(1000 + n));
+  const h = harness({ streams: ["readiness"], answers: (_endpoint, cursor) => {
+    const n = cursor === null ? 0 : Number(cursor);
+    return { data: [{ ...replay.daily_readiness[0], id: expected[n] }],
+      next_token: n === 59 ? null : String(n + 1) };
+  } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 60);
+  assert.deepEqual(h.records.map(({ data }) => data.id), expected);
+  assert.equal(h.messages.filter((message) => message.type === "STATE").length, 1);
+  noSkip(h);
+});
+
+for (const [label, pages, expectedCalls, expectedIds] of [
+  ["repeated cursor despite new rows", [
+    { data: [{ id: id(1101), day: DAY }], next_token: "page-b" },
+    { data: [{ id: id(1102), day: DAY }], next_token: "page-b" },
+  ], 2, [id(1101), id(1102)]],
+  ["already-seen ids despite a fresh cursor", [
+    { data: [{ id: id(1201), day: DAY }], next_token: "page-b" },
+    { data: [{ id: id(1201), day: DAY }], next_token: "page-c" },
+  ], 2, [id(1201)]],
+  ["two consecutive empty pages carrying cursors", [
+    { data: [], next_token: "page-b" },
+    { data: [], next_token: "page-c" },
+  ], 2, []],
+  ["duplicate-only terminal page", [
+    { data: [{ id: id(1301), day: DAY }], next_token: "page-b" },
+    { data: [{ id: id(1301), day: DAY }], next_token: null },
+  ], 2, [id(1301)]],
+] as const) {
+  test(`broken pagination: ${label} keeps rows but withholds STATE`, async () => {
+    let at = 0;
+    const h = harness({ streams: ["readiness"], answers: () => {
+      const page = pages[at++];
+      return page ? { data: [...page.data], next_token: page.next_token } : { data: [], next_token: null };
+    } });
+    await collectOuraBrowser(h.ctx, ACCESS);
+    assert.equal(h.calls.length, expectedCalls, "stop at evidence of a broken walk");
+    assert.deepEqual(h.records.map(({ data }) => data.id), [...expectedIds]);
+    assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+    assert.equal(h.messages.find((message) => message.type === "SKIP_RESULT")?.reason, "inventory_not_proven_complete");
+  });
+}
+
+test("one empty page with a cursor is followed and a non-empty page resets the allowance", async () => {
+  const pages: Answer[] = [
+    { data: [], next_token: "page-b" },
+    { data: [{ id: id(1401), day: DAY }], next_token: "page-c" },
+    { data: [], next_token: "page-d" },
+    { data: [{ id: id(1402), day: DAY }], next_token: null },
+  ];
+  let at = 0;
+  const h = harness({ streams: ["readiness"], answers: () => pages[at++] ?? { data: [], next_token: null } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 4);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(1401), id(1402)]);
+  assert.equal(h.messages.filter((message) => message.type === "STATE").length, 1);
+  noSkip(h);
+});
+
+test("an empty terminal page completes after one empty continuation", async () => {
+  let at = 0;
+  const h = harness({ streams: ["readiness"], answers: () =>
+    ({ data: [], next_token: at++ === 0 ? "page-b" : null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.messages.filter((message) => message.type === "STATE").length, 1);
+  noSkip(h);
+});
