@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Page } from "playwright";
+import { parseHTML } from "linkedom";
 import {
 	collectNutrition,
 	collectProfile,
@@ -33,18 +34,30 @@ function pageFor(html: string, landed?: string): Page {
 		},
 		url: () => url,
 		content: async () => html,
-		evaluate: async () => ({
-			actionableControl: null,
-			actionPerformed: null,
-			atEnd: true,
-			clientHeight: 100,
-			loading: false,
-			rowCount: 1,
-			rows: [{ key: "position:data-index=0", html, unitCount: 1 }],
-			scrollHeight: 100,
-			scrollTop: 0,
-			staticListEvidence: "declared_count",
-		}),
+		// Each outermost line is one row, keyed by document order, as the
+		// browser function reports a complete snapshot.
+		evaluate: async () => {
+			const { document } = parseHTML(html);
+			const lines = [...document.querySelectorAll("li")].filter(
+				(li) => !li.parentElement?.closest("li"),
+			);
+			return {
+				actionableControl: null,
+				actionPerformed: null,
+				atEnd: true,
+				clientHeight: 100,
+				loading: false,
+				rowCount: lines.length,
+				rows: lines.map((li, i) => ({
+					key: `position:document-order=${i}`,
+					html: li.outerHTML,
+					unitCount: 1,
+				})),
+				scrollHeight: 100,
+				scrollTop: 0,
+				staticListEvidence: "declared_count",
+			};
+		},
 		waitForTimeout: async () => {},
 	} as unknown as Page;
 }
@@ -181,7 +194,13 @@ const verified: InventoryEvidence = {
 	signal: { entity: "order_items", exactTotal: 2 },
 };
 test("an order's own server total proves its rows only when every row was read and they number exactly that total", () => {
-	const read = { ...verified, ownerIdentity: null, signedInOwnerIdentity: null, signal: null };
+	const read = {
+		...verified,
+		ownerIdentity: null,
+		signedInOwnerIdentity: null,
+		signal: null,
+		lineCountProven: true,
+	};
 	assert.equal(inventoryIsComplete(read), false);
 	assert.equal(inventoryMatchesSourceTotal(read, 2), true);
 	for (const total of [null, 0, 1, 3, 2.5])
@@ -197,6 +216,9 @@ test("an order's own server total proves its rows only when every row was read a
 		{ missingIdentityRows: 1 },
 		{ acceptedIds: ["line-1"] },
 		{ sourceIds: ["line-1", "line-1"] },
+		{ lineCountProven: false },
+		{ lineCountProven: undefined },
+		{ linklessLines: 1 },
 	] as Partial<InventoryEvidence>[])
 		assert.equal(
 			inventoryMatchesSourceTotal({ ...read, ...invalid }, 2),
@@ -700,4 +722,38 @@ test("an empty nutrition panel shell is an unknown lookup", async () => {
 	);
 	assert.equal(result.lookupSkips, 1);
 	assert.equal(deps.records.length, 0);
+});
+test("a browser row count that disagrees with the parsed html does not prove an order's lines", async () => {
+	const html = detailPage({ lines: 1 });
+	const page = {
+		...pageFor(html),
+		// One reported row whose html holds two outer lines.
+		evaluate: async () => ({
+			actionableControl: null,
+			actionPerformed: null,
+			atEnd: true,
+			clientHeight: 100,
+			loading: false,
+			rowCount: 1,
+			rows: [
+				{
+					key: "position:document-order=0",
+					html: `<ul>${itemRow(0)}${itemRow(1)}</ul>`,
+					unitCount: 1,
+				},
+			],
+			scrollHeight: 100,
+			scrollTop: 0,
+			staticListEvidence: "declared_count",
+		}),
+	} as unknown as Page;
+	const result = await fetchOrderDetail(page, order.orderId, {
+		waitForHydration: async () => {},
+		detailSurfaceTimeoutMs: 50,
+	});
+	assert.equal(result.status, "hydrated");
+	if (result.status !== "hydrated") return;
+	assert.equal(result.sourceItemTotal, 1);
+	assert.equal(result.evidence.lineCountProven, false);
+	assert.equal(result.inventoryComplete, false);
 });

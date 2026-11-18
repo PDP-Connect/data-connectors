@@ -707,6 +707,27 @@ function parseDetailItem(link: HTMLAnchorElement): DetailItem | null {
 // the emitted id for that case. No recommendation/footer product rail was
 // found on the real captured page (verified: only a "Quick actions" banner
 // with report/reorder buttons, no product-detail links).
+/** The order's purchased lines: each outermost <li> that holds a product name
+ * link or a quantity. A substitute's nested <li> belongs to its outer line.
+ * Same rule as the browser-side collector, applied to the html parsed. */
+export function countOrderDetailLines(html: string): number {
+	const { document } = parseHTML(html);
+	const lines = new Set(
+		[
+			...document.querySelectorAll(
+				'a[data-qe-id="itemRowDetailsName"], [data-qe-id="orderItemQty"]',
+			),
+		]
+			.map((element) => element.closest("li"))
+			.filter((element): element is HTMLLIElement => element !== null),
+	);
+	return [...lines].filter((line) => {
+		for (let parent = line.parentElement; parent; parent = parent.parentElement)
+			if (lines.has(parent as HTMLLIElement)) return false;
+		return true;
+	}).length;
+}
+
 export function parseOrderDetailDom(html: string): OrderDetail | null {
 	const { document } = parseHTML(html);
 	const links = [

@@ -71,6 +71,7 @@ import {
 	mergeOrdersListPage,
 	parseNutritionDom,
 	parseOrderDate,
+	countOrderDetailLines,
 	parseOrderDetailDom,
 	parseOrdersListDom,
 	parseOrdersListStructured,
@@ -180,6 +181,9 @@ interface DetailSurfaceDiagnostics {
 
 interface DetailSurfaceResult {
 	sourceIds: string[];
+	/** One complete snapshot mounted exactly the source's line total, and the
+	 * collection holds that snapshot's lines and nothing else. */
+	lineCountMatches: boolean;
 	diagnostics: DetailSurfaceDiagnostics;
 	html: string;
 	coherent: boolean;
@@ -744,9 +748,12 @@ async function collectDetailSurface(
 		sourceIds: [...collected.keys()],
 		diagnostics,
 		html,
-		coherent: coherent && !lastError && !latest.loading &&
+		coherent: coherent && !lastError && !latest.loading,
+		lineCountMatches:
+			sourceLineTotal !== null &&
 			latest.staticListEvidence === "declared_count" &&
-			collected.size === sourceLineTotal && latest.rows.length === sourceLineTotal,
+			collected.size === sourceLineTotal &&
+			latest.rows.length === sourceLineTotal,
 	};
 }
 
@@ -1098,8 +1105,14 @@ export async function fetchOrderDetail(
 		surface.sourceIds,
 	);
 	const sourceItemTotal = sourceOrderItemTotal(html, orderId);
-	evidence.coherent = surface.coherent && initialSourceItemTotal !== null &&
-		sourceItemTotal === initialSourceItemTotal;
+	evidence.coherent = surface.coherent;
+	// The browser's count is checked again here on the html actually parsed,
+	// against a server total that did not change while the page was read.
+	evidence.lineCountProven =
+		surface.lineCountMatches &&
+		initialSourceItemTotal !== null &&
+		sourceItemTotal === initialSourceItemTotal &&
+		countOrderDetailLines(surface.html) === sourceItemTotal;
 	evidence.linklessLines = surface.diagnostics.linklessLines;
 	evidence.responseSucceeded = responseSucceeded;
 	evidence.loading = surface.diagnostics.loading;

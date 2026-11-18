@@ -30,6 +30,9 @@ export interface InventoryEvidence {
 	missingIdentityRows: number;
 	/** Outermost source lines without a parsed product name link. */
 	linklessLines?: number;
+	/** One complete snapshot held exactly the source's line total, the parsed
+	 * html still holds that many lines, and the server total did not change. */
+	lineCountProven?: boolean;
 	signal:
 		| { entity: InventoryEntity; exactTotal: number }
 		| { entity: InventoryEntity; explicitEnd: true }
@@ -70,6 +73,7 @@ export function inventoryMatchesSourceTotal(
 		sourceTotal !== null &&
 		Number.isSafeInteger(sourceTotal) &&
 		sourceTotal > 0 &&
+		e.lineCountProven === true &&
 		rowsAreRead(e) &&
 		new Set(e.sourceIds).size === sourceTotal
 	);

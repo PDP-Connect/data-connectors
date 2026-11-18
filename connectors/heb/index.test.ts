@@ -5424,7 +5424,7 @@ test("fetchOrderDetail: a changed or missing final SSR total voids line proof", 
 			});
 			assert.equal(result.status, "hydrated");
 			if (result.status !== "hydrated") return;
-			assert.equal(result.evidence.coherent, false);
+			assert.equal(result.evidence.lineCountProven, false);
 			assert.equal(inventoryMatchesSourceTotal({
 				...result.evidence, acceptedIds: result.evidence.sourceIds,
 			}, result.sourceItemTotal), false);
