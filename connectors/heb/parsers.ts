@@ -900,6 +900,9 @@ export function resolveLinklessOrderItems(
 	const inventoryOnly = new Map<Element, (typeof items)[number]>();
 	let keyed = 0;
 	let eliminated = 0;
+	// Why each unresolved linkless line stayed unresolved, as fixed classes.
+	const why = new Map<string, number>();
+	let linklessImage: string | null = null;
 	const resolveLine = (line: Element, index: number, unordered = false) => {
 		const item = items[index]!;
 		claimed.add(index);
@@ -925,9 +928,16 @@ export function resolveLinklessOrderItems(
 			return name !== null && names.has(normalize(name));
 		});
 		const index = imageMatches[0] ?? textMatches[0];
-		if (imageMatches.length > 1 || textMatches.length > 1 || index === undefined ||
-			(imageMatches.length > 0 && textMatches.length > 0 && imageMatches[0] !== textMatches[0]) ||
-			claimed.has(index) || items[index]!.fullDisplayName === null) {
+		const refusal = imageMatches.length > 1 ? "img_multi"
+			: textMatches.length > 1 ? "txt_multi"
+			: index === undefined ? "none"
+			: imageMatches.length > 0 && textMatches.length > 0 && imageMatches[0] !== textMatches[0] ? "conflict"
+			: claimed.has(index) ? (imageMatches.length > 0 ? "img_claimed" : "txt_claimed")
+			: items[index]!.fullDisplayName === null ? "unnamed_item"
+			: null;
+		if (refusal !== null || index === undefined) {
+			why.set(refusal ?? "none", (why.get(refusal ?? "none") ?? 0) + 1);
+			linklessImage ??= imageShape(own);
 			remaining.push(line);
 			// Even a key naming an already claimed item forbids elimination.
 			if (imageMatches.length || textMatches.length) eliminationSafe = false;
@@ -937,8 +947,13 @@ export function resolveLinklessOrderItems(
 		keyed++;
 	}
 	const unclaimed = items.map((_, i) => i).filter((i) => !claimed.has(i));
-	if (ledgerComplete && eliminationSafe && remaining.length > 0 &&
-		remaining.length === unclaimed.length && unclaimed.every((i) => items[i]!.fullDisplayName !== null)) {
+	const stop = !ledgerComplete ? "ledger"
+		: remaining.length === 0 ? "none"
+		: !eliminationSafe ? "unsafe"
+		: remaining.length !== unclaimed.length ? "count"
+		: !unclaimed.every((i) => items[i]!.fullDisplayName !== null) ? "unnamed"
+		: "ok";
+	if (stop === "ok") {
 		// The inventory is known; with multiple rows, the DOM-to-item pairing
 		// is not. Never attach a line's quantity/price/department to that guess.
 		for (const [i, line] of remaining.entries()) resolveLine(line, unclaimed[i]!, remaining.length > 1);
@@ -972,7 +987,11 @@ export function resolveLinklessOrderItems(
 		`remaining:${remaining.length}`,
 		`unclaimed:${ledgerComplete ? unclaimed.length : "-"}`,
 		`elim:${eliminated}`,
-	].join(",") + (unfitImage ? `;unfit_img=${unfitImage}` : "");
+	].join(",") +
+		`;stop=${stop}` +
+		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
+		`;ll_img=${linklessImage ?? "-"}` +
+		(unfitImage ? `;unfit_img=${unfitImage}` : "");
 	return { detail, unresolved: inspectOrderDetailLines(resolvedHtml).linkless, trace };
 }
 

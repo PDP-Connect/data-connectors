@@ -1274,15 +1274,11 @@ test("processListOrder: DETAIL_GAP retains elapsed time and surface poll count",
 
 	const [gap] = findDetailGaps(protocolMessages);
 	assert.ok(gap);
+	// The linkless trace leads: a stored gap message keeps only its first
+	// 300 characters. The counters and item proof follow it.
 	assert.match(
 		gap.last_error?.message ?? "",
-		/^reason_code=detail_surface_incomplete;elapsed_ms=\d+;poll_count=[1-9]\d*/,
-	);
-	// The item proof's own numbers come before the surface diagnostic, so the
-	// 500-character cut cannot drop the reason the proof failed.
-	assert.match(
-		gap.last_error?.message ?? "",
-		/;poll_count=\d+;source_total=none;distinct_ids=\d+;row_ids=\d+;rejected=\d+;missing_identity=\d+;coherent=(true|false);/,
+		/^ssr=[^;]*;linkless_trace=[^;]*;stop=[^;]*;why=[^;]*;ll_img=[^;]*;(unfit_img=[^;]*;)?reason_code=detail_surface_incomplete;elapsed_ms=\d+;poll_count=[1-9]\d*;source_total=none;distinct_ids=\d+;row_ids=\d+;rejected=\d+;missing_identity=\d+;coherent=(true|false);/,
 	);
 });
 

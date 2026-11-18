@@ -859,6 +859,8 @@ export type DetailFetchResult =
 			inventoryComplete: boolean;
 			/** Item lines the order's own server payload reports; null when unproven. */
 			sourceItemTotal: number | null;
+			/** Server-payload shape and linkless-line trace: counts and fixed classes only. */
+			linklessTrace?: string;
 			diagnostic?: string;
 			elapsedMs?: number;
 			pollCount?: number;
@@ -954,8 +956,8 @@ function detailItemsComplete(
 	);
 }
 
-/** Why an order's item proof failed, as numbers only. It leads the gap message
- * so the 500-character cut keeps it. */
+/** Why an order's item proof failed, as numbers only. In a gap message it
+ * follows the linkless trace and the failure counters. */
 function itemProofDiagnostic(
 	evidence: InventoryEvidence,
 	sourceItemTotal: number | null,
@@ -1135,9 +1137,10 @@ export async function fetchOrderDetail(
 		evidence,
 		inventoryComplete: detailItemsComplete(evidence, sourceItemTotal),
 		sourceItemTotal,
-		// Counts and shapes only: how far linkless-line resolution got. It goes
-		// first because a gap keeps only the first 500 characters.
-		diagnostic: `ssr=${source.shape};${resolved.trace};${detailSurfaceErrorMessage(surface.diagnostics)}`,
+		// Counts and shapes only: how far linkless-line resolution got. A gap
+		// leads with it because a stored gap message keeps only 300 characters.
+		linklessTrace: `ssr=${source.shape};${resolved.trace}`,
+		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
 		...metrics(),
 		status: "hydrated",
 	};
@@ -1599,10 +1602,12 @@ function buildHebDetailGap(
 		elapsedMs?: number | undefined;
 		pollCount?: number | undefined;
 	} = {},
+	lead?: string | undefined,
 ) {
 	const elapsedMs = Math.max(0, Math.round(metrics.elapsedMs ?? 0));
 	const pollCount = Math.max(0, Math.floor(metrics.pollCount ?? 0));
 	const errorMessage = [
+		...(lead ? [lead] : []),
 		`reason_code=${failureKind}`,
 		`elapsed_ms=${elapsedMs}`,
 		`poll_count=${pollCount}`,
@@ -1944,6 +1949,7 @@ async function recoverPendingOrderItemDetailGapPage(
 						locator.orderDate,
 						`${itemProofDiagnostic(result.evidence, result.sourceItemTotal)};${result.diagnostic}`,
 						{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+						result.linklessTrace,
 					),
 				);
 				reDeferred += 1;
@@ -2289,6 +2295,7 @@ async function fetchDetailAndRecordCoverage(
 					orderDate,
 					`${itemProofDiagnostic(result.evidence, result.sourceItemTotal)};${result.diagnostic}`,
 					{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+					result.linklessTrace,
 				),
 			);
 		}

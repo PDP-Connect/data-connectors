@@ -1047,6 +1047,18 @@ test("a linked line's H-E-B image in a size folder with digits or underscores fi
 	assert.equal(r.detail.items[1]?.productId, "501");
 });
 
+test("the diagnostic names why elimination refused: a line naming a claimed item, or an unnamed left-over item", async () => {
+	const [claimedText, unnamed] = await Promise.all([
+		resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(0) + linklessLine("999", "SSR 500")),
+		resolveLinkless([ssrItem("500"), { product: { id: "501" }, quantity: 1 }], itemRow(0) + linklessLine("999")),
+	]);
+	assert.equal(claimedText.evidence.linklessLines, 1);
+	assert.match(claimedText.linklessTrace ?? "", /elim:0;stop=unsafe;why=txt_claimed:1;ll_img=heb_image\/hebgrocery_id\/jpg(;|$)/);
+	assert.equal(unnamed.evidence.linklessLines, 1);
+	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;why=none:1;/);
+	assert.doesNotMatch(`${claimedText.linklessTrace}${unnamed.linklessTrace}`, /500|501|999|SSR/);
+});
+
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {
 	const results = await Promise.all([
 		resolveLinkless([ssrItem("500"), { product: { id: 501, fullDisplayName: "SSR 501" }, quantity: 1 }], itemRow(0) + unrelatedLine()),
@@ -1073,8 +1085,9 @@ test("the detail diagnostic says which linkless step refused, in counts and shap
 		resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(499).replace("</li>", '<img src="https://cdn.example.test/p/widget-name_000000500.png"><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/000000999.jpg"></li>') + unrelatedLine()),
 		resolveLinkless([{ product: { fullDisplayName: "No id" }, quantity: 1 }], itemRow(0)),
 	]);
-	const diag = (r: { diagnostic?: string }): string => r.diagnostic ?? "";
+	const diag = (r: { linklessTrace?: string }): string => r.linklessTrace ?? "";
 	assert.match(diag(countMismatch), /linkless_trace=ssr:3,linked:1,unfit:0,by_img:0,ledger:complete,linkless:1,keyed:0,remaining:1,unclaimed:2,elim:0/);
+	assert.match(diag(countMismatch), /elim:0;stop=count;why=none:1;ll_img=other_host\/other_path\/jpg(;|$)/);
 	assert.match(diag(unfit), /linkless_trace=ssr:2,linked:1,unfit:1,by_img:0,ledger:unplaced,linkless:1,/);
 	assert.match(diag(unfit), /unfit_img=other_host\/other_path\/png\+heb_image\/hebgrocery_id\/jpg(;|$)/);
 	assert.doesNotMatch(diag(unfit), /500|999|widget|cdn|example/i);
