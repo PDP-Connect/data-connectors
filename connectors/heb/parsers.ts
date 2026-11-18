@@ -758,6 +758,7 @@ export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
 		productId: string;
+		quantity: number | null;
 		substituteIds: string[];
 		fullDisplayName: string | null;
 		productUrl: string | null;
@@ -777,6 +778,24 @@ export function resolveLinklessOrderItems(
 		for (const nested of own.querySelectorAll("li")) nested.remove();
 		return own;
 	};
+	const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
+	const ownImageIds = (own: Element) => {
+		const ids = new Set<string>();
+		for (const img of own.querySelectorAll("img")) {
+			for (const value of [img.getAttribute("src") ?? "", img.getAttribute("srcset") ?? ""]) {
+				for (const candidate of value.split(",")) {
+					try {
+						const url = new URL(candidate.trim().split(/\s+/)[0] ?? "");
+						if (url.hostname !== "images.heb.com") continue;
+						const match = /^\/is\/image\/HEBGrocery\/(?:prd-small\/(\d+)\.jpg|(\d+)-\d+)$/.exec(url.pathname);
+						const id = match?.[1] ?? match?.[2];
+						if (id) ids.add(numericId(id));
+					} catch { /* Not an image URL. */ }
+				}
+			}
+		}
+		return ids;
+	};
 	// Every linked outer line must take exactly one SSR item, and every id the
 	// line names (its own link and its nested substitutes') must belong to that
 	// item, so a shared substitute cannot stand in for a contradictory
@@ -793,7 +812,12 @@ export function resolveLinklessOrderItems(
 			const ids = [...line.querySelectorAll(nameSelector)].map(
 				(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "",
 			);
-			return items.map((_, i) => i).filter((i) => fits(ids, items[i]!));
+			const linked = items.map((_, i) => i).filter((i) => fits(ids, items[i]!));
+			if (linked.length) return linked;
+			const images = [...ownImageIds(ownCopy(line))];
+			return images.length ? items.map((_, i) => i).filter((i) =>
+				images.every((id) => [items[i]!.productId, ...items[i]!.substituteIds]
+					.some((candidate) => numericId(candidate) === id))) : [];
 		});
 	const lineOf = new Map<number, number>();
 	const place = (line: number, tried: Set<number>): boolean => {
@@ -831,23 +855,24 @@ export function resolveLinklessOrderItems(
 	}
 	for (const item of lineOf.keys()) claimed.add(item);
 	const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
-	const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
+	const remaining: Element[] = [];
+	let eliminationSafe = true;
+	const inventoryOnly = new Map<Element, (typeof items)[number]>();
+	const resolveLine = (line: Element, index: number, unordered = false) => {
+		const item = items[index]!;
+		claimed.add(index);
+		const anchor = document.createElement("a");
+		anchor.setAttribute("data-qe-id", "itemRowDetailsName");
+		anchor.setAttribute("href", "/product-detail/ssr/" + item.productId);
+		anchor.textContent = item.fullDisplayName!;
+		anchor.setAttribute("data-ssr-resolved", item.productUrl ?? "");
+		if (unordered) inventoryOnly.set(anchor, item);
+		line.insertBefore(anchor, line.firstChild);
+	};
 	for (const line of ledgerComplete ? outerLines : []) {
 		const own = ownCopy(line);
 		if (own.querySelector(nameSelector) || !own.querySelector(qtySelector)) continue;
-		const imageIds = new Set<string>();
-		for (const img of own.querySelectorAll("img")) {
-			for (const value of [img.getAttribute("src") ?? "", img.getAttribute("srcset") ?? ""]) {
-				for (const candidate of value.split(",")) {
-					try {
-						const url = new URL(candidate.trim().split(/\s+/)[0] ?? "");
-						if (url.hostname !== "images.heb.com") continue;
-						const match = /^\/is\/image\/HEBGrocery\/prd-small\/(\d+)\.jpg$/.exec(url.pathname);
-						if (match?.[1]) imageIds.add(numericId(match[1]));
-					} catch { /* Not an image URL. */ }
-				}
-			}
-		}
+		const imageIds = ownImageIds(own);
 		const names = new Set([...own.querySelectorAll("p, span, div")].map((el) => normalize(normText(el))));
 		// Both keys are matched against every SSR item, claimed or not, so a key
 		// that names a claimed item still counts as contradicting evidence.
@@ -856,20 +881,23 @@ export function resolveLinklessOrderItems(
 			const name = items[i]!.fullDisplayName;
 			return name !== null && names.has(normalize(name));
 		});
-		if (imageMatches.length > 1 || textMatches.length > 1) continue;
 		const index = imageMatches[0] ?? textMatches[0];
-		if (index === undefined || (imageMatches.length && textMatches.length && imageMatches[0] !== textMatches[0])) continue;
-		if (claimed.has(index)) continue;
-		const item = items[index]!;
-		// A record needs a name; an unnamed SSR item leaves the line unresolved.
-		if (item.fullDisplayName === null) continue;
-		claimed.add(index);
-		const anchor = document.createElement("a");
-		anchor.setAttribute("data-qe-id", "itemRowDetailsName");
-		anchor.setAttribute("href", "/product-detail/ssr/" + item.productId);
-		anchor.textContent = item.fullDisplayName;
-		anchor.setAttribute("data-ssr-resolved", item.productUrl ?? "");
-		line.insertBefore(anchor, line.firstChild);
+		if (imageMatches.length > 1 || textMatches.length > 1 || index === undefined ||
+			(imageMatches.length > 0 && textMatches.length > 0 && imageMatches[0] !== textMatches[0]) ||
+			claimed.has(index) || items[index]!.fullDisplayName === null) {
+			remaining.push(line);
+			// Even a key naming an already claimed item forbids elimination.
+			if (imageMatches.length || textMatches.length) eliminationSafe = false;
+			continue;
+		}
+		resolveLine(line, index);
+	}
+	const unclaimed = items.map((_, i) => i).filter((i) => !claimed.has(i));
+	if (ledgerComplete && eliminationSafe && remaining.length > 0 &&
+		remaining.length === unclaimed.length && unclaimed.every((i) => items[i]!.fullDisplayName !== null)) {
+		// The inventory is known; with multiple rows, the DOM-to-item pairing
+		// is not. Never attach a line's quantity/price/department to that guess.
+		for (const [i, line] of remaining.entries()) resolveLine(line, unclaimed[i]!, remaining.length > 1);
 	}
 	const resolvedHtml = document.toString();
 	const detail = parseOrderDetailDom(resolvedHtml);
@@ -881,6 +909,10 @@ export function resolveLinklessOrderItems(
 			if (!parseDetailItem(link)) continue;
 			if (link.hasAttribute("data-ssr-resolved"))
 				detail.items[index]!.productUrl = link.getAttribute("data-ssr-resolved") || null;
+			const item = inventoryOnly.get(link);
+			if (item) Object.assign(detail.items[index]!, {
+				quantity: item.quantity, lineTotal: null, imageUrl: null, department: null,
+			});
 			index++;
 		}
 	}

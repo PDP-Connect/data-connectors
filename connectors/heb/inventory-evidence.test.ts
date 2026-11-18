@@ -818,7 +818,7 @@ for (const [label, image, name, copies, expected] of [
 	["text", "999", "  ssr   name ", 1, true],
 	["conflict", "501", "Other", 1, false],
 	["reused", "501", "", 2, false],
-	["unknown", "999", "Unknown", 1, false],
+	["unknown", "999", "Unknown", 1, true],
 	["nested", "501", "SSR Name", 1, false],
 ] as const) {
 	test(`linkless SSR resolution: ${label}`, async () => {
@@ -983,4 +983,42 @@ test("a linkless line stays unresolved when which SSR item is left over depends 
 	const result = await resolveLinkless(items, itemRow(1) + linklessLine("600"));
 	assert.equal(result.evidence.linklessLines, 1);
 	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
+});
+
+const unrelatedLine = () => `<li><img src="https://example.test/unrelated.jpg"><p>Unrelated label</p><span data-qe-id="orderItemQty">Qty: 3</span><span data-qe-id="checkoutItemPrice">$6.00</span></li>`;
+const ssrItem = (id: string, quantity = 1) => ({ product: { id, fullDisplayName: `SSR ${id}` }, quantity });
+test("elimination resolves one unmatched line using its own quantity and price", async () => {
+ const r = await resolveLinkless([ssrItem("500"), ssrItem("501", 7)], itemRow(0) + unrelatedLine());
+ assert.equal(r.evidence.linklessLines, 0);
+ assert.equal(r.detail.items[1]?.productId, "501");
+ assert.equal(r.detail.items[1]?.quantity, 3);
+ assert.equal(r.detail.items[1]?.lineTotal, "$6.00");
+});
+test("multiple unmatched lines resolve the SSR inventory, not an invented line pairing", async () => {
+ const r = await resolveLinkless([ssrItem("500"), ssrItem("501", 7), ssrItem("502", 9)], itemRow(0) + unrelatedLine().repeat(2));
+ assert.equal(r.evidence.linklessLines, 0);
+ assert.deepEqual(r.detail.items.slice(1).map(({ productId, quantity, lineTotal, imageUrl, department, productUrl }) => ({ productId, quantity, lineTotal, imageUrl, department, productUrl })), [
+  { productId: "501", quantity: 7, lineTotal: null, imageUrl: null, department: null, productUrl: null },
+  { productId: "502", quantity: 9, lineTotal: null, imageUrl: null, department: null, productUrl: null },
+ ]);
+});
+test("a linked unmatched id uses only its own image ids and keeps its record id", async () => {
+ const results = await Promise.all([
+  "https://images.heb.com/is/image/HEBGrocery/prd-small/000000500.jpg",
+  "https://images.heb.com/is/image/HEBGrocery/000000500-1",
+ ].map(src => resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(499).replace("</li>", `<img src="${src}"></li>`) + unrelatedLine())));
+ for (const r of results) {
+  assert.equal(r.evidence.linklessLines, 0);
+  assert.equal(r.detail.items[0]?.productId, "999");
+  assert.equal(r.detail.items[1]?.productId, "501");
+ }
+});
+test("elimination refuses count mismatch, claimed keys, nested-only images and overfull linked ledger", async () => {
+ const results = await Promise.all([
+  resolveLinkless([ssrItem("500"), ssrItem("501"), ssrItem("502")], itemRow(0) + unrelatedLine()),
+  resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(0) + linklessLine("500")),
+  resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(499).replace("</li>", '<ul><li><img src="https://images.heb.com/is/image/HEBGrocery/000000500-1"></li></ul></li>') + unrelatedLine()),
+  resolveLinkless(Array.from({length:45}, (_,i)=>ssrItem(String(500+i))), Array.from({length:46}, (_,i)=>itemRow(i)).join("") + unrelatedLine()),
+ ]);
+ for (const r of results) assert.equal(r.evidence.linklessLines, 1);
 });
