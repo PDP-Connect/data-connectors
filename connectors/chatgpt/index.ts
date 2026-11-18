@@ -4102,6 +4102,9 @@ async function walkConversationSearch(
 	// Count raw IDs before time filtering; old but new pages still make progress.
 	const seenSourceIds = new Set<string>();
 	const seenCursors = new Set<number>();
+	// Progress guard: allow 16 consecutive forward pages without a new ID, not a collection size limit.
+	const maxForwardPagesWithoutIds = 16;
+	let forwardPagesWithoutIds = 0;
 	const savedBoundaryIds = new Set(resumeBackfill?.boundary_ids ?? []);
 	let resumeBoundarySeen = resumeBackfill?.boundary_ids.length === 0;
 	// Replay one complete page before the saved hint. The hint alone is not a
@@ -4422,13 +4425,20 @@ async function walkConversationSearch(
 				pageSize,
 			);
 		}
+		// Accepted cursors are strictly increasing, so cursor is the highest one read.
+		const forwardCursor =
+			nextCursor !== null && nextCursor > cursor && !seenCursors.has(nextCursor);
+		const addedIds = seenSourceIds.size > priorIdCount;
+		forwardPagesWithoutIds =
+			!addedIds && forwardCursor ? forwardPagesWithoutIds + 1 : 0;
 		const paginationFailure =
-			nextCursor !== null && (nextCursor <= cursor || seenCursors.has(nextCursor))
+			nextCursor !== null && !forwardCursor
 				? "conversations search returned a repeated or backward cursor"
-				: seenSourceIds.size === priorIdCount &&
-					(nextCursor !== null || attempts.some((items) => items.length > 0))
-					? "conversations search page added no new conversation id"
-					: null;
+				: forwardPagesWithoutIds > maxForwardPagesWithoutIds
+					? "conversations search exceeded the forward-page progress guard without a new id"
+					: !addedIds && !forwardCursor && attempts.some((items) => items.length > 0)
+						? "conversations search page added no new conversation id"
+						: null;
 		if (paginationFailure !== null) {
 			deps.emit({
 				type: "SKIP_RESULT",
