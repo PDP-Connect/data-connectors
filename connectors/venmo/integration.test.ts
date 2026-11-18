@@ -30,7 +30,6 @@ import {
 	collectTransactions,
 	establishVenmoCollectOrigin,
 	fetchAllFriends,
-	MAX_FRIENDS_PAGES,
 	MAX_TRANSACTION_PAGES,
 	VENMO_RETRYABLE_PATTERN,
 	type VenmoPageFetch,
@@ -997,7 +996,7 @@ test("a rejected backfill record keeps its position for a later retry", async ()
 	);
 });
 
-test("friends page-budget message discloses the recurring capped window", () => {
+test("friends stall message discloses incomplete inventory", () => {
 	const manifest = JSON.parse(
 		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
 	) as { reason_display_messages: Record<string, string> };
@@ -1345,17 +1344,14 @@ test("fetchAllFriends: a short non-empty page does not terminate the walk", asyn
 	);
 });
 
-test("collectAllStreams: a capped Venmo friends walk is partial and holds its fingerprint checkpoint", async () => {
+test("collectAllStreams: a repeated Venmo friends page is partial and holds its fingerprint checkpoint", async () => {
 	const page = Array.from({ length: 200 }, (_, i) => ({
 		id: String(30_000 + i),
 		username: `friend${i}`,
 		display_name: `Friend ${i}`,
 	}));
 	const { fetchPath, calls } = makeScriptedFetch({
-		[`/users/${OWNER_ID}/friends`]: Array.from(
-			{ length: MAX_FRIENDS_PAGES },
-			() => ({ body: { data: page } }),
-		),
+		[`/users/${OWNER_ID}/friends`]: [{ body: { data: page } }],
 	});
 	const { ctx, messages } = makeCtx(
 		{ friends: { fingerprints: { prior: "fingerprint" } } },
@@ -1368,9 +1364,14 @@ test("collectAllStreams: a capped Venmo friends walk is partial and holds its fi
 		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "friends",
 	);
 	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
-	assert.equal(coverage.considered, MAX_FRIENDS_PAGES * page.length + 1);
-	assert.equal(coverage.covered, MAX_FRIENDS_PAGES * page.length);
-	assert.equal(calls.length, MAX_FRIENDS_PAGES);
+	assert.equal(coverage.considered, 2 * page.length + 1);
+	assert.equal(coverage.covered, 2 * page.length);
+	assert.equal(calls.length, 2);
+	const failure = messages.find(
+		(m) => m.type === "SKIP_RESULT" && m.stream === "friends",
+	);
+	assert.ok(failure && failure.type === "SKIP_RESULT");
+	assert.match(failure.message ?? "", /no_new_friend_ids/);
 	assert.ok(
 		messages.some((m) => m.type === "SKIP_RESULT" && m.stream === "friends"),
 	);
@@ -2049,4 +2050,59 @@ test("unselected incomplete user snapshots do not fail requested coverage", asyn
 		);
 		assert.equal(run.emitted.length, 0);
 	}
+});
+
+test("friends enumerate beyond 200 pages and drop unseen fingerprints only at normal EOF", async () => {
+	const friends = Array.from({ length: 201 * 200 + 1 }, (_, i) => ({
+		id: String(100_000 + i),
+		username: `synthetic${i}`,
+		display_name: `Synthetic Friend ${i}`,
+	}));
+	const offsets: number[] = [];
+	const fetchPath: VenmoPageFetch = (path, query) => {
+		assert.equal(path, `/users/${OWNER_ID}/friends`);
+		assert.equal(query?.limit, "200");
+		const offset = Number(query?.offset);
+		offsets.push(offset);
+		assert.ok(offsets.length <= 203, "friends walk must terminate at EOF");
+		return Promise.resolve({
+			status: 200,
+			body: JSON.stringify({ data: friends.slice(offset, offset + 200) }),
+		});
+	};
+	const { ctx, emitted, messages } = makeCtx(
+		{ friends: { fingerprints: { prior: "fingerprint" } } },
+		["friends"],
+	);
+	await collectAllStreams(ctx, fetchPath, OWNER_ID, accountUser(), NO_DELAY);
+	assert.deepEqual(
+		emitted.map((record) => record.data.id),
+		friends.map((friend) => friend.id),
+	);
+	assert.deepEqual(offsets, [
+		...Array.from({ length: 202 }, (_, i) => i * 200),
+		friends.length,
+	]);
+	assert.equal(
+		messages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+	const coverage = messages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "friends",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, friends.length);
+	assert.equal(coverage.covered, friends.length);
+	const state = messages.find(
+		(m) => m.type === "STATE" && m.stream === "friends",
+	);
+	assert.ok(state && state.type === "STATE");
+	const fingerprints = (
+		state.cursor as { fingerprints: Record<string, string> }
+	).fingerprints;
+	assert.equal(Object.hasOwn(fingerprints, "prior"), false);
+	assert.deepEqual(
+		Object.keys(fingerprints).sort(),
+		friends.map((friend) => friend.id).sort(),
+	);
 });
