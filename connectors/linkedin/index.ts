@@ -49,6 +49,11 @@
  *     `profileEducations[].grade` value set.
  *
  * CHANGES
+ *   v0.3.45 (2026-11-18) - a full decoration that leaves out `summary` or
+ *     `industry` (a member with no About text or no industry) yields empty
+ *     fields, not a withheld profile row. Prod 2026-11-05..18: 203 of about
+ *     250 collected runs withheld the profile for it, and a profile-only
+ *     request failed outright.
  *   v0.3.3 (2026-09-24) — detect LinkedIn readiness during sign-in and
  *     continue collection automatically after `/voyager/api/me` succeeds.
  *   v0.3.2 (2026-09-24) — navigate to LinkedIn login before the manual

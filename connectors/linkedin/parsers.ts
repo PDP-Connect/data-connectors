@@ -403,8 +403,15 @@ function currentPositionReads(dash: unknown): {
  * Field reads for the owner's profile. Name, headline, and picture fall back
  * to `/me`. Fields only a full decoration carries (summary, industry,
  * location, current position) are unavailable from the basic fallback.
- * These dash-only fields must be present, even as `null`: the decoration
- * omitting them is not proof of an empty value.
+ *
+ * Summary and industry are optional in the decoration: LinkedIn leaves the
+ * key out for a member who has no About text or no industry, as the legacy
+ * connector assumed (`profileEl.summary || ''`). Within a full decoration an
+ * absent key is therefore empty, never a reason to withhold the row; a
+ * present but malformed value still is. (Prod, 0.3.43-0.3.44, 2026-11-05..18:
+ * 203 of about 250 collected runs withheld the whole profile row for
+ * `summary:absent` and/or `industry:absent`; a profile-only request then
+ * failed outright.) Location and the current position stay strict.
  */
 export function profileFieldReads(src: ProfileSources): FieldReads {
 	const hasDash = isRecord(src.dash);
@@ -441,7 +448,7 @@ export function profileFieldReads(src: ProfileSources): FieldReads {
 		),
 		id: read(src.publicIdentifier),
 		industry: decoration(() =>
-			firstOf([textAt(src.dash, ["industry", "name"])], "unavailable"),
+			firstOf([textAt(src.dash, ["industry", "name"])], "empty"),
 		),
 		location: decoration(() => locationRead(src.dash)),
 		profile_picture_url: firstOf(
@@ -464,7 +471,7 @@ export function profileFieldReads(src: ProfileSources): FieldReads {
 		),
 		public_url: read(profileUrlFor(src.publicIdentifier)),
 		summary: decoration(() =>
-			firstOf([textAt(src.dash, ["summary"])], "unavailable"),
+			firstOf([textAt(src.dash, ["summary"])], "empty"),
 		),
 	};
 }

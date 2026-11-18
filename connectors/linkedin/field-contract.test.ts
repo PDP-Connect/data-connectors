@@ -1370,3 +1370,30 @@ test("withholding: an uncovered row is withheld whole; its readable siblings are
 	assert.deepEqual(diagnostics.unavailable_fields, { grade: { malformed: 1 } });
 	assert.deepEqual(diagnostics.omitted_rows, { withheld_unreadable_fields: 1 });
 });
+
+test("r4: a decorated profile with no About text and no industry keeps its row; the fields are empty", async () => {
+	// Prod, 0.3.43-0.3.44: LinkedIn leaves `summary` and `industry` out of the
+	// full decoration for a member without them; 203 of about 250 runs withheld
+	// the whole profile row for it.
+	const control = outcomeOf(await collect(routesFor(baseFixture())), "profile");
+	const dashElement = baseFixture().dash as Record<string, unknown>;
+	delete dashElement.summary;
+	delete dashElement.industry;
+	const profile = outcomeOf(await collect(routesWithDash(dashElement)), "profile");
+	assert.equal(profile.records.length, 1, JSON.stringify(profile));
+	assert.equal(profile.records[0]?.summary, null);
+	assert.equal(profile.records[0]?.industry, null);
+	assert.equal(profile.complete, control.complete);
+	assert.equal(profile.records[0]?.full_name, control.records[0]?.full_name);
+});
+
+test("r4: a present but unreadable summary or industry still withholds the profile row", async () => {
+	for (const patch of [{ summary: 42 }, { industry: { name: 42 } }, { industry: "Computing" }]) {
+		const profile = outcomeOf(
+			await collect(routesWithDash({ ...(baseFixture().dash as object), ...patch })),
+			"profile",
+		);
+		assert.equal(profile.records.length, 0, `${JSON.stringify(patch)}: ${JSON.stringify(profile)}`);
+		assert.equal(profile.complete, false);
+	}
+});
