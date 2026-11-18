@@ -3477,8 +3477,10 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 				? "gizmos/mine pagination returned a repeated cursor"
 				: cursor !== null && page.items.length === 0
 					? "gizmos/mine returned an empty page with a cursor"
-					: hasGizmoId && seenGizmoIds.size === priorIdCount
-						? "gizmos/mine page added no new gizmo id"
+					: page.items.length > 0 && seenGizmoIds.size === priorIdCount
+						? hasGizmoId
+							? "gizmos/mine page added no new gizmo id: ids already seen"
+							: "gizmos/mine page added no new gizmo id: missing ids"
 						: null;
 		if (paginationFailure !== null) {
 			deps.emit({
