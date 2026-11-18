@@ -24760,7 +24760,7 @@
 				},
 				"connector_key": "slack-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-				"version": "0.1.4",
+				"version": "0.1.5",
 				"display_name": "Slack (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -24796,7 +24796,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers the lookback window; a later read starts from its own checkpoint, reaching back at most the max backfill after a long pause."
+						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers the lookback window; a later read starts from its own checkpoint without a default catch-up limit (SLACK_MAX_BACKFILL_DAYS=0). An owner may choose a positive max-backfill window; workspace retention limits what Slack can serve."
 					},
 					"public_listing": {
 						"tier": "development"
