@@ -844,3 +844,67 @@ for (const [label, image, name, copies, expected] of [
 		}
 	});
 }
+
+async function resolveLinkless(items: unknown[], rows: string) {
+	const data = { page: "/my-account/order-history/[orderId]", gssp: true, props: { __N_SSP: true, pageProps: { order: { orderId: order.orderId, orderItems: items } } } };
+	const html = rows + '<section data-qe-id="orderSummaryCard"></section>' + `<script id="__NEXT_DATA__">${JSON.stringify(data)}</script>`;
+	const result = await fetchOrderDetail(pageFor(html), order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50 });
+	assert.equal(result.status, "hydrated");
+	if (result.status !== "hydrated") throw new Error("not hydrated");
+	return result;
+}
+const linklessLine = (image: string, name = "") =>
+	`<li><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${image.padStart(9, "0")}.jpg"><p>${name}</p><span data-qe-id="orderItemQty">Qty: 3</span></li>`;
+
+test("a linked substitute named under subbedProducts[].product.id claims its SSR item before a linkless line can", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1 },
+		{ product: { id: "777", fullDisplayName: "Original" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+		{ product: { id: "502", fullDisplayName: "Gone" }, quantity: 1 },
+	];
+	const result = await resolveLinkless(items, itemRow(0) + itemRow(1) + linklessLine("777", "Original"));
+	assert.equal(result.evidence.linklessLines, 1);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
+});
+
+test("a resolved line keeps the SSR product page URL only when it is an heb.com product page for that id", async () => {
+	for (const [productPageURL, expected] of [
+		["/product-detail/ssr-name/501", "https://www.heb.com/product-detail/ssr-name/501"],
+		["https://www.heb.com/product-detail/ssr-name/501", "https://www.heb.com/product-detail/ssr-name/501"],
+		["https://example.test/product-detail/ssr-name/501", null],
+		["/product-detail/ssr-name/999", null],
+		[null, null],
+	] as const) {
+		const items = [
+			{ product: { id: "500", fullDisplayName: null }, quantity: 1 },
+			{ product: { id: "501", fullDisplayName: "SSR Name", productPageURL }, quantity: 1 },
+		];
+		const result = await resolveLinkless(items, itemRow(0) + linklessLine("501"));
+		assert.equal(result.evidence.linklessLines, 0, String(productPageURL));
+		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), true);
+		assert.equal(result.detail.items[1]?.productId, "501");
+		assert.equal(result.detail.items[1]?.productUrl, expected, String(productPageURL));
+	}
+});
+
+test("an SSR item without a name cannot become a record for a linkless line", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1 },
+		{ product: { id: "501", fullDisplayName: null }, quantity: 1 },
+	];
+	const result = await resolveLinkless(items, itemRow(0) + linklessLine("501"));
+	assert.equal(result.evidence.linklessLines, 1);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
+});
+
+test("an order with a substitute still resolves its linkless line from the item left over", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1 },
+		{ product: { id: "777", fullDisplayName: "Original" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+		{ product: { id: "502", fullDisplayName: "Left Over" }, quantity: 1 },
+	];
+	const result = await resolveLinkless(items, itemRow(0) + itemRow(1) + linklessLine("502"));
+	assert.equal(result.evidence.linklessLines, 0);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), true);
+	assert.equal(result.detail.items[2]?.name, "Left Over");
+});

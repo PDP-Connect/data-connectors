@@ -138,25 +138,61 @@ export function sourceOrderItemTotal(html: string, orderId: string): number | nu
 
 export interface SourceOrderItem {
 	productId: string;
+	/** Product ids of the item's substitutes, from `subbedProducts[]` as `id`
+	 * or `product.id`; an element in any other shape adds no id. */
 	substituteIds: string[];
-	fullDisplayName: string;
+	/** Null when H-E-B leaves the name out; such an item cannot match by text
+	 * and cannot become a record. */
+	fullDisplayName: string | null;
+	/** The SSR `productPageURL` when it is an www.heb.com product-detail page
+	 * ending in this product id; otherwise null. */
+	productUrl: string | null;
 	quantity: number;
 }
 
+const substituteId = z.union([
+	z.object({ id: text }).transform((sub) => sub.id),
+	z.object({ product: z.object({ id: text }) }).transform((sub) => sub.product.id),
+]);
+
+function productPageUrl(value: string | null | undefined, productId: string): string | null {
+	if (!value) return null;
+	try {
+		const url = new URL(value, "https://www.heb.com");
+		const last = url.pathname.split("/").filter(Boolean).pop();
+		return url.protocol === "https:" && url.hostname === "www.heb.com" &&
+			url.pathname.startsWith("/product-detail/") && last === productId
+			? url.href
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+/** Each SSR orderItem of this order, or [] when the payload is missing,
+ * names another order, or any item lacks a product id or quantity. */
 export function readSourceOrderItems(html: string, orderId: string): SourceOrderItem[] {
 	const result = z.object({ order: z.object({
 		orderId: text,
 		orderItems: z.array(z.object({
-			product: z.object({ id: text, fullDisplayName: text }),
+			product: z.object({
+				id: text,
+				fullDisplayName: z.string().trim().nullish(),
+				productPageURL: z.string().nullish(),
+			}),
 			quantity: z.number().finite().nonnegative(),
-			subbedProducts: z.array(z.object({ id: text })).optional(),
+			subbedProducts: z.array(z.unknown()).nullish(),
 		})),
 	}) }).safeParse(accountPageProps(html, "/my-account/order-history/[orderId]"));
 	if (!result.success || result.data.order.orderId !== orderId) return [];
 	return result.data.order.orderItems.map((item) => ({
 		productId: item.product.id,
-		substituteIds: (item.subbedProducts ?? []).map((sub) => sub.id),
-		fullDisplayName: item.product.fullDisplayName,
+		substituteIds: (item.subbedProducts ?? []).flatMap((sub) => {
+			const id = substituteId.safeParse(sub);
+			return id.success ? [id.data] : [];
+		}),
+		fullDisplayName: item.product.fullDisplayName || null,
+		productUrl: productPageUrl(item.product.productPageURL, item.product.id),
 		quantity: item.quantity,
 	}));
 }

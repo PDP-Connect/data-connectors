@@ -756,7 +756,12 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
  * Synthetic name anchors carry SSR identity; quantities/prices remain DOM-owned. */
 export function resolveLinklessOrderItems(
 	html: string,
-	items: readonly { productId: string; substituteIds: string[]; fullDisplayName: string; quantity: number }[],
+	items: readonly {
+		productId: string;
+		substituteIds: string[];
+		fullDisplayName: string | null;
+		productUrl: string | null;
+	}[],
 ): { detail: OrderDetail | null; unresolved: number } {
 	const { document } = parseHTML(html);
 	const claimed = new Set<number>();
@@ -789,27 +794,34 @@ export function resolveLinklessOrderItems(
 		}
 		const names = new Set([...own.querySelectorAll("p, span, div")].map((el) => normalize(normText(el))));
 		const imageMatches = items.map((_, i) => i).filter((i) => !claimed.has(i) && imageIds.has(numericId(items[i]!.productId)));
-		const textMatches = items.map((_, i) => i).filter((i) => !claimed.has(i) && names.has(normalize(items[i]!.fullDisplayName)));
+		const textMatches = items.map((_, i) => i).filter((i) => {
+			const name = items[i]!.fullDisplayName;
+			return !claimed.has(i) && name !== null && names.has(normalize(name));
+		});
 		if (imageMatches.length > 1 || textMatches.length > 1) continue;
 		const index = imageMatches[0] ?? textMatches[0];
 		if (index === undefined || (imageMatches.length && textMatches.length && imageMatches[0] !== textMatches[0])) continue;
-		claimed.add(index);
 		const item = items[index]!;
+		// A record needs a name; an unnamed SSR item leaves the line unresolved.
+		if (item.fullDisplayName === null) continue;
+		claimed.add(index);
 		const anchor = document.createElement("a");
 		anchor.setAttribute("data-qe-id", "itemRowDetailsName");
 		anchor.setAttribute("href", "/product-detail/ssr/" + item.productId);
 		anchor.textContent = item.fullDisplayName;
-		anchor.setAttribute("data-ssr-resolved", "true");
+		anchor.setAttribute("data-ssr-resolved", item.productUrl ?? "");
 		line.insertBefore(anchor, line.firstChild);
 	}
 	const resolvedHtml = document.toString();
 	const detail = parseOrderDetailDom(resolvedHtml);
 	if (detail) {
-		// The temporary anchor is only a parser adapter, not an evidenced URL.
+		// The temporary anchor is only a parser adapter: the record keeps the SSR
+		// product page URL when H-E-B gave a valid one, and no URL otherwise.
 		let index = 0;
 		for (const link of document.querySelectorAll<HTMLAnchorElement>(nameSelector)) {
 			if (!parseDetailItem(link)) continue;
-			if (link.hasAttribute("data-ssr-resolved")) detail.items[index]!.productUrl = null;
+			if (link.hasAttribute("data-ssr-resolved"))
+				detail.items[index]!.productUrl = link.getAttribute("data-ssr-resolved") || null;
 			index++;
 		}
 	}
