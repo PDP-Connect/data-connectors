@@ -140,6 +140,11 @@ export function garminApi(
 				: json({ hrvSummaries: rows, userProfilePk: 41001 });
 		}
 		if (at === "/gc-api/activitylist-service/activities/search/activities") {
+			if (query.get("sortOrder") === "asc" && query.get("start") === "0" && query.get("limit") === "1") {
+				const rows = [...data.activities].sort((a, b) =>
+					String(field(a, "startTimeLocal")).localeCompare(String(field(b, "startTimeLocal"))));
+				return json(rows.slice(0, 1));
+			}
 			const from = query.get("startDate") ?? "";
 			const to = query.get("endDate") ?? "";
 			const start = Number(query.get("start"));
