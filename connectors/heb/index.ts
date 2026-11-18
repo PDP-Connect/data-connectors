@@ -1090,7 +1090,8 @@ export async function fetchOrderDetail(
 
 	if (landedUrl !== url)
 		return failed("parse_missing", "detail resource identity mismatch");
-	const resolved = resolveLinklessOrderItems(surface.html, readSourceOrderItems(html, orderId));
+	const source = readSourceOrderItems(html, orderId);
+	const resolved = resolveLinklessOrderItems(surface.html, source.items);
 	const detail = resolved.detail;
 	if (!detail) {
 		return failed(
@@ -1134,7 +1135,9 @@ export async function fetchOrderDetail(
 		evidence,
 		inventoryComplete: detailItemsComplete(evidence, sourceItemTotal),
 		sourceItemTotal,
-		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
+		// Counts and shapes only: how far linkless-line resolution got. It goes
+		// first because a gap keeps only the first 500 characters.
+		diagnostic: `ssr=${source.shape};${resolved.trace};${detailSurfaceErrorMessage(surface.diagnostics)}`,
 		...metrics(),
 		status: "hydrated",
 	};

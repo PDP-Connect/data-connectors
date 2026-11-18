@@ -147,7 +147,8 @@ export interface SourceOrderItem {
 	/** The SSR `productPageURL` when it is an www.heb.com product-detail page
 	 * ending in this product id; otherwise null. */
 	productUrl: string | null;
-	quantity: number;
+	/** Null when H-E-B leaves it out or writes it as anything but a number. */
+	quantity: number | null;
 }
 
 const substituteId = z.union([
@@ -169,23 +170,35 @@ function productPageUrl(value: string | null | undefined, productId: string): st
 	}
 }
 
-/** Each SSR orderItem of this order, or [] when the payload is missing,
- * names another order, or any item lacks a product id or quantity. */
-export function readSourceOrderItems(html: string, orderId: string): SourceOrderItem[] {
+/** A product id H-E-B may write as a string or a whole number. */
+const productIdText = z.union([text, z.number().int().nonnegative().transform(String)]);
+
+/** Each SSR orderItem of this order (none when the payload is missing, names
+ * another order, or any item lacks a product id), and the payload's shape for
+ * diagnostics: the item count, or why it was not read. Never ids or names. */
+export function readSourceOrderItems(
+	html: string,
+	orderId: string,
+): { items: SourceOrderItem[]; shape: string } {
 	const result = z.object({ order: z.object({
 		orderId: text,
 		orderItems: z.array(z.object({
 			product: z.object({
-				id: text,
+				id: productIdText,
 				fullDisplayName: z.string().trim().nullish(),
 				productPageURL: z.string().nullish(),
 			}),
-			quantity: z.number().finite().nonnegative(),
+			quantity: z.unknown().optional(),
 			subbedProducts: z.array(z.unknown()).nullish(),
 		})),
 	}) }).safeParse(accountPageProps(html, "/my-account/order-history/[orderId]"));
-	if (!result.success || result.data.order.orderId !== orderId) return [];
-	return result.data.order.orderItems.map((item) => ({
+	if (!result.success) {
+		const issue = result.error.issues[0];
+		const path = issue?.path.map((part) => (typeof part === "number" ? "#" : String(part))).join(".");
+		return { items: [], shape: issue ? `unread:${path}:${issue.code}` : "unread" };
+	}
+	if (result.data.order.orderId !== orderId) return { items: [], shape: "unread:other_order" };
+	const items = result.data.order.orderItems.map((item) => ({
 		productId: item.product.id,
 		substituteIds: (item.subbedProducts ?? []).flatMap((sub) => {
 			const id = substituteId.safeParse(sub);
@@ -193,8 +206,13 @@ export function readSourceOrderItems(html: string, orderId: string): SourceOrder
 		}),
 		fullDisplayName: item.product.fullDisplayName || null,
 		productUrl: productPageUrl(item.product.productPageURL, item.product.id),
-		quantity: item.quantity,
+		quantity:
+			typeof item.quantity === "number" && Number.isFinite(item.quantity) && item.quantity >= 0
+				? item.quantity
+				: null,
 	}));
+	const quantityTypes = [...new Set(result.data.order.orderItems.map((item) => typeof item.quantity))].sort();
+	return { items, shape: `${items.length},qty:${quantityTypes.join("|") || "none"}` };
 }
 
 const emptyHistorySource = z.object({

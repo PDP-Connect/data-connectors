@@ -753,7 +753,8 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 }
 
 /** Resolve only outer purchased lines, then use the existing DOM parser.
- * Synthetic name anchors carry SSR identity; quantities/prices remain DOM-owned. */
+ * Synthetic name anchors carry SSR identity; quantities/prices remain DOM-owned.
+ * `trace` reports, in counts and shapes only, how far resolution got. */
 export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
@@ -763,7 +764,7 @@ export function resolveLinklessOrderItems(
 		fullDisplayName: string | null;
 		productUrl: string | null;
 	}[],
-): { detail: OrderDetail | null; unresolved: number } {
+): { detail: OrderDetail | null; unresolved: number; trace: string } {
 	const { document } = parseHTML(html);
 	const claimed = new Set<number>();
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
@@ -778,6 +779,10 @@ export function resolveLinklessOrderItems(
 		for (const nested of own.querySelectorAll("li")) nested.remove();
 		return own;
 	};
+	const linkless = outerLines.filter((line) => {
+		const own = ownCopy(line);
+		return !own.querySelector(nameSelector) && own.querySelector(qtySelector);
+	}).length;
 	const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
 	const ownImageIds = (own: Element) => {
 		const ids = new Set<string>();
@@ -787,8 +792,8 @@ export function resolveLinklessOrderItems(
 					try {
 						const url = new URL(candidate.trim().split(/\s+/)[0] ?? "");
 						if (url.hostname !== "images.heb.com") continue;
-						const match = /^\/is\/image\/HEBGrocery\/(?:prd-small\/(\d+)\.jpg|(\d+)-\d+)$/.exec(url.pathname);
-						const id = match?.[1] ?? match?.[2];
+						// prd-small/<id>.jpg, prd-medium/<id>.jpg, <id>-1 and the like.
+						const id = /^\/is\/image\/HEBGrocery\/(?:[a-z-]+\/)?(\d+)(?:[-.][^/]*)?$/i.exec(url.pathname)?.[1];
 						if (id) ids.add(numericId(id));
 					} catch { /* Not an image URL. */ }
 				}
@@ -806,6 +811,19 @@ export function resolveLinklessOrderItems(
 	// unproven and no linkless line resolves.
 	const fits = (ids: string[], item: (typeof items)[number]) =>
 		ids.every((id) => id === item.productId || item.substituteIds.includes(id));
+	let fitByImage = 0;
+	let unfitImage: string | null = null;
+	// Host and path with every digit run as #: the shape, never the id.
+	const imageShape = (own: Element) =>
+		[...own.querySelectorAll("img")].map((img) => {
+			const src = img.getAttribute("src") ?? "";
+			try {
+				const url = new URL(src);
+				return `${url.hostname}${url.pathname.replace(/\d+/g, "#")}`;
+			} catch {
+				return src.startsWith("data:") ? "data_uri" : src ? "relative" : "no_src";
+			}
+		}).join("+") || "no_img";
 	const candidates = outerLines
 		.filter((line) => ownCopy(line).querySelector(nameSelector))
 		.map((line) => {
@@ -814,10 +832,14 @@ export function resolveLinklessOrderItems(
 			);
 			const linked = items.map((_, i) => i).filter((i) => fits(ids, items[i]!));
 			if (linked.length) return linked;
-			const images = [...ownImageIds(ownCopy(line))];
-			return images.length ? items.map((_, i) => i).filter((i) =>
+			const own = ownCopy(line);
+			const images = [...ownImageIds(own)];
+			const byImage = images.length ? items.map((_, i) => i).filter((i) =>
 				images.every((id) => [items[i]!.productId, ...items[i]!.substituteIds]
 					.some((candidate) => numericId(candidate) === id))) : [];
+			if (byImage.length) fitByImage++;
+			else unfitImage ??= imageShape(own);
+			return byImage;
 		});
 	const lineOf = new Map<number, number>();
 	const place = (line: number, tried: Set<number>): boolean => {
@@ -833,6 +855,7 @@ export function resolveLinklessOrderItems(
 		return false;
 	};
 	let ledgerComplete = candidates.every((_, line) => place(line, new Set()));
+	let ledger = ledgerComplete ? "complete" : "unplaced";
 	if (ledgerComplete) {
 		// An item could be left over instead of a matched one when some line
 		// that fits the free item holds the matched one: walk those swaps.
@@ -852,12 +875,15 @@ export function resolveLinklessOrderItems(
 			}
 		}
 		ledgerComplete = couldBeFree.size === free.length;
+		if (!ledgerComplete) ledger = "ambiguous";
 	}
 	for (const item of lineOf.keys()) claimed.add(item);
 	const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
 	const remaining: Element[] = [];
 	let eliminationSafe = true;
 	const inventoryOnly = new Map<Element, (typeof items)[number]>();
+	let keyed = 0;
+	let eliminated = 0;
 	const resolveLine = (line: Element, index: number, unordered = false) => {
 		const item = items[index]!;
 		claimed.add(index);
@@ -892,6 +918,7 @@ export function resolveLinklessOrderItems(
 			continue;
 		}
 		resolveLine(line, index);
+		keyed++;
 	}
 	const unclaimed = items.map((_, i) => i).filter((i) => !claimed.has(i));
 	if (ledgerComplete && eliminationSafe && remaining.length > 0 &&
@@ -899,6 +926,7 @@ export function resolveLinklessOrderItems(
 		// The inventory is known; with multiple rows, the DOM-to-item pairing
 		// is not. Never attach a line's quantity/price/department to that guess.
 		for (const [i, line] of remaining.entries()) resolveLine(line, unclaimed[i]!, remaining.length > 1);
+		eliminated = remaining.length;
 	}
 	const resolvedHtml = document.toString();
 	const detail = parseOrderDetailDom(resolvedHtml);
@@ -917,7 +945,19 @@ export function resolveLinklessOrderItems(
 			index++;
 		}
 	}
-	return { detail, unresolved: inspectOrderDetailLines(resolvedHtml).linkless };
+	const trace = [
+		`linkless_trace=ssr:${items.length}`,
+		`linked:${candidates.length}`,
+		`unfit:${candidates.filter((fitting) => fitting.length === 0).length}`,
+		`by_img:${fitByImage}`,
+		`ledger:${ledger}`,
+		`linkless:${linkless}`,
+		`keyed:${keyed}`,
+		`remaining:${remaining.length}`,
+		`unclaimed:${ledgerComplete ? unclaimed.length : "-"}`,
+		`elim:${eliminated}`,
+	].join(",") + (unfitImage ? `;unfit_img=${unfitImage}` : "");
+	return { detail, unresolved: inspectOrderDetailLines(resolvedHtml).linkless, trace };
 }
 
 export function parseOrderDetailDom(html: string): OrderDetail | null {

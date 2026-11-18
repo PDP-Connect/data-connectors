@@ -1029,3 +1029,37 @@ test("a linkless image naming a claimed item's substitute blocks elimination", a
 	);
 	assert.equal(r.evidence.linklessLines, 1);
 });
+
+test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {
+	const results = await Promise.all([
+		resolveLinkless([ssrItem("500"), { product: { id: 501, fullDisplayName: "SSR 501" }, quantity: 1 }], itemRow(0) + unrelatedLine()),
+		resolveLinkless([ssrItem("500"), { product: { id: "501", fullDisplayName: "SSR 501" } }], itemRow(0) + unrelatedLine()),
+	]);
+	for (const r of results) {
+		assert.equal(r.evidence.linklessLines, 0);
+		assert.equal(r.detail.items[1]?.productId, "501");
+	}
+});
+
+test("a linked line's prd-medium H-E-B image id fits its SSR item", async () => {
+	const r = await resolveLinkless(
+		[ssrItem("500"), ssrItem("501")],
+		itemRow(499).replace("</li>", '<img src="https://images.heb.com/is/image/HEBGrocery/prd-medium/000000500.jpg?v=2"></li>') + unrelatedLine(),
+	);
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.equal(r.detail.items[1]?.productId, "501");
+});
+
+test("the detail diagnostic says which linkless step refused, in counts and shapes only", async () => {
+	const [countMismatch, unfit, unread] = await Promise.all([
+		resolveLinkless([ssrItem("500"), ssrItem("501"), ssrItem("502")], itemRow(0) + unrelatedLine()),
+		resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(499).replace("</li>", '<img src="https://cdn.example.test/p/000000500_1.png"></li>') + unrelatedLine()),
+		resolveLinkless([{ product: { fullDisplayName: "No id" }, quantity: 1 }], itemRow(0)),
+	]);
+	assert.match(countMismatch.diagnostic, /linkless_trace=ssr:3,linked:1,unfit:0,by_img:0,ledger:complete,linkless:1,keyed:0,remaining:1,unclaimed:2,elim:0/);
+	assert.match(unfit.diagnostic, /linkless_trace=ssr:2,linked:1,unfit:1,by_img:0,ledger:unplaced,linkless:1,/);
+	assert.match(unfit.diagnostic, /unfit_img=cdn\.example\.test\/p\/#_#\.png/);
+	assert.doesNotMatch(unfit.diagnostic, /500/);
+	assert.match(unread.diagnostic, /ssr=unread:order\.orderItems\.#\.product\.id:invalid_union/);
+});
+
