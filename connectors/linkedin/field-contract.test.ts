@@ -1387,13 +1387,46 @@ test("r4: a decorated profile with no About text and no industry keeps its row; 
 	assert.equal(profile.records[0]?.full_name, control.records[0]?.full_name);
 });
 
-test("r4: a present but unreadable summary or industry still withholds the profile row", async () => {
-	for (const patch of [{ summary: 42 }, { industry: { name: 42 } }, { industry: "Computing" }]) {
-		const profile = outcomeOf(
-			await collect(routesWithDash({ ...(baseFixture().dash as object), ...patch })),
-			"profile",
-		);
-		assert.equal(profile.records.length, 0, `${JSON.stringify(patch)}: ${JSON.stringify(profile)}`);
-		assert.equal(profile.complete, false);
-	}
+async function profileWith(patch: Record<string, unknown>, remove: readonly string[] = []) {
+	const dashElement = { ...(baseFixture().dash as Record<string, unknown>), ...patch };
+	for (const key of remove) delete dashElement[key];
+	return outcomeOf(await collect(routesWithDash(dashElement)), "profile");
+}
+
+function assertProfileWithheld(profile: StreamOutcome, where: string): void {
+	assert.equal(profile.records.length, 0, `${where}: ${JSON.stringify(profile)}`);
+	assert.equal(profile.complete, false, where);
+}
+
+test("r4: a present but unreadable summary still withholds the profile row", async () => {
+	assertProfileWithheld(await profileWith({ summary: 42 }), "summary 42");
+});
+
+test("r4: a present but unreadable industry name still withholds the profile row", async () => {
+	assertProfileWithheld(await profileWith({ industry: { name: 42 } }), "industry.name 42");
+});
+
+test("r4: an industry that is not an object still withholds the profile row", async () => {
+	assertProfileWithheld(await profileWith({ industry: "Computing" }), "industry string");
+});
+
+test("r4: an absent industry beside an industryUrn is unknown, not null", async () => {
+	assertProfileWithheld(
+		await profileWith({ industryUrn: "urn:li:fsd_industry:4" }, ["industry"]),
+		"industryUrn only",
+	);
+});
+
+test("r4: an absent industry beside an industryV2 key is unknown, not null", async () => {
+	assertProfileWithheld(
+		await profileWith({ industryV2Urn: "urn:li:fsd_industryV2:4" }, ["industry"]),
+		"industryV2Urn only",
+	);
+});
+
+test("r4: an absent summary beside a multiLocaleSummary is unknown, not null", async () => {
+	assertProfileWithheld(
+		await profileWith({ multiLocaleSummary: { en_US: "Writes programs." } }, ["summary"]),
+		"multiLocaleSummary only",
+	);
 });
