@@ -3423,7 +3423,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/linkedin/integration.test.ts",
-			line: 2895,
+			line: 2925,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "The unproven skills-walk cases share collectProof's global fetch shim, so their runs must not overlap.",
