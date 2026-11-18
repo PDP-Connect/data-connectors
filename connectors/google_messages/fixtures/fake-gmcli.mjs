@@ -214,35 +214,39 @@ if (mode === "not_paired") {
 	process.exit(1);
 }
 
+// process.exit() right after process.stdout.write() drops whatever the pipe
+// has not taken yet (64 KiB here), so a large page reached the connector cut
+// short. Exit only once the write has flushed, as the real gmcli effectively
+// does.
+function writeAndExit(output) {
+	process.stdout.write(output, () => process.exit(0));
+}
+
 if (isChatsList) {
 	if (mode === "empty") {
-		process.stdout.write(CHATS_EMPTY);
+		writeAndExit(CHATS_EMPTY);
 	} else if (mode === "malformed_chats") {
-		process.stdout.write(CHATS_MALFORMED);
+		writeAndExit(CHATS_MALFORMED);
 	} else if (mode === "not_json") {
-		process.stdout.write("this is not json output from gmcli");
+		writeAndExit("this is not json output from gmcli");
 	} else if (mode === "custom") {
-		process.stdout.write(customChatsForThisInvocation());
+		writeAndExit(customChatsForThisInvocation());
 	} else {
-		process.stdout.write(CHATS_HEALTHY);
+		writeAndExit(CHATS_HEALTHY);
 	}
-	process.exit(0);
-}
-
-if (isMessagesList) {
+} else if (isMessagesList) {
 	if (mode === "malformed_messages") {
-		process.stdout.write(MESSAGES_MALFORMED);
+		writeAndExit(MESSAGES_MALFORMED);
 	} else if (mode === "full_page") {
-		process.stdout.write(fullPageMessages());
+		writeAndExit(fullPageMessages());
 	} else if (mode === "custom") {
-		process.stdout.write(customMessagesForThisInvocation());
+		writeAndExit(customMessagesForThisInvocation());
 	} else {
-		process.stdout.write(MESSAGES_HEALTHY);
+		writeAndExit(MESSAGES_HEALTHY);
 	}
-	process.exit(0);
+} else {
+	process.stderr.write(
+		`fake-gmcli: unrecognized invocation: ${args.join(" ")}\n`,
+	);
+	process.exit(1);
 }
-
-process.stderr.write(
-	`fake-gmcli: unrecognized invocation: ${args.join(" ")}\n`,
-);
-process.exit(1);

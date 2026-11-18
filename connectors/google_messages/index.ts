@@ -28,7 +28,7 @@
  *
  * NEVER SEND-CAPABLE: this connector NEVER invokes `gmcli auth`, `gmcli serve`,
  * `gmcli mcp`, `gmcli sync --follow`, or any send-capable/streaming
- * subcommand. It only calls two read-only, single-invocation, bounded
+ * subcommand. It only calls two read-only, single-invocation
  * subcommands: `gmcli --json --full chats list` (enumerate conversations)
  * and, per conversation, `gmcli messages list --conv <id> --json --full
  * --limit <N> --order desc` (that conversation's NEWEST N messages, up to
@@ -52,8 +52,8 @@
  *
  * BOUNDING: `messages list` exposes only `--limit` (no offset/cursor flag
  * exists in gmkit's CLI) — there is no built-in pagination beyond a flat
- * count cap. This connector treats `--limit` as a hard per-conversation
- * cap (GMCLI_MESSAGES_PER_CHAT_LIMIT, default below) and fetches with
+ * count argument. The tool has no upper cap; its positive limit defaults to
+ * 1,000,000 as a runaway-tool guard, not a platform limit. Fetches use
  * `--order desc` (newest-first, see fetchChatMessages's doc comment) so a
  * conversation that keeps hitting the cap always has its NEWEST activity
  * inside the fetched window on every run — new messages remain observable
@@ -87,7 +87,7 @@
  *     behavior and CLI surface as subject to change without notice.
  *   - Resume/incremental semantics are best-effort only: gmcli exposes no
  *     "since" cursor (see BOUNDING above — `--limit` is a flat cap, not a
- *     pagination token), so every run re-fetches a bounded window per
+ *     pagination token), so every run re-fetches history up to the guard per
  *     conversation from scratch. This connector's own STATE cursor (see
  *     STATE below) is therefore a connector-side, not gmcli-side,
  *     de-duplication courtesy: it makes NO exactly-once/gapless resume
@@ -106,7 +106,7 @@
  * (`openFingerprintCursor`, shared with groupme/slack/gmail/ynab) seeded
  * from the prior run's cursor. A re-fetched message whose fingerprint is
  * unchanged is NOT re-emitted as a RECORD this run — this is what stops
- * every run from duplicating the same bounded per-chat window into
+ * every run from duplicating the same fetched per-chat history into
  * downstream storage. The cursor is carry-forward only (no `dropUnseenIds`):
  * gmcli gives no deletion signal for messages that scroll out of the
  * `--limit` window or a conversation gmcli stops returning, so an id once
@@ -439,13 +439,13 @@ export function parseGmcliMessagesJson(
 // ─── Bounding ────────────────────────────────────────────────────────────
 //
 // gmkit's `messages list` exposes only a flat `--limit` — no offset/cursor
-// pagination flag exists in the CLI. These caps bound total subprocess
-// output/runtime per run; a chat that returns exactly the limit is treated
+// pagination flag exists in the CLI; the tool requires a positive limit.
+// No tool cap: 1,000,000 only guards a runaway tool. A limit-hitting chat is treated
 // as POSSIBLY truncated (gmcli gives no "there were more" signal), and a
 // dedicated SKIP_RESULT diagnostic surfaces that honestly rather than silently
 // presenting a partial history as complete.
 
-const DEFAULT_MESSAGES_PER_CHAT_LIMIT = 500;
+const DEFAULT_MESSAGES_PER_CHAT_LIMIT = 1_000_000;
 const DEFAULT_MAX_CHATS = 200;
 
 function resolveMessagesPerChatLimit(): number {

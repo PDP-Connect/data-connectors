@@ -24,7 +24,10 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
 	connectorDir,
@@ -167,6 +170,41 @@ function runGoogleMessagesCustom(
 		},
 	});
 }
+
+test("default per-chat limit collects all 5,000 synthetic messages", async (t) => {
+	const messages = Array.from({ length: 5_000 }, (_, i) =>
+		msg({
+			message_id: `history_${String(i)}`,
+			timestamp_ms: 1_754_071_000_000 + i * 1000,
+		}),
+	);
+	// Keep the large fixture out of exec's environment-size limit. The wrapper
+	// sets it inside the fake process, then runs the existing custom-mode tool.
+	const dir = await mkdtemp(join(tmpdir(), "gmcli-full-history-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const wrapper = join(dir, "fake-gmcli.mjs");
+	await writeFile(
+		wrapper,
+		`#!/usr/bin/env node\nprocess.env.FAKE_GMCLI_MESSAGES_JSON = ${JSON.stringify(JSON.stringify(messages))};\nawait import(${JSON.stringify(pathToFileURL(FAKE_GMCLI).href)});\n`,
+		{ mode: 0o700 },
+	);
+	const run = await runGoogleMessagesCustom([CHAT_ALICE], [], {}, {
+		GMCLI_BIN: wrapper,
+		// Empty means no numeric override, even if the host has one configured.
+		GMCLI_MESSAGES_PER_CHAT_LIMIT: "",
+	});
+	assert.equal(run.code, 0);
+	const emitted = records(run.messages, "messages");
+	assert.equal(emitted.length, 5_000);
+	assert.deepEqual(
+		sortedIds(emitted),
+		messages.map((message) => message.message_id).sort(),
+	);
+	assert.equal(
+		skips(run.messages).some((skip) => skip.reason === "gmcli_per_chat_limit_reached"),
+		false,
+	);
+});
 
 // ─── First run: fresh state, everything is new ────────────────────────────
 
