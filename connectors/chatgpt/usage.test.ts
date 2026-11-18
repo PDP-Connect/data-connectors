@@ -491,8 +491,10 @@ test("beta features keep only enabled slug keys; side endpoints keep counts and 
 		has_more: true,
 	});
 	const tasks = await inPage("/tasks", "task_stats");
+	// The fixture's tasks carry no id, so the projection reads none.
 	assert.deepEqual(tasks.json, {
 		task_count: 3,
+		task_ids: [],
 		by_status: { active: 2, other: 1 },
 		cursor: null,
 		has_more: false,
