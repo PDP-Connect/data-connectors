@@ -4999,34 +4999,31 @@ test("collectNutrition covers products past the former 50-lookup limit and recor
 	);
 });
 
-test("collectNutrition ends the run as a session failure on a blocked product page", async () => {
+test("collectNutrition stops on a blocked product page as a retryable rate block, not a session failure", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const blockedPage = makePageStub({
 		content:
 			"<html><body><iframe src='/_Incapsula_Resource'></iframe></body></html>",
 	});
 
-	await assert.rejects(
-		() =>
-			collectNutrition(
-				blockedPage,
-				[
-					{
-						name: "H-E-B Organic 2% Reduced Fat Milk",
-						productId: "123456789",
-						productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
-					},
-				],
-				{
-					emit: deps.emit,
-					emitRecord: deps.emitRecord,
-					emittedAt: deps.emittedAt,
-					waitForHydration: immediateWait,
-				},
-			),
-		{ message: "heb_session_required" },
+	const result = await collectNutrition(
+		blockedPage,
+		[
+			{
+				name: "H-E-B Organic 2% Reduced Fat Milk",
+				productId: "123456789",
+				productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
+			},
+		],
+		{
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: deps.emittedAt,
+			waitForHydration: immediateWait,
+		},
 	);
 
+	assert.deepEqual(result, { lookupSkips: 1, readFailures: 1 });
 	assert.equal(
 		emitted.filter((record) => record.stream === "nutrition").length,
 		0,
@@ -5035,7 +5032,7 @@ test("collectNutrition ends the run as a session failure on a blocked product pa
 		protocolMessages
 			.filter((message) => message.type === "SKIP_RESULT")
 			.map((message) => message.type === "SKIP_RESULT" && message.reason),
-		["session_repair_required"],
+		["stream_collection_failed"],
 	);
 });
 

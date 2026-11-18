@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
 	parseAccountProfile,
+	readAccountProfile,
 	sourceReportsEmptyHistory,
 } from "./account-source.ts";
 
@@ -99,3 +100,52 @@ for (const [label, transform] of [
 ] as const)
 	test(`empty history rejects ${label}`, () =>
 		assert.equal(sourceReportsEmptyHistory(transform(orders)), false));
+
+test("profile accepts absent optional address fields", () => {
+	const html = profile.replace('"nickname":"Home",', "").replace('"address2":null,', "");
+	const result = readAccountProfile(html);
+	assert.equal(result.failure, null);
+	assert.ok(result.record);
+	assert.equal(result.record.delivery_addresses[0]?.label, null);
+	assert.equal(result.record.delivery_addresses[0]?.address, "123 Example Street, Example City, TX 00000");
+	assert.deepEqual(parseAccountProfile(html), result.record);
+});
+
+for (const replacement of ["", '"daytimeTelephoneNumber":"",', '"daytimeTelephoneNumber":"   ",']) {
+	test(`profile accepts optional phone: ${JSON.stringify(replacement)}`, () => {
+		const result = readAccountProfile(profile.replace('"daytimeTelephoneNumber":"2025550100",', replacement));
+		assert.equal(result.failure, null);
+		assert.ok(result.record);
+		assert.equal(result.record.phone, null);
+	});
+}
+
+for (const [label, transform, gate, paths] of [
+	["missing primary marker", (s: string) => s.replace('"defaultAddress":false', '"unrelated":false'), "schema", ["addresses.0.defaultAddress"]],
+	["unreadable address", (s: string) => s.replace('"address1":"123 Example Street"', '"address1":null'), "schema", ["addresses.0.address1"]],
+	["absent addresses", (s: string) => s.replace('"addresses":', '"unrelated":'), "schema", ["addresses"]],
+	["signed out", (s: string) => s.replace("/oidc/session/end", "/login"), "signed_out_marker", []],
+	["wrong route", (s: string) => s.replace('"/my-account/profile"', '"/public"'), "ssr_route_mismatch", []],
+	["non-SSR", (s: string) => s.replace('"gssp":true', '"gssp":false'), "ssr_route_mismatch", []],
+	["missing SSP", (s: string) => s.replace('"__N_SSP":true', '"__N_SSP":false'), "ssr_route_mismatch", []],
+	["missing payload", (s: string) => s.replace('__NEXT_DATA__', 'UNRELATED'), "next_data_missing", []],
+	["malformed payload", (s: string) => s.replace('"profileId":', '"profileId" INVALID:'), "next_data_unparseable", []],
+	["duplicate address", (s: string) => s.replace(/"addresses":\[({[^\]]+})\]/, '"addresses":[$1,$1]'), "duplicate_address_id", []],
+] as const) {
+	test(`profile failure reports value-free gate: ${label}`, () => {
+		const html = transform(profile);
+		assert.notEqual(html, profile);
+		const result = readAccountProfile(html);
+		assert.equal(result.record, null);
+		assert.equal(parseAccountProfile(html), null);
+		assert.deepEqual(result.failure, { gate, issue_paths: paths });
+		assert.doesNotMatch(JSON.stringify(result.failure), /Example|Shopper|shopper@example|2025550100|synthetic-address|123 Example Street/);
+	});
+}
+
+test("profile still refuses malformed optional fields without including their values", () => {
+	const html = profile.replace('"nickname":"Home"', '"nickname":{"private":"VALUE_SENTINEL"}');
+	assert.deepEqual(readAccountProfile(html), {
+		record: null, failure: { gate: "schema", issue_paths: ["addresses.0.nickname"] },
+	});
+});

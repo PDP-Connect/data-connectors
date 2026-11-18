@@ -45,7 +45,7 @@ import {
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
-	parseAccountProfile,
+	readAccountProfile,
 	sourceReportsEmptyHistory,
 } from "./account-source.ts";
 import {
@@ -92,6 +92,8 @@ const LIST_PAGE_WAIT_MS = 10_000;
 // every navigation (client-hydrated pages; DOM not ready on `load`).
 export const HEB_HYDRATION_WAIT_MIN_MS = 1500;
 export const HEB_HYDRATION_WAIT_MAX_MS = 2500;
+export const HEB_PRODUCT_PAGE_DELAY_MIN_MS = 4000;
+export const HEB_PRODUCT_PAGE_DELAY_MAX_MS = 8000;
 // 400-500ms between order-history list pages.
 const LIST_PAGE_POLITE_DELAY_MS = 450;
 export const MAX_LIST_PAGES = 50;
@@ -176,6 +178,13 @@ interface DetailSurfaceResult {
 	diagnostics: DetailSurfaceDiagnostics;
 	html: string;
 	coherent: boolean;
+}
+
+async function productPageWait(): Promise<void> {
+	await politeDelay(
+		HEB_PRODUCT_PAGE_DELAY_MIN_MS +
+			Math.random() * (HEB_PRODUCT_PAGE_DELAY_MAX_MS - HEB_PRODUCT_PAGE_DELAY_MIN_MS),
+	);
 }
 
 async function hydrationWait(): Promise<void> {
@@ -899,6 +908,8 @@ export interface HydrationDeps {
 	/** Optional deterministic seam for unit tests; production omits it and
 	 *  therefore keeps the 1500–2500ms polite hydration wait. */
 	waitForHydration?: (() => Promise<void>) | undefined;
+	/** Between public product navigations; deterministic injection for tests. */
+	waitForProductPage?: (() => Promise<void>) | undefined;
 }
 
 export async function fetchOrderDetail(
@@ -2789,8 +2800,7 @@ export async function collectProfile(
 		});
 		return;
 	}
-
-	const record = parseAccountProfile(html);
+	const { record, failure } = readAccountProfile(html);
 	const loading = unprovenInventory(
 		"profile",
 		PROFILE_URL,
@@ -2815,13 +2825,14 @@ export async function collectProfile(
 				landed_on_profile: landedUrl === PROFILE_URL,
 				loading,
 				record_parsed: record !== null,
+				profile_gate: failure?.gate ?? null,
+				profile_issue_paths: failure?.issue_paths ?? [],
 			},
 		);
 		return;
 	}
 	await deps.emitRecord("profile", record);
 }
-
 async function emitInventoryIncomplete(
 	deps: Pick<EmitDeps, "emit">,
 	stream: string,
@@ -2952,17 +2963,21 @@ export async function collectNutrition(
 		| "emittedAt"
 		| "reportStreamFailure"
 		| "waitForHydration"
+		| "waitForProductPage"
 	>,
 ): Promise<{ lookupSkips: number; readFailures: number }> {
 	let lookupSkips = 0;
 	/** Lookups already reported as failed reads; a subset of `lookupSkips`. */
 	let readFailures = 0;
-	for (const target of targets) {
+	let navigated = false;
+	for (const [targetIndex, target] of targets.entries()) {
 		if (!target.productUrl) {
 			lookupSkips += 1;
 			await emitInventoryIncomplete(deps, "nutrition");
 			continue;
 		}
+		if (navigated) await (deps.waitForProductPage ?? productPageWait)();
+		navigated = true;
 		let responseSucceeded = false;
 		try {
 			const response = await page.goto(target.productUrl, {
@@ -3003,18 +3018,35 @@ export async function collectNutrition(
 			landedUrl,
 			html,
 		).loading;
-		if (
-			SIGNIN_URL_RE.test(landedUrl) ||
-			looksLoggedOut(landedUrl, html) ||
-			isIncapsulaBlocked(html)
-		) {
+		const signal = SIGNIN_URL_RE.test(landedUrl)
+			? "signin_url"
+			: looksLoggedOut(landedUrl, html)
+				? "password_form"
+				: isIncapsulaBlocked(html)
+					? "incapsula_block"
+					: null;
+		if (signal === "incapsula_block") {
+			const remaining = targets.length - targetIndex;
+			lookupSkips += remaining;
+			readFailures += remaining;
+			await reportReadFailure(
+				deps,
+				"nutrition",
+				"H-E-B blocked product page reads; remaining nutrition products will be retried.",
+				{ action: "retry_by_runtime", retryable: true },
+				{ source_reason: "nutrition_rate_blocked", signal, products_remaining: remaining },
+			);
+			break;
+		}
+		if (signal) {
 			await deps.emit({
 				type: "SKIP_RESULT",
 				stream: "nutrition",
 				reason: "session_repair_required",
 				recovery_hint: { action: "refresh_credentials", retryable: false },
 				message:
-					"H-E-B product page redirected to sign-in or was blocked by Incapsula.",
+					"H-E-B product page redirected to sign-in or showed a password form.",
+				diagnostics: { signal },
 			});
 			throw hebSessionRequired();
 		}

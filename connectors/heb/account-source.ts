@@ -9,11 +9,21 @@ import type { ProfileRecord } from "./types.ts";
  * session. The logout control and SSR route must agree; a public shell or an
  * unrelated embedded object is not account evidence. No provider owner ID is
  * invented for the orders response, which does not expose one. */
-function accountPageProps(html: string, route: string): unknown {
+type ProfileReadFailure = {
+	gate: "signed_out_marker" | "next_data_missing" | "next_data_unparseable"
+		| "ssr_route_mismatch" | "schema" | "duplicate_address_id";
+	issue_paths: string[];
+};
+
+function readAccountPageProps(html: string, route: string): {
+	props: unknown;
+	failure: ProfileReadFailure | null;
+} {
 	const { document } = parseHTML(html);
-	if (!document.querySelector('a[href="/oidc/session/end"]')) return null;
+	if (!document.querySelector('a[href="/oidc/session/end"]'))
+		return { props: null, failure: { gate: "signed_out_marker", issue_paths: [] } };
 	const raw = document.querySelector("script#__NEXT_DATA__")?.textContent;
-	if (!raw) return null;
+	if (!raw) return { props: null, failure: { gate: "next_data_missing", issue_paths: [] } };
 	try {
 		const result = z
 			.object({
@@ -22,10 +32,16 @@ function accountPageProps(html: string, route: string): unknown {
 				props: z.object({ __N_SSP: z.literal(true), pageProps: z.unknown() }),
 			})
 			.safeParse(JSON.parse(raw));
-		return result.success ? result.data.props.pageProps : null;
+		return result.success
+			? { props: result.data.props.pageProps, failure: null }
+			: { props: null, failure: { gate: "ssr_route_mismatch", issue_paths: [] } };
 	} catch {
-		return null;
+		return { props: null, failure: { gate: "next_data_unparseable", issue_paths: [] } };
 	}
+}
+
+function accountPageProps(html: string, route: string): unknown {
+	return readAccountPageProps(html, route).props;
 }
 
 const text = z.string().trim().min(1);
@@ -35,14 +51,14 @@ const profileSource = z.object({
 		firstName: text,
 		lastName: text,
 		email: z.email(),
-		daytimeTelephoneNumber: text.nullable(),
+		daytimeTelephoneNumber: z.string().trim().nullish().transform((value) => value || null),
 	}),
 	addresses: z.array(
 		z.object({
 			id: text,
-			nickname: z.string().nullable(),
+			nickname: z.string().nullish().transform((value) => value ?? null),
 			address1: text,
-			address2: z.string().nullable(),
+			address2: z.string().nullish().transform((value) => value ?? null),
 			city: text,
 			state: text,
 			postalCode: text,
@@ -53,15 +69,21 @@ const profileSource = z.object({
 
 /** The profile and complete address array are delivered in one SSR response.
  * Reject the aggregate if any address or primary marker cannot be read. */
-export function parseAccountProfile(html: string): ProfileRecord | null {
-	const result = profileSource.safeParse(
-		accountPageProps(html, "/my-account/profile"),
-	);
-	if (!result.success) return null;
+export function readAccountProfile(html: string): {
+	record: ProfileRecord | null;
+	failure: ProfileReadFailure | null;
+} {
+	const page = readAccountPageProps(html, "/my-account/profile");
+	if (page.failure) return { record: null, failure: page.failure };
+	const result = profileSource.safeParse(page.props);
+	if (!result.success) return {
+		record: null,
+		failure: { gate: "schema", issue_paths: result.error.issues.map((issue) => issue.path.join(".")) },
+	};
 	const { profile, addresses } = result.data;
 	if (new Set(addresses.map((a) => a.id)).size !== addresses.length)
-		return null;
-	return {
+		return { record: null, failure: { gate: "duplicate_address_id", issue_paths: [] } };
+	const record: ProfileRecord = {
 		id: "profile",
 		name: `${profile.firstName} ${profile.lastName}`,
 		email: profile.email,
@@ -74,6 +96,11 @@ export function parseAccountProfile(html: string): ProfileRecord | null {
 			is_primary: a.defaultAddress,
 		})),
 	};
+	return { record, failure: null };
+}
+
+export function parseAccountProfile(html: string): ProfileRecord | null {
+	return readAccountProfile(html).record;
 }
 
 const emptyHistorySource = z.object({

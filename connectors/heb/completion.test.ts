@@ -17,7 +17,7 @@ import {
 	makeRecordingEmit,
 	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { hebConnector } from "./index.ts";
+import { collectNutrition, HEB_PRODUCT_PAGE_DELAY_MIN_MS, HEB_PRODUCT_PAGE_DELAY_MAX_MS, hebConnector } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
@@ -69,6 +69,7 @@ const WIDGET_ROW = {
 
 function makeCollectPage(routes: {
 	detailHtml?: string;
+	detailHtmlForUrl?: (url: string) => string;
 	failProductNavigation?: boolean;
 	listHtml: string;
 	profileHtml?: string;
@@ -76,6 +77,7 @@ function makeCollectPage(routes: {
 	/** Overrides `listHtml` per `?page=N`, for multi-page order history. */
 	listHtmlForPage?: (pageNum: number) => string;
 	productHtml?: string;
+	productPage?: (url: string) => { html: string; landedUrl?: string };
 	/** Collects every URL the page is sent to, in order. */
 	visits?: string[];
 }): Page {
@@ -96,11 +98,16 @@ function makeCollectPage(routes: {
 						}
 						currentUrl = url;
 						if (url.includes("/my-account/order-history/")) {
-							currentHtml = routes.detailHtml ?? "";
+							currentHtml = routes.detailHtmlForUrl?.(url) ?? routes.detailHtml ?? "";
 						} else if (url.includes("/product-detail/")) {
 							currentHtml =
 								routes.productHtml ??
 								"<main><div><h3>Nutrition Facts</h3><ul><li>Calories 0</li></ul></div></main>";
+							const product = routes.productPage?.(url);
+							if (product) {
+								currentHtml = product.html;
+								currentUrl = product.landedUrl ?? url;
+							}
 						} else if (url.includes("/my-account/your-orders")) {
 							const requestedPage = /page=(\d+)/.exec(url)?.[1];
 							currentHtml =
@@ -131,7 +138,7 @@ function makeCollectPage(routes: {
 				if (prop === "evaluate") {
 					return (): Promise<unknown> => {
 						const rows = currentHtml.includes('data-qe-id="itemRowDetailsName"')
-							? [WIDGET_ROW]
+							? [{ ...WIDGET_ROW, html: WIDGET_ROW.html.replace("/500", "/" + (currentHtml.match(/widget\/(\d+)/)?.[1] ?? "500")) }]
 							: [];
 						return Promise.resolve({
 							actionableControl: null,
@@ -978,12 +985,14 @@ test("collect: a profile page that is not a readable account profile is a failed
 				landed_on_profile: true,
 				loading: false,
 				record_parsed: false,
+				profile_gate: "signed_out_marker",
+				profile_issue_paths: [],
 			},
 		},
 	]);
 });
 
-test("collect: an Incapsula block on a product page ends the run as heb_session_required", async () => {
+test("collect: an Incapsula block on a product page reports a retryable nutrition rate block", async () => {
 	const ctx = makeContext(
 		["nutrition"],
 		makeCollectPage({
@@ -992,19 +1001,90 @@ test("collect: an Incapsula block on a product page ends the run as heb_session_
 			productHtml: INCAPSULA_BLOCK_HTML,
 		}),
 	);
-	await assert.rejects(
-		() => hebConnector.collect(ctx),
-		(error: unknown) => {
-			assert.equal((error as Error).message, "heb_session_required");
-			return true;
-		},
-	);
-	assert.deepEqual(causeSkips(ctx), []);
-	assert.deepEqual(ctx.reportedStreamFailures, []);
+	await hebConnector.collect(ctx);
+	// A nutrition-only run never proves order coverage, so the usual
+	// inventory skip stays; the block itself is one retryable read failure.
+	assert.deepEqual(causeSkips(ctx), ["nutrition"]);
+	assert.equal(ctx.reportedStreamFailures.length, 1);
+	assert.deepEqual(ctx.reportedStreamFailures[0]?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+	assert.deepEqual(ctx.reportedStreamFailures[0]?.diagnostics, {
+		source_reason: "nutrition_rate_blocked", signal: "incapsula_block", products_remaining: 1,
+	});
 	assert.deepEqual(
 		findMessages(ctx.protocolMessages, "SKIP_RESULT").map(
 			(skip) => `${skip.stream}:${skip.reason}`,
 		),
-		["nutrition:session_repair_required"],
+		["nutrition:stream_collection_failed", "nutrition:inventory_not_proven_complete"],
 	);
+});
+
+test("nutrition: third of five product pages is a retryable stop with the first two records intact", async () => {
+	const visits: string[] = [];
+	const page = makeCollectPage({
+		listHtml: "",
+		visits,
+		productPage: (url) => ({ html: url.endsWith("/503") ? INCAPSULA_BLOCK_HTML :
+			"<main><div><h3>Nutrition Facts</h3><ul><li>Calories 0</li></ul></div></main>" }),
+	});
+	const ctx = makeContext(["nutrition"], page);
+	let delays = 0;
+	const targets = Array.from({ length: 5 }, (_, i) => ({
+		productId: String(501 + i), productUrl: `https://www.heb.com/product-detail/widget/${501 + i}`, name: "Synthetic Widget",
+	}));
+	const result = await collectNutrition(page, targets, {
+		...ctx,
+		waitForHydration: async () => {},
+		waitForProductPage: async () => { delays += 1; },
+	});
+	assert.deepEqual(result, { lookupSkips: 3, readFailures: 3 });
+	assert.equal(ctx.emitted.filter((r) => r.stream === "nutrition").length, 2);
+	assert.deepEqual(visits, targets.slice(0, 3).map((t) => t.productUrl));
+	assert.equal(delays, 2);
+	assert.equal(HEB_PRODUCT_PAGE_DELAY_MIN_MS, 4000);
+	assert.equal(HEB_PRODUCT_PAGE_DELAY_MAX_MS, 8000);
+	assert.equal(ctx.reportedStreamFailures.length, 1);
+	assert.deepEqual(ctx.reportedStreamFailures[0]?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+	assert.deepEqual(ctx.reportedStreamFailures[0]?.diagnostics, {
+		source_reason: "nutrition_rate_blocked", signal: "incapsula_block", products_remaining: 3,
+	});
+	assert.ok(!findMessages(ctx.protocolMessages, "SKIP_RESULT").some((s) => s.reason === "session_repair_required"));
+});
+
+test("nutrition: sign-in redirect retains session failure with its signal", async () => {
+	const page = makeCollectPage({
+		listHtml: "",
+		productPage: () => ({ html: "<main>Sign in</main>", landedUrl: "https://www.heb.com/sign-in" }),
+	});
+	const ctx = makeContext(["nutrition"], page);
+	await assert.rejects(() => collectNutrition(page, [{
+		productId: "501", productUrl: "https://www.heb.com/product-detail/widget/501", name: "Synthetic Widget",
+	}], { ...ctx, waitForHydration: async () => {} }), /heb_session_required/);
+	const skips = findMessages(ctx.protocolMessages, "SKIP_RESULT");
+	assert.equal(skips.length, 1);
+	assert.equal(skips[0]?.reason, "session_repair_required");
+	assert.deepEqual(skips[0]?.diagnostics, { signal: "signin_url" });
+	assert.deepEqual(ctx.reportedStreamFailures, []);
+});
+
+test("collect: a third-product rate block preserves completed order records", async () => {
+	const visits: string[] = [];
+	const ids = Array.from({ length: 5 }, (_, i) => `HEB900000000${i}`);
+	const ctx = makeContext(["orders", "order_items", "nutrition"], makeCollectPage({
+		listHtml: `<html><body><main>${ids.map((id) => `<a href="/my-account/order-history/${id}">Jun 1, 2026 $10.00, 1 items</a>`).join("")}</main></body></html>`,
+		detailHtmlForUrl: (url) => WIDGET_DETAIL_HTML.replaceAll("/500", "/" + (501 + ids.indexOf(url.split("/").at(-1)!))),
+		productPage: (url) => ({ html: url.endsWith("/503") ? INCAPSULA_BLOCK_HTML :
+			"<main><div><h3>Nutrition Facts</h3><ul><li>Calories 0</li></ul></div></main>" }),
+		visits,
+	}));
+	await assert.doesNotReject(() => hebConnector.collect(ctx));
+	assert.equal(ctx.emitted.filter((r) => r.stream === "orders").length, 5);
+	assert.equal(ctx.emitted.filter((r) => r.stream === "order_items").length, 5);
+	assert.equal(ctx.emitted.filter((r) => r.stream === "nutrition").length, 2);
+	assert.equal(visits.filter((url) => url.includes("/product-detail/")).length, 3);
+	assert.equal(ctx.reportedStreamFailures.length, 1);
+	assert.deepEqual(ctx.reportedStreamFailures[0]?.diagnostics, {
+		source_reason: "nutrition_rate_blocked", signal: "incapsula_block", products_remaining: 3,
+	});
+	assert.ok(!findMessages(ctx.protocolMessages, "SKIP_RESULT").some((s) => s.reason === "session_repair_required"));
+	assert.ok(!findMessages(ctx.protocolMessages, "STATE").some((s) => s.stream === "nutrition"));
 });
