@@ -868,20 +868,28 @@ test("a linked substitute named under subbedProducts[].product.id claims its SSR
 });
 
 test("a resolved line keeps the SSR product page URL only when it is an heb.com product page for that id", async () => {
-	for (const [productPageURL, expected] of [
+	const cases = [
 		["/product-detail/ssr-name/501", "https://www.heb.com/product-detail/ssr-name/501"],
 		["https://www.heb.com/product-detail/ssr-name/501", "https://www.heb.com/product-detail/ssr-name/501"],
 		["https://example.test/product-detail/ssr-name/501", null],
 		["/product-detail/ssr-name/999", null],
 		[null, null],
-	] as const) {
-		const items = [
-			{ product: { id: "500", fullDisplayName: null }, quantity: 1 },
-			{ product: { id: "501", fullDisplayName: "SSR Name", productPageURL }, quantity: 1 },
-		];
-		const result = await resolveLinkless(items, itemRow(0) + linklessLine("501"));
+	] as const;
+	const results = await Promise.all(
+		cases.map(([productPageURL]) =>
+			resolveLinkless(
+				[
+					{ product: { id: "500", fullDisplayName: null }, quantity: 1 },
+					{ product: { id: "501", fullDisplayName: "SSR Name", productPageURL }, quantity: 1 },
+				],
+				itemRow(0) + linklessLine("501"),
+			),
+		),
+	);
+	for (const [index, [productPageURL, expected]] of cases.entries()) {
+		const result = results[index]!;
 		assert.equal(result.evidence.linklessLines, 0, String(productPageURL));
-		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), true);
+		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, 2), true);
 		assert.equal(result.detail.items[1]?.productId, "501");
 		assert.equal(result.detail.items[1]?.productUrl, expected, String(productPageURL));
 	}
