@@ -128,7 +128,7 @@ export function readHistoryResponseEvidence(
 						: typeof direct?.token === "string"
 							? direct.token
 							: null;
-				if (token && token.length <= 4096) tokens.add(token);
+				if (token && token.length <= 16384) tokens.add(token);
 				else bounded = false;
 			}
 			if (key === "nextContinuationData") {
@@ -137,7 +137,7 @@ export function readHistoryResponseEvidence(
 				if (
 					typeof continuation === "string" &&
 					continuation.length > 0 &&
-					continuation.length <= 4096
+					continuation.length <= 16384
 				)
 					tokens.add(continuation);
 				else bounded = false;
@@ -404,19 +404,19 @@ const PAGE_DATA_HELPERS = String.raw`
 				if (key === "continuationItemRenderer" && isObject(child)) {
 					hasContinuation = true;
 					const command = child.continuationEndpoint?.continuationCommand ?? child.continuationCommand;
-					if (typeof command?.token === "string" && command.token.length > 0 && command.token.length <= 4096) tokens.add(command.token);
+					if (typeof command?.token === "string" && command.token.length > 0 && command.token.length <= 16384) tokens.add(command.token);
 					else bounded = false;
 				}
 				if (key === "nextContinuationData") {
 					hasContinuation = true;
-					if (typeof child?.continuation === "string" && child.continuation.length > 0 && child.continuation.length <= 4096) tokens.add(child.continuation);
+					if (typeof child?.continuation === "string" && child.continuation.length > 0 && child.continuation.length <= 16384) tokens.add(child.continuation);
 					else bounded = false;
 				}
 				if (key === "continuations" && Array.isArray(child)) {
 					if (child.length > 0) hasContinuation = true;
 					for (const continuation of child) {
 						const token = continuation?.nextContinuationData?.continuation;
-						if (typeof token === "string" && token.length > 0 && token.length <= 4096) tokens.add(token);
+						if (typeof token === "string" && token.length > 0 && token.length <= 16384) tokens.add(token);
 						else bounded = false;
 					}
 				}
