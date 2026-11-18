@@ -53,7 +53,6 @@ import {
 	fetchOrderDetail,
 	HEB_HYDRATION_WAIT_MAX_MS,
 	HEB_HYDRATION_WAIT_MIN_MS,
-	MAX_LIST_PAGES as HEB_MAX_LIST_PAGES,
 	HEB_ORDER_RETENTION_FLOOR_DAYS,
 	HEB_REPAIR_RETRY_DELAY_MAX_MS,
 	HEB_REPAIR_RETRY_DELAY_MIN_MS,
@@ -302,6 +301,8 @@ interface SyntheticStreamFailure {
 async function collectSyntheticHeb(input: {
 	body: SyntheticProviderBody;
 	listSummary?: Partial<SyntheticListSummary>;
+	listPages?: number;
+	repeatListPage?: boolean;
 	emittedAt: string;
 	state: Record<string, unknown>;
 	streams: string[];
@@ -310,17 +311,35 @@ async function collectSyntheticHeb(input: {
 	protocolMessages: EmittedMessage[];
 	streamFailures: SyntheticStreamFailure[];
 	progressMessages: string[];
+	listRequests: number[];
 }> {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
 		const listBody = syntheticOrderList(input.body, input.listSummary);
 		const detailBody = syntheticOrderDetail(input.body);
+		const listRequests: number[] = [];
 		// Keep every request local to these synthetic provider responses.
 		await page.route("**/*", (route) => route.abort());
 		await page.route(
-			"https://www.heb.com/my-account/your-orders?page=1",
-			(route) => route.fulfill({ body: listBody, contentType: "text/html" }),
+			"https://www.heb.com/my-account/your-orders?page=*",
+			(route) => {
+				const pageNumber = Number(
+					new URL(route.request().url()).searchParams.get("page"),
+				);
+				listRequests.push(pageNumber);
+				if (input.repeatListPage && listRequests.length > 3)
+					throw new Error("repeated source did not stop within three pages");
+				const id = 1_000_000_000 + (input.repeatListPage ? 1 : pageNumber);
+				const maxPage = input.listPages ?? 1;
+				const body = input.listPages === undefined
+					? listBody
+					: listBody.replaceAll("HEB1000000001", `HEB${id}`).replace(
+					'<a href="/my-account/your-orders?page=1">1</a>',
+					`<a href="/my-account/your-orders?page=1">1</a><a href="/my-account/your-orders?page=${maxPage}">${maxPage}</a>`,
+				);
+				return route.fulfill({ body, contentType: "text/html" });
+			},
 		);
 		await page.route(
 			"https://www.heb.com/my-account/order-history/HEB1000000001",
@@ -367,6 +386,7 @@ async function collectSyntheticHeb(input: {
 			protocolMessages: harness.protocolMessages,
 			streamFailures,
 			progressMessages,
+			listRequests,
 		};
 	} finally {
 		await browser.close();
@@ -3439,21 +3459,13 @@ test("recordDetailOutcome: hydrated/gap each land in the right accumulator set",
 	assert.deepEqual(coverage.gap, ["ord-g"]);
 });
 
-// ─── Page-ceiling honesty (MAX_LIST_PAGES) ────────────────────────────────
-//
-// `runForwardScan` has two distinct exits: an honest completion
-// (`pageNum > maxPage` — the walk reached the end H-E-B itself advertised)
-// and a blast-radius ceiling (`pageNum <= MAX_LIST_PAGES` going false). The
-// ceiling is a legitimate bound, but a run that stops there has NOT seen the
-// whole list, and H-E-B's own pagination nav says so. These tests pin that
-// the two exits are distinguishable in the owner-facing coverage evidence:
-// a truncated walk must never report `covered >= considered`, because
-// `covered < considered` is what `evaluateStreamCoherence` turns into
-// `boundary_shortfall` -> `partial` instead of `complete`.
+// ─── Pagination progress and refusal honesty ─────────────────────────────
+// Natural source exhaustion must remain distinct from a stalled page.
+// A repeated source retains valid records but cannot advance STATE.
 
 /** Build a list-page stub advertising `maxPage` total pages, each holding one
  *  order, with dates descending so no boundary stop fires. */
-function makeCeilingPage(advertisedMaxPage: number): {
+function makeCeilingPage(advertisedMaxPage: number, repeat = false): {
 	page: Page;
 	pagesFetched: () => number[];
 } {
@@ -3481,6 +3493,8 @@ function makeCeilingPage(advertisedMaxPage: number): {
 						const m = /page=(\d+)/.exec(url);
 						currentPage = m?.[1] ? Number(m[1]) : 1;
 						fetched.push(currentPage);
+						if (repeat && fetched.length > 3)
+							throw new Error("repeated list must stop within three pages");
 						return Promise.resolve(null);
 					};
 				}
@@ -3488,7 +3502,8 @@ function makeCeilingPage(advertisedMaxPage: number): {
 					return (): Promise<null> => Promise.resolve(null);
 				}
 				if (prop === "content") {
-					return (): Promise<string> => Promise.resolve(htmlFor(currentPage));
+					return (): Promise<string> =>
+						Promise.resolve(htmlFor(repeat ? 1 : currentPage));
 				}
 				if (prop === "url") {
 					return (): string =>
@@ -3501,22 +3516,21 @@ function makeCeilingPage(advertisedMaxPage: number): {
 	return { page, pagesFetched: (): number[] => fetched };
 }
 
-test("runForwardScan: hitting MAX_LIST_PAGES does not report the orders stream complete", async () => {
-	// H-E-B advertises 60 pages; the connector's blast-radius ceiling is 50.
-	// The walk stops 10 pages short of what the provider itself says exists.
+test("runForwardScan: a repeated page refuses without inventing unread orders", async () => {
+	// H-E-B keeps returning the first page despite increasing request numbers.
 	const ordersCoverage = newOrdersCoverage();
 	const { deps } = makeRecordingDeps({ ordersCoverage, wantsItems: false });
-	const { page, pagesFetched } = makeCeilingPage(60);
+	const { page, pagesFetched } = makeCeilingPage(60, true);
 
 	await runForwardScan(page, deps, makeRunFlags(), null);
 
 	assert.equal(
 		pagesFetched().length,
-		HEB_MAX_LIST_PAGES,
-		"the ceiling bounds the walk at MAX_LIST_PAGES pages",
+		2,
+		"the first page with no new IDs refuses immediately",
 	);
 
-	assert.equal(ordersCoverage.considered.length, HEB_MAX_LIST_PAGES);
+	assert.equal(ordersCoverage.considered.length, 1);
 	assert.ok(
 		ordersCoverage.considered.every(
 			(id) => !id.startsWith("unread_list_page_"),
@@ -3524,7 +3538,7 @@ test("runForwardScan: hitting MAX_LIST_PAGES does not report the orders stream c
 	);
 });
 
-test("runForwardScan: an honest completion (maxPage under the ceiling) still reports the orders stream complete", async () => {
+test("runForwardScan: an honest completion still reports the orders stream complete", async () => {
 	// The guard against over-correcting: a walk that genuinely reached the end
 	// H-E-B advertised must still read complete (covered >= considered).
 	const ordersCoverage = newOrdersCoverage();
@@ -3546,8 +3560,20 @@ test("runForwardScan: an honest completion (maxPage under the ceiling) still rep
 	);
 });
 
-test("runForwardScan: the ceiling exit reports truncated, the honest exit does not", async () => {
-	const overCeiling = makeCeilingPage(60);
+test("runForwardScan: 51 distinct pages reach the same natural end as a short list", async () => {
+	const ordersCoverage = newOrdersCoverage();
+	const { deps } = makeRecordingDeps({ ordersCoverage, wantsItems: false });
+	const { page, pagesFetched } = makeCeilingPage(51);
+	const result = await runForwardScan(page, deps, makeRunFlags(), null);
+	assert.equal(pagesFetched().length, 51);
+	assert.equal(ordersCoverage.considered.length, 51);
+	assert.equal(ordersCoverage.covered.length, 51);
+	assert.equal(result.truncated, false);
+	assert.equal(result.stoppedAtBoundary, false);
+});
+
+test("runForwardScan: the repeat exit reports truncated, the honest exit does not", async () => {
+	const overCeiling = makeCeilingPage(60, true);
 	const truncatedScan = await runForwardScan(
 		overCeiling.page,
 		makeRecordingDeps({ wantsItems: false }).deps,
@@ -3557,7 +3583,7 @@ test("runForwardScan: the ceiling exit reports truncated, the honest exit does n
 	assert.equal(
 		truncatedScan.truncated,
 		true,
-		"stopping at the page ceiling must report truncated",
+		"stopping at a repeated page must report truncated",
 	);
 
 	const underCeiling = makeCeilingPage(3);
@@ -4838,7 +4864,7 @@ test("nutritionCoverageBlockReason accepts internally collected order evidence",
 	);
 });
 
-test("nutritionCoverageBlockReason blocks on the 50-page order-history ceiling", () => {
+test("nutritionCoverageBlockReason blocks on a non-progressing order-history walk", () => {
 	assert.equal(
 		nutritionCoverageBlockReason({
 			itemCountShort: false,
@@ -5082,14 +5108,23 @@ test("collectNutrition emits nothing when given zero targets", async () => {
 	);
 });
 
-test("reportListPageCeiling: the page-cap skip waits for a connector upgrade, because the held checkpoint makes the next run hit the same cap", async () => {
+test("reportListPageCeiling: a non-progressing source refuses with its cause and permits runtime retry", async () => {
 	const { deps, protocolMessages } = makeRecordingDeps();
 	const progressTexts: string[] = [];
 	deps.progress = (message: string): Promise<void> => {
 		progressTexts.push(message);
 		return Promise.resolve();
 	};
-	await reportListPageCeiling(deps, HEB_MAX_LIST_PAGES + 3);
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		await reportListPageCeiling(deps, 60, "no_new_order_ids", 2);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.deepEqual(diagnostics, [
+		'[heb-diagnostic] list_scan_page_limit {"pages_read":2,"advertised_max_page":60,"source_reason":"no_new_order_ids"}',
+	]);
 	const skip = protocolMessages.find((m) => m.type === "SKIP_RESULT");
 	assert.equal(skip?.type, "SKIP_RESULT");
 	assert.equal(skip.reason, "inventory_not_proven_complete");
@@ -5097,7 +5132,7 @@ test("reportListPageCeiling: the page-cap skip waits for a connector upgrade, be
 		progressTexts.map((message) => ({ type: "PROGRESS", message })),
 	);
 	assert.deepEqual(progressTexts, [
-		`Stopped after ${String(HEB_MAX_LIST_PAGES)} pages of orders; older orders were not read`,
+		"Stopped after 2 pages of orders because H-E-B kept showing orders already read; older orders were not read",
 	]);
 	assert.deepEqual(skip.recovery_hint, {
 		action: "retry_by_runtime",
@@ -5215,4 +5250,33 @@ test("resolveOrderDetail: failed repair at 99 does not spend a detail or retry r
 	assert.equal(second.failureKind, "session_repair_required");
 	assert.equal(flags.detailAttempts, 99);
 	assert.equal(interactions, 1);
+});
+
+test("collect: full 51-page history preserves the short-source coverage and STATE contract", async () => {
+	const runs = await Promise.all([3, 51].map((listPages) => collectSyntheticHeb({
+		body: SYNTHETIC_ORDER, emittedAt: SYNTHETIC_CLOCK, state: {},
+		streams: ["orders"], listPages,
+	})));
+	const [short, long] = runs;
+	assert.ok(short && long);
+	assert.equal(short.emitted.length, 3);
+	assert.equal(long.emitted.length, 51);
+	assert.equal(long.listRequests.length, 51);
+	assertWithheldWithoutState(short, ["orders"]);
+	assertWithheldWithoutState(long, ["orders"]);
+	assert.deepEqual(
+		long.protocolMessages.filter((m) => m.type === "STATE" || m.type === "DETAIL_COVERAGE"),
+		short.protocolMessages.filter((m) => m.type === "STATE" || m.type === "DETAIL_COVERAGE"),
+	);
+});
+
+test("collect: repeated list refuses within two pages without STATE", async () => {
+	const run = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER, emittedAt: SYNTHETIC_CLOCK, state: {},
+		streams: ["orders"], listPages: 60, repeatListPage: true,
+	});
+	assert.deepEqual(run.listRequests, [1, 2]);
+	assert.equal(run.emitted.length, 1);
+	assertWithheldWithoutState(run, ["orders"]);
+	assert.ok(run.progressMessages.some((message) => message.includes("kept showing orders already read")));
 });
