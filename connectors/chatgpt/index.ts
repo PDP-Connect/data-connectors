@@ -3190,8 +3190,6 @@ export async function processConversationDetail(
 	return { complete: true };
 }
 
-const PAGINATION_SAFETY_LIMIT = 5000;
-
 /**
  * A 200 whose body failed to parse arrives as `res.json === null` (the api
  * layer swallows the parse error). `runCustomInstructionsStream` is a
@@ -3417,6 +3415,7 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 		message: "Fetching custom GPTs",
 	});
 	const seenCursors = new Set<string>();
+	const seenGizmoIds = new Set<unknown>();
 	let cursor: string | null = null;
 	let pages = 0;
 	let anyError = false;
@@ -3455,9 +3454,13 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 			break;
 		}
 		considered += page.items.length;
+		const priorIdCount = seenGizmoIds.size;
+		let hasGizmoId = false;
 		for (const raw of page.items) {
 			const rec = buildGizmoRecord(raw);
 			if (rec) {
+				hasGizmoId = true;
+				seenGizmoIds.add(rec.id);
 				await deps.emitRecord("custom_gpts", rec);
 				covered += 1;
 			} else {
@@ -3469,12 +3472,20 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 		// here rather than folded into the shared classifier's generic item shape.
 		cursor = (res.json?.cursor as string | null | undefined) ?? null;
 		pages += 1;
-		if (cursor !== null && seenCursors.has(cursor)) {
+		const paginationFailure =
+			cursor !== null && seenCursors.has(cursor)
+				? "gizmos/mine pagination returned a repeated cursor"
+				: cursor !== null && page.items.length === 0
+					? "gizmos/mine returned an empty page with a cursor"
+					: hasGizmoId && seenGizmoIds.size === priorIdCount
+						? "gizmos/mine page added no new gizmo id"
+						: null;
+		if (paginationFailure !== null) {
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "custom_gpts",
 				reason: "pagination_cap_truncated",
-				message: "gizmos/mine pagination returned a repeated cursor",
+				message: paginationFailure,
 				recovery_hint: {
 					action: "retry_on_connector_upgrade",
 					retryable: false,
@@ -3738,7 +3749,8 @@ async function listPrimaryConversations(
 	});
 	let emptyReads = 0;
 	let pages = 0;
-	while (pages * PRIMARY_CONVERSATION_PAGE_SIZE < PAGINATION_SAFETY_LIMIT) {
+	const seenOffsets = new Set<number>();
+	while (true) {
 		let response: ChatGptFetchResult;
 		try {
 			response = await recovery.fetch(offset);
@@ -3813,6 +3825,15 @@ async function listPrimaryConversations(
 			}
 			return { items: [...rows.values()], truncated: false, backfill: null };
 		}
+		if (seenOffsets.has(offset) || pageRows.every((item) => rows.has(item.id))) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT primary list repeated an offset or added no new conversation id",
+				{ offset },
+			);
+			return incomplete();
+		}
+		seenOffsets.add(offset);
 		emptyReads = 0;
 		for (const item of pageRows) {
 			rows.set(item.id, item);
@@ -3823,12 +3844,6 @@ async function listPrimaryConversations(
 		offset += pageRows.length;
 		pages += 1;
 	}
-	emitConversationListUnstable(
-		deps,
-		"ChatGPT primary list reached the per-run pagination cap",
-		{ offset },
-	);
-	return incomplete();
 }
 
 function logConversationListPageShape(
@@ -4084,6 +4099,12 @@ async function walkConversationSearch(
 ): Promise<ConversationListResult> {
 	const conversationsById = new Map<string, ConversationListItem>();
 	const backfillTailById = new Map<string, ConversationListItem>();
+	// Count raw IDs before time filtering; old but new pages still make progress.
+	const seenSourceIds = new Set<string>();
+	const seenCursors = new Set<number>();
+	// Progress guard: allow 16 consecutive forward pages without a new ID, not a collection size limit.
+	const maxForwardPagesWithoutIds = 16;
+	let forwardPagesWithoutIds = 0;
 	const savedBoundaryIds = new Set(resumeBackfill?.boundary_ids ?? []);
 	let resumeBoundarySeen = resumeBackfill?.boundary_ids.length === 0;
 	// Replay one complete page before the saved hint. The hint alone is not a
@@ -4178,6 +4199,8 @@ async function walkConversationSearch(
 	let consecutiveOldPages = 0;
 	let page = 0;
 	while (true) {
+		seenCursors.add(cursor);
+		const priorIdCount = seenSourceIds.size;
 		const attempts: ConversationListItem[][] = [];
 		let logicalPageEntirelyOld = true;
 		let nextCursor: number | null = null;
@@ -4276,6 +4299,7 @@ async function walkConversationSearch(
 					backfill: conversationBackfillAt(conversationsById.values(), cursor),
 				};
 			}
+			for (const item of pageItems) seenSourceIds.add(item.id);
 			attempts.push(pageItems);
 			logicalPageEntirelyOld &&= responseEntirelyOld;
 			for (const item of items) {
@@ -4387,8 +4411,10 @@ async function walkConversationSearch(
 					if (isChatGptJsonObject(raw)) {
 						const id =
 							typeof raw.id === "string" ? raw.id : raw.conversation_id;
-						if (typeof id === "string" && id.length > 0)
+						if (typeof id === "string" && id.length > 0) {
+							seenSourceIds.add(id);
 							conversationsById.set(id, { ...raw, id });
+						}
 					}
 				}
 			}
@@ -4398,6 +4424,37 @@ async function walkConversationSearch(
 				classified.items.length,
 				pageSize,
 			);
+		}
+		// Accepted cursors are strictly increasing, so cursor is the highest one read.
+		const forwardCursor =
+			nextCursor !== null && nextCursor > cursor && !seenCursors.has(nextCursor);
+		const addedIds = seenSourceIds.size > priorIdCount;
+		const pageHadItems = attempts.some((items) => items.length > 0);
+		// Only an empty page may carry the walk forward without a new id. A page of
+		// already-seen ids is a stalled or shifted source, so it refuses below.
+		forwardPagesWithoutIds =
+			!addedIds && forwardCursor && !pageHadItems ? forwardPagesWithoutIds + 1 : 0;
+		const paginationFailure =
+			nextCursor !== null && !forwardCursor
+				? "conversations search returned a repeated or backward cursor"
+				: forwardPagesWithoutIds > maxForwardPagesWithoutIds
+					? "conversations search exceeded the forward-page progress guard without a new id"
+					: !addedIds && pageHadItems
+						? "conversations search page added no new conversation id"
+						: null;
+		if (paginationFailure !== null) {
+			deps.emit({
+				type: "SKIP_RESULT",
+				stream: "conversations",
+				reason: "pagination_cap_truncated",
+				message: paginationFailure,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
+				diagnostics: { cursor, collected: conversationsById.size },
+			});
+			return deferred();
 		}
 		if (!resumeBackfill && (priorCursor !== null || requestedSince)) {
 			consecutiveOldPages = logicalPageEntirelyOld
@@ -4425,24 +4482,6 @@ async function walkConversationSearch(
 			contiguous = false;
 		}
 		cursor = nextCursor;
-		if (cursor > PAGINATION_SAFETY_LIMIT) {
-			deps.emit({
-				type: "SKIP_RESULT",
-				stream: "conversations",
-				reason: "pagination_cap_truncated",
-				message: `conversations search stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				diagnostics: { cursor, collected: conversationsById.size },
-			});
-			return {
-				items: [...conversationsById.values()],
-				truncated: true,
-				backfill: conversationBackfillAt(conversationsById.values(), cursor),
-			};
-		}
 	}
 }
 
@@ -4851,7 +4890,7 @@ function prefetchingConversationSearchPages(
 				const limit = inFlight.has(cursor) ? width : width - 1;
 				for (let ahead = 1; ahead < width; ahead += 1) {
 					const next = cursor + ahead * CONVERSATION_PAGE_SIZE;
-					if (outstanding >= limit || next > PAGINATION_SAFETY_LIMIT) {
+					if (outstanding >= limit) {
 						break;
 					}
 					if (inFlight.has(next)) {
@@ -5066,11 +5105,11 @@ function conversationSearchNextCursor(
 	if (!isChatGptJsonObject(json))
 		return itemCount > 0 ? cursor + pageSize : null;
 	const raw = json.next_cursor ?? json.nextCursor;
-	if (typeof raw === "number" && Number.isSafeInteger(raw) && raw > cursor)
+	if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0)
 		return raw;
 	if (typeof raw === "string" && /^\d+$/.test(raw)) {
 		const parsed = Number(raw);
-		if (Number.isSafeInteger(parsed) && parsed > cursor) return parsed;
+		if (Number.isSafeInteger(parsed) && parsed >= 0) return parsed;
 	}
 	if (raw === null || json.has_more === false) return null;
 	if (typeof json.has_more === "boolean")
