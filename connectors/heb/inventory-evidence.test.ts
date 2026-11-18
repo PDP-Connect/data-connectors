@@ -961,3 +961,26 @@ test("a shared substitute cannot let a linked line take an SSR item whose origin
 	assert.equal(result.evidence.linklessLines, 1);
 	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
 });
+
+test("linked lines are matched one-to-one, so a substitute-only line ahead of its original does not block the order", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+		{ product: { id: "600", fullDisplayName: "Gadget" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+		{ product: { id: "502", fullDisplayName: "Other" }, quantity: 1 },
+	];
+	const substituteOnly = itemRow(1).replace('data-index="1"', 'data-index="10"');
+	const originalWithSubstitute = itemRow(0).replace("</li>", `<ul>${itemRow(1).replace('data-index="1"', 'data-index="60"')}</ul></li>`);
+	const result = await resolveLinkless(items, substituteOnly + originalWithSubstitute + linklessLine("502"));
+	assert.equal(result.evidence.linklessLines, 0);
+	assert.ok(result.detail.items.some((item) => item.productId === "502" && item.name === "Other"));
+});
+
+test("a linkless line stays unresolved when which SSR item is left over depends on how linked lines are matched", async () => {
+	const items = [
+		{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+		{ product: { id: "600", fullDisplayName: "Gadget" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] },
+	];
+	const result = await resolveLinkless(items, itemRow(1) + linklessLine("600"));
+	assert.equal(result.evidence.linklessLines, 1);
+	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, items.length), false);
+});

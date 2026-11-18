@@ -777,23 +777,59 @@ export function resolveLinklessOrderItems(
 		for (const nested of own.querySelectorAll("li")) nested.remove();
 		return own;
 	};
-	// Every linked outer line must take exactly one SSR item by the ids of its
-	// own and its nested substitutes' name links. If one cannot, the ledger of
-	// what is left over is unproven, so no linkless line is resolved.
-	let ledgerComplete = true;
-	for (const line of outerLines) {
-		if (!ownCopy(line).querySelector(nameSelector)) continue;
-		const ids = [...line.querySelectorAll(nameSelector)].map(
-			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "",
-		);
-		// Every id the line names (its own and its substitutes') must belong to
-		// the one SSR item, so a shared substitute cannot stand in for a
-		// contradictory original.
-		const index = items.findIndex((item, i) => !claimed.has(i) &&
-			ids.every((id) => id === item.productId || item.substituteIds.includes(id)));
-		if (index < 0) ledgerComplete = false;
-		else claimed.add(index);
+	// Every linked outer line must take exactly one SSR item, and every id the
+	// line names (its own link and its nested substitutes') must belong to that
+	// item, so a shared substitute cannot stand in for a contradictory
+	// original. The lines are matched to items one-to-one (augmenting paths,
+	// so an earlier ambiguous line can move to make room). Linkless lines are
+	// resolved only when every linked line is matched and the items left over
+	// are the same in every such matching; otherwise the left-overs are
+	// unproven and no linkless line resolves.
+	const fits = (ids: string[], item: (typeof items)[number]) =>
+		ids.every((id) => id === item.productId || item.substituteIds.includes(id));
+	const candidates = outerLines
+		.filter((line) => ownCopy(line).querySelector(nameSelector))
+		.map((line) => {
+			const ids = [...line.querySelectorAll(nameSelector)].map(
+				(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "",
+			);
+			return items.map((_, i) => i).filter((i) => fits(ids, items[i]!));
+		});
+	const lineOf = new Map<number, number>();
+	const place = (line: number, tried: Set<number>): boolean => {
+		for (const item of candidates[line]!) {
+			if (tried.has(item)) continue;
+			tried.add(item);
+			const holder = lineOf.get(item);
+			if (holder === undefined || place(holder, tried)) {
+				lineOf.set(item, line);
+				return true;
+			}
+		}
+		return false;
+	};
+	let ledgerComplete = candidates.every((_, line) => place(line, new Set()));
+	if (ledgerComplete) {
+		// An item could be left over instead of a matched one when some line
+		// that fits the free item holds the matched one: walk those swaps.
+		const free = items.map((_, i) => i).filter((i) => !lineOf.has(i));
+		const couldBeFree = new Set(free);
+		const queue = [...free];
+		while (queue.length > 0) {
+			const item = queue.pop()!;
+			for (const [line, fitting] of candidates.entries()) {
+				if (!fitting.includes(item)) continue;
+				for (const [held, holder] of lineOf) {
+					if (holder === line && !couldBeFree.has(held)) {
+						couldBeFree.add(held);
+						queue.push(held);
+					}
+				}
+			}
+		}
+		ledgerComplete = couldBeFree.size === free.length;
 	}
+	for (const item of lineOf.keys()) claimed.add(item);
 	const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
 	const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
 	for (const line of ledgerComplete ? outerLines : []) {
