@@ -13905,25 +13905,58 @@ test("full-history progress: 6000 conversations reach primary and search end", a
 });
 
 for (const scenario of ["empty continuation", "repeated ids"] as const) {
-	test(`full-history progress: gizmos ${scenario} skip without STATE`, async () => {
-		const { deps, messages } = makeHarness({
+	test(`runCustomGptsStream: gizmos ${scenario} follow fresh cursors to new records`, async () => {
+		// Fresh continuation is progress permission, not proof that a sparse page is the end.
+		const { deps, emitted, messages } = makeHarness({
 			fetchQueue: [
 				{ status: 200, json: { items: [{ id: "gizmo-synthetic" }], cursor: "first" } },
 				{ status: 200, json: { items: scenario === "empty continuation" ? [] : [{ id: "gizmo-synthetic" }], cursor: "fresh" } },
-				{ status: 200, json: { items: [] } },
+				{ status: 200, json: { items: [{ id: "gizmo-later" }] } },
 			],
 			requested: ["custom_gpts"],
 		});
 		await runCustomGptsStream(deps);
-		assert.equal(messages.filter((m) => m.type === "STATE").length, 0);
-		assert.equal(customGptsCoverage(messages), undefined);
-		const skip = messages.find((m) => m.type === "SKIP_RESULT");
-		assert.ok(skip && skip.type === "SKIP_RESULT");
-		assert.equal(skip.reason, "pagination_cap_truncated");
-		assert.match(skip.message ?? "", scenario === "empty continuation" ? /empty.*cursor/i : /no new.*id/i);
-		assert.deepEqual(skip.recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
+		assert.equal(messages.filter((m) => m.type === "STATE").length, 1);
+		assert.equal(messages.filter((m) => m.type === "SKIP_RESULT").length, 0);
+		assert.deepEqual([...new Set(emitted.map((r) => r.data.id))], ["gizmo-synthetic", "gizmo-later"]);
+		assert.equal(customGptsCoverage(messages)?.covered, scenario === "empty continuation" ? 2 : 3);
 	});
 }
+
+test("runCustomGptsStream: new IDs reset the 16-page guard and an empty last page ends normally", async () => {
+	const pages = [
+		...Array.from({ length: 16 }, (_, i) => ({ status: 200, json: { items: [], cursor: "before-" + i } })),
+		{ status: 200, json: { items: [{ id: "reset-gizmo" }], cursor: "new-id" } },
+		...Array.from({ length: 16 }, (_, i) => ({ status: 200, json: { items: [], cursor: "after-" + i } })),
+		{ status: 200, json: { items: [], cursor: null } },
+	];
+	const { deps, emitted, messages } = makeHarness({ fetchQueue: pages, requested: ["custom_gpts"] });
+	await runCustomGptsStream(deps);
+	assert.deepEqual(emitted.filter((r) => r.stream === "custom_gpts").map((r) => r.data.id), ["reset-gizmo"]);
+	assert.equal(messages.filter((m) => m.type === "STATE").length, 1);
+	assert.equal(messages.filter((m) => m.type === "SKIP_RESULT").length, 0);
+	assert.equal(customGptsCoverage(messages)?.covered, 1);
+});
+
+test("runCustomGptsStream: 17 empty fresh-cursor pages refuse without STATE", async () => {
+	const { deps, messages } = makeHarness({ requested: ["custom_gpts"] });
+	let reads = 0;
+	deps.api = { ...deps.api, fetch: (): Promise<ChatGptFetchResult> => {
+		reads += 1;
+		assert.ok(reads <= 17, "progress guard must bound empty continuations");
+		return Promise.resolve({ status: 200, json: { items: [], cursor: "empty-" + reads } });
+	}};
+	await runCustomGptsStream(deps);
+	assert.equal(reads, 17);
+	const skips = messages.filter((m) => m.type === "SKIP_RESULT");
+	assert.equal(skips.length, 1);
+	assert.ok(skips[0]?.type === "SKIP_RESULT");
+	assert.equal(skips[0].reason, "pagination_cap_truncated");
+	assert.deepEqual(skips[0].recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
+	assert.match(skips[0].message ?? "", /empty/i);
+	assert.equal(messages.filter((m) => m.type === "STATE").length, 0);
+	assert.equal(customGptsCoverage(messages), undefined);
+});
 
 for (const scenario of [
 	"missing ids with fresh cursors",
@@ -13936,14 +13969,15 @@ for (const scenario of [
 		});
 		const firstPageMissing = scenario === "missing ids with fresh cursors";
 		const repeatedIds = scenario === "already seen ids with fresh cursor";
-		const expectedReads = firstPageMissing ? 1 : 2;
+		// Fresh cursors tolerate 16 no-new-id pages; a nonempty final page still refuses immediately.
+		const expectedReads = firstPageMissing ? 17 : repeatedIds ? 18 : 2;
 		const paths: string[] = [];
 		deps.api = {
 			...deps.api,
 			fetch: (path): Promise<ChatGptFetchResult> => {
 				paths.push(path);
 				// Bound the regression itself: the broken walk must fail, not hang.
-				assert.ok(paths.length <= expectedReads, "stop on the first no-new-id page");
+				assert.ok(paths.length <= expectedReads, "stop at the no-progress guard or nonempty final page");
 				assert.ok(path.startsWith("/gizmos/mine?"));
 				if (!firstPageMissing && paths.length === 1) {
 					return Promise.resolve({
@@ -13966,9 +14000,8 @@ for (const scenario of [
 		await runCustomGptsStream(deps);
 
 		assert.equal(paths.length, expectedReads);
-		assert.deepEqual(paths, firstPageMissing
-			? ["/gizmos/mine?limit=100"]
-			: ["/gizmos/mine?limit=100", "/gizmos/mine?cursor=fresh-1&limit=100"]);
+		assert.deepEqual(paths, Array.from({ length: expectedReads }, (_, i) =>
+			i === 0 ? "/gizmos/mine?limit=100" : `/gizmos/mine?cursor=fresh-${i}&limit=100`));
 		const skips = messages.filter((m) => m.type === "SKIP_RESULT");
 		assert.equal(skips.length, 1);
 		const skip = skips[0];
@@ -13979,7 +14012,7 @@ for (const scenario of [
 		assert.deepEqual(skip.recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
 		assert.equal(messages.some((m) => m.type === "STATE" && m.stream === "custom_gpts"), false);
 		assert.equal(customGptsCoverage(messages), undefined);
-		assert.equal(emitted.filter((r) => r.stream === "custom_gpts").length, firstPageMissing ? 0 : repeatedIds ? 2 : 1);
+		assert.equal(emitted.filter((r) => r.stream === "custom_gpts").length, firstPageMissing ? 0 : repeatedIds ? expectedReads : 1);
 		if (!repeatedIds) {
 			assert.match(recordDiagnostic(messages, "shape_check_failed: custom_gpts", "missing-id item remains diagnosable"), /missing id/);
 		}

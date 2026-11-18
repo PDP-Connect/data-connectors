@@ -3408,6 +3408,9 @@ function buildChatGptRejectAwareFullScanCoverageMessage(
 	});
 }
 
+// Progress guard, not a history-size limit: stop endless fresh cursors that add no gizmo IDs.
+const MAX_GIZMO_NO_PROGRESS_PAGES = 16;
+
 export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 	deps.emit({
 		type: "PROGRESS",
@@ -3418,6 +3421,7 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 	const seenGizmoIds = new Set<unknown>();
 	let cursor: string | null = null;
 	let pages = 0;
+	let noProgressPages = 0;
 	let anyError = false;
 	// The enumerated boundary: every gizmo `/gizmos/mine` listed across all pages,
 	// counted here at the enumeration site. Deliberately NOT the emitted count —
@@ -3472,16 +3476,21 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 		// here rather than folded into the shared classifier's generic item shape.
 		cursor = (res.json?.cursor as string | null | undefined) ?? null;
 		pages += 1;
+		const addedNewId = seenGizmoIds.size > priorIdCount;
+		noProgressPages = addedNewId ? 0 : noProgressPages + 1;
 		const paginationFailure =
 			cursor !== null && seenCursors.has(cursor)
 				? "gizmos/mine pagination returned a repeated cursor"
-				: cursor !== null && page.items.length === 0
-					? "gizmos/mine returned an empty page with a cursor"
-					: page.items.length > 0 && seenGizmoIds.size === priorIdCount
-						? hasGizmoId
+				: !addedNewId &&
+						(cursor !== null
+							? noProgressPages > MAX_GIZMO_NO_PROGRESS_PAGES
+							: page.items.length > 0)
+					? page.items.length === 0
+						? "gizmos/mine empty pages with fresh cursors exceeded the progress guard"
+						: hasGizmoId
 							? "gizmos/mine page added no new gizmo id: ids already seen"
 							: "gizmos/mine page added no new gizmo id: missing ids"
-						: null;
+					: null;
 		if (paginationFailure !== null) {
 			deps.emit({
 				type: "SKIP_RESULT",
@@ -3498,7 +3507,7 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 			break;
 		}
 		if (cursor !== null) seenCursors.add(cursor);
-		if (!page.items.length) {
+		if (!page.items.length && cursor === null) {
 			break;
 		}
 	} while (cursor);
