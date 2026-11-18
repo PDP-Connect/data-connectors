@@ -673,7 +673,11 @@ function parseDetailItem(link: HTMLAnchorElement): DetailItem | null {
 		return null;
 	}
 	const row = itemRowFor(link);
-	const rowText = rawLines(row);
+	// A substituted product is nested inside the original purchased line.
+	// Its quantity/price must not leak into the original product record.
+	const ownRow = row.cloneNode(true) as Element;
+	for (const nested of ownRow.querySelectorAll("li")) nested.remove();
+	const rowText = rawLines(ownRow);
 	const rawPosition =
 		row.getAttribute("data-index") ?? row.getAttribute("aria-posinset");
 	const sourcePosition =
@@ -688,7 +692,7 @@ function parseDetailItem(link: HTMLAnchorElement): DetailItem | null {
 		productUrl: absoluteProductUrl(href),
 		imageUrl: productImageUrl(productId),
 		quantity: parseDetailQuantity(rowText),
-		lineTotal: parseLineTotal(row, rowText),
+		lineTotal: parseLineTotal(ownRow, rowText),
 		sourcePosition,
 	};
 }

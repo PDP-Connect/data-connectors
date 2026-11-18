@@ -80,7 +80,8 @@ import {
 	runForwardScan,
 } from "./index.ts";
 import type { OrderItemTally } from "./item-count-anchor.ts";
-import { parseOrderDate, parseOrdersListDom } from "./parsers.ts";
+import { buildOrderItemRecord, parseOrderDetailDom, parseOrderDate, parseOrdersListDom } from "./parsers.ts";
+import { inventoryMatchesSourceTotal } from "./inventory-evidence.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
 
@@ -5306,4 +5307,129 @@ test("resolveOrderDetail: failed repair at 99 does not spend a detail or retry r
 	assert.equal(second.failureKind, "session_repair_required");
 	assert.equal(flags.detailAttempts, 99);
 	assert.equal(interactions, 1);
+});
+
+
+function syntheticLine(product: string | null, quantity = 1, nested = ""): string {
+	return `<li>${product ? `<a data-qe-id="itemRowDetailsName" href="/product-detail/${product}">${product}</a>` : ""}
+		<p data-qe-id="orderItemQty">Qty: ${quantity}</p><p data-qe-id="checkoutItemPrice">$${quantity}.00</p>${nested}</li>`;
+}
+
+function syntheticLinePage(lines: string, total: number): string {
+	return `<main><div data-qe-id="orderSummaryCard"></div><ul id="lines">${lines}</ul></main>
+		<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
+			page: "/my-account/order-history/[orderId]", gssp: true,
+			props: { __N_SSP: true, pageProps: { order: {
+				orderId: "SYNTHETIC-LINES", orderItems: Array.from({ length: total }, () => ({})),
+			} } },
+		})}</script>`;
+}
+
+test("fetchOrderDetail: SSR outer lines preserve substitution and duplicate record identity", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const cases = [
+			{ lines: syntheticLine("original", 2, `<ul>${syntheticLine("substitute", 3)}</ul>`), total: 1, complete: true, ids: ["original", "substitute"], quantities: [2, 3] },
+			{ lines: syntheticLine("repeat") + syntheticLine("repeat", 2), total: 2, complete: true, ids: ["repeat|0", "repeat|1"], quantities: [1, 2] },
+			{ lines: syntheticLine("first") + syntheticLine(null), total: 2, complete: false, linkless: 1 },
+			{ lines: syntheticLine("first"), total: 2, complete: false },
+			{ lines: syntheticLine("first") + syntheticLine("second"), total: 1, complete: false },
+			{ lines: syntheticLine("first") + syntheticLine("second", 2), total: 2, complete: true, ids: ["first", "second"], quantities: [1, 2] },
+		];
+		await Promise.all(cases.map(async (scenario) => {
+			const page = await browser.newPage();
+			await page.route("https://www.heb.com/my-account/order-history/SYNTHETIC-LINES",
+				(route) => route.fulfill({ body: syntheticLinePage(scenario.lines, scenario.total), contentType: "text/html" }));
+			const result = await fetchOrderDetail(page, "SYNTHETIC-LINES", {
+				expectedItemCount: 99, detailSurfaceTimeoutMs: 3000, waitForHydration: immediateWait,
+			});
+			assert.equal(result.status, "hydrated");
+			if (result.status !== "hydrated") return;
+			// Exercise the line proof after accepting all successfully parsed items.
+			const items = result.detail.items;
+			const records = items.map((item, index) => buildOrderItemRecord(
+				"SYNTHETIC-LINES", "2026-01-01", item, index, "", items));
+			assert.equal(result.evidence.rejectedRows, 0);
+			const evidence = { ...result.evidence, acceptedIds: result.evidence.sourceIds };
+			assert.equal(inventoryMatchesSourceTotal(evidence, result.sourceItemTotal), scenario.complete);
+			if (scenario.ids) {
+				assert.deepEqual(records.map((record) => record.id), scenario.ids.map((id) => `SYNTHETIC-LINES|${id}`));
+				assert.deepEqual(items.map((item) => item.quantity), scenario.quantities);
+				assert.deepEqual(items.map((item) => item.lineTotal), scenario.quantities?.map((qty) => `$${qty}.00`));
+			}
+			if (scenario.linkless) assert.match(result.diagnostic ?? "", /linkless_lines=1/);
+			if (scenario.ids?.[0] === "first") {
+				const baseline = parseOrderDetailDom(scenario.lines)!;
+				assert.equal(JSON.stringify(records), JSON.stringify(baseline.items.map((item, index) =>
+					buildOrderItemRecord("SYNTHETIC-LINES", "2026-01-01", item, index, "", baseline.items))));
+			}
+		}));
+	} finally {
+		await browser.close();
+	}
+});
+
+test("fetchOrderDetail: partial then full SSR snapshot never accumulates document-order windows", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const partial = syntheticLine("repeat");
+		const full = partial + syntheticLine("repeat", 2);
+		await page.route("https://www.heb.com/my-account/order-history/SYNTHETIC-LINES",
+			(route) => route.fulfill({ body: syntheticLinePage(partial, 2), contentType: "text/html" }));
+		let observations = 0;
+		const evaluate = page.evaluate.bind(page);
+		page.evaluate = (async (...args: Parameters<Page["evaluate"]>) => {
+			const result = await evaluate(...args);
+			observations += 1;
+			if (observations === 1) {
+				assert.equal((result as { staticListEvidence: unknown }).staticListEvidence, null);
+				await page.locator("#lines").evaluate((el, html) => { el.innerHTML = html; }, full);
+			}
+			return result;
+		}) as Page["evaluate"];
+		const result = await fetchOrderDetail(page, "SYNTHETIC-LINES", {
+			detailSurfaceTimeoutMs: 3000, waitForHydration: immediateWait,
+		});
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.ok(observations > 1);
+		assert.equal(result.detail.items.length, 2);
+		assert.equal(result.evidence.sourceIds.length, 2);
+		assert.equal(inventoryMatchesSourceTotal({
+			...result.evidence, acceptedIds: result.evidence.sourceIds,
+		}, result.sourceItemTotal), true);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("fetchOrderDetail: a changed or missing final SSR total voids line proof", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		await Promise.all(["changed", "missing"].map(async (mode) => {
+			const page = await browser.newPage();
+			const lines = syntheticLine("first");
+			await page.route("https://www.heb.com/my-account/order-history/SYNTHETIC-LINES",
+				(route) => route.fulfill({ body: syntheticLinePage(lines, 1), contentType: "text/html" }));
+			const content = page.content.bind(page);
+			let reads = 0;
+			page.content = async () => {
+				const html = await content();
+				if (++reads === 1) return html;
+				return mode === "changed" ? syntheticLinePage(lines, 2) : `<main>${lines}</main>`;
+			};
+			const result = await fetchOrderDetail(page, "SYNTHETIC-LINES", {
+				detailSurfaceTimeoutMs: 3000, waitForHydration: immediateWait,
+			});
+			assert.equal(result.status, "hydrated");
+			if (result.status !== "hydrated") return;
+			assert.equal(result.evidence.coherent, false);
+			assert.equal(inventoryMatchesSourceTotal({
+				...result.evidence, acceptedIds: result.evidence.sourceIds,
+			}, result.sourceItemTotal), false);
+		}));
+	} finally {
+		await browser.close();
+	}
 });

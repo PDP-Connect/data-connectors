@@ -28,6 +28,8 @@ export interface InventoryEvidence {
 	acceptedIds: string[];
 	rejectedRows: number;
 	missingIdentityRows: number;
+	/** Outermost source lines without a parsed product name link. */
+	linklessLines?: number;
 	signal:
 		| { entity: InventoryEntity; exactTotal: number }
 		| { entity: InventoryEntity; explicitEnd: true }
@@ -84,7 +86,8 @@ function rowsAreRead(e: InventoryEvidence): boolean {
 		e.loading ||
 		!e.coherent ||
 		e.rejectedRows !== 0 ||
-		e.missingIdentityRows !== 0
+		e.missingIdentityRows !== 0 ||
+		(e.linklessLines ?? 0) !== 0
 	)
 		return false;
 	const source = new Set(e.sourceIds);

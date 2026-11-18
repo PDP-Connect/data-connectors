@@ -165,6 +165,7 @@ interface DetailSurfaceDiagnostics {
 	actionableControl: string | null;
 	clientHeight: number;
 	collectedRows: number;
+	linklessLines: number;
 	expectedUnits: number | null;
 	lastAction: string | null;
 	lastError: string | null;
@@ -178,6 +179,7 @@ interface DetailSurfaceDiagnostics {
 }
 
 interface DetailSurfaceResult {
+	sourceIds: string[];
 	diagnostics: DetailSurfaceDiagnostics;
 	html: string;
 	coherent: boolean;
@@ -202,18 +204,27 @@ async function hydrationWait(): Promise<void> {
  * does not depend on H-E-B-specific React internals. */
 function inspectAndAdvanceDetailSurface(input: {
 	debugDiagnostics: boolean;
-	expectedItemCount: number | null;
+	sourceLineTotal: number | null;
 	lastAction: string | null;
 }): DetailSurfaceState {
-	const { debugDiagnostics, expectedItemCount, lastAction } = input;
+	const { debugDiagnostics, sourceLineTotal, lastAction } = input;
+	const candidates = new Set(
+		[...document.querySelectorAll('a[data-qe-id="itemRowDetailsName"], [data-qe-id="orderItemQty"]')]
+			.map((element) => element.closest("li"))
+			.filter((element): element is HTMLLIElement => element !== null),
+	);
+	const lines = [...candidates].filter((line) => {
+		for (let parent = line.parentElement; parent; parent = parent.parentElement) {
+			if (candidates.has(parent as HTMLLIElement)) return false;
+		}
+		return true;
+	});
 	// Visit every row's scrollable ancestors. Scroll geometry schedules collection,
 	// but is never a source end-of-inventory signal.
 	const scrollPorts = new Set<Element>();
-	for (const link of document.querySelectorAll(
-		'a[data-qe-id="itemRowDetailsName"]',
-	)) {
+	for (const line of lines) {
 		for (
-			let current: Element | null = link.closest("li") ?? link;
+			let current: Element | null = line;
 			current;
 			current = current.parentElement
 		) {
@@ -245,25 +256,21 @@ function inspectAndAdvanceDetailSurface(input: {
 	const clientHeight = isDocumentScrollPort
 		? window.innerHeight
 		: scrollPort.clientHeight;
-	const rowLinks = [
-		...document.querySelectorAll<HTMLAnchorElement>(
-			'a[data-qe-id="itemRowDetailsName"]',
-		),
-	];
+	// Count outer purchased lines, not nested substitute name links.
 	// A quiet, viewport-fitting document is not evidence that every row is
 	// mounted: an unanchored virtualizer can hide its reserve with overflow.
 	// Document order is safe only when H-E-B's declared count matches the
 	// complete mounted row set on this snapshot. Otherwise position-free rows
 	// must fail closed rather than become a local index that can repeat.
 	const staticListEvidence: StaticListEvidence =
-		expectedItemCount !== null && rowLinks.length === expectedItemCount
+		sourceLineTotal !== null && lines.length === sourceLineTotal
 			? "declared_count"
 			: null;
 	// Href identity can preserve partial product rows without a source line ID.
 	// It cannot establish completeness, even if all observed rows stay mounted.
-	const canAttemptVirtualizedContentIdentity = rowLinks.length > 0;
-	const rows = rowLinks.map((link, itemIndex) => {
-		const itemRow = link.closest("li") ?? link;
+	const canAttemptVirtualizedContentIdentity = lines.length > 0;
+	const rows = lines.map((itemRow, itemIndex) => {
+		const link = itemRow.querySelector<HTMLAnchorElement>('a[data-qe-id="itemRowDetailsName"]');
 		const qtyText =
 			itemRow.querySelector('[data-qe-id="orderItemQty"]')?.textContent ?? "";
 		// H-E-B writes weighed quantities as "Qty: N of M lbs". N is the
@@ -281,10 +288,10 @@ function inspectAndAdvanceDetailSurface(input: {
 				return value ? `position:${attribute}=${value}` : null;
 			})
 			.find((value) => value);
-		const href = link.getAttribute("href")?.trim() || null;
+		const href = link?.getAttribute("href")?.trim() || null;
 		const key =
-			positionalIdentity ??
 			(staticListEvidence ? `position:document-order=${itemIndex}` : null) ??
+			positionalIdentity ??
 			(canAttemptVirtualizedContentIdentity && href
 				? `content:href=${href}`
 				: null);
@@ -432,6 +439,7 @@ function detailSurfaceErrorMessage(
 	return [
 		`detail_surface_${diagnostics.settlement}`,
 		`collected=${diagnostics.collectedRows}`,
+		`linkless_lines=${diagnostics.linklessLines}`,
 		`expected_units=${diagnostics.expectedUnits ?? "unknown"}`,
 		`observed_units=${diagnostics.observedUnits ?? "unknown"}`,
 		`snapshots=${diagnostics.snapshots}`,
@@ -450,6 +458,7 @@ function detailSurfaceErrorMessage(
 async function collectDetailSurface(
 	page: Page,
 	expectedItemCount: number | null | undefined,
+	sourceLineTotal: number | null,
 	onProgress?: ((message: string) => Promise<void>) | undefined,
 	timeoutMs = DETAIL_SURFACE_TIMEOUT_MS,
 ): Promise<DetailSurfaceResult> {
@@ -512,7 +521,7 @@ async function collectDetailSurface(
 		try {
 			latest = await page.evaluate(inspectAndAdvanceDetailSurface, {
 				debugDiagnostics,
-				expectedItemCount: expectedUnits,
+				sourceLineTotal,
 				lastAction,
 			});
 		} catch (error) {
@@ -545,7 +554,9 @@ async function collectDetailSurface(
 			latest.rows.some((row) => row.key.startsWith("missing:"))
 		)
 			coherent = false;
-		if (scheme !== null && scheme !== collectedScheme) {
+		// Document-order keys belong to one complete mounted snapshot only.
+		// Never combine independently numbered snapshots or partial windows.
+		if (scheme !== null && (scheme !== collectedScheme || scheme === "position:document-order")) {
 			collected.clear();
 			collectedUnits.clear();
 			contentHrefMountedLastSnapshot.clear();
@@ -713,6 +724,7 @@ async function collectDetailSurface(
 		actionableControl: latest.actionableControl,
 		clientHeight: latest.clientHeight,
 		collectedRows: collected.size,
+		linklessLines: latest.rows.filter((row) => !parseOrderDetailDom(row.html)?.items.length).length,
 		expectedUnits,
 		lastAction,
 		lastError,
@@ -729,9 +741,12 @@ async function collectDetailSurface(
 			? `<html><body><main>${[...collected.values()].join("")}</main></body></html>`
 			: "";
 	return {
+		sourceIds: [...collected.keys()],
 		diagnostics,
 		html,
-		coherent: coherent && !lastError && !latest.loading,
+		coherent: coherent && !lastError && !latest.loading &&
+			latest.staticListEvidence === "declared_count" &&
+			collected.size === sourceLineTotal && latest.rows.length === sourceLineTotal,
 	};
 }
 
@@ -1025,9 +1040,11 @@ export async function fetchOrderDetail(
 		);
 	}
 
+	const initialSourceItemTotal = sourceOrderItemTotal(initialHtml, orderId);
 	const surface = await collectDetailSurface(
 		page,
 		deps.expectedItemCount,
+		initialSourceItemTotal,
 		deps.onDetailProgress,
 		deps.detailSurfaceTimeoutMs,
 	);
@@ -1078,14 +1095,16 @@ export async function fetchOrderDetail(
 		url,
 		landedUrl,
 		surface.html,
-		detail.parsing?.sourceIds ?? [],
+		surface.sourceIds,
 	);
-	evidence.coherent = surface.coherent;
+	const sourceItemTotal = sourceOrderItemTotal(html, orderId);
+	evidence.coherent = surface.coherent && initialSourceItemTotal !== null &&
+		sourceItemTotal === initialSourceItemTotal;
+	evidence.linklessLines = surface.diagnostics.linklessLines;
 	evidence.responseSucceeded = responseSucceeded;
 	evidence.loading = surface.diagnostics.loading;
 	evidence.rejectedRows = detail.parsing?.rejectedRows ?? 0;
 	evidence.missingIdentityRows = detail.parsing?.missingIdentityRows ?? 0;
-	const sourceItemTotal = sourceOrderItemTotal(html, orderId);
 	return {
 		detail,
 		evidence,
