@@ -2900,3 +2900,69 @@ test("skills walk: anything unproven keeps the first page and the gap", async (t
 		});
 	}
 });
+
+async function collectSizedConnections(total: number) {
+	const recording = makeRecordingEmit(validateRecord);
+	const ctx = buildCtx(["connections"], recording);
+	const starts: number[] = [];
+	let summaryReads = 0;
+	const members = Array.from({ length: total }, (_, i) => ({
+		connectedMember: `urn:li:fsd_profile:synthetic-bound-${i}`, createdAt: 1_700_000_000_000,
+	}));
+	ctx.page = makeFakePage((path) => {
+		if (path === "/voyager/api/me") return PROOF_ME;
+		if (path === "/voyager/api/relationships/connectionsSummary/") {
+			summaryReads++;
+			return { ...PROOF_SUMMARY, numConnections: total };
+		}
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
+			starts.push(start);
+			return { elements: members.slice(start, start + 40), paging: { start, count: 40, total } };
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
+			const ids = new URL(path, "https://www.linkedin.com").searchParams.get("ids");
+			assert.ok(ids !== null && ids.startsWith("List(") && ids.endsWith(")"));
+			return { results: Object.fromEntries(ids.slice(5, -1).split(",").map(urn => [urn, {
+				firstName: "Synthetic", lastName: null, headline: null, publicIdentifier: null,
+			}])) };
+		}
+		if (path.includes("memberIdentity=")) return { elements: [proofProfile()] };
+		return routeVoyagerPath(path);
+	});
+	await collectLinkedIn(ctx);
+	return { recording, starts, summaryReads, members };
+}
+
+test("connections bound: 2,050 members reach empty end and independent confirmation", async () => {
+	const { recording, starts, summaryReads, members } = await collectSizedConnections(2050);
+	assert.equal(summaryReads, 2);
+	assert.deepEqual(starts, [...Array.from({ length: 52 }, (_, i) => i * 40), 2050, 2050]);
+	assert.deepEqual(recording.emitted.map(row => row.data.id), members.map(member => member.connectedMember));
+	assert.equal(new Set(recording.emitted.map(row => row.data.id)).size, 2050);
+	assert.deepEqual(skipResults(recording), []);
+	assert.equal(claimsFullCoverage(recording, "connections"), true);
+});
+
+test("connections bound: 30,000 members, LinkedIn's limit, reach empty end and full coverage", async () => {
+	const { recording, starts, summaryReads, members } = await collectSizedConnections(30000);
+	assert.equal(summaryReads, 2);
+	assert.deepEqual(starts, [...Array.from({ length: 750 }, (_, i) => i * 40), 30000, 30000]);
+	assert.deepEqual(recording.emitted.map(row => row.data.id), members.map(member => member.connectedMember));
+	assert.deepEqual(skipResults(recording), []);
+	assert.equal(claimsFullCoverage(recording, "connections"), true);
+});
+
+test("connections bound: more than 30,000 members refuse page_budget", async () => {
+	const { recording, starts, summaryReads } = await collectSizedConnections(30040);
+	assert.equal(summaryReads, 2);
+	assert.deepEqual(starts, Array.from({ length: 751 }, (_, i) => i * 40));
+	assert.equal(recording.emitted.length, 30040);
+	assert.equal(new Set(recording.emitted.map(row => row.data.id)).size, 30040);
+	const gap = skipResults(recording).find(message => message.stream === "connections");
+	assert.equal(gap?.reason, "linkedin_enumeration_unproven");
+	assert.equal(diagnosticsOf(gap ?? {}).termination_reason, "page_budget");
+	assert.equal(diagnosticsOf(gap ?? {}).page_reason, "older_connections_deferred_page_budget");
+	assert.equal(claimsFullCoverage(recording, "connections"), false);
+	assert.equal(recording.protocolMessages.some(message => message.type === "STATE"), false);
+});
