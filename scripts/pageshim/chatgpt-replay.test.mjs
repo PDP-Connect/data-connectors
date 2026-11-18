@@ -263,6 +263,11 @@ test("chatgpt: a 600-conversation replay keeps bridge calls bounded", {
 	// Detail reads go through the batch endpoint, 10 IDs at a time.
 	assert.ok(fixtures.requests.batch >= conversations / 10);
 	assert.equal(fixtures.requests.detail, 0);
+	console.log("PAGESHIM_REPLAY_BRIDGE " + JSON.stringify({
+		records: conversations * (messagesPerConversation + 1),
+		setData: run.calls.setData, setProgress: run.calls.setProgress,
+		resultMessages: run.streamResult.messageCount,
+	}));
 	assert.ok(
 		run.streamResult.messageCount < 100,
 		`result stream messages: ${run.streamResult.messageCount}`,

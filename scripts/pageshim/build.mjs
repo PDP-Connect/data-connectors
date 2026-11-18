@@ -31,6 +31,7 @@ import { gzipSync } from "node:zlib";
 import * as esbuild from "esbuild";
 import { consentSlicePlugin } from "../consent-slice-resolution.mjs";
 import { renderSlice } from "../../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
+import { captureLifecycleConfig } from "./lifecycle-config.mjs";
 import { isPageShimCapable } from "./capabilities.mjs";
 import { createPageShimPortFileReader, resolvePageShimPortProfile } from "./port-profile.mjs";
 
@@ -267,6 +268,15 @@ export async function buildPageshim({
 			PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
 		},
 		plugins: [
+			{
+				name: "pageshim-lifecycle-config",
+				setup(build) {
+					const entry = join(REPO, "connectors", connector, "index.ts");
+					build.onLoad({ filter: /\.ts$/ }, (args) => args.path === entry
+						? { contents: captureLifecycleConfig(readFileSync(entry, "utf8")), loader: "ts" }
+						: undefined);
+				},
+			},
 			// The same slice the Core build bundles for this connector; the
 			// runtime reads it through PAGESHIM_CONNECTOR_MANIFEST.
 			consentSlicePlugin({

@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import Ajv2020 from "ajv/dist/2020.js";
+import { captureLifecycleConfig } from "./lifecycle-config.mjs";
 import { isPageShimCapable, pageShimConnectors, pageShimIncompatibilities } from "./capabilities.mjs";
 
 const manifest = (name) =>
@@ -344,4 +345,18 @@ test("PageShim rejects legacy API method names as capability declarations", () =
 		};
 		assert.equal(isPageShimCapable(connector), false, name);
 	}
+});
+
+
+test("hosted bundles capture every connector's original runtime policy", () => {
+	for (const name of pageShimConnectors(fileURLToPath(new URL("../..", import.meta.url)))) {
+		const source = readFileSync(new URL(`../../connectors/${name}/index.ts`, import.meta.url), "utf8");
+		const captured = captureLifecycleConfig(source);
+		assert.match(captured, /globalThis\.__pageshimConnectorConfig = \(/);
+		assert.equal(captured.includes("if (isMainModule(import.meta.url))"), false, name);
+	}
+	const source = 'if (isMainModule(import.meta.url)) { runConnector({name:"synthetic", retryablePattern:/retry/, recordKeyFields:{rows:["account","id"]}, normalizeTerminalError: normalize}); }';
+	assert.equal(captureLifecycleConfig(source), 'if (true) { globalThis.__pageshimConnectorConfig = ({name:"synthetic", retryablePattern:/retry/, recordKeyFields:{rows:["account","id"]}, normalizeTerminalError: normalize}); }');
+	assert.throws(() => captureLifecycleConfig('runConnector({});'), /one guarded/);
+	assert.throws(() => captureLifecycleConfig('if (isMainModule(import.meta.url)) { startServer(); runConnector({}); }'), /one guarded/);
 });

@@ -110,12 +110,27 @@ function assertFatal(run, c, name, { errorClass, phase, requestedScopes }) {
 	assert.deepEqual(run.result.exportSummary, c.emptyExportSummary);
 	assert.equal(run.result.errors.length, 1, JSON.stringify(run.result.errors));
 	const [error] = run.result.errors;
-	assert.deepEqual(Object.keys(error), [
-		"errorClass",
-		"reason",
-		"disposition",
-		"phase",
-	]);
+	const terminals = run.connectorMessages.filter((frame) => frame.type === "DONE");
+	assert.equal(terminals.length, 1);
+	assert.equal(terminals[0].status, "failed");
+	assert.equal(terminals[0].records_emitted, 0);
+	const keys = ["errorClass", "reason", "disposition", "phase"];
+	if (phase === "collect") {
+		const native = terminals[0].error;
+		assert.equal(error.reason, native.message);
+		if (native.code !== undefined) {
+			keys.push("code");
+			assert.equal(error.code, native.code);
+		}
+		if (native.recovery_hint !== undefined) {
+			keys.push("recovery_hint");
+			const hint = native.recovery_hint;
+			assert.deepEqual(error.recovery_hint, typeof hint === "string"
+				? { action: hint, retryable: native.retryable }
+				: { action: hint.action, retryable: hint.retryable ?? native.retryable });
+		}
+	}
+	assert.deepEqual(Object.keys(error), keys);
 	assert.equal(error.errorClass, errorClass);
 	assert.equal(error.disposition, "fatal");
 	assert.equal(error.phase, phase);
@@ -225,6 +240,29 @@ for (const name of pageShimConnectors(
 			assert.equal(r.data.status, legacy.data.status);
 		});
 
+		await t.test("native DONE precedes spool completion and counts mobile intake records", async () => {
+			const r = await run({ scopes: c.scopes, resultStreaming: true,
+				connectorEndEvidence: true, resultSpoolDirectory: join(out, `${name}-native-done`) });
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.equal(r.data.error, undefined);
+			const terminals = r.connectorMessages.filter((frame) => frame.type === "DONE");
+			assert.equal(terminals.length, 1);
+			assert.equal(terminals[0].status, "succeeded");
+			assert.equal(r.connectorMessages.at(-1), terminals[0]);
+			assert.ok(r.connectorMessageOrders.at(-1) < r.resultDoneAttemptOrder);
+			if (r.stateMessages.length > 0)
+				assert.ok(r.stateAckOrder < r.connectorMessageOrders.at(-1));
+			let storedRecords = 0;
+			for (const path of Object.values(r.streamScopeFiles)) {
+				const payload = JSON.parse(await readFile(path, "utf8"));
+				assert.ok(Array.isArray(payload.records));
+				storedRecords += payload.records.length;
+			}
+			assert.equal(terminals[0].records_emitted, storedRecords);
+			assert.equal(r.streamResult.completed, true);
+		});
+
 		await t.test("thin host: a fatal run reports its error without a result", async () => {
 			const r = await run({
 				scopes: c.scopes,
@@ -238,6 +276,8 @@ for (const name of pageShimConnectors(
 			assert.equal(r.result, null);
 			assert.equal(r.streamResult, null);
 			assert.match(r.data.error, /login/i);
+			assert.equal(r.connectorMessages.filter((frame) => frame.type === "DONE").length, 1);
+			assert.equal(r.connectorMessages.at(-1).status, "failed");
 		});
 
 		await t.test("signed out, then sign-in: every scope", async () => {
@@ -261,6 +301,9 @@ for (const name of pageShimConnectors(
 
 		await t.test("empty requestedScopes: protocol_violation", async () => {
 			const r = await run({ scopes: [] });
+			assert.equal(r.connectorMessages.at(-1)?.type, "DONE");
+			assert.equal(r.connectorMessages.at(-1)?.status, "failed");
+			assert.equal(r.connectorMessages.at(-1)?.records_emitted, 0);
 			assertFatal(r, c, name, {
 				errorClass: "protocol_violation",
 				phase: "init",
@@ -1175,7 +1218,10 @@ test("chatgpt: 30-day bundle stops after three old pages without fetching old de
 	// zero-scope run (A7), so the runtime reports why instead of a result.
 	assert.equal(run.result, null);
 	assert.equal(run.streamResult, null);
-	assert.equal(run.data.error, "no records collected");
+	const terminal = run.connectorMessages.find((message) => message.type === "DONE");
+	assert.equal(terminal.status, "failed");
+	assert.equal(run.data.error, terminal.error.message);
+	assert.match(run.data.error, /no records collected$/);
 });
 
 test("chatgpt: 30-day walk keeps later in-window rows after older rows on unordered pages", {

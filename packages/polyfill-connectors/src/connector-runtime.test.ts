@@ -30,6 +30,7 @@ import {
 	makeTracer,
 	resolveBrowserLaunchSource,
 	resolveBrowserRuntimeVisibility,
+	runConnectorLifecycle,
 	runtimeOwnsBrowserPages,
 	shouldCloseBrowserPageAfterRun,
 	shouldPreserveRemotePagesOnAcquire,
@@ -1874,3 +1875,80 @@ test("describeUnexpectedFailure bounds a pathological responseText so it cannot 
 	);
 	assert.match(message, /…$/);
 });
+
+for (const scenario of [
+	"success",
+	"throw",
+	"stream_failure",
+	"rejected_start",
+] as const) {
+	test(`shared lifecycle emits one awaited terminal DONE: ${scenario}`, async () => {
+		const messages: EmittedMessage[] = [];
+		const result = await runConnectorLifecycle(
+			{
+				name: "synthetic_lifecycle",
+				collect: async ({ emitRecord, emit, reportStreamFailure }) => {
+					await emitRecord("items", { id: "retained" });
+					await emit({
+						type: "STATE",
+						stream: "items",
+						cursor: { after: "retained" },
+					});
+					if (scenario === "throw")
+						throw createConnectorFailure(
+							"synthetic_cancelled",
+							"Synthetic cancellation",
+							{ retryable: true },
+						);
+					if (scenario === "stream_failure")
+						await reportStreamFailure?.("items", "Synthetic stream failure", {
+							retryable: true,
+							recoveryHint: { action: "retry_by_runtime" },
+						});
+				},
+			},
+			{
+				readStart: async () => {
+					if (scenario === "rejected_start")
+						throw new TerminalError("Expected START message");
+					return { type: "START", scope: { streams: [{ name: "items" }] } };
+				},
+				emit: async (message) => {
+					// A bridge acknowledgement may complete on a later microtask.
+					await Promise.resolve();
+					messages.push(message);
+				},
+				sendInteraction: async () => {
+					throw new Error("Unexpected interaction");
+				},
+				requestDetailGapPage: async () => [],
+			},
+		);
+		const terminals = messages.filter((message) => message.type === "DONE");
+		assert.equal(terminals.length, 1);
+		assert.equal(messages.at(-1), terminals[0]);
+		assert.equal(result.exitCode, scenario === "success" ? 0 : 1);
+		assert.equal(
+			terminals[0]?.status,
+			scenario === "success" ? "succeeded" : "failed",
+		);
+		assert.equal(
+			terminals[0]?.records_emitted,
+			scenario === "rejected_start" ? 0 : 1,
+		);
+		if (scenario === "throw")
+			assert.deepEqual(terminals[0]?.error, {
+				code: "synthetic_cancelled",
+				message: "Synthetic cancellation",
+				retryable: true,
+			});
+		if (scenario === "stream_failure") {
+			assert.equal(terminals[0]?.error?.code, "stream_collection_failed");
+			const skip = messages.find((message) => message.type === "SKIP_RESULT");
+			assert.deepEqual(skip?.recovery_hint, {
+				action: "retry_by_runtime",
+				retryable: true,
+			});
+		}
+	});
+}

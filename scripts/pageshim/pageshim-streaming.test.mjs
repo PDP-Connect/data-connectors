@@ -56,6 +56,121 @@ async function runCoverageOutcome(messages, { resultStreaming = true, streamReco
 		resultStreaming, resultSpoolDirectory: join(root, `outcome-${resultStreaming}-${streamRecords}`), ...hostOptions });
 }
 
+for (const streamRecords of [false, true]) {
+	for (const failure of ["none", "collect", "cancel", "abort", "scope", "state", "timeout"]) {
+		test(`native terminal follows durable batches: records=${streamRecords}, failure=${failure}`, { timeout: 60_000 }, async () => {
+			await mkdir(root, { recursive: true });
+			const bundle = join(root, `native-terminal-${streamRecords}-${failure}.js`);
+			await buildPageshim({ connector: "chatgpt", outfile: bundle,
+				entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+				bridgeCallTimeoutMs: 500,
+				extraDefines: {
+					PAGESHIM_COVERAGE_MESSAGES: JSON.stringify([{ type: "STATE", stream: "conversations", cursor: { done: true } }]),
+					PAGESHIM_COVERAGE_THROW: String(failure === "collect"),
+					PAGESHIM_COVERAGE_RECORD: "true",
+					PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+					...(failure === "cancel" ? { PAGESHIM_TERMINAL_CODE: JSON.stringify("synthetic_cancelled") } : {}),
+				},
+			});
+			const events = [];
+			const controller = new AbortController();
+			const running = runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"],
+				resultStreaming: true, connectorEndEvidence: true, fixtureReady: true, signal: controller.signal,
+				resultSpoolDirectory: join(root, `native-terminal-spool-${streamRecords}-${failure}`),
+				...(failure === "scope" ? { resultStreamFailure: { key: "result:scope-done" } } : {}),
+				...(failure === "state" ? { failStateWriteAt: 1 } : {}),
+				...(failure === "timeout" ? { resultStreamNeverAck: "result:scope-done" } : {}),
+				observeBridge: async (method, args) => {
+					if (method !== "setData") return;
+					if (args[0] === "result:scope-done") {
+						if (failure === "abort") controller.abort(new Error("synthetic host cancellation"));
+						await new Promise(resolve => setTimeout(resolve, 30));
+						events.push("durable-batch");
+					}
+					if (args[0] === "connector:message" && args[1].type === "DONE") events.push(args[1]);
+				},
+			});
+			if (failure === "abort") {
+				await assert.rejects(running, /synthetic host cancellation/);
+				assert.equal(events.some(event => event?.status === "succeeded"), false);
+				return;
+			}
+			const run = await running;
+			assertCleanRun(run);
+			assert.deepEqual(run.ret, { ok: true });
+			const terminals = run.connectorMessages.filter(message => message.type === "DONE");
+			assert.equal(terminals.length, 1);
+			assert.equal(terminals[0].status, failure === "none" ? "succeeded" : "failed");
+			assert.equal(terminals[0].records_emitted, 1);
+			if (failure === "none") {
+				assert.deepEqual(events, ["durable-batch", terminals[0]]);
+				assert.ok(run.stateAckOrder < run.connectorMessageOrders.at(-1));
+				assert.ok(run.connectorMessageOrders.at(-1) < run.resultDoneAttemptOrder);
+				const payload = JSON.parse(await readFile(run.streamScopeFiles["chatgpt.conversations"], "utf8"));
+				assert.equal(payload.records.length, terminals[0].records_emitted);
+				assert.equal(run.streamResult.completed, true);
+			} else {
+				assert.equal(terminals.some(message => message.status === "succeeded"), false);
+				assert.equal(run.streamResult?.completed === true, false);
+			}
+		});
+	}
+}
+
+for (const streamRecords of [false, true]) {
+	for (const concurrent of [false, true]) {
+		for (const coverage of [false, true]) {
+			test(`ordered record marker intervals: stream=${streamRecords}, concurrent=${concurrent}, coverage=${coverage}`, { timeout: 60_000 }, async () => {
+				await mkdir(root, { recursive: true });
+				const bundle = join(root, `marker-${streamRecords}-${concurrent}-${coverage}.js`);
+				await buildPageshim({ connector: "chatgpt", outfile: bundle,
+					entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+					extraDefines: {
+						PAGESHIM_COVERAGE_MESSAGES: JSON.stringify(coverage ? [{ type: "DETAIL_COVERAGE", reference_only: true,
+							stream: "conversations", state_stream: "conversations", required_keys: [], hydrated_keys: [], considered: 1, covered: 1 }] : []),
+						PAGESHIM_COVERAGE_THROW: "false", PAGESHIM_COVERAGE_RECORD: "false",
+						PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+						PAGESHIM_COVERAGE_RANGE_MODE: JSON.stringify(concurrent ? "concurrent" : "unbounded"),
+					},
+				});
+				const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], fixtureReady: true,
+					resultStreaming: true, connectorEndEvidence: true,
+					resultSpoolDirectory: join(root, `marker-spool-${streamRecords}-${concurrent}-${coverage}`) });
+				assertCleanRun(run);
+				assert.equal(run.data.error, undefined);
+				assert.equal(run.streamResult.completed, true);
+				assert.deepEqual(run.connectorMessages.map(message => message.type), coverage
+					? ["RECORD", "DETAIL_COVERAGE", "RECORD", "DONE"] : ["RECORD", "DONE"]);
+				const payload = JSON.parse(await readFile(run.streamScopeFiles["chatgpt.conversations"], "utf8"));
+				assert.deepEqual(payload.records.map(record => record.id), ["retained", "filtered"]);
+				assert.equal(run.connectorMessages.at(-1).records_emitted, payload.records.length);
+			});
+		}
+	}
+}
+
+test("a swallowed evidence acknowledgement failure cannot produce succeeded DONE", { timeout: 60_000 }, async () => {
+	const bundle = await buildSyntheticBundle(3, true);
+	let rejected = false;
+	const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations", "chatgpt.messages"],
+		fixtureReady: true, resultStreaming: true, connectorEndEvidence: true,
+		resultSpoolDirectory: join(root, "failed-evidence-ack"),
+		observeBridge: (method, args) => {
+			if (!rejected && method === "setData" && args[0] === "connector:message" && args[1].type === "RECORD") {
+				rejected = true;
+				throw new Error("synthetic evidence acknowledgement failed");
+			}
+		},
+	});
+	assertCleanRun(run);
+	assert.equal(rejected, true);
+	const terminals = run.connectorMessages.filter(message => message.type === "DONE");
+	assert.equal(terminals.length, 1);
+	assert.equal(terminals[0].status, "failed");
+	assert.equal(run.data.error, "synthetic evidence acknowledgement failed");
+	assert.equal(run.streamResult?.completed === true, false);
+});
+
 for (const bounded of [false, true]) {
 	for (const resultStreaming of [false, true]) {
 		for (const streamRecords of [false, true]) {
