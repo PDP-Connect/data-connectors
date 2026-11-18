@@ -710,8 +710,9 @@ function parseDetailItem(link: HTMLAnchorElement): DetailItem | null {
 export interface OrderDetailLineShape {
 	/** Outermost <li>s holding a product name link or a quantity. */
 	lines: number;
-	/** Outer lines with no name link of their own. A substitute's link in a
-	 * nested <li> does not name the purchased line. */
+	/** Lines (outer or nested substitute) with no name link of their own. A
+	 * substitute's link in a nested <li> does not name the purchased line, and
+	 * the purchased line's link does not name its substitute. */
 	linkless: number;
 	/** Lines (outer or nested) that own more than one name link, so one line
 	 * would parse as several products. */
@@ -746,7 +747,7 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 	}
 	return {
 		lines: outer.length,
-		linkless: outer.filter((line) => !ownLinks.has(line)).length,
+		linkless: [...lines].filter((line) => !ownLinks.has(line)).length,
 		multiName: [...ownLinks.values()].filter((count) => count > 1).length,
 	};
 }

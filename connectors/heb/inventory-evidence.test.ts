@@ -765,6 +765,10 @@ for (const [label, lineHtml] of [
 		'<li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="orderItemQty">Qty: 1</span></li>',
 	],
 	[
+		"a substitute line without its own name link",
+		'<li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="orderItemQty">Qty: 1</span><ul><li><span data-qe-id="orderItemQty">Qty: 1</span></li></ul></li>',
+	],
+	[
 		"a line without its own name link whose substitute has one",
 		'<li><span data-qe-id="orderItemQty">Qty: 1</span><ul><li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/501">Substitute</a><span data-qe-id="orderItemQty">Qty: 1</span></li></ul></li>',
 	],
