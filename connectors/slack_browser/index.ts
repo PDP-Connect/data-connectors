@@ -24,11 +24,11 @@
  *
  * Bounds: calls are paced (at most one a second across every lane) and
  * retried on Slack's rate-limit and 5xx answers; a conversation's first read
- * goes back to the lookback floor (SLACK_LOOKBACK_DAYS, default 7; 0 for
- * everything), a later one from its cursor with no default catch-up limit.
+ * reads all available history (SLACK_LOOKBACK_DAYS defaults to 0; a positive
+ * value opts into a window), a later one from its cursor with no default catch-up limit.
  * SLACK_MAX_BACKFILL_DAYS (default 0) lets an owner opt into a window;
- * MAX_PAGES_PER_CONVERSATION still bounds pages. See collector.ts for the
- * cursor and thread rules.
+ * history and replies stop at Slack's end or refuse non-progressing pages.
+ * See collector.ts for the cursor and thread rules.
  *
  * Reachability probe: permanently exempt. Every method needs the owner's
  * session, and slack.com serves nothing useful unauthenticated (the
@@ -268,7 +268,7 @@ export function readSlackBrowserOptions(): SlackBrowserOptions {
 	const parsed = readOptions(null, {
 		envPrefix: "SLACK_",
 		fields: {
-			LOOKBACK_DAYS: { parse: "int", default: 7 },
+			LOOKBACK_DAYS: { parse: "int", default: 0 },
 			MAX_BACKFILL_DAYS: { parse: "int", default: DEFAULT_MAX_BACKFILL_DAYS },
 			CHANNEL_ALLOWLIST: { parse: "csv", default: [] },
 			CHANNEL_TYPES: { parse: "csv", default: [...CONVERSATION_KINDS] },
@@ -284,7 +284,7 @@ export function readSlackBrowserOptions(): SlackBrowserOptions {
 		lookbackDays:
 			typeof parsed.LOOKBACK_DAYS === "number" && parsed.LOOKBACK_DAYS >= 0
 				? parsed.LOOKBACK_DAYS
-				: 7,
+				: 0,
 		maxBackfillDays:
 			typeof parsed.MAX_BACKFILL_DAYS === "number" &&
 			parsed.MAX_BACKFILL_DAYS >= 0

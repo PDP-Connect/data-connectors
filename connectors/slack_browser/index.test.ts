@@ -1308,6 +1308,7 @@ test("options come from SLACK_* variables with unlimited catch-up by default", (
 		}
 		assert.deepEqual(readSlackBrowserOptions(), {
 			...DEFAULT_OPTIONS,
+			lookbackDays: 0,
 			maxBackfillDays: 0,
 		});
 		process.env.SLACK_LOOKBACK_DAYS = "30";
@@ -1324,7 +1325,7 @@ test("options come from SLACK_* variables with unlimited catch-up by default", (
 		});
 		process.env.SLACK_LOOKBACK_DAYS = "-3";
 		process.env.SLACK_MAX_BACKFILL_DAYS = "-1";
-		assert.equal(readSlackBrowserOptions().lookbackDays, 7);
+		assert.equal(readSlackBrowserOptions().lookbackDays, 0);
 		assert.equal(readSlackBrowserOptions().maxBackfillDays, 0);
 	} finally {
 		for (const key of Object.keys(process.env)) {
@@ -1864,7 +1865,7 @@ test("later gap pages are asked for the messages stream only", async () => {
 });
 
 /** Exercise actual option defaults, not the legacy fixture's explicit 90-day window. */
-async function catchUpAfter200Days(window?: string) {
+async function catchUpAfter200Days(window?: string, floorSec = 0) {
 	const saved = Object.fromEntries(
 		Object.entries(process.env).filter(([key]) => key.startsWith("SLACK_")),
 	);
@@ -1886,7 +1887,8 @@ async function catchUpAfter200Days(window?: string) {
 		state: {
 			messages: {
 				channel_last_ts: { C0123456789: `${String(cursorSec)}.000100` },
-				floor_ts: cursorSec,
+				// A cursor saved by a full-history read covers the default floor.
+				floor_ts: floorSec,
 				format: 1,
 				replies_checked_ts: cursorSec,
 			},
@@ -1964,5 +1966,273 @@ test("an explicit 90-day max backfill still limits a 200-day cursor gap", async 
 		h.progress.some((entry) =>
 			entry.message.includes("SLACK_MAX_BACKFILL_DAYS"),
 		),
+	);
+});
+
+test("a cursor saved under an older seven-day floor is read again from the start", async () => {
+	const { h, api, cursorSec, ts } = await catchUpAfter200Days(
+		undefined,
+		FIXTURE_NOW_SECONDS - 207 * DAY,
+	);
+	assert.equal(cursorSec, FIXTURE_NOW_SECONDS - 200 * DAY);
+	assert.equal(historyCalls(api, "C0123456789")[0]?.params.oldest, undefined);
+	assert.ok(
+		h.of("messages").some((message) => message.id === `C0123456789:${ts}`),
+	);
+	assert.equal(h.state("messages")?.floor_ts, 0);
+	assert.deepEqual(h.gaps(), []);
+});
+
+/** Exercise shipped options, not the older fixtures' deliberate seven-day window. */
+function firstReadOptions(lookback?: string) {
+	const saved = { ...process.env };
+	try {
+		for (const key of Object.keys(process.env)) {
+			if (key.startsWith("SLACK_")) delete process.env[key];
+		}
+		if (lookback !== undefined) process.env.SLACK_LOOKBACK_DAYS = lookback;
+		return readSlackBrowserOptions();
+	} finally {
+		for (const key of Object.keys(process.env)) {
+			if (key.startsWith("SLACK_")) delete process.env[key];
+		}
+		Object.assign(process.env, saved);
+	}
+}
+
+test("default first read includes 400-day-old history and checkpoints; explicit seven-day window remains", async () => {
+	await Promise.all(
+		[undefined, "7"].map(async (lookback) => {
+			const h = harness(["messages"]);
+			const oldTs = `${FIXTURE_NOW_SECONDS - 400 * DAY}.000001`;
+			const api = fakeApi((call) => {
+				if (call.method !== "conversations.history") return undefined;
+				const inWindow = Number(call.params.oldest ?? 0) < Number(oldTs);
+				return {
+					ok: true,
+					has_more: false,
+					messages: inWindow
+						? [
+								{
+									type: "message",
+									user: "U0987654321",
+									text: "old synthetic message",
+									ts: oldTs,
+								},
+							]
+						: [],
+				};
+			});
+			await run(h, api, {
+				...firstReadOptions(lookback),
+				channelAllowlist: ["C0987654321"],
+			});
+			assert.equal(
+				historyCalls(api, "C0987654321")[0]?.params.oldest,
+				lookback === undefined ? undefined : String(FLOOR_7D),
+			);
+			assert.equal(
+				h.of("messages").some((m) => m.id === `C0987654321:${oldTs}`),
+				lookback === undefined,
+			);
+			assert.ok(h.state("messages"));
+			if (lookback === undefined) {
+				assert.equal(
+					(h.state("messages")?.channel_last_ts as Record<string, string>)
+						.C0987654321,
+					oldTs,
+				);
+			}
+		}),
+	);
+});
+
+test("a 2001-page conversation reaches Slack's end and checkpoints", async () => {
+	const h = harness(["messages"]);
+	let pages = 0;
+	const api = fakeApi((call) => {
+		if (call.method !== "conversations.history") return undefined;
+		pages++;
+		assert.ok(pages <= 2001, "must stop at Slack's terminal page");
+		const page = Number(call.params.cursor ?? "1");
+		assert.equal(page, pages);
+		return {
+			ok: true,
+			messages: [
+				{
+					type: "message",
+					user: "U0987654321",
+					text: "synthetic history",
+					ts: `${FIXTURE_NOW_SECONDS - page}.000001`,
+				},
+			],
+			has_more: page < 2001,
+			response_metadata: { next_cursor: page < 2001 ? String(page + 1) : "" },
+		};
+	});
+	await run(h, api, { lookbackDays: 0, channelAllowlist: ["C0987654321"] });
+	assert.equal(pages, 2001);
+	assert.equal(h.of("messages").length, 2001);
+	assert.deepEqual(h.gaps(), []);
+	assert.equal(
+		(h.state("messages")?.channel_last_ts as Record<string, string>)
+			.C0987654321,
+		`${FIXTURE_NOW_SECONDS - 1}.000001`,
+	);
+});
+
+test("history refuses repeated cursors and no-new-ts pages without advancing the conversation", async () => {
+	await Promise.all(
+		["cursor", "timestamps"].map(async (kind) => {
+			const h = harness(["messages"]);
+			let pages = 0;
+			const api = fakeApi((call) => {
+				if (call.method !== "conversations.history") return undefined;
+				pages++;
+				assert.ok(pages <= 3, "non-progress must be bounded");
+				return {
+					ok: true,
+					messages: [
+						{
+							type: "message",
+							user: "U0987654321",
+							text: "synthetic repeat",
+							ts: `${FIXTURE_NOW_SECONDS - (kind === "cursor" ? pages : 1)}.000001`,
+						},
+					],
+					has_more: true,
+					response_metadata: {
+						next_cursor: kind === "cursor" ? "repeat" : String(pages + 1),
+					},
+				};
+			});
+			await run(h, api, { lookbackDays: 0, channelAllowlist: ["C0987654321"] });
+			assert.equal(pages, 2);
+			assert.equal(h.gaps()[0]?.record_key, "C0987654321");
+			assert.equal(h.gaps()[0]?.reason, "temporary_unavailable");
+			assert.equal(
+				(h.state("messages")?.channel_last_ts as Record<string, string>)
+					.C0987654321,
+				undefined,
+			);
+			assert.ok(
+				h.progress.some((p) =>
+					p.message.includes(
+						kind === "cursor" ? "repeated_cursor" : "no_new_ts",
+					),
+				),
+			);
+		}),
+	);
+});
+
+test("a thread can finish beyond 200 pages without losing its conversation checkpoint", async () => {
+	const h = harness(["messages"]);
+	const parentTs = `${FIXTURE_NOW_SECONDS - 500}.000001`;
+	let pages = 0;
+	const api = fakeApi((call) => {
+		if (call.method === "conversations.history")
+			return {
+				ok: true,
+				has_more: false,
+				messages: [
+					{
+						type: "message",
+						user: "U0987654321",
+						text: "parent",
+						ts: parentTs,
+						reply_count: 201,
+						latest_reply: `${FIXTURE_NOW_SECONDS - 1}.000001`,
+					},
+				],
+			};
+		if (call.method !== "conversations.replies") return undefined;
+		pages++;
+		assert.ok(pages <= 201);
+		return {
+			ok: true,
+			messages: [
+				{
+					type: "message",
+					user: "U0987654321",
+					text: "reply",
+					thread_ts: parentTs,
+					ts: `${FIXTURE_NOW_SECONDS - 300 + pages}.000001`,
+				},
+			],
+			has_more: pages < 201,
+			response_metadata: { next_cursor: pages < 201 ? String(pages + 1) : "" },
+		};
+	});
+	await run(h, api, { lookbackDays: 0, channelAllowlist: ["C0987654321"] });
+	assert.equal(pages, 201);
+	assert.equal(h.of("messages").length, 202);
+	assert.deepEqual(h.gaps(), []);
+	assert.equal(
+		(h.state("messages")?.channel_last_ts as Record<string, string>)
+			.C0987654321,
+		parentTs,
+	);
+});
+
+test("thread non-progress refuses its conversation within a few pages", async () => {
+	await Promise.all(
+		["cursor", "timestamps"].map(async (kind) => {
+			const h = harness(["messages"]);
+			const parentTs = `${FIXTURE_NOW_SECONDS - 500}.000001`;
+			let pages = 0;
+			const api = fakeApi((call) => {
+				if (call.method === "conversations.history")
+					return {
+						ok: true,
+						has_more: false,
+						messages: [
+							{
+								type: "message",
+								user: "U0987654321",
+								text: "parent",
+								ts: parentTs,
+								reply_count: 300,
+								latest_reply: `${FIXTURE_NOW_SECONDS - 1}.000001`,
+							},
+						],
+					};
+				if (call.method !== "conversations.replies") return undefined;
+				pages++;
+				assert.ok(pages <= 3);
+				return {
+					ok: true,
+					messages: [
+						{
+							type: "message",
+							user: "U0987654321",
+							text: "reply",
+							thread_ts: parentTs,
+							ts: `${FIXTURE_NOW_SECONDS - (kind === "cursor" ? pages : 1)}.000001`,
+						},
+					],
+					has_more: true,
+					response_metadata: {
+						next_cursor: kind === "cursor" ? "repeat" : String(pages + 1),
+					},
+				};
+			});
+			await run(h, api, { lookbackDays: 0, channelAllowlist: ["C0987654321"] });
+			assert.equal(pages, 2);
+			assert.equal(h.gaps()[0]?.record_key, "C0987654321");
+			assert.equal(h.gaps()[0]?.reason, "temporary_unavailable");
+			assert.equal(
+				(h.state("messages")?.channel_last_ts as Record<string, string>)
+					.C0987654321,
+				undefined,
+			);
+			assert.ok(
+				h.progress.some((p) =>
+					p.message.includes(
+						kind === "cursor" ? "repeated_cursor" : "no_new_ts",
+					),
+				),
+			);
+		}),
 	);
 });
