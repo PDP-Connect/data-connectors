@@ -1941,6 +1941,7 @@ function uncappedUsageHarness(
 					status: 200,
 					json: {
 						task_count: 1,
+						task_ids: [`task-${page}`],
 						by_status: { active: 1 },
 						has_more: page + 1 < taskPages || lastTaskCursor !== undefined,
 						cursor:
@@ -2100,7 +2101,7 @@ function progressPagerHarness(
 					? { items: page.ids.map((id) => listItem(rawConvId(id))) }
 					: target === "sidebar"
 						? { item_count: page.ids.length, file_count: 0, project_ids: page.ids.map((id) => "g-p-Progress" + id) }
-						: { task_count: page.ids.length, by_status: {} };
+						: { task_count: page.ids.length, task_ids: page.ids.map((id) => `task-${id}`), by_status: {} };
 				return Promise.resolve({ status: 200, json: { ...body, has_more: page.has_more, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) } });
 			}
 			if (isSidebar) return Promise.resolve({ status: 200, json: {
@@ -2196,5 +2197,65 @@ for (const target of ["project", "sidebar", "tasks"] as const) {
 		await h.run();
 		assert.equal(h.pages(), 34);
 		assertUsageCheckpoint(h.harness, true);
+	});
+}
+
+
+test("project progress is local even when another project already listed every early id", async () => {
+	const shared = Array.from({ length: 17 }, (_, i) => projectItem(i));
+	const { api } = fakeApi(siteRoutes({ projects: {
+		"g-p-First": [shared],
+		"g-p-Second": [...shared.map((item) => [item]), [projectItem(17)]],
+	} }));
+	const deps = { api } as unknown as StreamDeps;
+	const result = await walkProjectConversations(deps, {
+		classifyError: () => "other",
+		accountsCheckPath: "/accounts/check/v4-2023-04-27",
+	}, createLimiter(1), { status: "ok", value: {
+		count: 2, files: 0, by_status: {}, project_ids: ["g-p-First", "g-p-Second"],
+	} });
+	assert.equal(result.pages, 19);
+	assert.equal(result.failed, 0);
+	assert.equal(result.truncated, false);
+	assert.equal(result.items.length, 18);
+	assert.ok(result.items.some((item) => item.id === rawConvId(17)));
+});
+
+test("task projection retains only validated opaque ids, never task text", async () => {
+	installFakeSite({ "/tasks": () => json({ tasks: [
+		{ id: "task-A_1", title: "PRIVATE TEXT" },
+		{ id: "x".repeat(128) }, { id: "" }, { id: "bad/id" },
+		{ id: "x".repeat(129) }, { id: 123 }, {},
+	] }) });
+	const projected = await inPage("/tasks", "task_stats");
+	assert.deepEqual((projected.json as { task_ids: string[] }).task_ids, ["task-A_1", "x".repeat(128)]);
+	assert.ok(!JSON.stringify(projected.json).includes("PRIVATE TEXT"));
+});
+
+function assertProfileCheckpoint(h: ReturnType<typeof makeRecordingEmit>, complete: boolean) {
+	assert.equal(h.protocolMessages.some((m) => m.type === "STATE" && m.stream === "account_profile"), complete);
+	assert.equal(h.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE" && m.stream === "account_profile"), complete);
+}
+for (const mode of ["repeated", "unreadable", "new"] as const) {
+	test(`task identity progress and profile checkpoints: ${mode}`, async () => {
+		let pages = 0;
+		const expectedPages = mode === "new" ? 40 : mode === "repeated" ? 18 : 17;
+		const h = runHarness(["account_profile"], { routes: {
+			...siteRoutes(),
+			"/gizmos/snorlax/sidebar": () => json({ items: [], has_more: false }),
+			"/tasks": () => {
+				assert.ok(++pages <= expectedPages, "must stop without a run budget");
+				const id = mode === "unreadable" ? "invalid/id" : mode === "repeated" ? "task-same" : `task-${pages}`;
+				return json({ tasks: [{ id, status: "active" }], cursor: String(pages),
+					has_more: mode !== "new" || pages < expectedPages });
+			},
+		} });
+		await h.run();
+		assert.equal(pages, expectedPages);
+		const profiles = records(h.harness, "account_profile");
+		assert.equal(profiles.length, 1);
+		assert.equal(sub(profiles[0], "source_status").tasks, mode === "new" ? "ok" : "partial");
+		assertProfileCheckpoint(h.harness, mode === "new");
+		assert.ok(!JSON.stringify(profiles).includes("task-same"));
 	});
 }
