@@ -90,7 +90,9 @@ export function readOptionsAsEnv(
 	const overlay: NodeJS.ProcessEnv = { ...process.env };
 	for (const name of names) {
 		const value = effective[name];
-		if (value !== undefined) {
+		if (value === undefined) {
+			delete overlay[`${envPrefix}${name}`];
+		} else {
 			overlay[`${envPrefix}${name}`] = String(value);
 		}
 	}

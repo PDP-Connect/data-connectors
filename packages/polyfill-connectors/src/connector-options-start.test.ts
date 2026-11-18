@@ -84,6 +84,27 @@ test("a confirmed START option beats the env variable; env applies when START is
 	});
 });
 
+test("null START keeps fallback precedence consistent across readers", () => {
+	const spec = {
+		envPrefix: "TEST_",
+		fields: { N: { default: 7, parse: "int" as const } },
+	};
+	const resolve = (env: NodeJS.ProcessEnv) =>
+		env.TEST_N === undefined ? 7 : Number.parseInt(env.TEST_N, 10);
+	withEnv("TEST_N", "9", () => {
+		for (const start of [{ N: null }, { N: undefined }]) {
+			const msg = { connector_options: start };
+			assert.equal(readOptions(msg, spec).N, 7);
+			const env = readOptionsAsEnv(msg, "TEST_", ["N"]);
+			assert.equal(env.TEST_N, undefined);
+			assert.equal(resolve(env), 7);
+			assert.equal(process.env.TEST_N, "9");
+		}
+		const silent = readOptionsAsEnv({ connector_options: {} }, "TEST_", ["N"]);
+		assert.equal(silent.TEST_N, "9");
+	});
+});
+
 test("a bad START value is ignored the way a bad env value is", () => {
 	const env = readOptionsAsEnv(
 		{
