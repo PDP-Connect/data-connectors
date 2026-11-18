@@ -490,7 +490,7 @@ function reportSubject(connector: string) {
 	};
 }
 
-function jsonReport(
+export function jsonReport(
 	connector: string,
 	staticOnly: boolean,
 	subject: ReturnType<typeof reportSubject>,
@@ -522,7 +522,9 @@ function jsonReport(
 		: undefined;
 	const findings = steps.map((step) => ({
 		...step,
-		...(step.name === "mock mutation" && noHttpReason
+		...(step.name === "mock mutation" &&
+		noHttpReason &&
+		(step.verdict === "UNKNOWN" || step.verdict === "PASS")
 			? {
 					detail: `${step.detail}; author declares no HTTP requests: ${noHttpReason}`,
 				}
