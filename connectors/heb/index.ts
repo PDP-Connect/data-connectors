@@ -929,6 +929,22 @@ function detailItemsComplete(
 	);
 }
 
+/** Why an order's item proof failed, as numbers only. It leads the gap message
+ * so the 500-character cut keeps it. */
+function itemProofDiagnostic(
+	evidence: InventoryEvidence,
+	sourceItemTotal: number | null,
+): string {
+	return [
+		`source_total=${sourceItemTotal ?? "none"}`,
+		`distinct_ids=${new Set(evidence.sourceIds).size}`,
+		`row_ids=${evidence.sourceIds.length}`,
+		`rejected=${evidence.rejectedRows}`,
+		`missing_identity=${evidence.missingIdentityRows}`,
+		`coherent=${evidence.coherent}`,
+	].join(";");
+}
+
 export async function fetchOrderDetail(
 	page: Page,
 	orderId: string,
@@ -1875,7 +1891,7 @@ async function recoverPendingOrderItemDetailGapPage(
 						"temporary_unavailable",
 						"detail_surface_incomplete",
 						locator.orderDate,
-						result.diagnostic,
+						`${itemProofDiagnostic(result.evidence, result.sourceItemTotal)};${result.diagnostic}`,
 						{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
 					),
 				);
@@ -2219,7 +2235,7 @@ async function fetchDetailAndRecordCoverage(
 					"temporary_unavailable",
 					"detail_surface_incomplete",
 					orderDate,
-					result.diagnostic,
+					`${itemProofDiagnostic(result.evidence, result.sourceItemTotal)};${result.diagnostic}`,
 					{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
 				),
 			);
