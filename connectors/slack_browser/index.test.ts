@@ -978,7 +978,7 @@ test("search discovery reads 150 pages and keeps every thread parent", async () 
 					team: TEAM.id,
 					user: "U0123456789",
 					username: "Synthetic User",
-					ts: "1790500000.000900",
+					ts: `1790500000.${String(page).padStart(6, "0")}`,
 					text: "Synthetic reply",
 					channel: { id: "C0123456789" },
 					permalink: `https://acme.slack.com/archives/C0123456789/p1790500000000900?thread_ts=${parents[page - 1]}`,
@@ -1018,7 +1018,7 @@ test("search discovery retains pages 1-119 when page 120 fails", async () => {
 					team: TEAM.id,
 					user: "U0123456789",
 					username: "Synthetic User",
-					ts: "1790500000.000900",
+					ts: `1790500000.${String(page).padStart(6, "0")}`,
 					text: "Synthetic reply",
 					channel: { id: "C0123456789" },
 					permalink: `https://acme.slack.com/archives/C0123456789/p1790500000000900?thread_ts=${parents[page - 1]}`,
@@ -1053,7 +1053,7 @@ test("search discovery continues through top-level-only pages", async () => {
 						team: TEAM.id,
 						user: "U0123456789",
 						username: "Synthetic User",
-						ts: "1790500000.000900",
+						ts: `1790500000.${String(page).padStart(6, "0")}`,
 						text: "Synthetic top-level message",
 						channel: { id: "C0123456789" },
 					},
@@ -1066,6 +1066,63 @@ test("search discovery continues through top-level-only pages", async () => {
 	assert.equal(found?.complete, true);
 	assert.equal(found?.threadsByChannel.size, 0);
 	assert.equal(api.calls.length, 150);
+});
+
+for (const repeated of [false, true]) {
+	test(`search discovery bounds endless ${repeated ? "repeated" : "empty"} pages`, async () => {
+		let requests = 0;
+		const api = fakeApi((call) => {
+			if (call.method !== "search.messages") return undefined;
+			const page = Number(call.params.page);
+			requests += 1;
+			assert.ok(requests <= 103, "search must stop instead of following a moving last page");
+			return {
+				ok: true,
+				messages: {
+					matches: repeated ? [{
+						iid: "synthetic-repeated",
+						ts: "1790500000.000900",
+						text: "Synthetic repeated reply",
+						channel: { id: "C0123456789" },
+						permalink: "https://acme.slack.com/archives/C0123456789/p1790500000000900?thread_ts=1788000000.000600",
+					}] : [],
+					paging: { page, pages: page + 1 },
+				},
+			};
+		});
+		const found = await searchSinceFloor({ api }, TEAM, FLOOR_7D);
+		assert.equal(found?.complete, false);
+		assert.equal(requests, repeated ? 102 : 101);
+		assert.deepEqual(
+			[...(found?.threadsByChannel.get("C0123456789") ?? [])],
+			repeated ? ["1788000000.000600"] : [],
+		);
+	});
+}
+
+test("search discovery resets its empty-page streak on fresh top-level matches", async () => {
+	const api = fakeApi((call) => {
+		if (call.method !== "search.messages") return undefined;
+		const page = Number(call.params.page);
+		assert.ok(page <= 113, "search must stop at the declared last page");
+		return {
+			ok: true,
+			messages: {
+				// Fifty empty pages, progress, sixty empty pages, progress, final empty page.
+				matches: page === 51 || page === 112 ? [{
+					iid: `synthetic-${page}`,
+					ts: `1790500000.${String(page).padStart(6, "0")}`,
+					text: "Synthetic top-level message",
+					channel: { id: "C0123456789" },
+				}] : [],
+				paging: { page, pages: 113 },
+			},
+		};
+	});
+	const found = await searchSinceFloor({ api }, TEAM, FLOOR_7D);
+	assert.equal(found?.complete, true);
+	assert.equal(found?.threadsByChannel.size, 0);
+	assert.equal(api.calls.length, 113);
 });
 
 test("a search page that does not report its own paging does not claim the thread list is complete", async () => {

@@ -121,6 +121,8 @@ const USERS_PAGE_LIMIT = "500";
 // Progress guard, not a size limit: Slack allows empty pages with next_cursor.
 // See https://docs.slack.dev/apis/web-api/pagination/ (fewer than limit, even zero).
 const MAX_CONSECUTIVE_LIST_NO_PROGRESS = 100;
+// Progress guard, not a size limit: search may return empty or repeated pages.
+const MAX_CONSECUTIVE_SEARCH_NO_PROGRESS = MAX_CONSECUTIVE_LIST_NO_PROGRESS;
 const SEARCH_PAGE_COUNT = "100";
 const THREAD_TS_IN_PERMALINK = /[?&]thread_ts=(\d{10}\.\d{1,6})/;
 /** A method answered `ok` with a body this connector's schema does not recognise. */
@@ -646,8 +648,8 @@ interface SearchFindings {
 /**
  * Everything written since the floor, from Slack search: which thread
  * parents got a reply (search links a reply to its parent through the
- * permalink's `thread_ts`). Slack's paging block bounds the walk; a failed
- * page leaves the findings incomplete rather than imposing a history cap.
+ * permalink's `thread_ts`). A failed page or stalled identity walk leaves
+ * the findings incomplete rather than imposing a history cap.
  */
 export async function searchSinceFloor(
 	run: Pick<Run, "api">,
@@ -660,6 +662,8 @@ export async function searchSinceFloor(
 	};
 	// `after:` is exclusive of the named day; step one day back to cover the floor itself.
 	const query = `after:${searchDay(floorSec - 86_400)}`;
+	const seenMatches = new Set<string>();
+	let noProgress = 0;
 	for (let page = 1; ; page += 1) {
 		let json: unknown;
 		try {
@@ -679,11 +683,19 @@ export async function searchSinceFloor(
 		if (!parsed.success) {
 			return page === 1 ? null : findings;
 		}
+		let addedIdentity = false;
 		for (const match of parsed.data.messages?.matches ?? []) {
 			const channelId = match.channel?.id;
 			if (channelId === undefined) {
 				continue;
 			}
+			const iid = "iid" in match && typeof match.iid === "string" ? match.iid : null;
+			const identity = JSON.stringify([channelId, match.ts, iid]);
+			if (!seenMatches.has(identity)) {
+				seenMatches.add(identity);
+				addedIdentity = true;
+			}
+			// Top-level matches count too, even when they name no thread parent.
 			const parent = THREAD_TS_IN_PERMALINK.exec(match.permalink ?? "")?.[1];
 			if (parent !== undefined) {
 				let threads = findings.threadsByChannel.get(channelId);
@@ -709,6 +721,10 @@ export async function searchSinceFloor(
 		}
 		if (page >= totalPages) {
 			findings.complete = true;
+			return findings;
+		}
+		noProgress = addedIdentity ? 0 : noProgress + 1;
+		if (noProgress > MAX_CONSECUTIVE_SEARCH_NO_PROGRESS) {
 			return findings;
 		}
 	}
