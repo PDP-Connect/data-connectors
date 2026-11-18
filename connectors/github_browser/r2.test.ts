@@ -136,8 +136,9 @@ for (const pages of [1, 2]) {
   } });
   assert.equal(calls, pages);
   assert.equal(result.records.length, 1);
-  assert.match(String(result.records[0]?.data.windowDescription), /300.*90 days/);
-  assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
+  assert.match(String(result.records[0]?.data.windowDescription), /at most 300 events from the last 30 days/);
+  assert.ok(result.messages.some(m => m.type === "STATE"));
+  assert.ok(!result.messages.some(m => m.type === "DETAIL_COVERAGE"));
  });
 }
 test("events follow short pages while rel=next remains and withhold unread continuation", async () => {
@@ -206,7 +207,7 @@ test("PageShim fixtures prove all six snapshots without relaxing omitted-stream 
  assert.equal(result.messages.some(m => m.type === "SKIP_RESULT"), false);
  const contributions = result.records.find(r => r.stream === "contributions");
  assert.equal(contributions?.data.totalContributionsLastYear, pageshimCase.exportSummary.details.contributions);
- assert.equal(result.messages.filter(m => m.type === "DETAIL_COVERAGE").length, 5);
+ assert.equal(result.messages.filter(m => m.type === "DETAIL_COVERAGE").length, 4);
 });
 
 test("events retain legacy null details when a PushEvent omits its commits list", async () => {
@@ -223,7 +224,7 @@ test("events retain legacy null details when a PushEvent omits its commits list"
  assert.equal(events[0]?.title, null);
  assert.equal(events[0]?.commits, null);
  assert.equal(events[0]?.branch, "main");
- assert.ok(result.messages.some((message) => message.type === "DETAIL_COVERAGE"));
+ assert.ok(result.messages.some((message) => message.type === "STATE"));
  assert.ok(!result.messages.some((message) => message.type === "SKIP_RESULT"));
 });
 

@@ -6,7 +6,7 @@ import { z } from "zod";
 import { eventRecord } from "../github/parsers.ts";
 import { type CollectionBoundary, type Continuation, InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
-import { type InventoryEndResult, boundCursor, inspectInventoryEnd } from "./page-evidence.ts";
+import { type CursorGuard, type InventoryEndResult, boundCursor, echoesPage, inspectCursorLink, inspectInventoryEnd } from "./page-evidence.ts";
 import type {
 	LegacyContributionDay,
 	LegacyContributions,
@@ -975,7 +975,8 @@ export function inspectInventoryPage(
 			url.searchParams.get("tab") === current.searchParams.get("tab") &&
 			url.hash === "" && url.searchParams.getAll("before").length === 1 &&
 			(url.searchParams.get("before") ?? "").trim() !== "" &&
-			Array.from(url.searchParams.keys()).every(key => key === "before" || key === "tab");
+			Array.from(url.searchParams.keys()).every(key => key === "before" || key === "tab" || key === "page") &&
+			echoesPage(url, current);
 	};
 	const nextUrl = cursorNext !== null ? null : next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
 	const foreignPagination = Array.from(pagination?.querySelectorAll("a[href]") ?? []).filter(link =>
@@ -1004,6 +1005,21 @@ export function inspectInventoryPage(
 		linkedPage = Math.max(linkedPage ?? 0, targetPage);
 		return targetPage > pageNumber && nextUrl === null;
 	});
+	// The first guard that rejected the continuation, for the failure diagnostic.
+	const cursorOnlyLink = cursorLinks.length === 1 ? cursorHref : null;
+	const cursorRejection = (): CursorGuard => {
+		if (cursorOnlyLink === null) return cursorLinks.length > 1 ? "conflicting_next" : "cursor_missing";
+		const inspected = inspectCursorLink(cursorOnlyLink, page.currentUrl);
+		return "guard" in inspected ? inspected.guard : "unknown_target";
+	};
+	const rejectedGuard: CursorGuard | undefined =
+		cursorLinks.length > 0 && cursorNext === null ? cursorRejection()
+		: paginators.length > 1 ? "multiple_paginators"
+		: nextTargets.size > 1 ? "conflicting_next"
+		: foreignPagination ? "foreign_link"
+		: counterAmbiguous ? "counter_ambiguous"
+		: unknownTargets || (next !== null && !disabled && nextUrl === null && cursorNext === null) ? "unknown_target"
+		: undefined;
 	const ambiguous = unknownTargets || counterAmbiguous || foreignPagination || paginators.length > 1 || nextTargets.size > 1 ||
 		(next !== null && !disabled && nextUrl === null && cursorNext === null) ||
 		(cursorLinks.length > 0 && cursorNext === null);
@@ -1022,16 +1038,17 @@ export function inspectInventoryPage(
 	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
 	return { valid: result.complete || result.reason === "remaining_continuation",
 		complete: result.complete, total, exactTotals, totalConflict: trusted && counterAmbiguous,
-		terminalProof, nextUrl: result.nextUrl, reason: result.reason, continuation: inventoryContinuation(result),
+		terminalProof, nextUrl: result.nextUrl, reason: result.reason, continuation: inventoryContinuation(result, rejectedGuard),
 		...(linkedPage === undefined ? {} : { linkedPage }) };
 }
 
-function inventoryContinuation(result: InventoryEndResult): Continuation {
+function inventoryContinuation(result: InventoryEndResult, guard: CursorGuard | undefined): Continuation {
 	if (result.nextUrl !== null) return { kind: "next", url: result.nextUrl, ...(result.cursor == null ? {} : { cursor: result.cursor }) };
 	if (result.complete) return { kind: "end" };
 	if (result.reason === "terminal_unverified") return { kind: "unproven" };
 	if (result.reason === "wrong_navigation" || result.reason === "wrong_owner") return { kind: "unbound", reason: result.reason };
-	return { kind: "unknown", reason: result.reason };
+	return { kind: "unknown", reason: result.reason,
+		...(result.reason === "unknown_continuation" ? { guard: guard ?? "unknown_target" } : {}) };
 }
 
 export function parseContributionHtml(html: string): {
@@ -1195,6 +1212,16 @@ export function buildContributionSnapshot(
 }
 
 
+/** The compact pull-request reference the Events API serves: ids, API url and refs, no title or body. */
+function isCompactPullRequestReference(pr: Record<string, unknown>, repo: string): boolean {
+	const ref = (side: unknown) => typeof objectValue(side).ref === "string" && objectValue(side).ref !== "";
+	return pr.title === undefined && pr.body === undefined &&
+		typeof pr.id === "number" && Number.isSafeInteger(pr.id) && pr.id > 0 &&
+		typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0 &&
+		pr.url === `https://api.github.com/repos/${repo}/pulls/${pr.number}` &&
+		ref(pr.head) && ref(pr.base);
+}
+
 export function parseLegacyEvent(raw: unknown): EventRow | null {
 	return parseLegacyEventPageItem(raw).row;
 }
@@ -1258,14 +1285,9 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 				(payload.number === undefined || payload.number === htmlNumber);
 			// The Events API also returns a compact PR reference without title/body.
 			// Accept that known source shape; arbitrary missing detail still vetoes.
-			const compact = pr.title === undefined && pr.body === undefined &&
-				typeof pr.id === "number" && Number.isSafeInteger(pr.id) && pr.id > 0 &&
-				validNumber &&
+			const compact = isCompactPullRequestReference(pr, value.repo) &&
 				payload.number === pr.number &&
-				pr.url === expectedApiUrl &&
-				(pr.html_url === undefined || matchingHtmlUrl) &&
-				typeof objectValue(pr.head).ref === "string" && objectValue(pr.head).ref !== "" &&
-				typeof objectValue(pr.base).ref === "string" && objectValue(pr.base).ref !== "";
+				(pr.html_url === undefined || matchingHtmlUrl);
 			requireField("action", typeof payload.action === "string");
 			requireField("title", compact || nullableText(pr.title));
 			if (pr.title === null) row.title = null;
@@ -1278,7 +1300,9 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 		}
 		case "PullRequestReviewEvent":
 			requireField("action", typeof review.state === "string");
-			requireField("title", nullableText(pr.title));
+			// The Events API sends a review's pull request as a compact reference: no title
+			// by source contract, so the title stays null. A present non-string title vetoes.
+			requireField("title", isCompactPullRequestReference(pr, value.repo) || nullableText(pr.title));
 			requireField("body", nullableText(review.body));
 			requireField("url", nullableText(review.html_url));
 			break;

@@ -702,7 +702,7 @@ test("compact pull-request event payloads publish the observed events window", a
 	assert.equal(events[0]?.url, "https://github.com/sample-owner/demo/pull/7");
 	assert.deepEqual(
 		messages.map((message) => message.type),
-		["STATE", "DETAIL_COVERAGE"],
+		["STATE"],
 	);
 });
 

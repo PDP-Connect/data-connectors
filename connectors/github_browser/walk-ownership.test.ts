@@ -90,7 +90,7 @@ for (const walk of Object.keys(walks) as Walk[]) {
 	test(`${walk} follows GitHub's real id-aliased Link through a bound terminal page`, async () => {
 		const result = await collect(walk, api(walk, s => `<${API}${s.alias}?${s.selection}&page=2>; rel="next", <${API}${s.alias}?${s.selection}&page=2>; rel="last"`), spec.html());
 		assert.equal(result.records.length, 1);
-		assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
+		assert.deepEqual(result.messages.map(message => message.type), walk === "events" ? ["STATE"] : ["STATE", "DETAIL_COVERAGE"]);
 		// The walk requests its own owner-bound successor, not the header's id alias.
 		assert.ok(result.requests.some(url => new URL(url).pathname === spec.path && new URL(url).searchParams.get("page") === "2"));
 	});
@@ -245,7 +245,7 @@ for (const walk of Object.keys(walks) as Walk[]) {
 				...(page > 1 ? [`${target(1)}; rel="first"`] : [])].join(", ")
 			: `${target(2)}; rel="prev", ${target(1)}; rel="first"`), spec.html(3));
 		assert.equal(result.records.length, 1);
-		assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
+		assert.deepEqual(result.messages.map(message => message.type), walk === "events" ? ["STATE"] : ["STATE", "DETAIL_COVERAGE"]);
 	});
 }
 

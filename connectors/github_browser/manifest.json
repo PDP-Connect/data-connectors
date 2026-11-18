@@ -384,7 +384,7 @@
 		{
 			"name": "events",
 			"required": true,
-			"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
+			"description": "One legacy aggregate snapshot of public events. GitHub's events API serves at most 300 events from the last 30 days, a platform limit: a fully accounted served window is a checkpoint, never the whole event history.",
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
@@ -483,7 +483,7 @@
 				"resources": true
 			},
 			"incremental": false,
-			"coverage_strategy": "full_inventory",
+			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "scheduled_window"
 		},
 		{
