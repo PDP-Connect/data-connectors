@@ -70,3 +70,33 @@ test("blob upload gap: stays silent when the runtime provided the upload credent
     setConnectorDiagnosticSink(undefined);
   }
 });
+
+test("blob upload gap: a failed emit neither throws nor uses up the one report", async () => {
+  const emitted: EmittedMessage[] = [];
+  const lines: string[] = [];
+  setConnectorDiagnosticSink((line) => lines.push(line));
+  let failNext = true;
+  const report = makeBlobUploadGapReporter({
+    connector: "demo",
+    emit: (msg) => {
+      if (failNext) {
+        failNext = false;
+        return Promise.reject(new Error("emit failed"));
+      }
+      emitted.push(msg);
+      return Promise.resolve();
+    },
+    env: { PDPP_RS_URL: "http://rs.local" },
+    stream: "attachments",
+  });
+  try {
+    await report();
+    assert.equal(emitted.length, 0);
+    await report();
+    await report();
+    assert.equal(emitted.length, 1);
+    assert.equal(lines.length, 1);
+  } finally {
+    setConnectorDiagnosticSink(undefined);
+  }
+});

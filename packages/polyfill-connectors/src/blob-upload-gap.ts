@@ -29,18 +29,25 @@ export function makeBlobUploadGapReporter(args: {
     if (reported || runtimeBlobUploadAvailable(args.env ?? process.env)) {
       return;
     }
+    // The report is used up only once the SKIP_RESULT is out. A failed emit
+    // must not fail the attachment that triggered it, so the next attachment
+    // tries again.
+    try {
+      await args.emit({
+        type: "SKIP_RESULT",
+        stream: args.stream,
+        reason: BLOB_UPLOAD_UNAVAILABLE_REASON,
+        message:
+          "Attachment bytes were not uploaded: the runtime provided no blob upload credential " +
+          "(PDPP_RS_URL and PDPP_BLOB_UPLOAD_TOKEN). Attachment records were emitted without their files.",
+        recovery_hint: { action: "retry_by_runtime", retryable: true },
+      });
+    } catch {
+      return;
+    }
     reported = true;
     connectorDiagnostic(args.connector, BLOB_UPLOAD_UNAVAILABLE_REASON, {
       stream: args.stream,
-    });
-    await args.emit({
-      type: "SKIP_RESULT",
-      stream: args.stream,
-      reason: BLOB_UPLOAD_UNAVAILABLE_REASON,
-      message:
-        "Attachment bytes were not uploaded: the runtime provided no blob upload credential " +
-        "(PDPP_RS_URL and PDPP_BLOB_UPLOAD_TOKEN). Attachment records were emitted without their files.",
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
     });
   };
 }
