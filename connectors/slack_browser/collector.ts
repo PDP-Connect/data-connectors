@@ -120,6 +120,9 @@ export const DEFAULT_CONCURRENCY = 3;
 const HISTORY_PAGE_LIMIT = "999";
 const LIST_PAGE_LIMIT = "200";
 const USERS_PAGE_LIMIT = "500";
+// Progress guard, not a size limit: Slack allows empty pages with next_cursor.
+// See https://docs.slack.dev/apis/web-api/pagination/ (fewer than limit, even zero).
+const MAX_CONSECUTIVE_LIST_NO_PROGRESS = 100;
 const SEARCH_PAGE_COUNT = "100";
 const THREAD_TS_IN_PERMALINK = /[?&]thread_ts=(\d{10}\.\d{1,6})/;
 /** A method answered `ok` with a body this connector's schema does not recognise. */
@@ -362,10 +365,13 @@ async function listAll<
 	method: string,
 	params: Record<string, string>,
 	schema: ZodType<T>,
+	itemIds: (page: T) => readonly unknown[],
 ): Promise<T[]> {
 	const pages: T[] = [];
 	let cursor = "";
 	const cursors = new Set<string>();
+	const seenIds = new Set<string>();
+	let noProgressPages = 0;
 	while (true) {
 		const answer = parseAnswer(
 			schema,
@@ -377,13 +383,21 @@ async function listAll<
 			),
 		);
 		pages.push(answer);
+		const before = seenIds.size;
+		for (const id of itemIds(answer)) {
+			if (typeof id === "string" && id.length > 0) seenIds.add(id);
+		}
+		noProgressPages = seenIds.size > before ? 0 : noProgressPages + 1;
 		cursor = answer.response_metadata?.next_cursor ?? "";
+		// Neither a repeated continuation nor endless non-progress proves an end.
+		if (
+			cursors.has(cursor) ||
+			noProgressPages > MAX_CONSECUTIVE_LIST_NO_PROGRESS
+		) {
+			throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
+		}
 		if (cursor === "") {
 			return pages;
-		}
-		// A repeated continuation cannot establish the list's end.
-		if (cursors.has(cursor)) {
-			throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
 		}
 		cursors.add(cursor);
 	}
@@ -462,6 +476,7 @@ async function collectUsers(run: Run, team: SignedInTeam): Promise<void> {
 		"users.list",
 		{ limit: USERS_PAGE_LIMIT },
 		usersListSchema,
+		(page) => (page.members ?? []).map((member) => member.id),
 	);
 	let members = 0;
 	for (const page of pages) {
@@ -489,6 +504,7 @@ async function listConversations(
 		"users.conversations",
 		{ types, limit: LIST_PAGE_LIMIT, exclude_archived: "false" },
 		conversationsListSchema,
+		(page) => (page.channels ?? []).map((channel) => channel.id),
 	);
 	const allowed = new Set(
 		run.options.channelAllowlist.map((entry) => entry.toLowerCase()),
@@ -1486,6 +1502,7 @@ async function readStars(run: Run, team: SignedInTeam): Promise<RecordData[]> {
 		"stars.list",
 		{ count: "100" },
 		starsListSchema,
+		(page) => (page.items ?? []).map((item) => buildStar(item).id),
 	);
 	return pages.flatMap((page) => (page.items ?? []).map(buildStar));
 }

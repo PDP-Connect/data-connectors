@@ -2306,3 +2306,74 @@ test("a repeated directory cursor stops retryably without STATE", async () => {
 	assert.equal(h.skips()[0]?.reason, "collection_interrupted");
 	assert.match(h.skips()[0]?.message ?? "", /page_cap_reached/);
 });
+
+test("directory pagination tolerates 30 empty pages before members and source end", async () => {
+	const h = harness(["users"]);
+	let pages = 0;
+	const members = [
+		{ id: "U0000000001", name: "first" },
+		{ id: "U0000000002", name: "second" },
+	];
+	const api = fakeApi((call) => {
+		assert.equal(call.method, "users.list");
+		pages += 1;
+		assert.ok(pages <= 32);
+		assert.equal(Number(call.params.cursor ?? "1"), pages);
+		return {
+			ok: true,
+			members: pages === 31 ? members : [],
+			response_metadata: { next_cursor: pages < 32 ? String(pages + 1) : "" },
+		};
+	});
+	await run(h, api);
+	assert.equal(pages, 32);
+	assert.deepEqual(h.of("users").map((member) => member.id).sort(), members.map((member) => member.id).sort());
+	assert.ok(h.state("users"));
+	assert.deepEqual(h.skips(), []);
+});
+
+for (const repeatedMembers of [false, true]) {
+	test(`directory pagination rejects endless fresh cursors with ${repeatedMembers ? "repeated members" : "empty pages"}`, async () => {
+		const h = harness(["users"]);
+		let pages = 0;
+		const expectedPages = repeatedMembers ? 102 : 101;
+		const api = fakeApi((call) => {
+			assert.equal(call.method, "users.list");
+			pages += 1;
+			// Bound the old implementation too: fail rather than hang.
+			assert.ok(pages <= expectedPages, "no-progress guard must stop another fetch");
+			assert.equal(Number(call.params.cursor ?? "1"), pages);
+			return {
+				ok: true,
+				members: repeatedMembers ? [{ id: "U0000000001", name: "same" }] : [],
+				response_metadata: { next_cursor: String(pages + 1) },
+			};
+		});
+		await run(h, api);
+		assert.equal(pages, expectedPages);
+		assert.equal(h.of("users").length, 0);
+		assert.equal(h.state("users"), undefined);
+		assert.equal(h.skips()[0]?.reason, "collection_interrupted");
+		assert.match(h.skips()[0]?.message ?? "", /page_cap_reached/);
+	});
+}
+
+test("directory pagination resets the no-progress streak on a new member", async () => {
+	const h = harness(["users"]);
+	let pages = 0;
+	const api = fakeApi((call) => {
+		assert.equal(call.method, "users.list");
+		pages += 1;
+		assert.ok(pages <= 201);
+		return {
+			ok: true,
+			members: pages === 101 ? [{ id: "U0000000001", name: "reset" }] : [],
+			response_metadata: { next_cursor: pages < 201 ? String(pages + 1) : "" },
+		};
+	});
+	await run(h, api);
+	assert.equal(pages, 201);
+	assert.equal(h.of("users").length, 1);
+	assert.ok(h.state("users"));
+	assert.deepEqual(h.skips(), []);
+});
