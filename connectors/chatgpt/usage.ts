@@ -532,7 +532,10 @@ export async function chatGptUsageFetchInBrowser(
 							? j.items
 							: null;
 					const byStatus = new Map<string, number>();
+					const ids: string[] = [];
 					for (const t of tasks ?? []) {
+						const id = h.isObj(t) ? h.opaqueId(t.id) : null;
+						if (id) ids.push(id);
 						h.bump(
 							byStatus,
 							(h.isObj(t) ? h.slug(t.status) : null) ?? "unknown",
@@ -540,6 +543,7 @@ export async function chatGptUsageFetchInBrowser(
 					}
 					return {
 						task_count: tasks ? tasks.length : null,
+						task_ids: ids,
 						by_status: Object.fromEntries(byStatus),
 						cursor: h.cursor(j.cursor),
 						// An explicit has_more wins; otherwise a cursor means more.

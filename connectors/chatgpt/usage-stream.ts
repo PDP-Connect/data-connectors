@@ -358,6 +358,7 @@ export async function walkProjectConversations(
 	// Copies of one conversation across projects or pages merge field by field.
 	const byId = new Map<string, UsageListItem>();
 	const walkOne = async (projectId: string): Promise<void> => {
+		const seenIds = new Set<string>();
 		const seenCursors = new Set<string>();
 		let cursor = "0";
 		let noProgressPages = 0;
@@ -390,7 +391,8 @@ export async function walkProjectConversations(
 						? raw
 						: { ...raw, gizmo_id: projectId };
 				const seen = byId.get(c.id);
-				if (!seen) added += 1;
+				if (!seenIds.has(c.id)) added += 1;
+				seenIds.add(c.id);
 				byId.set(c.id, seen ? mergeListItems(seen, c) : c);
 			}
 			const step = nextCursorStep(
@@ -638,6 +640,7 @@ async function readPagedCounts(
 	};
 	let cursor: string | null = null;
 	const seen = new Set<string>();
+	const seenTaskIds = new Set<string>();
 	let noProgressPages = 0;
 	for (let page = 0; ; page += 1) {
 		if (deps.runBudget?.reason() === "max_wall_clock")
@@ -682,13 +685,19 @@ async function readPagedCounts(
 					acc.by_status[k] = (acc.by_status[k] ?? 0) + v;
 			}
 		}
-		// Tasks carry no ids to compare, so every counted task is treated as
-		// new: a page that echoes its own cursor ends the walk, but one that
-		// points back to an earlier page is a loop and stays partial.
+		// Compare validated task identities within this walk, not task counts:
+		// repeated or unreadable ids do not establish fresh-cursor progress.
+		const tasksBefore = seenTaskIds.size;
+		if (projection === "task_stats" && Array.isArray(j.task_ids)) {
+			for (const id of j.task_ids) {
+				if (typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id))
+					seenTaskIds.add(id);
+			}
+		}
 		const fresh =
 			projection === "project_sidebar"
 				? acc.project_ids.length - projectsBefore
-				: n;
+				: seenTaskIds.size - tasksBefore;
 		const step = nextCursorStep(j, seen, cursor, n, fresh);
 		if ("done" in step) return { value: acc, status: step.done };
 		noProgressPages = fresh === 0 ? noProgressPages + 1 : 0;
@@ -791,6 +800,11 @@ async function runAccountProfile(
 			message: "The account profile did not match its schema",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		});
+		return;
+	}
+	if (Object.values(sources).some((status) => status === "partial")) {
+		// Retain the observation without checkpointing or certifying a full scan.
+		await deps.emitRecord("account_profile", record);
 		return;
 	}
 	await emitGated(deps, state, "account_profile", stateless, [record]);
