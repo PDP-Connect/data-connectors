@@ -3745,14 +3745,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura/index.ts",
-			line: 357,
+			line: 206,
+			column: 16,
+			category: "dependent_pagination",
+			note: "fetchAll(): each request uses the previous response token after checking cursor and ID progress.",
+		},
+		{
+			path: "connectors/oura/index.ts",
+			line: 349,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "runStream(): emitRecord(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/oura/index.ts",
-			line: 460,
+			line: 441,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "collectSleep(): emitRecord(): Collection Profile protocol emission requiring in-order delivery",
