@@ -2791,13 +2791,20 @@ export async function collectProfile(
 		});
 		responseSucceeded = response?.ok() === true;
 	} catch (error) {
+		// The error text is not echoed: a browser error can quote page content,
+		// and this skip must carry no account value. A fixed category is enough.
 		const message = error instanceof Error ? error.message : String(error);
+		const category = /timeout/i.test(message)
+			? "timeout"
+			: /net::|ECONN|ETIMEDOUT/.test(message)
+				? "network"
+				: "other";
 		await deps.emit({
 			type: "SKIP_RESULT",
 			stream: "profile",
 			reason: "profile_navigation_failed",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message: `H-E-B profile page navigation failed: ${message.slice(0, 160)}`,
+			message: `H-E-B profile page navigation failed (${category}).`,
 		});
 		return;
 	}

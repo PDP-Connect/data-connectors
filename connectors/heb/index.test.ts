@@ -4781,6 +4781,29 @@ test("collectProfile withholds an aggregate without complete owner-bound section
 	);
 });
 
+test("collectProfile reports a failed profile navigation without the error's text", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const sentinel = "shopper@example.test 123 Example Street 2025550100";
+	const page = new Proxy(makePageStub({ content: SYNTHETIC_PROFILE_HTML }), {
+		get(target, prop, receiver): unknown {
+			if (prop === "goto")
+				return () => Promise.reject(new Error(`Timeout 30000ms exceeded near ${sentinel}`));
+			return Reflect.get(target, prop, receiver);
+		},
+	});
+	await collectProfile(page, {
+		emit: deps.emit,
+		emitRecord: deps.emitRecord,
+		emittedAt: deps.emittedAt,
+		waitForHydration: immediateWait,
+	});
+	assert.equal(emitted.filter((r) => r.stream === "profile").length, 0);
+	const skip = protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.equal(skip?.reason, "profile_navigation_failed");
+	assert.equal(skip?.message, "H-E-B profile page navigation failed (timeout).");
+	assert.doesNotMatch(JSON.stringify(protocolMessages), /shopper@example|Example Street|2025550100/);
+});
+
 test("collectProfile emits SKIP_RESULT (not a null-only record) when no fields are found", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const page = makePageStub({ content: SYNTHETIC_EMPTY_PROFILE_HTML });
