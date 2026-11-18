@@ -5,6 +5,11 @@ import assert from "node:assert/strict";
 import { after, before, type TestContext, test } from "node:test";
 import { evaluateStreamCoherence } from "@pdpp/reference-contract/evidence";
 import {
+	buildPacingStateFields,
+	readPersistedPacingInterval,
+} from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
+import type { StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
 	closeDb,
 	getDb,
 	initDb,
@@ -14,12 +19,6 @@ import {
 	ingestRecord,
 } from "../../reference-implementation/server/records.ts";
 import {
-	buildPacingStateFields,
-	readPersistedPacingInterval,
-} from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
-import type { StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import {
-	__setMaxGithubListPages,
 	collectGists,
 	collectIssues,
 	collectPullRequests,
@@ -1486,11 +1485,11 @@ for (const {
 	});
 }
 
-test("GitHub repositories: fresh next links stop at the bounded page cap with a retryable gap", async (t: TestContext) => {
-	__setMaxGithubListPages(2);
+test("GitHub repositories: fresh next links with repeated IDs refuse without a checkpoint", async (t: TestContext) => {
 	let calls = 0;
 	mockFetch(t, (input: string | URL | Request) => {
 		calls += 1;
+		assert.ok(calls <= 3, "stalled source must stop promptly");
 		const current = new URL(
 			typeof input === "string" ? input : input.toString(),
 		);
@@ -1500,25 +1499,30 @@ test("GitHub repositories: fresh next links stop at the bounded page cap with a 
 			String(Number(current.searchParams.get("page") ?? "1") + 1),
 		);
 		return Promise.resolve(
-			jsonResponse([], { headers: { link: `<${next.href}>; rel="next"` } }),
+			jsonResponse(
+				Array.from({ length: 100 }, (_, i) =>
+					repoItem(i + 1, "2026-06-01T00:00:00Z"),
+				),
+				{ headers: { link: `<${next.href}>; rel="next"` } },
+			),
 		);
 	});
 	const { ctx, coverages, skips, states } = makeCtx(["repositories"]);
 
-	try {
-		await assert.rejects(() => collectRepositories(ctx), isRetryableGithubGap);
-	} finally {
-		__setMaxGithubListPages(200);
-	}
+	await assert.rejects(() => collectRepositories(ctx), isRetryableGithubGap);
 
-	assert.equal(calls, 2, "the cap must prevent the third page request");
-	assert.equal(states.length, 0, "a page cap gap must not advance state");
+	assert.equal(calls, 2, "the progress guard prevents the third request");
+	assert.equal(states.length, 0, "a no-new-ID gap must not advance state");
 	assert.equal(
 		coverages.length,
 		0,
-		"a page cap gap must not declare complete coverage",
+		"a no-new-ID gap must not declare complete coverage",
 	);
 	assert.equal(skips[0]?.reason, "github_pagination_cap_exceeded");
+	assert.deepEqual(skips[0]?.diagnostics, {
+		cause: "no_new_ids",
+		page_count: 2,
+	});
 	assert.deepEqual(skips[0]?.recovery_hint, {
 		action: "retry_by_runtime",
 		retryable: true,
@@ -1990,5 +1994,53 @@ test("collectPullRequests: PR-detail transport failure is terminal without progr
 	assert.equal(
 		progresses.filter(({ extra }) => extra?.phase === "page").length,
 		0,
+	);
+});
+
+test("GitHub repositories: 201 list pages reach normal coverage and STATE", async (t: TestContext) => {
+	let calls = 0;
+	let pageCount = 201;
+	mockFetch(t, (input: string | URL | Request) => {
+		calls += 1;
+		assert.ok(calls <= pageCount, "stop exactly at the missing next link");
+		const current = new URL(String(input));
+		const next = new URL(current);
+		next.searchParams.set("page", String(calls + 1));
+		return Promise.resolve(
+			jsonResponse(
+				[repoItem(calls, "2026-06-01T00:00:00Z")],
+				calls < pageCount
+					? { headers: { link: `<${next.href}>; rel="next"` } }
+					: {},
+			),
+		);
+	});
+	const long = makeCtx(["repositories"]);
+	await collectRepositories(long.ctx);
+	assert.equal(calls, 201);
+	assert.deepEqual(
+		long.records.map((r) => String(r.data.id)),
+		Array.from({ length: 201 }, (_, i) => String(i + 1)),
+	);
+	assert.equal(long.skips.length, 0);
+	assert.deepEqual(long.coverages, [
+		{
+			stream: "repositories",
+			stateStream: "repositories",
+			requiredKeys: 0,
+			hydratedKeys: 0,
+			considered: 201,
+			covered: 201,
+		},
+	]);
+	pageCount = 1;
+	calls = 0;
+	const short = makeCtx(["repositories"]);
+	await collectRepositories(short.ctx);
+	assert.deepEqual(long.states, short.states);
+	assert.equal(long.states.length, 1);
+	assert.deepEqual(
+		long.coverages.map((c) => ({ ...c, considered: 1, covered: 1 })),
+		short.coverages,
 	);
 });
