@@ -27,9 +27,8 @@
  * Pagination: DoorDash's orders page infinite-scrolls, firing a repeat
  * `getConsumerOrdersWithDetails` request as the owner (or an automated
  * scroll) nears the bottom. Same approach as the legacy scraper: scroll,
- * capture, repeat, stop when a scroll yields no new orders or a page-count
- * ceiling is hit (`MAX_SCROLL_PAGES`, mirrors Reddit's `MAX_PAGES` safety
- * cap pattern from src/page-ceiling.ts).
+ * capture, repeat until no response or an empty order list. A nonempty
+ * scroll with no new order ID refuses as stalled rather than claiming EOF.
  *
  * ## Incremental cursor — NOT implemented; full refresh only
  *
@@ -42,8 +41,8 @@
  * ("don't invent cursors where the platform has none") and the task's
  * explicit instruction to default to full refresh when a stable stop
  * condition can't be justified, this connector performs a FULL REFRESH every
- * run: it walks the order list from the top on every invocation, bounded by
- * `MAX_SCROLL_PAGES`, and does not persist or consult a STATE cursor.
+ * run: it walks the order list from the top on every invocation until the
+ * list ends or stops making progress, without persisting a STATE cursor.
  * `manifests/doordash.json` reflects this (`incremental: false`,
  * `coverage_strategy: full_inventory`). Re-evaluate this once a live capture
  * shows the real request/response shape.
@@ -105,7 +104,6 @@ import {
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
 	orderItemRecords,
 	orderRecord,
@@ -118,12 +116,6 @@ const SESSION_COOKIE = /^(session_id|dd_login|_cfuvid)$/;
 const ORDERS_GRAPHQL_URL_RE = /getConsumerOrdersWithDetails/i;
 const ORDERS_URL = "https://www.doordash.com/orders";
 
-/** Scroll-triggered pagination safety ceiling. Mirrors Reddit's MAX_PAGES —
- *  a generous bound for one run, not a claim about how many pages DoorDash
- *  actually has. See the full-refresh note in the header comment: there is
- *  no evidenced cursor to resume from, so this only bounds a single run's
- *  work, not cross-run continuation. */
-export const MAX_SCROLL_PAGES = 20;
 const SCROLL_SETTLE_MS = 3000;
 const RESPONSE_WAIT_TIMEOUT_MS = 12_000;
 
@@ -164,6 +156,7 @@ export async function waitForOrdersResponse(
 export interface CollectOrdersResult {
 	nodes: DoorDashOrderNode[];
 	truncated: boolean;
+	cause?: "no_new_order_ids";
 }
 
 /**
@@ -176,8 +169,7 @@ export interface CollectOrdersResult {
 export async function collectOrderNodes(args: {
 	page: Page;
 	/** Pacing delay between scroll pages. Defaults to politeDelay(3000ms).
-	 *  Tests inject a no-op so they don't sleep through MAX_SCROLL_PAGES
-	 *  iterations. */
+	 *  Tests inject a no-op so they do not sleep between pages. */
 	delay?: (ms: number) => Promise<void>;
 	progress?: (
 		message: string,
@@ -233,31 +225,33 @@ export async function collectOrderNodes(args: {
 		item_count: nodes.length,
 	});
 
-	const walk = await walkPagesWithCeiling({
-		maxPages: MAX_SCROLL_PAGES,
-		fetchPage: async (pageNumber) => {
-			const body = await waitForResponseFn(page, async () => {
-				await scrollFn(page);
-			});
-			if (!body) {
-				return false;
-			}
-			const added = addNodes(parseOrdersResponse(body));
-			await progress?.("Fetched DoorDash orders page", {
-				phase: "page",
-				page_index: pageNumber,
-				item_count: nodes.length,
-			});
-			if (added === 0) {
-				// Scroll produced a response with nothing new — end of list.
-				return false;
-			}
-			await delay(SCROLL_SETTLE_MS);
-			return true;
-		},
-	});
-
-	return { nodes, truncated: walk.truncated };
+	let pageNumber = 1;
+	while (true) {
+		const body = await waitForResponseFn(page, async () => {
+			await scrollFn(page);
+		});
+		if (!body) {
+			return { nodes, truncated: false };
+		}
+		const pageNodes = parseOrdersResponse(body);
+		const seenBefore = seen.size;
+		addNodes(pageNodes);
+		await progress?.("Fetched DoorDash orders page", {
+			phase: "page",
+			page_index: pageNumber,
+			item_count: nodes.length,
+		});
+		// There is no evidenced cursor/page-size contract: empty is the list end.
+		if (pageNodes.length === 0) {
+			return { nodes, truncated: false };
+		}
+		// Malformed nodes are retained for diagnostics, but cannot prove ID progress.
+		if (seen.size === seenBefore) {
+			return { nodes, truncated: true, cause: "no_new_order_ids" };
+		}
+		await delay(SCROLL_SETTLE_MS);
+		pageNumber += 1;
+	}
 }
 
 export async function collectAllStreams(
@@ -274,7 +268,7 @@ export async function collectAllStreams(
 		return;
 	}
 
-	const { nodes, truncated } = await collectOrderNodes({
+	const { nodes, truncated, cause } = await collectOrderNodes({
 		page,
 		progress,
 		...(delay ? { delay } : {}),
@@ -330,7 +324,7 @@ export async function collectAllStreams(
 	}
 
 	if (truncated) {
-		const message = `DoorDash orders stopped at the ${MAX_SCROLL_PAGES}-scroll limit with more history possibly unread`;
+		const message = `DoorDash orders stopped because a scroll added no new order IDs; more history may be unread (${cause})`;
 		if (wantsOrders) {
 			await emit({
 				type: "SKIP_RESULT",
@@ -341,7 +335,7 @@ export async function collectAllStreams(
 					retryable: false,
 				},
 				message,
-				diagnostics: { page_limit: MAX_SCROLL_PAGES, total_seen: nodes.length },
+				diagnostics: { cause, total_seen: nodes.length },
 			});
 		}
 		if (wantsItems) {
@@ -354,7 +348,7 @@ export async function collectAllStreams(
 					retryable: false,
 				},
 				message,
-				diagnostics: { page_limit: MAX_SCROLL_PAGES, total_seen: nodes.length },
+				diagnostics: { cause, total_seen: nodes.length },
 			});
 		}
 	}

@@ -29,11 +29,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import {
-	collectAllStreams,
-	collectOrderNodes,
-	MAX_SCROLL_PAGES,
-} from "./index.ts";
+import { collectAllStreams, collectOrderNodes } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DoorDashOrderNode } from "./types.ts";
 
@@ -161,7 +157,7 @@ test("collectOrderNodes: dedupes overlapping orderUuid across pages", async () =
 	assert.equal(result.truncated, false);
 });
 
-test("collectOrderNodes: hits the page ceiling and reports truncated", async () => {
+test("collectOrderNodes: repeated order page reports truncated promptly", async () => {
 	const page = fakePage();
 	let call = 0;
 	const result = await collectOrderNodes({
@@ -171,13 +167,13 @@ test("collectOrderNodes: hits the page ceiling and reports truncated", async () 
 		waitForResponseFn: async (_p, action) => {
 			await action();
 			call += 1;
-			// Every page (including the ceiling page) returns exactly one NEW
-			// order, so the ceiling — not an empty page — is what stops the walk.
-			return graphqlEnvelope([makeOrderNode(`order-${call}`)]);
+			assert.ok(call <= 3, "repeat guard must stop promptly");
+			return graphqlEnvelope([makeOrderNode("order-repeat")]);
 		},
 	});
 	assert.equal(result.truncated, true);
-	assert.equal(result.nodes.length, MAX_SCROLL_PAGES + 1);
+	assert.equal(result.nodes.length, 1);
+	assert.equal(call, 2);
 });
 
 test("collectOrderNodes: no response observed at all returns zero nodes, not truncated", async () => {
@@ -221,11 +217,11 @@ async function runCollectAllStreamsWithNodes(
 	// browserless test; instead, call the two pure halves collectAllStreams
 	// composes (collectOrderNodes + the record loop) by exercising
 	// collectAllStreams through a page stub that fakes `waitForResponse`.
+	let resolved = false;
 	(page as unknown as { waitForResponse: unknown }).waitForResponse = async (
 		predicate: (res: { url: () => string }) => boolean,
 	) => {
 		void predicate;
-		let resolved = false;
 		return {
 			json: async () => {
 				if (resolved) {
@@ -363,7 +359,7 @@ test("collectAllStreams: order missing orderUuid is a record-level diagnostic, n
 	} finally {
 		setConnectorDiagnosticSink(undefined);
 	}
-	// The mock page serves the same bad node on every page, so the line repeats.
+	// The malformed node is retained for the existing record-level diagnostic.
 	assert.ok(diagnostics.length >= 1);
 	for (const line of diagnostics) {
 		assert.equal(
@@ -390,5 +386,88 @@ test("collectAllStreams: order missing orderUuid is a record-level diagnostic, n
 	);
 	assertUserFacingProgress(
 		harness.protocolMessages.filter((m) => m.type === "PROGRESS"),
+	);
+});
+
+test("collectAllStreams: walks 21 scroll pages beyond the old cap to the normal end", async () => {
+	const run = async (count: number, repeat = false) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const page = fakePage();
+		let calls = 0;
+		(page as unknown as { waitForResponse: unknown }).waitForResponse =
+			async () => {
+				calls += 1;
+				assert.ok(
+					calls <= count + 2,
+					"walk must stop at end or on repeated IDs",
+				);
+				const id = repeat ? "order-1" : `order-${calls}`;
+				return {
+					json: async () =>
+						calls <= count || repeat
+							? graphqlEnvelope([makeOrderNode(id)])
+							: graphqlEnvelope([]),
+				};
+			};
+		await collectAllStreams(
+			makeCtx(harness, ["orders", "order_items"], page),
+			async () => undefined,
+		);
+		return { harness, calls };
+	};
+	const short = await run(1);
+	const long = await run(22);
+	assert.equal(long.calls, 23);
+	assert.equal(long.harness.skipped.length, 0);
+	assert.deepEqual(
+		long.harness.emitted
+			.filter((r) => r.stream === "orders")
+			.map((r) => r.data.id),
+		Array.from({ length: 22 }, (_, i) => `order-${i + 1}`),
+	);
+	assert.equal(
+		long.harness.emitted.filter((r) => r.stream === "order_items").length,
+		22,
+	);
+	// The full-refresh connector has no STATE, even after a complete walk.
+	assert.deepEqual(
+		long.harness.protocolMessages.filter((m) => m.type === "STATE"),
+		short.harness.protocolMessages.filter((m) => m.type === "STATE"),
+	);
+	assert.equal(
+		long.harness.protocolMessages.filter((m) => m.type === "STATE").length,
+		0,
+	);
+	const normalize = (messages: unknown[]) =>
+		JSON.parse(
+			JSON.stringify(messages, (_key, value) => (value === 22 ? 1 : value)),
+		);
+	assert.deepEqual(
+		normalize(long.harness.protocolMessages.filter((m) => m.type !== "RECORD")),
+		normalize(
+			short.harness.protocolMessages.filter((m) => m.type !== "RECORD"),
+		),
+	);
+	const repeated = await run(1, true);
+	assert.equal(repeated.calls, 2);
+	assert.equal(repeated.harness.emitted.length, 2);
+	const skips = repeated.harness.protocolMessages.filter(
+		(m) => m.type === "SKIP_RESULT",
+	);
+	assert.equal(skips.length, 2);
+	for (const skip of skips) {
+		assert.equal(skip.reason, "older_pages_deferred_page_budget");
+		assert.deepEqual(skip.recovery_hint, {
+			action: "retry_on_connector_upgrade",
+			retryable: false,
+		});
+		assert.equal(
+			(skip.diagnostics as { cause: string }).cause,
+			"no_new_order_ids",
+		);
+	}
+	assert.equal(
+		repeated.harness.protocolMessages.filter((m) => m.type === "STATE").length,
+		0,
 	);
 });
