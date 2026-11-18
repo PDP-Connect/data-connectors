@@ -1995,14 +1995,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/doordash/index.ts",
-			line: 302,
+			line: 230,
+			column: 16,
+			category: "dependent_pagination",
+			note: "Each scroll waits for the preceding response and ID-progress decision.",
+		},
+		{
+			path: "connectors/doordash/index.ts",
+			line: 296,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emit() record-level PROGRESS for an order node missing orderUuid: Collection Profile protocol emission requiring in-order delivery.",
 		},
 		{
 			path: "connectors/doordash/index.ts",
-			line: 327,
+			line: 321,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emitRecord() order_items per order: Collection Profile protocol emission requiring in-order delivery.",
