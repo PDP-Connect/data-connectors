@@ -46,14 +46,31 @@ const PLATFORM_OPTION_KINDS: Readonly<Record<string, ConnectorOptionKinds>> =
 		chatgpt: Object.freeze({
 			// Pacing and per-run bounds. A run that stops early defers the rest as
 			// resumable gaps, so none of these changes what is eventually collected.
+			BACKEND_FETCH_TIMEOUT_MS: "transport",
 			BATCH_MAX_PARALLELISM: "transport",
 			CIRCUIT_BREAKER: "transport",
+			DETAIL_INITIAL_CONCURRENCY_PROBE: "transport",
+			DETAIL_MAX_CONCURRENCY_PROBE: "transport",
+			DETAIL_PAUSE_MAX_MS_PROBE: "transport",
+			DETAIL_PAUSE_MIN_MS_PROBE: "transport",
 			DETAIL_RATE_LIMIT_STOP_AFTER: "transport",
 			MAX_DETAIL_FETCHES_PER_RUN: "transport",
 			MAX_RUN_WALL_CLOCK_MS: "transport",
+			MAX_TAIL_DEFERRAL_GAPS_PER_RUN: "transport",
+			PACING_BURST_TOLERANCE_MS: "transport",
 			PACING_INITIAL_INTERVAL_MS: "transport",
 			PACING_MAX_INTERVAL_MS: "transport",
 			PACING_MIN_INTERVAL_MS: "transport",
+			PACING_RECOVERY_GAIN: "transport",
+			RETRY_BUDGET_CAPACITY: "transport",
+			RETRY_BUDGET_INITIAL_TOKENS: "transport",
+			// These change which records a run emits: the stateless flags drop the
+			// unchanged-record suppression, USAGE_DETAIL sets how many conversations
+			// the usage summary reads, and SIDE_EFFECT_PROBE skips collection.
+			ACCOUNT_PLAN_STATELESS: "collection_scope",
+			SIDE_EFFECT_PROBE: "collection_scope",
+			USAGE_DETAIL: "collection_scope",
+			USAGE_STATELESS: "collection_scope",
 		}),
 		claude_code: Object.freeze({
 			// Both are substring filters over the project folders that get scanned

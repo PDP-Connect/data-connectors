@@ -81,6 +81,12 @@ export const CHATGPT_USAGE_DETAIL_ENV = "PDPP_CHATGPT_USAGE_DETAIL";
 /** Set by hosts that never persist STATE (PageShim): emit without fingerprints. */
 export const CHATGPT_USAGE_STATELESS_ENV = "PDPP_CHATGPT_USAGE_STATELESS";
 
+/** `1` (the env form) or `true` (the form a boolean option arrives in). */
+export function isChatGptStatelessFlag(value: string | undefined): boolean {
+	const v = value?.trim().toLowerCase();
+	return v === "1" || v === "true";
+}
+
 export const DEFAULT_DETAIL_SAMPLE = 30;
 export const LIST_PAGE_LIMIT = 100;
 const LIST_MAX_PAGES = 300;
@@ -862,7 +868,7 @@ async function runUsageSummary(
 	});
 
 	// 2. Detail for this run's sample only: the N most recently updated.
-	const plan = resolveUsageDetailPlan();
+	const plan = resolveUsageDetailPlan(deps.tuningEnv);
 	const sample = items.slice(0, plan.size).map((c) => c.id);
 	const { outcomes } =
 		sample.length > 0
@@ -932,7 +938,9 @@ export async function runUsageStreams(
 	);
 	// Both consumers await it; this keeps an early rejection from going unhandled.
 	sidebar.catch(() => undefined);
-	const stateless = process.env[CHATGPT_USAGE_STATELESS_ENV] === "1";
+	const stateless = isChatGptStatelessFlag(
+		(deps.tuningEnv ?? process.env)[CHATGPT_USAGE_STATELESS_ENV],
+	);
 	// One trace/timezone read serves both the profile and the summary.
 	const client =
 		wantProfile || wantUsage

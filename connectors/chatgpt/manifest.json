@@ -1603,47 +1603,18 @@
 	},
 	"options_schema": {
 		"type": "object",
-		"description": "Settings for the ChatGPT connector. Values are delivered in START.connector_options; the matching PDPP_CHATGPT_<NAME> environment variable is read only when the owner has set none. All of them pace requests or bound a run; none changes which conversations are collected, because work a run does not finish is deferred as resumable gaps.",
+		"description": "Settings for the ChatGPT connector. Values are delivered in START.connector_options; the matching PDPP_CHATGPT_<NAME> environment variable is read only when the owner has set none. Pacing, retry, timeout and per-run bound settings do not change which conversations are collected, because work a run does not finish is deferred as resumable gaps. The stateless, usage-detail and probe settings change which records a run emits, so they wait for owner confirmation.",
 		"properties": {
-			"MAX_DETAIL_FETCHES_PER_RUN": {
-				"type": "integer",
-				"description": "Most conversation-detail requests one run makes before it defers the rest. 0 means no cap.",
-				"default": 0,
-				"minimum": 0,
-				"declared_option_kind": "transport"
+			"ACCOUNT_PLAN_STATELESS": {
+				"type": "boolean",
+				"description": "Emit the account plan on every run instead of only when it changed. Meant for hosts that keep no saved state between runs.",
+				"default": false,
+				"declared_option_kind": "collection_scope"
 			},
-			"MAX_RUN_WALL_CLOCK_MS": {
+			"BACKEND_FETCH_TIMEOUT_MS": {
 				"type": "integer",
-				"description": "Most milliseconds the conversation-detail phase of one run may take before it defers the rest. 0 means no cap.",
-				"default": 0,
-				"minimum": 0,
-				"declared_option_kind": "transport"
-			},
-			"DETAIL_RATE_LIMIT_STOP_AFTER": {
-				"type": "integer",
-				"description": "Rate-limit responses in one run after which the run waits out a cool-down. 0 disables the stop.",
-				"default": 8,
-				"minimum": 0,
-				"declared_option_kind": "transport"
-			},
-			"PACING_INITIAL_INTERVAL_MS": {
-				"type": "integer",
-				"description": "Milliseconds between requests when no learned pace is stored for the connection.",
-				"default": 1000,
-				"minimum": 1,
-				"declared_option_kind": "transport"
-			},
-			"PACING_MIN_INTERVAL_MS": {
-				"type": "integer",
-				"description": "Fastest allowed pace, as the smallest number of milliseconds between requests.",
-				"default": 250,
-				"minimum": 1,
-				"declared_option_kind": "transport"
-			},
-			"PACING_MAX_INTERVAL_MS": {
-				"type": "integer",
-				"description": "Slowest pace that rate-limit backoff may reach, in milliseconds between requests.",
-				"default": 30000,
+				"description": "Most milliseconds one ChatGPT request may take before it is abandoned.",
+				"default": 45000,
 				"minimum": 1,
 				"declared_option_kind": "transport"
 			},
@@ -1660,6 +1631,134 @@
 				"description": "Whether repeated upstream failures open a circuit that pauses requests. Turning it off removes that protection.",
 				"default": true,
 				"declared_option_kind": "transport"
+			},
+			"DETAIL_INITIAL_CONCURRENCY_PROBE": {
+				"type": "integer",
+				"description": "Test only: conversation-detail requests in flight at the start of a run. Values above 1 raise rate-limit pressure.",
+				"default": 1,
+				"minimum": 1,
+				"maximum": 5,
+				"declared_option_kind": "transport"
+			},
+			"DETAIL_MAX_CONCURRENCY_PROBE": {
+				"type": "integer",
+				"description": "Test only: most conversation-detail requests in flight. Values above 1 raise rate-limit pressure.",
+				"default": 1,
+				"minimum": 1,
+				"maximum": 5,
+				"declared_option_kind": "transport"
+			},
+			"DETAIL_PAUSE_MAX_MS_PROBE": {
+				"type": "integer",
+				"description": "Test only: longest random pause, in milliseconds, between conversation-detail requests.",
+				"default": 150,
+				"minimum": 0,
+				"declared_option_kind": "transport"
+			},
+			"DETAIL_PAUSE_MIN_MS_PROBE": {
+				"type": "integer",
+				"description": "Test only: shortest random pause, in milliseconds, between conversation-detail requests.",
+				"default": 0,
+				"minimum": 0,
+				"declared_option_kind": "transport"
+			},
+			"DETAIL_RATE_LIMIT_STOP_AFTER": {
+				"type": "integer",
+				"description": "Rate-limit responses in one run after which the run waits out a cool-down. 0 disables the stop.",
+				"default": 8,
+				"minimum": 0,
+				"declared_option_kind": "transport"
+			},
+			"MAX_DETAIL_FETCHES_PER_RUN": {
+				"type": "integer",
+				"description": "Most conversation-detail requests one run makes before it defers the rest. 0 means no cap.",
+				"default": 0,
+				"minimum": 0,
+				"declared_option_kind": "transport"
+			},
+			"MAX_RUN_WALL_CLOCK_MS": {
+				"type": "integer",
+				"description": "Most milliseconds the conversation-detail phase of one run may take before it defers the rest. 0 means no cap.",
+				"default": 0,
+				"minimum": 0,
+				"declared_option_kind": "transport"
+			},
+			"MAX_TAIL_DEFERRAL_GAPS_PER_RUN": {
+				"type": "string",
+				"description": "Most resumable gaps a run writes for work it defers after a cap is reached; the rest is folded into one backlog gap. Empty derives it from the detail-request cap.",
+				"default": "",
+				"declared_option_kind": "transport"
+			},
+			"PACING_BURST_TOLERANCE_MS": {
+				"type": "string",
+				"description": "Milliseconds of burst the pacer allows before it delays a request. Empty means twice the initial interval.",
+				"default": "",
+				"declared_option_kind": "transport"
+			},
+			"PACING_INITIAL_INTERVAL_MS": {
+				"type": "integer",
+				"description": "Milliseconds between requests when no learned pace is stored for the connection.",
+				"default": 1000,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			},
+			"PACING_MAX_INTERVAL_MS": {
+				"type": "integer",
+				"description": "Slowest pace that rate-limit backoff may reach, in milliseconds between requests.",
+				"default": 30000,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			},
+			"PACING_MIN_INTERVAL_MS": {
+				"type": "integer",
+				"description": "Fastest allowed pace, as the smallest number of milliseconds between requests.",
+				"default": 250,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			},
+			"PACING_RECOVERY_GAIN": {
+				"type": "string",
+				"description": "How fast the pace speeds up again after a rate-limit slowdown, as a number of 0 or more. Empty uses the built-in value.",
+				"default": "",
+				"declared_option_kind": "transport"
+			},
+			"RETRY_BUDGET_CAPACITY": {
+				"type": "string",
+				"description": "Most retry tokens the run may bank, as a whole number above 0. Empty derives it from the detail-request cap, or uses the built-in value when there is none.",
+				"default": "",
+				"declared_option_kind": "transport"
+			},
+			"RETRY_BUDGET_INITIAL_TOKENS": {
+				"type": "integer",
+				"description": "Retry tokens a run starts with before successes refill the budget.",
+				"default": 8,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			},
+			"SIDE_EFFECT_PROBE": {
+				"type": "string",
+				"description": "Run a read-only check of the conversation list instead of collecting data. \"only\" skips collection; \"true\" does the same; \"off\" collects normally.",
+				"default": "off",
+				"enum": [
+					"off",
+					"true",
+					"only"
+				],
+				"declared_option_kind": "collection_scope"
+			},
+			"USAGE_DETAIL": {
+				"type": "integer",
+				"description": "How many of the most recently updated conversations the usage summary reads in detail. 0 reads none.",
+				"default": 30,
+				"minimum": 0,
+				"maximum": 500,
+				"declared_option_kind": "collection_scope"
+			},
+			"USAGE_STATELESS": {
+				"type": "boolean",
+				"description": "Emit the account profile and usage summary on every run instead of only when they changed. Meant for hosts that keep no saved state between runs.",
+				"default": false,
+				"declared_option_kind": "collection_scope"
 			}
 		}
 	}

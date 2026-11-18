@@ -15,9 +15,16 @@ import { fileURLToPath } from "node:url";
 import {
 	CHATGPT_OPTION_NAMES,
 	CHATGPT_OPTIONS_ENV_PREFIX,
+	resolveChatGptBackendFetchTimeoutMs,
+	resolveChatGptDetailLaneTuning,
 	resolveChatGptMaxRunWallClockMs,
+	resolveChatGptMaxTailDeferralGapsPerRun,
 	resolveChatGptProviderBudget,
 } from "../../../connectors/chatgpt/index.ts";
+import {
+	isChatGptStatelessFlag,
+	resolveUsageDetailPlan,
+} from "../../../connectors/chatgpt/usage-stream.ts";
 import {
 	GMAIL_OPTION_NAMES,
 	GMAIL_OPTIONS_ENV_PREFIX,
@@ -107,6 +114,58 @@ test("ChatGPT pacing and run bounds come from START", () => {
 	assert.equal(resolveChatGptMaxRunWallClockMs(env), 90_000);
 	assert.equal(env.PDPP_CHATGPT_CIRCUIT_BREAKER, "false");
 	assert.notEqual(resolveChatGptProviderBudget(env, null), null);
+});
+
+test("ChatGPT tail bound, timeout, probes and usage detail come from START over env", () => {
+	const previous = process.env.PDPP_CHATGPT_BACKEND_FETCH_TIMEOUT_MS;
+	process.env.PDPP_CHATGPT_BACKEND_FETCH_TIMEOUT_MS = "10000";
+	try {
+		const env = readOptionsAsEnv(
+			{
+				connector_options: {
+					BACKEND_FETCH_TIMEOUT_MS: 60_000,
+					DETAIL_MAX_CONCURRENCY_PROBE: 3,
+					DETAIL_INITIAL_CONCURRENCY_PROBE: 2,
+					MAX_TAIL_DEFERRAL_GAPS_PER_RUN: "7",
+					PACING_RECOVERY_GAIN: "0.4",
+					RETRY_BUDGET_INITIAL_TOKENS: 3,
+					USAGE_DETAIL: 12,
+					ACCOUNT_PLAN_STATELESS: true,
+					USAGE_STATELESS: true,
+				},
+			},
+			CHATGPT_OPTIONS_ENV_PREFIX,
+			CHATGPT_OPTION_NAMES,
+		);
+		assert.equal(resolveChatGptBackendFetchTimeoutMs(env), 60_000);
+		assert.equal(resolveChatGptMaxTailDeferralGapsPerRun(env), 7);
+		assert.equal(resolveUsageDetailPlan(env).size, 12);
+		assert.equal(
+			isChatGptStatelessFlag(env.PDPP_CHATGPT_USAGE_STATELESS),
+			true,
+		);
+		assert.equal(
+			isChatGptStatelessFlag(env.PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS),
+			true,
+		);
+		const lane = resolveChatGptDetailLaneTuning(env);
+		assert.equal(lane.initialConcurrency, 2);
+		assert.equal(lane.maxConcurrency, 3);
+		assert.notEqual(resolveChatGptProviderBudget(env, null), null);
+		// With no START value the env name still applies.
+		const fallback = readOptionsAsEnv(
+			{ connector_options: {} },
+			CHATGPT_OPTIONS_ENV_PREFIX,
+			CHATGPT_OPTION_NAMES,
+		);
+		assert.equal(resolveChatGptBackendFetchTimeoutMs(fallback), 10_000);
+	} finally {
+		if (previous === undefined) {
+			delete process.env.PDPP_CHATGPT_BACKEND_FETCH_TIMEOUT_MS;
+		} else {
+			process.env.PDPP_CHATGPT_BACKEND_FETCH_TIMEOUT_MS = previous;
+		}
+	}
 });
 
 test("Slack reads its settings from START, with the env fallback", () => {
