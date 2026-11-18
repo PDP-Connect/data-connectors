@@ -447,16 +447,20 @@ test("photos stream reports once per run that bytes were not uploaded when the r
 	try {
 		const photosDir = join(importRoot, "Photos", "Photos from 2024");
 		await mkdir(photosDir, { recursive: true });
-		for (const [name, bytes] of [
-			["IMG_0001.jpg", TINY_JPEG_A],
-			["IMG_0002.jpg", TINY_JPEG_B],
-		] as const) {
-			await writeFile(join(photosDir, name), bytes);
-			await writeFile(
-				join(photosDir, `${name}.json`),
-				JSON.stringify({ photoTakenTime: { timestamp: "1717600000" } }),
-			);
-		}
+		await Promise.all(
+			(
+				[
+					["IMG_0001.jpg", TINY_JPEG_A],
+					["IMG_0002.jpg", TINY_JPEG_B],
+				] as const
+			).flatMap(([name, bytes]) => [
+				writeFile(join(photosDir, name), bytes),
+				writeFile(
+					join(photosDir, `${name}.json`),
+					JSON.stringify({ photoTakenTime: { timestamp: "1717600000" } }),
+				),
+			]),
+		);
 		const { messages, photos } = await runPhotosImport(importRoot, {
 			PDPP_OWNER_TOKEN: "legacy-owner-secret",
 			PDPP_RS_URL: "http://rs.local",

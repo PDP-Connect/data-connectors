@@ -180,7 +180,9 @@ test("WhatsApp attachments - media that fails to extract reads as a coverage sho
 				message.type === "SKIP_RESULT" && message.stream === "attachments",
 		);
 		const mediaSkips = attachmentSkips.filter(
-			(message) => message.reason !== "blob_upload_unavailable",
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason !== "blob_upload_unavailable",
 		);
 		assert.equal(
 			mediaSkips.length,
