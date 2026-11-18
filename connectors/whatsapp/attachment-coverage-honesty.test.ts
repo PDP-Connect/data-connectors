@@ -172,14 +172,25 @@ test("WhatsApp attachments - media that fails to extract reads as a coverage sho
 			"an export with unreadable media must not report full coverage",
 		);
 
-		const skipResults = result.messages.filter(
+		// This run has no blob upload credential, so the connector also reports
+		// its once-per-run `blob_upload_unavailable` gap. Count only the
+		// per-file extraction-failure disclosures here.
+		const attachmentSkips = result.messages.filter(
 			(message) =>
 				message.type === "SKIP_RESULT" && message.stream === "attachments",
 		);
+		const mediaSkips = attachmentSkips.filter(
+			(message) => message.reason !== "blob_upload_unavailable",
+		);
 		assert.equal(
-			skipResults.length,
+			mediaSkips.length,
 			1,
 			"the skipped media file is still disclosed as a SKIP_RESULT",
+		);
+		assert.equal(
+			attachmentSkips.length - mediaSkips.length,
+			1,
+			"the missing upload credential is reported exactly once for the run",
 		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
