@@ -74,7 +74,7 @@ import {
 	recordDetailOutcome,
 	recoverPendingOrderItemDetailGaps,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
-	reportListPageCeiling,
+	reportListWalkIncomplete,
 	resolveOrderDetail,
 	runForwardScan,
 } from "./index.ts";
@@ -304,6 +304,8 @@ async function collectSyntheticHeb(input: {
 	listSummary?: Partial<SyntheticListSummary>;
 	listPages?: number;
 	repeatListPage?: boolean;
+	/** Each list page advertises one more page than itself. */
+	growingList?: boolean;
 	emittedAt: string;
 	state: Record<string, unknown>;
 	streams: string[];
@@ -331,9 +333,11 @@ async function collectSyntheticHeb(input: {
 				listRequests.push(pageNumber);
 				if (input.repeatListPage && listRequests.length > 3)
 					throw new Error("repeated source did not stop within three pages");
+				if (input.growingList && listRequests.length > 10)
+					throw new Error("growing source did not stop within ten pages");
 				const id = 1_000_000_000 + (input.repeatListPage ? 1 : pageNumber);
-				const maxPage = input.listPages ?? 1;
-				const body = input.listPages === undefined
+				const maxPage = input.growingList ? pageNumber + 1 : (input.listPages ?? 1);
+				const body = input.listPages === undefined && !input.growingList
 					? listBody
 					: listBody.replaceAll("HEB1000000001", `HEB${id}`).replace(
 					'<a href="/my-account/your-orders?page=1">1</a>',
@@ -5200,7 +5204,7 @@ test("collectNutrition emits nothing when given zero targets", async () => {
 	);
 });
 
-test("reportListPageCeiling: a non-progressing source refuses with its cause and permits runtime retry", async () => {
+test("reportListWalkIncomplete: a non-progressing source refuses with its cause and permits runtime retry", async () => {
 	const { deps, protocolMessages } = makeRecordingDeps();
 	const progressTexts: string[] = [];
 	deps.progress = (message: string): Promise<void> => {
@@ -5210,12 +5214,12 @@ test("reportListPageCeiling: a non-progressing source refuses with its cause and
 	const diagnostics: string[] = [];
 	setConnectorDiagnosticSink((line) => diagnostics.push(line));
 	try {
-		await reportListPageCeiling(deps, 60, "no_new_order_ids", 2);
+		await reportListWalkIncomplete(deps, 60, "no_new_order_ids", 2);
 	} finally {
 		setConnectorDiagnosticSink(undefined);
 	}
 	assert.deepEqual(diagnostics, [
-		'[heb-diagnostic] list_scan_page_limit {"pages_read":2,"advertised_max_page":60,"source_reason":"no_new_order_ids"}',
+		'[heb-diagnostic] list_scan_incomplete {"pages_read":2,"advertised_max_page":60,"source_reason":"no_new_order_ids"}',
 	]);
 	const skip = protocolMessages.find((m) => m.type === "SKIP_RESULT");
 	assert.equal(skip?.type, "SKIP_RESULT");
@@ -5496,4 +5500,25 @@ test("collect: repeated list refuses within two pages without STATE", async () =
 	assert.equal(run.emitted.length, 1);
 	assertWithheldWithoutState(run, ["orders"]);
 	assert.ok(run.progressMessages.some((message) => message.includes("kept showing orders already read")));
+});
+
+test("collect: a last page that only repeats orders already read is not a finished walk", async () => {
+	const run = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER, emittedAt: SYNTHETIC_CLOCK, state: {},
+		streams: ["orders"], listPages: 2, repeatListPage: true,
+	});
+	assert.deepEqual(run.listRequests, [1, 2]);
+	assertWithheldWithoutState(run, ["orders"]);
+	assert.ok(run.progressMessages.some((message) => message.includes("kept showing orders already read")));
+});
+
+test("collect: a list that keeps adding pages stops one page past the count H-E-B showed first", async () => {
+	const run = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER, emittedAt: SYNTHETIC_CLOCK, state: {},
+		streams: ["orders"], growingList: true,
+	});
+	assert.deepEqual(run.listRequests, [1, 2, 3]);
+	assert.equal(run.emitted.length, 3);
+	assertWithheldWithoutState(run, ["orders"]);
+	assert.ok(run.progressMessages.some((message) => message.includes("kept adding pages")));
 });

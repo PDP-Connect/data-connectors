@@ -2394,7 +2394,13 @@ export async function runForwardScan(
 	let advertisedMaxPage: number | null = null;
 	let stoppedAtBoundary = false;
 	let truncated = false;
+	let truncation: ListWalkStop = "no_new_order_ids";
 	let pagesRead = 0;
+	// H-E-B's own page count at the start of the walk, plus one page for
+	// orders placed while it runs. Pages past it would mean the list keeps
+	// growing under the walk, which no real history does; stop there as
+	// unproven rather than walk without end.
+	let walkBound: number | null = null;
 	const fetchPage = async (pageNum: number): Promise<boolean> => {
 		const listPage = await loadListPage(
 			page,
@@ -2416,6 +2422,7 @@ export async function runForwardScan(
 			pageNum === 1 && listPage.sourceReportedEmpty === true;
 		pages.push(listPage.evidence);
 		advertisedMaxPage = maxPage;
+		if (pageNum === 1) walkBound = maxPage + 1;
 		const hasNewOrder = orders.some(
 			(order) => !seenOrderIds.has(order.orderId),
 		);
@@ -2442,6 +2449,12 @@ export async function runForwardScan(
 			await processListOrder(page, deps, flags, listOrder);
 		}
 
+		if (pageNum > 1 && orders.length > 0 && !hasNewOrder) {
+			// A page that only repeats orders already read proves nothing about
+			// the rest of the list, even when it claims to be the last page.
+			truncated = true;
+			return false;
+		}
 		if (pageNum >= maxPage) {
 			// EXIT A — honest completion. The walk reached the end of the list as
 			// H-E-B's own pagination nav advertised it; there is no untraversed
@@ -2472,13 +2485,18 @@ export async function runForwardScan(
 	// Page numbers are generated monotonically here, never taken from a source
 	// cursor. Repeated source content is detected by the run-scoped ID set.
 	for (let pageNum = 1; ; pageNum += 1) {
+		if (walkBound !== null && pageNum > walkBound) {
+			truncated = true;
+			truncation = "list_kept_growing";
+			break;
+		}
 		pagesRead = pageNum;
 		if (!(await fetchPage(pageNum))) break;
 	}
 
 	if (truncated) {
-		await reportListPageCeiling(
-			deps, advertisedMaxPage, "no_new_order_ids", pagesRead,
+		await reportListWalkIncomplete(
+			deps, advertisedMaxPage, truncation, pagesRead,
 		);
 	}
 
@@ -2501,26 +2519,28 @@ export async function runForwardScan(
 
 /** The unobserved tail has unknown cardinality. Never mint synthetic orders
  * to inflate a denominator; retain valid rows and report the retryable gap. */
-export async function reportListPageCeiling(
+export type ListWalkStop = "no_new_order_ids" | "list_kept_growing";
+
+export async function reportListWalkIncomplete(
 	deps: EmitDeps,
 	advertisedMaxPage: number | null,
-	cause: "no_new_order_ids",
+	cause: ListWalkStop,
 	pagesRead: number,
 ): Promise<void> {
-	connectorDiagnostic("heb", "list_scan_page_limit", {
+	connectorDiagnostic("heb", "list_scan_incomplete", {
 		pages_read: pagesRead,
 		advertised_max_page: advertisedMaxPage,
 		source_reason: cause,
 	});
 	await deps.progress(
-		`Stopped after ${String(pagesRead)} pages of orders because H-E-B kept showing orders already read; older orders were not read`,
+		cause === "list_kept_growing"
+			? `Stopped after ${String(pagesRead)} pages of orders because H-E-B kept adding pages past the count it showed at the start; older orders may not have been read`
+			: `Stopped after ${String(pagesRead)} pages of orders because H-E-B kept showing orders already read; older orders were not read`,
 		{ stream: "orders" },
 	);
 
-	// `order_items` hangs off the same list walk: the orders on the unread
-	// pages never had their details enumerated, so the unread tail is also owed
-	// by `order_items`. Count it as considered-not-covered there too.
-
+	// \`order_items\` hangs off the same list walk, so its inventory is refused
+	// with \`orders\`.
 	// A non-progressing list is an unproven enumeration (Collection Profile
 	// 5.5). Refuse every affected stream while retaining valid emitted rows;
 	// the caller emits no finishing STATE.
