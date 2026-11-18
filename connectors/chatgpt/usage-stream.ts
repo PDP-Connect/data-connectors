@@ -83,13 +83,11 @@ export const CHATGPT_USAGE_STATELESS_ENV = "PDPP_CHATGPT_USAGE_STATELESS";
 
 export const DEFAULT_DETAIL_SAMPLE = 30;
 export const LIST_PAGE_LIMIT = 100;
-const LIST_MAX_PAGES = 300;
 const LIST_WORKERS = 4;
 const REQUESTS_IN_FLIGHT = 4;
 const DETAIL_BATCH_SIZE = 10;
 const DETAIL_WORKERS = 3;
 const SHARED_PAGE_LIMIT = 100;
-const SHARED_MAX_PAGES = 50;
 
 export type UsageFetchErrorClass = "auth" | "forbidden" | "deferred" | "other";
 
@@ -210,6 +208,8 @@ export async function walkConversationList(
 ): Promise<ListPass> {
 	const pages = new Map<number, ConversationListPage>();
 	const failures = new Map<number, ListOutcome>();
+	const seenIds = new Set<string>();
+	let checkedThrough = 0;
 	let next = 0;
 	let endAt = Number.POSITIVE_INFINITY;
 	let wallClockStop = false;
@@ -218,7 +218,7 @@ export async function walkConversationList(
 	const worker = async (): Promise<void> => {
 		for (;;) {
 			const i = next;
-			if (i > endAt || i >= firstFailure() || i >= LIST_MAX_PAGES) return;
+			if (i > endAt || i >= firstFailure()) return;
 			if (deps.runBudget?.reason() === "max_wall_clock") {
 				wallClockStop = true;
 				return;
@@ -244,6 +244,19 @@ export async function walkConversationList(
 			}
 			pages.set(i, page);
 			if (page.raw_count < LIST_PAGE_LIMIT) endAt = Math.min(endAt, i);
+			// Replies may arrive out of order. Only earlier page indexes can
+			// establish that a full page contains no new conversation ids.
+			while (checkedThrough <= endAt && checkedThrough < firstFailure()) {
+				const ready = pages.get(checkedThrough);
+				if (!ready) break;
+				const before = seenIds.size;
+				for (const item of ready.items) seenIds.add(item.id);
+				if (ready.raw_count === LIST_PAGE_LIMIT && seenIds.size === before) {
+					failures.set(checkedThrough, "failed");
+					break;
+				}
+				checkedThrough += 1;
+			}
 		}
 	};
 	await Promise.all(
@@ -251,7 +264,7 @@ export async function walkConversationList(
 	);
 	const failedAt = firstFailure();
 	const ordered: ConversationListPage[] = [];
-	for (let i = 0; i <= Math.min(endAt, failedAt - 1, LIST_MAX_PAGES - 1); i++) {
+	for (let i = 0; i <= Math.min(endAt, failedAt - 1); i++) {
 		const page = pages.get(i);
 		if (!page) break;
 		ordered.push(page);
@@ -408,7 +421,7 @@ async function readSharedIds(
 	limit: Limiter,
 ): Promise<Set<string> | null> {
 	const ids = new Set<string>();
-	for (let page = 0; page < SHARED_MAX_PAGES; page += 1) {
+	for (let page = 0; ; page += 1) {
 		const r = await limit(() =>
 			fetchProjected(
 				deps,
@@ -422,11 +435,13 @@ async function readSharedIds(
 		const j = r.json as { items?: unknown; total?: unknown } | null;
 		const items = Array.isArray(j?.items) ? j.items : null;
 		if (!items) return null;
+		const before = ids.size;
 		for (const item of items) {
 			const id = (item as { conversation_id?: unknown } | null)
 				?.conversation_id;
 			if (typeof id === "string") ids.add(id);
 		}
+		if (items.length === SHARED_PAGE_LIMIT && ids.size === before) return null;
 		const total = typeof j?.total === "number" ? j.total : null;
 		if (
 			items.length < SHARED_PAGE_LIMIT ||
@@ -434,8 +449,6 @@ async function readSharedIds(
 		)
 			return ids;
 	}
-	// More shares than the page cap: the flag would under-report.
-	return null;
 }
 
 // ─── Detail ───────────────────────────────────────────────────────────

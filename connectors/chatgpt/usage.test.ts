@@ -978,6 +978,76 @@ function sub(
 
 const many = (n: number) => Array.from({ length: n }, (_, i) => rawListItem(i));
 
+test("usage history reads 320 full list pages and the short final page", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const { run, harness, calls, inFlightMax } = runHarness(["usage_summary"], {
+		site: { conversations: many(32001), total: 101 },
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "coverage").conversations_listed, 32001);
+	assert.equal(sub(summary, "totals").conversations, 32001);
+	assert.equal(sub(summary, "coverage").listing_complete, true);
+	assert.ok(calls.some((c) => c.path.startsWith("/conversations?offset=32000&")));
+	assert.ok(harness.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"));
+	assert.ok(inFlightMax() <= 6);
+});
+
+test("usage history reads 60 full shared pages and the short final page", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const shared = Array.from({ length: 6001 }, (_, i) => ({ conversation_id: rawConvId(i) }));
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		routes: {
+			...siteRoutes({ conversations: many(6002) }),
+			"/shared_conversations": (_init, url) => {
+				const offset = Number(url.searchParams.get("offset"));
+				return json({ items: shared.slice(offset, offset + 100), total: 7000 });
+			},
+		},
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "totals").shared, 6001);
+	assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, 61);
+});
+
+test("usage history rejects a full list page with no new ids", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const repeated = many(100);
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		routes: {
+			...siteRoutes(),
+			"/conversations": (_init, url) => json({
+				items: url.searchParams.get("is_archived") === "true" ? [] : repeated,
+				total: 1,
+			}),
+		},
+	});
+	await run();
+	assert.equal(records(harness, "usage_summary").length, 0);
+	const skip = harness.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.equal((skip as { reason?: string } | undefined)?.reason, "conversation_list_unstable");
+	assert.ok(!harness.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"));
+	assert.ok(calls.filter((c) => c.path.startsWith("/conversations?") && !c.path.includes("archived")).length <= 5);
+});
+
+test("usage history keeps shared count unknown after a full repeated shared page", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+	const repeated = Array.from({ length: 100 }, (_, i) => ({ conversation_id: rawConvId(i) }));
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		routes: {
+			...siteRoutes({ conversations: many(100) }),
+			"/shared_conversations": () => json({ items: repeated, total: 200 }),
+		},
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "totals").shared, null);
+	assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, 2);
+	assert.ok(harness.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"));
+});
+
+
 test("a full run of both streams emits valid records and leaks no canary anywhere", async () => {
 	const { run, harness, calls } = runHarness([
 		"account_profile",
