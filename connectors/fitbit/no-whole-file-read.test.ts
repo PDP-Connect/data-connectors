@@ -139,7 +139,7 @@ async function run(
 		cwd: PACKAGE_ROOT,
 		entrypoint: connectorEntrypoint("fitbit"),
 		env: {
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			FITBIT_EXPORT_DIR: importDir,

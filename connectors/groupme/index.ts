@@ -1145,13 +1145,13 @@ function makeUploader(): BlobUploader | undefined {
 		return;
 	}
 	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-	const ownerToken = process.env.PDPP_OWNER_TOKEN;
-	if (!(rsUrl && ownerToken)) {
+	const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+	if (!(rsUrl && uploadToken)) {
 		return;
 	}
 	const blobUploader = makeReferenceBlobUploader({
 		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-		ownerToken,
+		uploadToken,
 		rsUrl,
 	});
 	return async (

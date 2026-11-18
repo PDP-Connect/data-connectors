@@ -1626,27 +1626,27 @@ test("buildAttachmentTransferProgressMessage: renders megabytes, omits the total
 	);
 });
 
-test("runtimeBlobUploadAvailable: requires an RS URL alias and owner token", () => {
+test("runtimeBlobUploadAvailable: requires an RS URL alias and upload token", () => {
 	assert.equal(runtimeBlobUploadAvailable({}), false);
 	assert.equal(
 		runtimeBlobUploadAvailable({ PDPP_RS_URL: "http://rs.local" }),
 		false,
 	);
 	assert.equal(
-		runtimeBlobUploadAvailable({ PDPP_OWNER_TOKEN: "token" }),
+		runtimeBlobUploadAvailable({ PDPP_BLOB_UPLOAD_TOKEN: "token" }),
 		false,
 	);
 	assert.equal(
 		runtimeBlobUploadAvailable({
 			PDPP_RS_URL: "http://rs.local",
-			PDPP_OWNER_TOKEN: "token",
+			PDPP_BLOB_UPLOAD_TOKEN: "token",
 		}),
 		true,
 	);
 	assert.equal(
 		runtimeBlobUploadAvailable({
 			RS_URL: "http://rs.local",
-			PDPP_OWNER_TOKEN: "token",
+			PDPP_BLOB_UPLOAD_TOKEN: "token",
 		}),
 		true,
 	);
@@ -1675,14 +1675,14 @@ test("validateAttachmentHydrationPreflight: fails attachment hydration before ma
 			},
 			requested: makeRequested(["attachments"]),
 		}),
-		"blob upload unavailable: PDPP_RS_URL and PDPP_OWNER_TOKEN must be provided by the runtime",
+		"blob upload unavailable: PDPP_RS_URL and PDPP_BLOB_UPLOAD_TOKEN must be provided by the runtime",
 	);
 	assert.equal(
 		validateAttachmentHydrationPreflight({
 			env: {
 				GMAIL_ADDRESS: "me@example.com",
 				GOOGLE_APP_PASSWORD_PDPP: "app-password",
-				PDPP_OWNER_TOKEN: "owner-token",
+				PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 				PDPP_RS_URL: "http://127.0.0.1:4000",
 			},
 			requested: makeRequested(["attachments"]),
@@ -1723,7 +1723,7 @@ test("validateAttachmentHydrationPreflight: pending attachment detail gaps requi
 			},
 			requested: makeRequested(["messages"]),
 		}),
-		"blob upload unavailable: PDPP_RS_URL and PDPP_OWNER_TOKEN must be provided by the runtime",
+		"blob upload unavailable: PDPP_RS_URL and PDPP_BLOB_UPLOAD_TOKEN must be provided by the runtime",
 	);
 });
 
@@ -7157,9 +7157,9 @@ test("production attachment caller: a rejection with no retry locator becomes le
 	// failed hydration writes no record at all.
 	globalThis.fetch = stubBlobEndpoint;
 	const originalRsUrl = process.env.PDPP_RS_URL;
-	const originalOwnerToken = process.env.PDPP_OWNER_TOKEN;
+	const originalUploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
 	process.env.PDPP_RS_URL = "http://rs.test";
-	process.env.PDPP_OWNER_TOKEN = "test-owner-token";
+	process.env.PDPP_BLOB_UPLOAD_TOKEN = "test-upload-token";
 	try {
 		const client = {
 			close: mock.fn(),
@@ -7314,8 +7314,8 @@ test("production attachment caller: a rejection with no retry locator becomes le
 		globalThis.fetch = originalFetch;
 		if (originalRsUrl === undefined) delete process.env.PDPP_RS_URL;
 		else process.env.PDPP_RS_URL = originalRsUrl;
-		if (originalOwnerToken === undefined) delete process.env.PDPP_OWNER_TOKEN;
-		else process.env.PDPP_OWNER_TOKEN = originalOwnerToken;
+		if (originalUploadToken === undefined) delete process.env.PDPP_BLOB_UPLOAD_TOKEN;
+		else process.env.PDPP_BLOB_UPLOAD_TOKEN = originalUploadToken;
 	}
 });
 
@@ -7344,9 +7344,9 @@ test("persistent attachment rejection advances messages checkpoints with durable
 	// failed hydration writes no record at all.
 	globalThis.fetch = stubBlobEndpoint;
 	const originalRsUrl = process.env.PDPP_RS_URL;
-	const originalOwnerToken = process.env.PDPP_OWNER_TOKEN;
+	const originalUploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
 	process.env.PDPP_RS_URL = "http://rs.test";
-	process.env.PDPP_OWNER_TOKEN = "test-owner-token";
+	process.env.PDPP_BLOB_UPLOAD_TOKEN = "test-upload-token";
 	try {
 		const client = {
 			close: mock.fn(),
@@ -7506,8 +7506,8 @@ test("persistent attachment rejection advances messages checkpoints with durable
 		globalThis.fetch = originalFetch;
 		if (originalRsUrl === undefined) delete process.env.PDPP_RS_URL;
 		else process.env.PDPP_RS_URL = originalRsUrl;
-		if (originalOwnerToken === undefined) delete process.env.PDPP_OWNER_TOKEN;
-		else process.env.PDPP_OWNER_TOKEN = originalOwnerToken;
+		if (originalUploadToken === undefined) delete process.env.PDPP_BLOB_UPLOAD_TOKEN;
+		else process.env.PDPP_BLOB_UPLOAD_TOKEN = originalUploadToken;
 	}
 });
 

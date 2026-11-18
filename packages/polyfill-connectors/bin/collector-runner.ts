@@ -40,7 +40,7 @@
  *     of historical attachment backfill in the connector's START
  *     envelope; window size is governed by
  *     `PDPP_GMAIL_ATTACHMENT_BACKFILL_WINDOW_UIDS`. Attachment backfill
- *     also requires `PDPP_RS_URL` and `PDPP_OWNER_TOKEN` for blob
+ *     also requires `PDPP_RS_URL` and `PDPP_BLOB_UPLOAD_TOKEN` for blob
  *     upload — the Gmail connector's preflight fails before mailbox
  *     work when those are missing.
  *

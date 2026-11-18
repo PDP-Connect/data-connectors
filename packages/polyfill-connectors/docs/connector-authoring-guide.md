@@ -693,7 +693,7 @@ When a stream carries binary payload (attachments, statement PDFs, uploaded file
 The uploader helper behaves as follows.
 
 1. It hashes the stream inline and returns `{ blob_id, mime_type, sha256, size_bytes }`. It fails when the server's hash or size differs from its own.
-2. It reads the server address from `PDPP_RS_URL` (or `RS_URL`) and the token from `PDPP_OWNER_TOKEN`. `runtimeBlobUploadAvailable()` reports whether both are set.
+2. It reads the server address from `PDPP_RS_URL` (or `RS_URL`) and the run-scoped upload credential from `PDPP_BLOB_UPLOAD_TOKEN`. `runtimeBlobUploadAvailable()` reports whether both are set.
 3. It takes `connectorInstanceId` (`PDPP_CONNECTOR_INSTANCE_ID`) when the run is connection-scoped, so blobs land with the same connection as record ingest and state checkpoints.
 4. It accepts any `AsyncIterable` or `Iterable` of `Buffer | Uint8Array | string`.
 

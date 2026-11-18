@@ -14,6 +14,7 @@
  */
 
 import assert from "node:assert/strict";
+import { chmodSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,7 @@ import type { EmittedMessage } from "../../packages/polyfill-connectors/src/conn
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { SIGNAL_DEFAULT_STREAMS } from "./collector-definition.ts";
 import { buildSignalExportFixture, setupMockSigtop } from "./fixtures.ts";
+import { runSigtop } from "./index.ts";
 
 const ENTRYPOINT = connectorEntrypoint("signal");
 
@@ -71,7 +73,7 @@ function runSignal(
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
 		env: {
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			SIGTOP_BIN: scriptPath,
@@ -632,6 +634,45 @@ test("buildSignalExportFixture produces a database queryable by the connector's 
 			db.close();
 		}
 	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("signal does not pass the blob upload credential to the sigtop sidecar", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "signal-sigtop-env-"));
+	const script = join(dir, "sigtop-env-dump.mjs");
+	writeFileSync(
+		script,
+		`#!${process.execPath}\nprocess.stdout.write(JSON.stringify(process.env));\n`,
+	);
+	chmodSync(script, 0o755);
+	const saved = {
+		SIGTOP_BIN: process.env.SIGTOP_BIN,
+		PDPP_BLOB_UPLOAD_TOKEN: process.env.PDPP_BLOB_UPLOAD_TOKEN,
+		PDPP_RS_URL: process.env.PDPP_RS_URL,
+		XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+	};
+	process.env.SIGTOP_BIN = script;
+	process.env.PDPP_BLOB_UPLOAD_TOKEN = "secret-run-scoped-upload-token";
+	process.env.PDPP_RS_URL = "http://rs.local";
+	process.env.XDG_RUNTIME_DIR = "/run/user/test";
+	try {
+		const result = await runSigtop(["check-database"]);
+		assert.equal(result.code, 0);
+		const seen = JSON.parse(result.stdout) as Record<string, string>;
+		assert.equal(seen.PDPP_BLOB_UPLOAD_TOKEN, undefined);
+		assert.equal(seen.PDPP_RS_URL, undefined);
+		assert.ok(
+			!result.stdout.includes("secret-run-scoped-upload-token"),
+			"upload credential leaked into the sigtop environment",
+		);
+		// Variables sigtop needs for keyring access still pass through.
+		assert.equal(seen.XDG_RUNTIME_DIR, "/run/user/test");
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
 		await rm(dir, { force: true, recursive: true });
 	}
 });

@@ -111,7 +111,7 @@ function runImessage(
 		entrypoint: ENTRYPOINT,
 		env: {
 			IMESSAGE_DB_PATH: dbPath,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			...env,
@@ -577,7 +577,7 @@ test("iMessage hydrates a local attachment through the reference blob endpoint",
 
 		await withBlobServer(
 			async (req) => {
-				assert.equal(req.headers.authorization, "Bearer owner-token");
+				assert.equal(req.headers.authorization, "Bearer upload-token");
 				assert.equal(req.headers["content-type"], "application/octet-stream");
 				const url = new URL(req.url ?? "", "http://127.0.0.1");
 				assert.equal(url.searchParams.get("mime_type"), "image/jpeg");
@@ -606,7 +606,7 @@ test("iMessage hydrates a local attachment through the reference blob endpoint",
 			async (baseUrl) => {
 				const result = await runImessage(dbPath, ["attachments"], {
 					IMESSAGE_ATTACHMENTS_ROOT: attachmentsRootFor(dir),
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				const attachments = records(result.messages, "attachments");
@@ -815,7 +815,7 @@ test("iMessage marks an attachment failed when blob upload fails, without losing
 			async (baseUrl) => {
 				const result = await runImessage(dbPath, ["attachments"], {
 					IMESSAGE_ATTACHMENTS_ROOT: attachmentsRootFor(dir),
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				const [a] = records(result.messages, "attachments");
@@ -1210,7 +1210,7 @@ test("iMessage's production hydration path routes the fd-based read through read
 			async (baseUrl) => {
 				const result = await runImessage(dbPath, ["attachments"], {
 					IMESSAGE_ATTACHMENTS_ROOT: root,
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				const [a] = records(result.messages, "attachments");

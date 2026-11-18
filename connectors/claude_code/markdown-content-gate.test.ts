@@ -50,7 +50,7 @@ async function runClaudeCode(
 		env: {
 			CLAUDE_CODE_HOME: home,
 			HOME: home,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 		},

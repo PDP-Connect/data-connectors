@@ -128,7 +128,7 @@ test("WhatsApp attachments - media that fails to extract reads as a coverage sho
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				TZ: "America/Chicago",
@@ -204,7 +204,7 @@ test("WhatsApp attachments - a fully readable export still proves full coverage"
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				TZ: "America/Chicago",

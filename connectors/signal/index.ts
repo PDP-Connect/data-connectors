@@ -195,6 +195,52 @@ export function resolveSigtopBin(env: NodeJS.ProcessEnv = process.env): string {
 	return env.SIGTOP_BIN || "sigtop";
 }
 
+/**
+ * Environment variables the sigtop sidecar may inherit. sigtop decrypts Signal
+ * Desktop's database with a key from the platform keyring (libsecret over the
+ * session D-Bus on Linux, Keychain on macOS, DPAPI on Windows), so it needs the
+ * user/home/session variables below. It must not inherit the rest of the
+ * connector environment, which holds the run-scoped blob upload credential.
+ */
+const SIGTOP_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+	"APPDATA",
+	"DBUS_SESSION_BUS_ADDRESS",
+	"DISPLAY",
+	"HOME",
+	"LANG",
+	"LOCALAPPDATA",
+	"LOGNAME",
+	"PATH",
+	"PROGRAMDATA",
+	"SYSTEMROOT",
+	"TEMP",
+	"TMP",
+	"TMPDIR",
+	"USER",
+	"USERNAME",
+	"USERPROFILE",
+	"WAYLAND_DISPLAY",
+	"WINDIR",
+]);
+const SIGTOP_ENV_PREFIX_ALLOWLIST = ["LC_", "XDG_", "GNOME_KEYRING_"] as const;
+
+export function sigtopChildEnv(
+	env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+	const out: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (value === undefined) continue;
+		const upper = key.toUpperCase();
+		if (
+			SIGTOP_ENV_ALLOWLIST.has(upper) ||
+			SIGTOP_ENV_PREFIX_ALLOWLIST.some((prefix) => upper.startsWith(prefix))
+		) {
+			out[key] = value;
+		}
+	}
+	return out;
+}
+
 export function formatSigtopMissingError(bin: string): string {
 	return [
 		`sigtop binary not found: ${bin}`,
@@ -227,7 +273,10 @@ export function runSigtop(
 	return new Promise((resolve, reject) => {
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+			child = spawn(bin, args, {
+				env: sigtopChildEnv(),
+				stdio: ["ignore", "pipe", "pipe"],
+			});
 		} catch (err) {
 			reject(err instanceof Error ? err : new Error(String(err)));
 			return;
@@ -960,13 +1009,13 @@ function uploadAttachmentBlob(args: {
 	recordKey: string;
 }): Promise<ReferenceBlobRef | null> {
 	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-	const ownerToken = process.env.PDPP_OWNER_TOKEN;
-	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
+	const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && uploadToken)) {
 		return Promise.resolve(null);
 	}
 	const uploader = makeReferenceBlobUploader({
 		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-		ownerToken,
+		uploadToken,
 		rsUrl,
 	});
 	return uploader({

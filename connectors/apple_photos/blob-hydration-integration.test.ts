@@ -94,7 +94,7 @@ async function runApplePhotos(
 		entrypoint: ENTRYPOINT,
 		env: {
 			APPLE_PHOTOS_EXPORT_DIR: exportDir,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			...env,
@@ -118,7 +118,7 @@ test("photos stream hydrates bytes through the reference blob endpoint", async (
 
 		await withBlobServer(
 			async (req) => {
-				assert.equal(req.headers.authorization, "Bearer owner-token");
+				assert.equal(req.headers.authorization, "Bearer upload-token");
 				assert.equal(req.headers["content-type"], "application/octet-stream");
 				const url = new URL(req.url ?? "", "http://127.0.0.1");
 				assert.equal(url.searchParams.get("mime_type"), "image/jpeg");
@@ -137,7 +137,7 @@ test("photos stream hydrates bytes through the reference blob endpoint", async (
 			},
 			async (baseUrl) => {
 				const { photos } = await runApplePhotos(dir, {
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(photos.length, 1);
@@ -168,7 +168,7 @@ test("photos stream marks hydration failed (not fabricated deletion) when blob u
 			}),
 			async (baseUrl) => {
 				const { photos } = await runApplePhotos(dir, {
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(

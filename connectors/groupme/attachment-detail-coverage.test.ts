@@ -349,7 +349,7 @@ test("collect(): zero attachments across both parent streams proves a verified-e
 });
 
 test("collect(): nonzero attachments with no blob-upload backend configured proves considered > 0, covered: 0 — never false-complete, and emits STATE", async () => {
-	// No PDPP_RS_URL/PDPP_OWNER_TOKEN in this test process env, so
+	// No PDPP_RS_URL/PDPP_BLOB_UPLOAD_TOKEN in this test process env, so
 	// makeUploader() returns undefined and every attachment with a URL stays
 	// hydration_status: "deferred" (attempted this run, but not retained).
 	const restore = stubFetchByPath({
