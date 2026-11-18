@@ -121,9 +121,11 @@ interface CollectionResult<T> {
 async function fetchCollection<T extends { id: string; day: string }>(page: BrowserCollectContext["page"], token: string,
   endpoint: string, start: string, end: string): Promise<CollectionResult<T>> {
   const rows: T[] = [];
+  const seenIds = new Set<string>();
+  let emptyPages = 0;
   const seen = new Set<string>();
   let nextToken: string | null = null;
-  for (let pages = 0; pages < 50; pages++) {
+  for (;;) {
     const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
     if (nextToken) query.set("next_token", nextToken);
     let response: APIResponse;
@@ -143,6 +145,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       const payload = value as Record<string, unknown>;
       if (!Array.isArray(payload.data)) return { rows, complete: false };
       let invalidRow = false;
+      let newIds = 0;
       for (const row of payload.data) {
         // A row without an identity or a calendar day cannot be placed in the
         // inventory, so its page cannot prove the inventory complete.
@@ -151,19 +154,27 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
           invalidRow = true;
           continue;
         }
+        if (!seenIds.has(row.id)) {
+          seenIds.add(row.id);
+          newIds++;
+        }
         rows.push(row as T);
       }
       if (invalidRow) return { rows, complete: false };
+      // Fresh cursors alone cannot prove progress when the source repeats rows.
+      if (payload.data.length > 0 && newIds === 0) return { rows, complete: false };
+      emptyPages = payload.data.length === 0 ? emptyPages + 1 : 0;
       // A terminal next_token is Oura's only source evidence of a complete inventory.
       if (!("next_token" in payload)) return { rows, complete: false };
       if (payload.next_token === null) return { rows, complete: true };
+      // Follow one empty continuation; a second consecutive one is a broken walk.
+      if (emptyPages > 1) return { rows, complete: false };
       if (typeof payload.next_token !== "string" || !payload.next_token || seen.has(payload.next_token))
         return { rows, complete: false };
       nextToken = payload.next_token;
       seen.add(nextToken);
     } finally { await response.dispose().catch(() => {}); }
   }
-  return { rows, complete: false };
 }
 
 function day(value: string): Date {
