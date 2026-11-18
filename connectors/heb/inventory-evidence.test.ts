@@ -1056,10 +1056,11 @@ test("the detail diagnostic says which linkless step refused, in counts and shap
 		resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(499).replace("</li>", '<img src="https://cdn.example.test/p/000000500_1.png"></li>') + unrelatedLine()),
 		resolveLinkless([{ product: { fullDisplayName: "No id" }, quantity: 1 }], itemRow(0)),
 	]);
-	assert.match(countMismatch.diagnostic, /linkless_trace=ssr:3,linked:1,unfit:0,by_img:0,ledger:complete,linkless:1,keyed:0,remaining:1,unclaimed:2,elim:0/);
-	assert.match(unfit.diagnostic, /linkless_trace=ssr:2,linked:1,unfit:1,by_img:0,ledger:unplaced,linkless:1,/);
-	assert.match(unfit.diagnostic, /unfit_img=cdn\.example\.test\/p\/#_#\.png/);
-	assert.doesNotMatch(unfit.diagnostic, /500/);
-	assert.match(unread.diagnostic, /ssr=unread:order\.orderItems\.#\.product\.id:invalid_union/);
+	const diag = (r: { diagnostic?: string }): string => r.diagnostic ?? "";
+	assert.match(diag(countMismatch), /linkless_trace=ssr:3,linked:1,unfit:0,by_img:0,ledger:complete,linkless:1,keyed:0,remaining:1,unclaimed:2,elim:0/);
+	assert.match(diag(unfit), /linkless_trace=ssr:2,linked:1,unfit:1,by_img:0,ledger:unplaced,linkless:1,/);
+	assert.match(diag(unfit), /unfit_img=cdn\.example\.test\/p\/#_#\.png/);
+	assert.doesNotMatch(diag(unfit), /500/);
+	assert.match(diag(unread), /ssr=unread:order\.orderItems\.#\.product\.id:invalid_union/);
 });
 
