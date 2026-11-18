@@ -193,10 +193,8 @@ export const LOGIN_URL = `${TIKTOK_ORIGIN}/login`;
 const ITEM_PAGE_SIZE = "30";
 /** Accounts per page asked of /api/user/list/. */
 const USER_PAGE_SIZE = "30";
-/** Most pages read from one list in one run. Hitting it fails the stream. */
-export const MAX_PAGES_PER_LIST = 200;
-/** Hard stop on requests in one run, whatever the lists still hold. */
-export const MAX_REQUESTS_PER_RUN = 900;
+// Full-history walks have no default page or request count cap. STATE contains
+// counts, not resumable list cursors; a cap would strand the same tail every run.
 /** Shortest and longest pause between two requests; random in between. */
 export const REQUEST_PAUSE_MIN_MS = 1500;
 export const REQUEST_PAUSE_MAX_MS = 3000;
@@ -288,7 +286,7 @@ export interface TikTokCollectContext {
 }
 
 export interface TikTokCollectOptions {
-	/** Test seams. Production uses the constants above and the real clock. */
+	/** Test-only fault-injection seams. Production walks to the source end, with real pacing. */
 	delay?: (ms: number) => Promise<void>;
 	maxPages?: number;
 	maxRequests?: number;
@@ -386,7 +384,7 @@ export const STOP_HINTS: Record<
 	status_error: { action: "unknown", retryable: false },
 	// The person selects favorite_collections together with collection_items.
 	scope: { action: "manual_action_required", retryable: false },
-	// The list did not show its end (a repeated cursor, the page cap, fewer
+	// The list did not show its end (a repeated cursor, no new IDs, fewer
 	// entries than counted): not known to clear on a retry.
 	incomplete: { action: "unknown", retryable: false },
 };
@@ -430,7 +428,7 @@ export const fetchApi = fetchFromPage;
 function createApi(page: TikTokPage, options: TikTokCollectOptions) {
 	const delay = options.delay ?? realDelay;
 	const random = options.random ?? Math.random;
-	const maxRequests = options.maxRequests ?? MAX_REQUESTS_PER_RUN;
+	const maxRequests = options.maxRequests ?? Number.POSITIVE_INFINITY;
 	let requests = 0;
 	let recoveries = 0;
 	let transport: string | null = null;
@@ -923,7 +921,7 @@ interface WalkResult {
  * TikTok says `hasMore: false`. That is the only way a walk completes: a
  * known id is not an end (a list can hold new items below one), and any
  * other ending throws: a repeated cursor, a page that adds nothing while
- * hasMore is true, a missing cursor or the page cap. The one exception is
+ * hasMore is true or a missing cursor. The one exception is
  * `stopAfterPage`: after a page whose items were all handed on, it may end a
  * walk the run's scope proves needs nothing more (`stopped: true`).
  */
@@ -999,9 +997,9 @@ async function walkItemList(
 				pages: pages + 1,
 			};
 		}
-		if (added === 0 && page.unreadable === 0) {
+		if (added === 0) {
 			throw new TikTokStop(
-				"incomplete",
+				page.unreadable > 0 ? "unreadable" : "incomplete",
 				`${path} said it had more but its page added nothing new`,
 			);
 		}
@@ -1078,9 +1076,9 @@ async function walkUserList(
 		if (stopAfterPage?.() === true) {
 			return { read: seenIds.size, stopped: true, total, unreadable };
 		}
-		if (added === 0 && page.unreadable === 0) {
+		if (added === 0) {
 			throw new TikTokStop(
-				"incomplete",
+				page.unreadable > 0 ? "unreadable" : "incomplete",
 				"/api/user/list/ said it had more but its page added nothing new",
 			);
 		}
@@ -1206,7 +1204,7 @@ export async function collectTikTok(
 	const requested = STREAMS.filter((stream) => ctx.requested.has(stream));
 	if (requested.length === 0) return;
 	const delay = options.delay ?? realDelay;
-	const maxPages = options.maxPages ?? MAX_PAGES_PER_LIST;
+	const maxPages = options.maxPages ?? Number.POSITIVE_INFINITY;
 	const notes = newTextNotes();
 	const finished = new Set<Stream>();
 
@@ -1353,10 +1351,11 @@ export async function collectTikTok(
 	 * total), which the manifest documents as null counts. Everything else
 	 * that ends without a usable video fails the profile: an unreadable entry,
 	 * listed videos none of which carry the counts, a positive total with
-	 * nothing listed, a page that adds nothing, a repeated cursor, the cap.
+	 * nothing listed, a page that adds no distinct video, or a repeated cursor.
 	 */
 	const findOwnItem = async (): Promise<Item | null> => {
 		const seenCursors = new Set<string>();
+		const seenIds = new Set<string>();
 		let cursor = "0";
 		let listed = 0;
 		for (let pages = 0; pages < maxPages; pages += 1) {
@@ -1383,6 +1382,8 @@ export async function collectTikTok(
 			}
 			const usable = page.items.find(isOwnerItem);
 			if (usable) return usable;
+			const before = seenIds.size;
+			for (const item of page.items) seenIds.add(item.id);
 			listed += page.items.length;
 			if (!page.hasMore) {
 				if (listed > 0) {
@@ -1401,7 +1402,7 @@ export async function collectTikTok(
 			}
 			const next = page.cursor;
 			if (
-				page.items.length === 0 ||
+				seenIds.size === before ||
 				next === null ||
 				next === "" ||
 				seenCursors.has(next)
