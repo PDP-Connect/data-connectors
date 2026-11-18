@@ -17,8 +17,8 @@ import { validateRecord } from "./schemas.ts";
 import { ensureOuraApiAccess, type OuraApiAccess, probeOuraPortalSession, probeOuraSignInInProgress, readOuraCachedAccess } from "./api-access.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
-// Include today in the initial 90-day snapshot.
-const INITIAL_LOOKBACK_DAYS = 89;
+// Oura's first ring shipped in 2015; the API has no account-created date, and days before the account return no rows.
+const INITIAL_START_DATE = "2015-01-01";
 const MUTABLE_OVERLAP_DAYS = 2;
 const CHUNK_DAYS = 30;
 
@@ -176,10 +176,10 @@ function requestedUtcDay(value: string | undefined): string | undefined {
   return Number.isNaN(timestamp) ? undefined : new Date(timestamp).toISOString().slice(0, 10);
 }
 
-export function initialStartDate(now = new Date()): string {
-  const start = new Date(now);
-  start.setUTCDate(start.getUTCDate() - INITIAL_LOOKBACK_DAYS);
-  return start.toISOString().slice(0, 10);
+export function initialStartDate(_now = new Date()): string {
+  // Keep the caller's optional date argument compatible; first runs always
+  // walk the complete supported history rather than a moving lookback.
+  return INITIAL_START_DATE;
 }
 
 function addDays(value: string, days: number): string {
