@@ -441,3 +441,40 @@ test("photos stream marks hydration failed (not fabricated deletion) when blob u
 		await rm(importRoot, { force: true, recursive: true });
 	}
 });
+
+test("photos stream reports once per run that bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-nogap-"));
+	try {
+		const photosDir = join(importRoot, "Photos", "Photos from 2024");
+		await mkdir(photosDir, { recursive: true });
+		for (const [name, bytes] of [
+			["IMG_0001.jpg", TINY_JPEG_A],
+			["IMG_0002.jpg", TINY_JPEG_B],
+		] as const) {
+			await writeFile(join(photosDir, name), bytes);
+			await writeFile(
+				join(photosDir, `${name}.json`),
+				JSON.stringify({ photoTakenTime: { timestamp: "1717600000" } }),
+			);
+		}
+		const { messages, photos } = await runPhotosImport(importRoot, {
+			PDPP_OWNER_TOKEN: "legacy-owner-secret",
+			PDPP_RS_URL: "http://rs.local",
+		});
+		assert.equal(photos.length, 2);
+		for (const photo of photos) {
+			assert.equal(photo.hydration_status, "unavailable");
+		}
+		const gaps = skipResults(messages).filter(
+			(s) => s.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per photo");
+		assert.equal(gaps[0]?.stream, "photos");
+		assert.ok(
+			!JSON.stringify(messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});

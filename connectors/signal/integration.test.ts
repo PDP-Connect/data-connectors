@@ -676,3 +676,50 @@ test("signal does not pass the blob upload credential to the sigtop sidecar", as
 		await rm(dir, { force: true, recursive: true });
 	}
 });
+
+test("signal reports once per run that attachment bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-signal-"));
+	try {
+		const scriptPath = setupMockSigtop(
+			dir,
+			{ messages: [] },
+			{
+				attachments: [
+					{
+						bytes: Buffer.from([1, 2]),
+						conversationDir: "Alice",
+						filename: "one.bin",
+					},
+					{
+						bytes: Buffer.from([3, 4]),
+						conversationDir: "Alice",
+						filename: "two.bin",
+					},
+				],
+			},
+		);
+		// An un-updated runtime sets only the retired owner variable. The
+		// connector must neither use it nor stay silent about the missing upload.
+		const result = await runSignal(scriptPath, ["attachments"], {
+			PDPP_OWNER_TOKEN: "legacy-owner-secret",
+			PDPP_RS_URL: "http://rs.local",
+		});
+		const rows = records(result.messages, "attachments");
+		assert.equal(rows.length, 2);
+		for (const row of rows) {
+			assert.equal(row.blob_ref, null);
+			assert.equal(row.hydration_status, "deferred");
+		}
+		const gaps = skips(result.messages).filter(
+			(s) => s.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per attachment");
+		assert.equal(gaps[0]?.stream, "attachments");
+		assert.ok(
+			!JSON.stringify(result.messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});

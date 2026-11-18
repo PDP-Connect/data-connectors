@@ -24,6 +24,7 @@ import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -374,6 +375,7 @@ async function buildPhotoRecordForFile(
 	file: DiscoveredPhotoFile,
 	jsonFilenamesByDir: Map<string, string[]>,
 	maxBytes: number,
+	reportBlobUploadGap: () => Promise<void>,
 ): Promise<PhotoRecord | null> {
 	const metadata = await resolveSidecarMetadata(file, jsonFilenamesByDir);
 	const tsMs = await resolvePhotoEventTimeMs(file, metadata);
@@ -388,6 +390,9 @@ async function buildPhotoRecordForFile(
 		maxBytes,
 		stream: "photos",
 	});
+	if (hydration.hydrationStatus === "unavailable") {
+		await reportBlobUploadGap();
+	}
 
 	const base = buildPhotoRecord(
 		file.name,
@@ -416,6 +421,11 @@ async function emitPhotos(
 	const stream = "photos";
 	let latest: string | undefined = since;
 	let processedItems = 0;
+	const reportBlobUploadGap = makeBlobUploadGapReporter({
+		connector: "google_takeout",
+		emit,
+		stream,
+	});
 
 	for (const file of mediaEntries) {
 		processedItems += 1;
@@ -423,6 +433,7 @@ async function emitPhotos(
 			file,
 			jsonFilenamesByDir,
 			maxBytes,
+			reportBlobUploadGap,
 		);
 		if (!record) {
 			continue;

@@ -128,6 +128,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	buildDetailCoverageMessage,
@@ -1117,6 +1118,7 @@ async function resolveAttachmentHydration(
 	id: string,
 	maxBytes: number,
 	exportRoot: string,
+	reportBlobUploadGap: () => Promise<void>,
 ): Promise<AttachmentHydrationResult> {
 	const safe = resolveSafeAttachmentPath(localPath, exportRoot);
 	if (!(safe.ok && safe.path)) {
@@ -1135,6 +1137,7 @@ async function resolveAttachmentHydration(
 		return local;
 	}
 	try {
+		await reportBlobUploadGap();
 		const blobRef = await uploadAttachmentBlob({
 			bytes: local.bytes,
 			mimeType: contentType,
@@ -1165,12 +1168,14 @@ async function emitAttachmentRows({
 	maxBytes,
 	metadataIndex,
 	progress,
+	reportBlobUploadGap,
 }: {
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	exportRoot: string;
 	files: readonly string[];
 	maxBytes: number;
 	metadataIndex: Map<string, AttachmentMetadata>;
+	reportBlobUploadGap: () => Promise<void>;
 	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
 }): Promise<number> {
 	let emitted = 0;
@@ -1185,6 +1190,7 @@ async function emitAttachmentRows({
 			id,
 			maxBytes,
 			exportRoot,
+			reportBlobUploadGap,
 		);
 
 		await emitRecord("attachments", {
@@ -1261,6 +1267,11 @@ async function collectAttachments(ctx: CollectContext): Promise<void> {
 		maxBytes,
 		metadataIndex,
 		progress,
+		reportBlobUploadGap: makeBlobUploadGapReporter({
+			connector: "signal",
+			emit,
+			stream: "attachments",
+		}),
 	});
 	if (emitted === 0) {
 		await emit({

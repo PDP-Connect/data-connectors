@@ -543,3 +543,50 @@ test("WhatsApp connector marks media hydration failed when blob upload fails", a
 		await rm(importRoot, { force: true, recursive: true });
 	}
 });
+
+test("WhatsApp reports once per run that attachment bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-whatsapp-media-"));
+	try {
+		const stagedDir = join(importRoot, "artifact_123");
+		await mkdir(stagedDir, { recursive: true });
+		await writeFile(
+			join(stagedDir, "Alice export.zip"),
+			makeStoredZip([
+				{ name: "WhatsApp Chat - Alice.txt", data: VALID_EXPORT },
+				{ name: "IMG-20240605-WA0001.jpg", data: Buffer.from([1, 2, 3, 4]) },
+				{ name: "IMG-20240605-WA0002.jpg", data: Buffer.from([5, 6, 7, 8]) },
+			]),
+		);
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint: WHATSAPP_ENTRYPOINT,
+			env: {
+				PDPP_BLOB_UPLOAD_TOKEN: "",
+				PDPP_OWNER_TOKEN: "legacy-owner-secret",
+				PDPP_RS_URL: "http://rs.local",
+				RS_URL: "",
+				TZ: "America/Chicago",
+				WHATSAPP_EXPORT_DIR: importRoot,
+			},
+			start: {
+				scope: { streams: [{ name: "chats" }, { name: "attachments" }] },
+				type: "START",
+			},
+		});
+		assert.equal(records(result.messages, "attachments").length, 2);
+		const gaps = result.messages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per attachment");
+		assert.equal(
+			gaps[0]?.type === "SKIP_RESULT" ? gaps[0].stream : null,
+			"attachments",
+		);
+		assert.ok(
+			!JSON.stringify(result.messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});

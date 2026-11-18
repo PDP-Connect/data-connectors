@@ -239,3 +239,29 @@ test("photos stream dedupes identical-content files discovered under different n
 		await rm(dir, { force: true, recursive: true });
 	}
 });
+
+test("photos stream reports once per run that bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-apple-photos-nogap-"));
+	try {
+		await writeFile(join(dir, "IMG_1111.jpg"), TINY_JPEG_A);
+		await writeFile(join(dir, "IMG_2222.jpg"), Buffer.from([0xff, 0xd8, 0x01]));
+		const { messages, photos } = await runApplePhotos(dir, {
+			PDPP_OWNER_TOKEN: "legacy-owner-secret",
+			PDPP_RS_URL: "http://rs.local",
+		});
+		assert.equal(photos.length, 2);
+		for (const photo of photos) {
+			assert.equal(photo.hydration_status, "unavailable");
+		}
+		const gaps = messages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per photo");
+		assert.ok(
+			!JSON.stringify(messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
