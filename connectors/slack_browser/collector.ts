@@ -26,7 +26,7 @@
  * oldest reply any conversation still owes a look for (the last run's start,
  * less the same week, or the floor on a first read): its results name the
  * threads that got a reply, whatever the age of their parent, and those are
- * read directly. When search is unavailable, fails, or runs past its page cap,
+ * read directly. When search is unavailable or fails,
  * each conversation instead scans the month below its starting line for
  * thread parents with a reply since then. That scan is bounded; when the
  * conversation has history older than the scan reached, the conversation is
@@ -112,8 +112,6 @@ export const LATE_REPLY_LOOKBACK_SECONDS = 7 * 24 * 3600;
 export const THREAD_LOOKBACK_SECONDS = 30 * 24 * 3600;
 /** The thread scan below a read's starting line stopped with older history left unscanned. */
 export const THREAD_SCAN_BOUND_REASON = "thread_scan_bound_reached";
-/** Search pages (100 matches each) a run reads before it stops trusting search for thread discovery. */
-export const MAX_SEARCH_PAGES = 100;
 /** How many conversations are read at once. */
 export const DEFAULT_CONCURRENCY = 3;
 /** Slack allows up to 999 per history page; fewer round trips on busy channels. */
@@ -623,8 +621,8 @@ function conversationWindow(
 /**
  * Which threads got a reply since `sinceSec`, per conversation, from Slack
  * search: parents whose replies are active whatever the age of the parent
- * itself. Null when search did not cover the window (unavailable, failed, or
- * past its page cap), so each conversation scans below its starting line
+ * itself. Null when search did not cover the window (unavailable or failed),
+ * so each conversation scans below its starting line
  * instead.
  */
 async function discoverThreads(
@@ -648,12 +646,11 @@ interface SearchFindings {
 /**
  * Everything written since the floor, from Slack search: which thread
  * parents got a reply (search links a reply to its parent through the
- * permalink's `thread_ts`). Search is paged 100 at a time and rate limited
- * more tightly than history, so a run reads at most MAX_SEARCH_PAGES pages
- * and reports the list incomplete beyond that.
+ * permalink's `thread_ts`). Slack's paging block bounds the walk; a failed
+ * page leaves the findings incomplete rather than imposing a history cap.
  */
-async function searchSinceFloor(
-	run: Run,
+export async function searchSinceFloor(
+	run: Pick<Run, "api">,
 	team: SignedInTeam,
 	floorSec: number,
 ): Promise<SearchFindings | null> {
@@ -663,7 +660,7 @@ async function searchSinceFloor(
 	};
 	// `after:` is exclusive of the named day; step one day back to cover the floor itself.
 	const query = `after:${searchDay(floorSec - 86_400)}`;
-	for (let page = 1; page <= MAX_SEARCH_PAGES; page += 1) {
+	for (let page = 1; ; page += 1) {
 		let json: unknown;
 		try {
 			json = await run.api.call(team.id, "search.messages", {
