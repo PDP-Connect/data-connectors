@@ -61,6 +61,7 @@ import {
 } from "./item-count-anchor.ts";
 import {
 	buildNutritionRecord,
+	productStatesNoNutritionLabel,
 	buildOrderItemRecord,
 	buildOrderRecord,
 	diagnoseEmptyListPage,
@@ -3137,7 +3138,11 @@ export async function collectNutrition(
 				extraction.servingSize,
 				extraction.servingsPerContainer,
 			].some((value) => value !== null);
-		if (!panelReady) {
+		// A product whose own page data states it has no label (household goods,
+		// some produce) is a definitive not_found, not an unread panel.
+		const noLabel =
+			!panelReady && productStatesNoNutritionLabel(html, target.productId);
+		if (!panelReady && !noLabel) {
 			lookupSkips += 1;
 			await emitInventoryIncomplete(deps, "nutrition");
 		}
@@ -3145,6 +3150,7 @@ export async function collectNutrition(
 		// is unknown. A blank shell never becomes a definitive not_found record.
 		if (
 			panelReady ||
+			noLabel ||
 			extraction.ingredients ||
 			extraction.allergens ||
 			extraction.highlights ||
@@ -3159,7 +3165,7 @@ export async function collectNutrition(
 					target.name,
 					deps.emittedAt,
 					target.productUrl,
-					panelReady ? "heb_product_page" : "error",
+					panelReady ? "heb_product_page" : noLabel ? "not_found" : "error",
 				),
 			);
 		}

@@ -12,6 +12,7 @@
 // connector is claimed proven end-to-end.
 
 import { parseHTML } from "linkedom";
+import { z } from "zod";
 import type {
 	DeliveryAddress,
 	DetailItem,
@@ -1294,6 +1295,38 @@ function parseUpc(document: Document): string | null {
  *  `found: false` is an honest, real outcome — not every product page has a
  *  "Nutrition Facts" panel. Mirrors the legacy heb-playwright.js scrapeNutrition
  *  structural-selector strategy; no free-text regex over concatenated innerText. */
+const productPageSource = z.object({
+	page: z.literal("/product-detail/[productId]"),
+	gssp: z.literal(true),
+	props: z.object({
+		__N_SSP: z.literal(true),
+		pageProps: z.object({
+			product: z.object({ id: z.string(), nutritionLabels: z.array(z.unknown()) }),
+		}),
+	}),
+});
+
+/** True only when H-E-B's own server payload for exactly this product states
+ * that it carries no nutrition label: the product-detail route, the requested
+ * product id, and an empty nutritionLabels array. Live 2026-11-18, every
+ * label-less product page had nutritionLabels: [] and every labelled one a
+ * non-empty array. A missing or null list, another product or route, or no
+ * payload proves nothing. */
+export function productStatesNoNutritionLabel(html: string, productId: string): boolean {
+	const raw = parseHTML(html).document.querySelector("script#__NEXT_DATA__")?.textContent;
+	if (!raw) return false;
+	try {
+		const result = productPageSource.safeParse(JSON.parse(raw));
+		return (
+			result.success &&
+			result.data.props.pageProps.product.id === productId &&
+			result.data.props.pageProps.product.nutritionLabels.length === 0
+		);
+	} catch {
+		return false;
+	}
+}
+
 export function parseNutritionDom(html: string): NutritionDomExtraction {
 	const { document } = parseHTML(html);
 	const panelHeading = findNutritionPanelHeading(document);
@@ -1383,7 +1416,8 @@ export function buildNutritionRecord(
 		carbs_g: extraction.carbsG,
 		category: extraction.category,
 		cholesterol_mg: extraction.cholesterolMg,
-		confidence: source === "heb_product_page" ? "high" : "low",
+		// A not_found record is the source's own statement, not a failed read.
+		confidence: source === "heb_product_page" || source === "not_found" ? "high" : "low",
 		fat_g: extraction.fatG,
 		fiber_g: extraction.fiberG,
 		highlights: extraction.highlights,

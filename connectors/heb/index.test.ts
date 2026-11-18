@@ -5091,6 +5091,71 @@ test("collectNutrition reports unknown retryable lookup for products without pro
 	);
 });
 
+/** A label-less product page: the visible panel is absent, and H-E-B's own
+ * server payload names the product and gives it an empty nutritionLabels list. */
+function productPageHtml(product: Record<string, unknown>, page = "/product-detail/[productId]"): string {
+	const next = { page, gssp: true, props: { __N_SSP: true, pageProps: { product } } };
+	return `<html><body><main><h1>Paper Towels</h1></main><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(next)}</script></body></html>`;
+}
+
+async function runLabelLessLookup(html: string) {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
+	const page = makePageStub({ content: html });
+	const result = await collectNutrition(
+		page,
+		[
+			{
+				name: "Paper Towels",
+				productId: "222333444",
+				productUrl: "https://www.heb.com/product-detail/paper-towels/222333444",
+			},
+		],
+		{
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: deps.emittedAt,
+			waitForHydration: immediateWait,
+		},
+	);
+	const records = emitted.filter((record) => record.stream === "nutrition");
+	const skips = protocolMessages.filter(
+		(message) =>
+			message.type === "SKIP_RESULT" &&
+			message.reason === "inventory_not_proven_complete",
+	);
+	return { result, records, skips };
+}
+
+test("collectNutrition records not_found when the product's own page data states it has no nutrition label", async () => {
+	const { result, records, skips } = await runLabelLessLookup(
+		productPageHtml({ id: "222333444", nutritionLabels: [] }),
+	);
+	assert.equal(result.lookupSkips, 0);
+	assert.equal(skips.length, 0);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.data.source, "not_found");
+	assert.equal(records[0]?.data.confidence, "high");
+	assert.equal(records[0]?.data.calories, null);
+});
+
+test("collectNutrition keeps the skip when the page data does not prove an empty label for this product", async () => {
+	const cases: Array<[string, string]> = [
+		["another product", productPageHtml({ id: "999888777", nutritionLabels: [] })],
+		["a numeric id", productPageHtml({ id: 222333444, nutritionLabels: [] })],
+		["a missing label list", productPageHtml({ id: "222333444" })],
+		["a null label list", productPageHtml({ id: "222333444", nutritionLabels: null })],
+		["a non-empty label list", productPageHtml({ id: "222333444", nutritionLabels: [{}] })],
+		["another route", productPageHtml({ id: "222333444", nutritionLabels: [] }, "/search")],
+		["no page data", "<html><body><main><h1>Paper Towels</h1></main></body></html>"],
+	];
+	for (const [label, html] of cases) {
+		const { result, records, skips } = await runLabelLessLookup(html);
+		assert.equal(result.lookupSkips, 1, label);
+		assert.equal(skips.length, 1, label);
+		assert.ok(records.every((record) => record.data.source !== "not_found"), label);
+	}
+});
+
 test("collectNutrition emits nothing when given zero targets", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 
