@@ -148,9 +148,9 @@ async function decodeBrowseRequestBody(
 ): Promise<HistoryBrowseLogEntry["requestBody"]> {
 	try {
 		const buffer = request.postDataBuffer?.() ?? null;
-		const gzipHeader = /gzip/i.test(
-			request.headers?.()["content-encoding"] ?? "",
-		);
+		const gzipHeader = (request.headers?.()["content-encoding"] ?? "")
+			.split(",")
+			.some((token) => token.trim().toLowerCase() === "gzip");
 		const gzipBody =
 			buffer !== null &&
 			buffer.length > 2 &&
@@ -162,12 +162,14 @@ async function decodeBrowseRequestBody(
 				: request.postDataJSON();
 		const body = recordValue(parsed);
 		if (!body) return null;
-		if (typeof body.continuation === "string")
-			return body.continuation.length <= 16384
-				? { continuation: body.continuation }
-				: { continuationTooLong: true };
-		if (typeof body.browseId === "string") return { browseId: body.browseId };
-		return {};
+		return {
+			...(typeof body.browseId === "string" ? { browseId: body.browseId } : {}),
+			...(typeof body.continuation === "string"
+				? body.continuation.length <= 16384
+					? { continuation: body.continuation }
+					: { continuationTooLong: true }
+				: {}),
+		};
 	} catch {
 		return null;
 	}
@@ -188,6 +190,10 @@ class HistoryResponseTracker {
 	private pageLogBroken = false;
 	private pageLogOverflow = false;
 	private pageLogConsumed = 0;
+	/** A correlated non-2xx answer: the run can no longer claim it saw the whole source. */
+	private non2xxSeen = false;
+	/** A browse call the run cannot attribute came after the last terminal evidence. */
+	private uncorrelatedSinceTerminal = false;
 	private readonly tokens = new Set<string>();
 	private readonly requestedTokens = new Set<string>();
 	private readonly preSeedResponses: Array<{
@@ -290,6 +296,27 @@ class HistoryResponseTracker {
 		return !this.preSeedOverflow && !this.pageLogBroken && !this.pageLogOverflow;
 	}
 
+	/**
+	 * Why this run must not claim the source ended, or null. A correlated non-2xx
+	 * answer and any browse call after the last terminal evidence that the run
+	 * could not attribute both hide what the source said. On the page-log path the
+	 * terminal response must also account for every row and continuation the page
+	 * shows: otherwise a fetch captured before the wrapper delivered them unseen.
+	 */
+	stateVeto(end: ListEnd): string | null {
+		if (this.non2xxSeen) return "history-browse-non-2xx";
+		if (this.uncorrelatedSinceTerminal) return "history-browse-uncorrelated";
+		const latest = this.latestResponse;
+		if (this.pageLog && latest?.recognized && !latest.hasContinuation) {
+			const unseenRows =
+				end.domItemCount !== null &&
+				end.domItemCount >
+					this.bootstrapItemCount + (latest.continuationItemCount ?? 0);
+			if (end.domHasContinuation || unseenRows) return "history-log-blind";
+		}
+		return null;
+	}
+
 	get allArrivalsProcessed(): boolean {
 		return this.processedVersion === this.evidenceVersion;
 	}
@@ -378,9 +405,13 @@ class HistoryResponseTracker {
 		const { requestBody, status } = observation;
 		if (!requestBody) {
 			this.uncorrelatedResponseCount += 1;
+			this.uncorrelatedSinceTerminal = true;
 			return;
 		}
-		if (requestBody.continuationTooLong) return;
+		if (requestBody.continuationTooLong) {
+			this.uncorrelatedSinceTerminal = true;
+			return;
+		}
 		const requestedContinuation = requestBody.continuation ?? null;
 		const initialHistoryRequest = requestBody.browseId === "FEhistory";
 		if (
@@ -388,6 +419,7 @@ class HistoryResponseTracker {
 			(!requestedContinuation || !this.tokens.has(requestedContinuation))
 		) {
 			this.uncorrelatedResponseCount += 1;
+			this.uncorrelatedSinceTerminal = true;
 			return;
 		}
 		this.correlatedResponseCount += 1;
@@ -402,6 +434,7 @@ class HistoryResponseTracker {
 			this.requestedTokens.add(requestedContinuation);
 		if (status < 200 || status >= 300) {
 			this.non2xxResponseCount += 1;
+			this.non2xxSeen = true;
 			this.latestResponse = {
 				recognized: false,
 				hasContinuation: false,
@@ -431,6 +464,8 @@ class HistoryResponseTracker {
 		if (requestedContinuation && evidence.recognized)
 			this.continuationItemCount += evidence.itemCount ?? 0;
 		if (!evidence.recognized) this.unrecognizedResponseCount += 1;
+		if (evidence.recognized && !evidence.hasContinuation)
+			this.uncorrelatedSinceTerminal = false;
 		this.latestResponse = {
 			...evidence,
 			continuationItemCount: this.continuationItemCount,
@@ -1476,9 +1511,17 @@ async function readHistoryVideoList(
 			? "history-evidence-changed-during-final-refresh"
 			: "history-response-buffer-overflow";
 	}
+	const stateVeto = responseTracker.stateVeto(currentEnd);
+	if (stateVeto) {
+		sourceEnded = false;
+		verifiedEmpty = false;
+		evidence = { kind: "unproven", page: currentEnd };
+		stopReason = stateVeto;
+	}
 	const hasSafePrefix = lastAccounted !== null;
 	const partialCheckpointAllowed =
 		!blocked &&
+		!stateVeto &&
 		((hasSafePrefix &&
 			!sourceEnded &&
 			!parseGap &&
@@ -1497,7 +1540,10 @@ async function readHistoryVideoList(
 		dedupedCount,
 		lastAccounted,
 		checkpointAnchor:
-			stableEnd && responseTracker.trackingComplete && lastAccounted
+			stableEnd &&
+			responseTracker.trackingComplete &&
+			!stateVeto &&
+			lastAccounted
 				? identityForVideo(lastAccounted)
 				: null,
 		phase: headOnly ? "head_reconciliation" : phase,

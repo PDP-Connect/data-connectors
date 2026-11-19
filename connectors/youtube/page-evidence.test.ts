@@ -628,7 +628,7 @@ test("latest history continuation response overrides stale bootstrap continuatio
 	globals.window = window;
 	try {
 		const finalResponse = readHistoryResponseEvidence(
-			{ onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [] } }] },
+			{ onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [{ lockupViewModel: {} }] } }] },
 			"old-token",
 			new Set(["old-token"]),
 		);
@@ -878,4 +878,59 @@ test("the page browse log is absent until installed", async () => {
 	await withFakeWindow(async () => new Response("{}"), async () => {
 		assert.equal(drainHistoryBrowseLog(), null);
 	});
+});
+
+test("a response is recognized only when it carries rows or a continuation item", () => {
+	const keyOnly = [
+		{ onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [] } }] },
+		{ onResponseReceivedActions: [{ reloadContinuationItemsCommand: {} }] },
+		{ contents: { twoColumnBrowseResultsRenderer: { tabs: [] } } },
+		{ contents: { singleColumnBrowseResultsRenderer: { tabs: [] } } },
+		{ continuationContents: { itemSectionContinuation: { continuations: [{}] } } },
+	];
+	for (const value of keyOnly) {
+		const scan = scanHistoryResponse(value);
+		assert.equal(scan.recognized, false, JSON.stringify(value));
+		assert.equal(scan.hasContinuation, false, JSON.stringify(value));
+	}
+	assert.equal(
+		scanHistoryResponse({
+			onResponseReceivedActions: [
+				{ appendContinuationItemsAction: { continuationItems: [{ lockupViewModel: {} }] } },
+			],
+		}).recognized,
+		true,
+	);
+	assert.equal(
+		scanHistoryResponse({
+			onResponseReceivedActions: [
+				{
+					appendContinuationItemsAction: {
+						continuationItems: [
+							{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } },
+						],
+					},
+				},
+			],
+		}).recognized,
+		true,
+	);
+});
+
+test("the page browse log keeps both browseId and continuation from one request", async () => {
+	await withFakeWindow(
+		async () => new Response(JSON.stringify(continuationBody("next-token")), { status: 200 }),
+		async (window) => {
+			assert.equal(installHistoryBrowseLog(), true);
+			await window.fetch(BROWSE_URL, {
+				method: "POST",
+				body: JSON.stringify({ browseId: "FEhistory", continuation: "both" }),
+			});
+			const drained = await drainAll();
+			assert.deepEqual(drained.entries[0]?.requestBody, {
+				browseId: "FEhistory",
+				continuation: "both",
+			});
+		},
+	);
 });

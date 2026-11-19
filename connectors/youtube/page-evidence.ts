@@ -129,15 +129,16 @@ const HISTORY_RESPONSE_SCAN_SOURCE = String.raw`(value) => {
 				if (typeof continuation === "string" && continuation.length > 0 && continuation.length <= 16384) tokens.add(continuation);
 				else bounded = false;
 			}
-			if (key === "continuations" && Array.isArray(child) && child.length > 0) { recognized = true; hasContinuation = true; }
+			if (key === "continuations" && Array.isArray(child) && child.length > 0) recognized = true;
 			visit(child);
 			if (!bounded) break;
 		}
 	};
 	visit(value);
 	if (tokens.size > 8) bounded = false;
+	// A list key alone proves nothing: the response must carry readable rows or an explicit continuation item.
 	return {
-		recognized: recognized && bounded,
+		recognized: recognized && bounded && (itemCount > 0 || hasContinuation),
 		hasContinuation,
 		itemCount,
 		nextContinuation: tokens.values().next().value ?? null,
@@ -682,10 +683,13 @@ const HISTORY_BROWSE_LOG_INSTALL_FUNCTION = `(request) => {
 		let parsed;
 		try { parsed = JSON.parse(text); } catch { return null; }
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-		if (typeof parsed.continuation === "string")
-			return parsed.continuation.length <= MAX_TOKEN ? { continuation: parsed.continuation } : { continuationTooLong: true };
-		if (typeof parsed.browseId === "string") return { browseId: parsed.browseId.slice(0, 64) };
-		return {};
+		const summary = {};
+		if (typeof parsed.browseId === "string") summary.browseId = parsed.browseId.slice(0, 64);
+		if (typeof parsed.continuation === "string") {
+			if (parsed.continuation.length <= MAX_TOKEN) summary.continuation = parsed.continuation;
+			else summary.continuationTooLong = true;
+		}
+		return summary;
 	};
 	// The Request must be cloned before the original fetch runs: afterwards its body is used.
 	const readRequest = (input, init) => {
