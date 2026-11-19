@@ -38,6 +38,16 @@ export function requiredForReview(
 	if (!step.advisory && step.verdict === "FAIL") {
 		return true;
 	}
+	if (
+		[
+			"submission refresh",
+			"submission deletions",
+			"submission text",
+			"submission counts",
+		].includes(step.name)
+	) {
+		return !step.advisory;
+	}
 	if (["manifest", "tests"].includes(step.name)) {
 		return true;
 	}
@@ -51,6 +61,41 @@ export function requiredForReview(
 		["evidence", "pilot fixture"].includes(step.name) ||
 		(step.name === "mock mutation" &&
 			!(step.verdict === "UNKNOWN" && context.noHttpExemption))
+	);
+}
+
+/** The bounded pilot covers required network bindings without other binding kinds. */
+export function isApiSubmissionPilot(manifest: unknown): boolean {
+	if (
+		!manifest ||
+		typeof manifest !== "object" ||
+		!("runtime_requirements" in manifest)
+	)
+		return false;
+	const runtime = manifest.runtime_requirements;
+	if (!runtime || typeof runtime !== "object" || !("bindings" in runtime))
+		return false;
+	const bindings = runtime.bindings;
+	if (!bindings || typeof bindings !== "object" || Array.isArray(bindings))
+		return false;
+	const entries = Object.entries(bindings);
+	return (
+		entries.some(
+			([key, binding]) =>
+				binding &&
+				typeof binding === "object" &&
+				(binding.kind ?? key) === "network" &&
+				binding.required === true,
+		) &&
+		entries.every(
+			([key, binding]) =>
+				binding &&
+				typeof binding === "object" &&
+				!Array.isArray(binding) &&
+				typeof binding.required === "boolean" &&
+				(binding.kind === undefined || typeof binding.kind === "string") &&
+				(binding.kind ?? key) === "network",
+		)
 	);
 }
 
