@@ -1055,7 +1055,7 @@ export function resolveLinklessOrderItems(
 		naming?: "none" | "found" | "incomplete";
 		namingPath?: string;
 	}[],
-): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[] } {
+): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[]; ledgerExhausted: boolean } {
 	const { document } = parseHTML(html);
 	const claimed = new Set<number>();
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
@@ -1082,8 +1082,6 @@ export function resolveLinklessOrderItems(
 	// resolved only when every linked line is matched and the items left over
 	// are the same in every such matching; otherwise the left-overs are
 	// unproven and no linkless line resolves.
-	const fits = (ids: string[], item: (typeof items)[number]) =>
-		ids.every((id) => id === item.productId || item.substituteIds.includes(id));
 	const itemIds = (item: (typeof items)[number]) =>
 		item.productId === null ? item.substituteIds : [item.productId, ...item.substituteIds];
 	let fitByImage = 0;
@@ -1108,25 +1106,80 @@ export function resolveLinklessOrderItems(
 				return src.startsWith("data:") ? "data_uri" : src ? "relative" : "no_src";
 			}
 		}).join("+") || "no_img";
-	const candidates = outerLines
-		.filter((line) => ownCopy(line).querySelector(nameSelector))
-		.map((line) => {
+	// Candidate edges are built from key indexes, so a row looks up only its own
+	// ids, and every edge built is charged to the ledger budget.
+	const budget = { left: LEDGER_WORK_BUDGET };
+	const namedLines = outerLines.filter((line) => ownCopy(line).querySelector(nameSelector));
+	const itemsByKey = new Map<string, number[]>();
+	const itemsByImage = new Map<string, number[]>();
+	const indexKey = (index: Map<string, number[]>, key: string, item: number) => {
+		const list = index.get(key);
+		if (list === undefined) index.set(key, [item]);
+		else if (list[list.length - 1] !== item) list.push(item);
+	};
+	let constructionSpent = false;
+	for (const [i, item] of items.entries()) {
+		const keys = itemIds(item);
+		if ((budget.left -= 1 + keys.length) < 0) {
+			constructionSpent = true;
+			break;
+		}
+		for (const key of keys) {
+			indexKey(itemsByKey, key, i);
+			indexKey(itemsByImage, numericId(key), i);
+		}
+	}
+	// The items every key in `keys` reaches, ascending; null past the budget.
+	const reach = (index: Map<string, number[]>, keys: string[]): number[] | null => {
+		let current: number[] | undefined;
+		for (const key of keys) {
+			const list = index.get(key) ?? [];
+			if ((budget.left -= list.length + (current?.length ?? 0) + 1) < 0) return null;
+			if (current === undefined) current = list;
+			else {
+				const next: number[] = [];
+				let x = 0;
+				let y = 0;
+				while (x < current.length && y < list.length) {
+					if (current[x]! === list[y]!) next.push(current[x++]!), y++;
+					else if (current[x]! < list[y]!) x++;
+					else y++;
+				}
+				current = next;
+			}
+		}
+		return current ?? [];
+	};
+	const candidates: number[][] = [];
+	if (!constructionSpent) {
+		for (const line of namedLines) {
 			const ids = [...line.querySelectorAll(nameSelector)].map(
 				(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "",
 			);
-			const linked = items.map((_, i) => i).filter((i) => fits(ids, items[i]!));
-			if (linked.length) return linked;
+			const linked = reach(itemsByKey, ids);
+			if (linked === null) {
+				constructionSpent = true;
+				break;
+			}
+			if (linked.length) {
+				candidates.push(linked);
+				continue;
+			}
 			const own = ownCopy(line);
 			const images = [...ownImageIds(own)];
-			const byImage = images.length ? items.map((_, i) => i).filter((i) =>
-				images.every((id) => itemIds(items[i]!)
-					.some((candidate) => numericId(candidate) === id))) : [];
+			const byImage = images.length ? reach(itemsByImage, images) : [];
+			if (byImage === null) {
+				constructionSpent = true;
+				break;
+			}
 			if (byImage.length) fitByImage++;
 			else unfitImage ??= imageShape(own);
-			return byImage;
-		});
-	const budget = { left: LEDGER_WORK_BUDGET };
-	const placement = matchRows(candidates, items.length, true, budget);
+			candidates.push(byImage);
+		}
+	}
+	const placement = constructionSpent
+		? { owner: new Int32Array(items.length).fill(-1), unplaced: [] as number[], exhausted: true }
+		: matchRows(candidates, items.length, true, budget);
 	const lineOf = new Map<number, number>();
 	let budgetSpent = placement.exhausted;
 	if (!budgetSpent) {
@@ -1287,12 +1340,11 @@ export function resolveLinklessOrderItems(
 			: counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1), new Map<string, number>()).values()]
 			.filter((n) => n > 1).length;
 		const tail = `,ssr:${subItems}/${repeatedSsr}`;
-		const exhaustedHead = `lg=mx:?/${candidates.length}/${items.length},x:budget${tail}`;
+		const exhaustedHead = `lg=mx:?/${namedLines.length}/${items.length},x:budget${tail}`;
 		if (budgetSpent) return exhaustedHead;
 		const matching = matchRows(candidates, items.length, false, { left: LEDGER_WORK_BUDGET });
 		if (matching.exhausted) return exhaustedHead;
 		const unplaced = matching.unplaced;
-		const namedLines = outerLines.filter((line) => ownCopy(line).querySelector(nameSelector));
 		const ownIds = (line: Element) => [...ownCopy(line).querySelectorAll(nameSelector)].map(
 			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "");
 		const idCounts = new Map<string, number>();
@@ -1327,7 +1379,7 @@ export function resolveLinklessOrderItems(
 	};
 	const trace = [
 		`linkless_trace=ssr:${items.length}`,
-		`linked:${candidates.length}`,
+		`linked:${namedLines.length}`,
 		`unfit:${candidates.filter((fitting) => fitting.length === 0).length}`,
 		`by_img:${fitByImage}`,
 		`ledger:${ledger}`,
@@ -1348,6 +1400,7 @@ export function resolveLinklessOrderItems(
 		unresolved: inspectOrderDetailLines(resolvedHtml).linkless,
 		trace,
 		nameless: namelessItems ?? [],
+		ledgerExhausted: budgetSpent,
 	};
 }
 

@@ -1140,6 +1140,7 @@ export async function fetchOrderDetail(
 	detail.items.push(...namelessKept);
 	evidence.linklessLines = resolved.unresolved - namelessKept.length;
 	evidence.multiNameLines = lineShape.multiName;
+	evidence.ledgerExhausted = resolved.ledgerExhausted;
 	// Distinct source lines must also become distinct records: two lines whose
 	// records share an id would overwrite one purchase with the other.
 	const recordIds = detail.items.map((item, itemIndex) =>

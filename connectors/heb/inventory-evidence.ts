@@ -37,6 +37,8 @@ export interface InventoryEvidence {
 	multiNameLines?: number;
 	/** Parsed products whose emitted record id repeats another's. */
 	duplicateRecordIds?: number;
+	/** The ledger ran out of its work budget: its result proves nothing. */
+	ledgerExhausted?: boolean;
 	signal:
 		| { entity: InventoryEntity; exactTotal: number }
 		| { entity: InventoryEntity; explicitEnd: true }
@@ -97,7 +99,8 @@ function rowsAreRead(e: InventoryEvidence): boolean {
 		e.missingIdentityRows !== 0 ||
 		(e.linklessLines ?? 0) !== 0 ||
 		(e.multiNameLines ?? 0) !== 0 ||
-		(e.duplicateRecordIds ?? 0) !== 0
+		(e.duplicateRecordIds ?? 0) !== 0 ||
+		e.ledgerExhausted === true
 	)
 		return false;
 	const source = new Set(e.sourceIds);

@@ -1475,15 +1475,15 @@ test("a dense order past the work budget reports mx:? with the SSR counts and fi
 	assert.match(r.trace, /;stop=ledger;lg=mx:\?\/400\/399,x:budget,ssr:399\/0;why=/);
 });
 
-test("a long chain of forced shifts stays within the stack and is matched exactly", () => {
+test("a long chain of forced shifts is matched exactly within the budget", () => {
 	// Row i fits items i and i+1; the last row fits only item 0, so placing it
 	// shifts every earlier row by one: an augmenting path as long as the order.
-	const n = 11000;
+	const n = 2500;
 	const rowIds = Array.from({ length: n }, (_, i) => `C${i}`);
 	const items = Array.from({ length: n - 1 }, (_, i) => bareItem(`C${i}`, i > 0 ? [`C${i - 1}`] : []));
 	const rows = rowIds.map((id, i) => (i === n - 1 ? bareRow("C0") : bareRow(id)));
 	const r = resolveLinklessOrderItems(rows.join(""), items);
-	assert.match(r.trace, /;stop=ledger;lg=mx:10999\/11000\/10999,u:1\[/);
+	assert.match(r.trace, /;stop=ledger;lg=mx:2499\/2500\/2499,u:1\[/);
 });
 
 test("an error inside the ledger diagnostic becomes lg=err and changes nothing else", () => {
@@ -1589,4 +1589,35 @@ test("nothing collapses when the product is also a substitute id, or a rendering
 	const sub = await resolveLinkless(asSubstitute, dupPage(dupRow("900"), dupRow("900")));
 	const nested = await resolveLinkless(dupSsr, dupPage(dupRow("900", { nested: nestedSub("905") }), dupRow("900", { nested: nestedSub("905") })));
 	for (const r of [sub, nested]) assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+});
+
+// ─── ledger exhaustion is a value, and building candidates is bounded ─────
+test("building the candidate edges is charged to the budget: a dense order exhausts fast", () => {
+	const n = 3000;
+	const items = Array.from({ length: n }, () => bareItem("X"));
+	const started = Date.now();
+	const r = resolveLinklessOrderItems(Array.from({ length: n }, () => bareRow("X")).join(""), items);
+	assert.ok(Date.now() - started < 6000, `took ${Date.now() - started} ms`);
+	assert.equal(r.ledgerExhausted, true);
+	assert.match(r.trace, /ledger:budget,/);
+	assert.match(r.trace, new RegExp(`;stop=ledger;lg=mx:\\?/${n}/${n},x:budget,`));
+});
+
+test("budget exhaustion keeps the gap even when every row is named and the counts match", async () => {
+	const n = 300;
+	const r = await resolveLinkless(
+		Array.from({ length: n }, () => ssrItem("X")),
+		Array.from({ length: n }, () => bareRow("X")).join(""),
+	);
+	assert.equal(r.evidence.ledgerExhausted, true);
+	assert.equal(r.detail.items.length, n);
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.equal(matchesTotal(r, n), false);
+	assert.equal(r.inventoryComplete, false);
+});
+
+test("an order inside the budget is not flagged exhausted, the collapse case included", async () => {
+	const r = await resolveLinkless(dupSsr, dupPage(dupRow("900"), dupRow("900")));
+	assert.notEqual(r.evidence.ledgerExhausted, true);
+	assert.equal(matchesTotal(r, 5), true);
 });
