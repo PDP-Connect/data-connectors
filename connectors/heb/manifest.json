@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.44",
+	"version": "0.6.48",
 	"display_name": "H-E-B",
 	"brand": {
 		"icon": "icon.svg",
@@ -222,7 +222,7 @@
 				"exclude_keys": ["fetched_at"]
 			},
 			"required": true,
-			"description": "Line items within H-E-B orders. Curbside/delivery orders only; in-store purchases are not available from heb.com. product_id is the H-E-B provider/catalog identifier observed on the order-detail purchase line, not a global product identity (GTIN/UPC/EAN); no such field is collected because no live-evidenced H-E-B response has been shown to carry one on the purchase line, and this connector does not crawl product pages to obtain one.",
+			"description": "Line items within H-E-B orders. Curbside/delivery orders only; in-store purchases are not available from heb.com. product_id is the H-E-B provider/catalog identifier observed on the order-detail purchase line, not a global product identity (GTIN/UPC/EAN); no such field is collected because no live-evidenced H-E-B response has been shown to carry one on the purchase line, and this connector does not crawl product pages to obtain one. H-E-B serves some weighed order lines with no name, image or product link (seen for products no longer sold). Such lines are kept with name null and name_unavailable_reason source_omits_name.",
 			"display": {
 				"label": "Your H-E-B order line items",
 				"detail": "Product name, department, H-E-B product id, product URL, image, quantity, line total, denormalized order date."
@@ -238,8 +238,13 @@
 						"type": "string"
 					},
 					"name": {
-						"type": "string",
+						"type": ["string", "null"],
 						"x_pdpp_role": "primary-title"
+					},
+					"name_unavailable_reason": {
+						"type": ["string", "null"],
+						"enum": ["source_omits_name", null],
+						"description": "Why name is null: source_omits_name means H-E-B served the line with no name. Null whenever name is a string."
 					},
 					"department": {
 						"type": ["string", "null"],
@@ -270,7 +275,7 @@
 						"x_pdpp_role": "event-time"
 					}
 				},
-				"required": ["id", "order_id", "name", "order_date"]
+				"required": ["id", "order_id", "order_date"]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "order_date",

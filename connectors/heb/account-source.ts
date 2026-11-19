@@ -137,18 +137,23 @@ export function sourceOrderItemTotal(html: string, orderId: string): number | nu
 }
 
 export interface SourceOrderItem {
-	productId: string;
+	/** Null only for an item H-E-B serves with no product id and no name. */
+	productId: string | null;
 	/** Product ids of the item's substitutes, from `subbedProducts[]` as `id`
 	 * or `product.id`; an element in any other shape adds no id. */
 	substituteIds: string[];
-	/** Null when H-E-B leaves the name out; such an item cannot match by text
-	 * and cannot become a record. */
+	/** Null when H-E-B leaves the name out; such an item cannot match by text. It
+	 * becomes a nameless record only through the line-total pairing in
+	 * parsers.ts (namelessRecords). */
 	fullDisplayName: string | null;
 	/** The SSR `productPageURL` when it is an www.heb.com product-detail page
 	 * ending in this product id; otherwise null. */
 	productUrl: string | null;
 	/** Null when H-E-B leaves it out or writes it as anything but a number. */
 	quantity: number | null;
+	/** The item's `totalLineItemPricePaid.formattedAmount` when it is a
+	 * non-blank string; the key that pairs a nameless item with its line. */
+	lineTotal: string | null;
 	/** Only when fullDisplayName is null, for diagnostics: how H-E-B left the
 	 * name out, and the item's non-blank strings by key path. */
 	unnamed?: UnnamedSourceItem;
@@ -209,6 +214,10 @@ const substituteId = z.union([
 	z.object({ product: z.object({ id: productIdText }) }).transform((sub) => sub.product.id),
 ]);
 
+function namedAmount(value: unknown): string | null {
+	return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 /** Each SSR orderItem of this order (none when the payload is missing, names
  * another order, or any item lacks a product id), and the payload's shape for
  * diagnostics: the item count, or why it was not read. Never ids or names. */
@@ -220,13 +229,15 @@ export function readSourceOrderItems(
 	const result = z.object({ order: z.object({
 		orderId: text,
 		orderItems: z.array(z.object({
+			// An item with no name may also have no product id (or no product).
 			product: z.object({
-				id: productIdText,
+				id: productIdText.nullish().or(z.literal("")),
 				fullDisplayName: z.string().trim().nullish(),
 				productPageURL: z.string().nullish(),
-			}),
+			}).nullish(),
 			quantity: z.unknown().optional(),
 			subbedProducts: z.array(z.unknown()).nullish(),
+			totalLineItemPricePaid: z.object({ formattedAmount: z.unknown().optional() }).nullish(),
 		})),
 	}) }).safeParse(props);
 	if (!result.success) {
@@ -236,19 +247,27 @@ export function readSourceOrderItems(
 	}
 	if (result.data.order.orderId !== orderId) return { items: [], shape: "unread:other_order" };
 	const rawItems = (props as { order: { orderItems: unknown[] } }).order.orderItems;
+	// An item that names itself must carry its product id.
+	const idless = result.data.order.orderItems.findIndex(
+		(item) => !item.product?.id && item.product?.fullDisplayName,
+	);
+	if (idless !== -1) return { items: [], shape: "unread:order.orderItems.#.product.id:invalid_union" };
 	const items = result.data.order.orderItems.map((item, index) => ({
-		productId: item.product.id,
+		productId: item.product?.id || null,
 		substituteIds: (item.subbedProducts ?? []).flatMap((sub) => {
 			const id = substituteId.safeParse(sub);
 			return id.success ? [id.data] : [];
 		}),
-		fullDisplayName: item.product.fullDisplayName || null,
-		productUrl: productPageUrl(item.product.productPageURL, item.product.id),
+		fullDisplayName: item.product?.fullDisplayName || null,
+		productUrl: item.product?.id
+			? productPageUrl(item.product.productPageURL, item.product.id)
+			: null,
 		quantity:
 			typeof item.quantity === "number" && Number.isFinite(item.quantity) && item.quantity >= 0
 				? item.quantity
 				: null,
-		...(item.product.fullDisplayName ? {} : { unnamed: unnamedSourceItem(rawItems[index]) }),
+		lineTotal: namedAmount(item.totalLineItemPricePaid?.formattedAmount),
+		...(item.product?.fullDisplayName ? {} : { unnamed: unnamedSourceItem(rawItems[index]) }),
 	}));
 	const quantityTypes = [...new Set(result.data.order.orderItems.map((item) => typeof item.quantity))].sort();
 	return { items, shape: `${items.length},qty:${quantityTypes.join("|") || "none"}` };

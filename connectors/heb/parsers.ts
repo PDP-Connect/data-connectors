@@ -752,6 +752,97 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 	};
 }
 
+const NAMELESS_SENTENCE_RE =
+	/^Item\b[^A-Za-z]*Quantity:\s*(\d+(?:\.\d+)?)?(?:\s*[a-z]+)?\.?(?:\s*Price:\s*(\$\d[\d,]*\.\d{2})\.?)?$/i;
+const NAMELESS_QTY_RE = /^qty:?\s*(\d+(?:\.\d+)?)(?:\s*[a-z]+)?$/i;
+const NAMELESS_PRICE_RE = /^\$\s?\d[\d,]*(?:\.\d{2})?(?:\s*\/\s*[a-z]+)?$/i;
+/** SSR key paths that could hold a name, link or image of the item. */
+const NAMING_KEY_RE = /image|img|photo|picture|url|href|name|title|label|desc/i;
+
+/** What a linkless line states, only when it carries no naming evidence: no
+ * link, no image with alt text or a H-E-B product image id, and no text but a
+ * quantity, a price and the accessible sentence with an empty name slot. Null
+ * when it has any other text, or when its own sources disagree on its total or
+ * quantity. */
+function namelessLineFacts(
+	own: Element,
+	hasProductImage: boolean,
+): { total: string | null; quantity: number | null } | null {
+	if (hasProductImage || own.querySelector("a")) return null;
+	for (const img of own.querySelectorAll("img"))
+		if (/[a-z0-9]/i.test(img.getAttribute("alt") ?? "")) return null;
+	const totals: string[] = [];
+	const quantities: number[] = [];
+	const structuredTotal = normText(own.querySelector('[data-qe-id="checkoutItemPrice"]'));
+	if (structuredTotal) totals.push(structuredTotal);
+	for (const element of [own, ...own.querySelectorAll("*")]) {
+		const text = [...element.childNodes]
+			.filter((node) => node.nodeType === 3)
+			.map((node) => node.textContent ?? "")
+			.join(" ")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!text) continue;
+		const sentence = NAMELESS_SENTENCE_RE.exec(text);
+		const qty = NAMELESS_QTY_RE.exec(text);
+		if (sentence) {
+			if (sentence[1]) quantities.push(Number(sentence[1]));
+			if (sentence[2]) totals.push(sentence[2]);
+		} else if (qty) quantities.push(Number(qty[1]));
+		else if (!NAMELESS_PRICE_RE.test(text)) return null;
+	}
+	if (new Set(totals).size > 1 || new Set(quantities).size > 1) return null;
+	return { total: totals[0] ?? null, quantity: quantities[0] ?? null };
+}
+
+/** Records for source items that H-E-B serves with no name, when each pairs
+ * with one linkless line by exact line total, in both directions. A tie is
+ * accepted only among items with the same total and quantity, since the records
+ * come from the items and any pairing gives the same ones. Null when any item
+ * or line has naming evidence, or any pairing is unproven or contradicted. */
+function namelessRecords(
+	lines: readonly { own: Element; hasProductImage: boolean }[],
+	items: readonly {
+		productId: string | null;
+		productUrl: string | null;
+		fullDisplayName: string | null;
+		quantity: number | null;
+		lineTotal: string | null;
+		unnamed?: { strings: readonly { path: string }[] };
+	}[],
+	itemIndexes: readonly number[],
+): DetailItem[] | null {
+	if (lines.length === 0 || lines.length !== itemIndexes.length) return null;
+	const left = itemIndexes.map((i) => ({ i, item: items[i]! }));
+	if (left.some(({ item }) =>
+		item.fullDisplayName !== null || item.productId !== null || item.productUrl !== null ||
+		item.lineTotal === null ||
+		(item.unnamed?.strings ?? []).some((leaf) => NAMING_KEY_RE.test(leaf.path))))
+		return null;
+	const facts = lines.map((line) => namelessLineFacts(line.own, line.hasProductImage));
+	if (facts.some((fact) => !fact || fact.total === null)) return null;
+	for (const total of new Set(left.map(({ item }) => item.lineTotal))) {
+		const group = left.filter(({ item }) => item.lineTotal === total);
+		const matching = facts.filter((fact) => fact!.total === total);
+		if (matching.length !== group.length) return null;
+		const quantity = group[0]!.item.quantity;
+		if (group.some(({ item }) => item.quantity !== quantity)) return null;
+		if (matching.some((fact) => fact!.quantity !== null && fact!.quantity !== quantity)) return null;
+	}
+	if (facts.some((fact) => !left.some(({ item }) => item.lineTotal === fact!.total))) return null;
+	return left.map(({ i, item }) => ({
+		department: null,
+		imageUrl: null,
+		lineTotal: item.lineTotal,
+		name: null,
+		nameUnavailableReason: "source_omits_name" as const,
+		productId: null,
+		productUrl: null,
+		quantity: item.quantity,
+		sourcePosition: i,
+	}));
+}
+
 /** Resolve only outer purchased lines, then use the existing DOM parser.
  * Synthetic name anchors carry SSR identity; quantities/prices remain DOM-owned.
  * `trace` reports, in counts and shapes only, how far resolution got. */
@@ -766,14 +857,15 @@ function hebGroceryImageId(pathname: string): string | undefined {
 export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
-		productId: string;
+		productId: string | null;
 		quantity: number | null;
 		substituteIds: string[];
 		fullDisplayName: string | null;
 		productUrl: string | null;
+		lineTotal: string | null;
 		unnamed?: { state: string; strings: readonly { path: string; value: string }[] };
 	}[],
-): { detail: OrderDetail | null; unresolved: number; trace: string } {
+): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[] } {
 	const { document } = parseHTML(html);
 	const claimed = new Set<number>();
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
@@ -819,6 +911,8 @@ export function resolveLinklessOrderItems(
 	// unproven and no linkless line resolves.
 	const fits = (ids: string[], item: (typeof items)[number]) =>
 		ids.every((id) => id === item.productId || item.substituteIds.includes(id));
+	const itemIds = (item: (typeof items)[number]) =>
+		item.productId === null ? item.substituteIds : [item.productId, ...item.substituteIds];
 	let fitByImage = 0;
 	let unfitImage: string | null = null;
 	// Fixed classes of host, path and file type: never URL text, which can
@@ -852,7 +946,7 @@ export function resolveLinklessOrderItems(
 			const own = ownCopy(line);
 			const images = [...ownImageIds(own)];
 			const byImage = images.length ? items.map((_, i) => i).filter((i) =>
-				images.every((id) => [items[i]!.productId, ...items[i]!.substituteIds]
+				images.every((id) => itemIds(items[i]!)
 					.some((candidate) => numericId(candidate) === id))) : [];
 			if (byImage.length) fitByImage++;
 			else unfitImage ??= imageShape(own);
@@ -949,7 +1043,7 @@ export function resolveLinklessOrderItems(
 		claimed.add(index);
 		const anchor = document.createElement("a");
 		anchor.setAttribute("data-qe-id", "itemRowDetailsName");
-		anchor.setAttribute("href", "/product-detail/ssr/" + item.productId);
+		anchor.setAttribute("href", "/product-detail/ssr/" + item.productId!);
 		anchor.textContent = item.fullDisplayName!;
 		anchor.setAttribute("data-ssr-resolved", item.productUrl ?? "");
 		if (unordered) inventoryOnly.set(anchor, item);
@@ -963,7 +1057,7 @@ export function resolveLinklessOrderItems(
 		// Both keys are matched against every SSR item, claimed or not, so a key
 		// that names a claimed item still counts as contradicting evidence.
 		const imageMatches = items.map((_, i) => i).filter((i) =>
-			[items[i]!.productId, ...items[i]!.substituteIds].some((id) => imageIds.has(numericId(id))));
+			itemIds(items[i]!).some((id) => imageIds.has(numericId(id))));
 		const textMatches = items.map((_, i) => i).filter((i) => {
 			const name = items[i]!.fullDisplayName;
 			return name !== null && names.has(normalize(name));
@@ -996,6 +1090,19 @@ export function resolveLinklessOrderItems(
 		: remaining.length !== unclaimed.length ? "count"
 		: !unclaimed.every((i) => items[i]!.fullDisplayName !== null) ? "unnamed"
 		: "ok";
+	// Left-overs H-E-B serves with no name at all, each paired by exact line
+	// total with a linkless line that names nothing either. The caller adds
+	// these records only when the line count is proven.
+	const namelessItems = stop === "unnamed"
+		? namelessRecords(
+			remaining.map((line) => {
+				const own = ownCopy(line);
+				return { own, hasProductImage: ownImageIds(own).size > 0 };
+			}),
+			items,
+			unclaimed,
+		)
+		: null;
 	if (stop === "ok") {
 		// The inventory is known; with multiple rows, the DOM-to-item pairing
 		// is not. Never attach a line's quantity/price/department to that guess.
@@ -1030,17 +1137,20 @@ export function resolveLinklessOrderItems(
 			(partial ? `;un_sub=${partial}` : "") + `;un_keys=${keys || "-"}`;
 	}
 	const resolvedHtml = document.toString();
-	const detail = parseOrderDetailDom(resolvedHtml);
-	if (detail) {
+	const parsed = parseOrderDetailDom(resolvedHtml);
+	const detail = parsed ?? (namelessItems
+		? { items: [], parsing: { observedRows: 0, rejectedRows: 0, missingIdentityRows: 0, sourceIds: [] } }
+		: null);
+	if (parsed) {
 		// The temporary anchor is only a parser adapter: the record keeps the SSR
 		// product page URL when H-E-B gave a valid one, and no URL otherwise.
 		let index = 0;
 		for (const link of document.querySelectorAll<HTMLAnchorElement>(nameSelector)) {
 			if (!parseDetailItem(link)) continue;
 			if (link.hasAttribute("data-ssr-resolved"))
-				detail.items[index]!.productUrl = link.getAttribute("data-ssr-resolved") || null;
+				parsed.items[index]!.productUrl = link.getAttribute("data-ssr-resolved") || null;
 			const item = inventoryOnly.get(link);
-			if (item) Object.assign(detail.items[index]!, {
+			if (item) Object.assign(parsed.items[index]!, {
 				quantity: item.quantity, lineTotal: null, imageUrl: null, department: null,
 			});
 			index++;
@@ -1058,13 +1168,18 @@ export function resolveLinklessOrderItems(
 		`unclaimed:${ledgerComplete ? unclaimed.length : "-"}`,
 		`elim:${eliminated}`,
 	].join(",") +
-		`;stop=${stop}` +
-		(stop === "unnamed" ? `;ll_dom=${linklessDom ?? "-"}` : "") +
+		(namelessItems ? `;stop=nameless;nameless=${namelessItems.length}` : `;stop=${stop}`) +
+		(stop === "unnamed" && !namelessItems ? `;ll_dom=${linklessDom ?? "-"}` : "") +
 		unnamedTrace +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
 		`;ll_img=${linklessImage ?? "-"}` +
 		(unfitImage ? `;unfit_img=${unfitImage}` : "");
-	return { detail, unresolved: inspectOrderDetailLines(resolvedHtml).linkless, trace };
+	return {
+		detail,
+		unresolved: inspectOrderDetailLines(resolvedHtml).linkless,
+		trace,
+		nameless: namelessItems ?? [],
+	};
 }
 
 export function parseOrderDetailDom(html: string): OrderDetail | null {
@@ -1306,6 +1421,10 @@ export function buildOrderRecord(
  * rows whose old product-only id represented multiple lines still require an
  * owner-approved migration/tombstone; this connector cannot infer which old
  * row should survive. */
+function nameKey(name: string | null): string {
+	return name?.replace(WHITESPACE_RE, " ").trim().toLowerCase() || "unknown";
+}
+
 export function orderItemId(
 	orderId: string,
 	item: Pick<DetailItem, "productId" | "name" | "sourcePosition">,
@@ -1315,18 +1434,17 @@ export function orderItemId(
 		"productId" | "name" | "sourcePosition"
 	>[] = [item],
 ): string {
-	const normalizedName =
-		item.name.replace(WHITESPACE_RE, " ").trim().toLowerCase() || "unknown";
-	const key = item.productId || normalizedName;
+	// A line with no name and no product id has no identity of its own: its
+	// position (the SSR orderItems index) is the id, always, so a second such
+	// line in a later read cannot move the first one's id.
+	if (item.name === null && !item.productId)
+		return `${orderId}|unknown|${item.sourcePosition ?? itemIndex}`;
+	const key = item.productId || nameKey(item.name);
 	const duplicate = siblingItems.some((sibling, siblingIndex) => {
 		if (siblingIndex === itemIndex) {
 			return false;
 		}
-		const siblingKey =
-			sibling.productId ||
-			sibling.name.replace(WHITESPACE_RE, " ").trim().toLowerCase() ||
-			"unknown";
-		return siblingKey === key;
+		return (sibling.productId || nameKey(sibling.name)) === key;
 	});
 	return duplicate
 		? `${orderId}|${key}|${item.sourcePosition ?? itemIndex}`
@@ -1347,6 +1465,7 @@ export function buildOrderItemRecord(
 		id: orderItemId(orderId, item, itemIndex, siblingItems),
 		order_id: orderId,
 		name: item.name,
+		name_unavailable_reason: item.name === null ? (item.nameUnavailableReason ?? "source_omits_name") : null,
 		department: item.department,
 		product_id: item.productId,
 		product_url: item.productUrl,

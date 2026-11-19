@@ -92,25 +92,33 @@ export const ordersSchema = z.object({
 });
 
 /**
- * order_items stream (manifest required: id, order_id, name, order_date).
+ * order_items stream (manifest required: id, order_id, order_date).
  * One record per line item on an order-detail page.
  */
-export const orderItemsSchema = z.object({
-	id: z.string().min(1).max(300),
-	order_id: z.string().regex(HEB_ORDER_ID_RE, 'order_id must start with "HEB"'),
-	name: pdppSafeText
-		.min(1)
-		.max(1024)
-		.refine((s) => !NAME_CRUFT_RE.test(s), { message: "contains UI cruft" }),
-	department: z.string().min(1).max(100).nullable(),
-	product_id: z.string().min(1).max(64).nullable(),
-	product_url: z.string().nullable(),
-	image_url: z.string().nullable(),
-	quantity: z.number().min(0).max(999).nullable(),
-	line_total: currencyStringSchema,
-	line_total_cents: centsSchema,
-	order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
-});
+export const orderItemsSchema = z
+	.object({
+		id: z.string().min(1).max(300),
+		order_id: z.string().regex(HEB_ORDER_ID_RE, 'order_id must start with "HEB"'),
+		// Null only when H-E-B serves the line with no name; the reason says so.
+		name: pdppSafeText
+			.min(1)
+			.max(1024)
+			.refine((s) => !NAME_CRUFT_RE.test(s), { message: "contains UI cruft" })
+			.nullable(),
+		name_unavailable_reason: z.enum(["source_omits_name"]).nullable(),
+		department: z.string().min(1).max(100).nullable(),
+		product_id: z.string().min(1).max(64).nullable(),
+		product_url: z.string().nullable(),
+		image_url: z.string().nullable(),
+		quantity: z.number().min(0).max(999).nullable(),
+		line_total: currencyStringSchema,
+		line_total_cents: centsSchema,
+		order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
+	})
+	.refine((r) => (r.name === null) === (r.name_unavailable_reason !== null), {
+		message: "name is null exactly when name_unavailable_reason is set",
+		path: ["name_unavailable_reason"],
+	});
 
 // Internal: shape returned by list-page extraction (pre-shape-check). Used to
 // catch list-page selector drift before it reaches the emitted-record schema —

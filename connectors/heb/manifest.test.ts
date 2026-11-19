@@ -67,3 +67,15 @@ test("heb manifest declares otp alongside manual_action and keeps the posture ho
 	assert.match(rationale, /verification code/i);
 	assert.match(rationale, /Incapsula/i);
 });
+
+test("heb order_items manifest lets name be null only with a stated reason", () => {
+	const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as {
+		streams: { name: string; schema: { required: string[]; properties: Record<string, { type: unknown; enum?: unknown; x_pdpp_role?: unknown }> } }[];
+	};
+	const { schema } = manifest.streams.find((stream) => stream.name === "order_items")!;
+	assert.deepEqual(schema.properties.name?.type, ["string", "null"]);
+	assert.equal(schema.properties.name?.x_pdpp_role, "primary-title");
+	assert.equal(schema.required.includes("name"), false);
+	assert.deepEqual(schema.properties.name_unavailable_reason?.type, ["string", "null"]);
+	assert.deepEqual(schema.properties.name_unavailable_reason?.enum, ["source_omits_name", null]);
+});

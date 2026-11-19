@@ -95,6 +95,7 @@ const ORDER_ITEM_RECORD = {
 	id: "HEB1029384756|123456789",
 	order_id: "HEB1029384756",
 	name: "H-E-B Organic 2% Reduced Fat Milk",
+	name_unavailable_reason: null,
 	department: "Dairy & eggs",
 	product_id: "123456789",
 	product_url:
@@ -450,4 +451,14 @@ test("nutrition schema rejects a negative macro value", () => {
 test("validateRecord routes profile and nutrition streams", () => {
 	assert.equal(validateRecord("profile", PROFILE_RECORD).ok, true);
 	assert.equal(validateRecord("nutrition", NUTRITION_RECORD).ok, true);
+});
+
+test("order_items schema keeps a nameless line only with its stated reason, and no reason without a null name", () => {
+	const nameless = { ...ORDER_ITEM_RECORD, name: null, name_unavailable_reason: "source_omits_name", product_id: null };
+	assert.equal(orderItemsSchema.safeParse(nameless).success, true);
+	assert.equal(orderItemsSchema.safeParse({ ...nameless, name_unavailable_reason: null }).success, false);
+	assert.equal(orderItemsSchema.safeParse({ ...ORDER_ITEM_RECORD, name_unavailable_reason: "source_omits_name" }).success, false);
+	assert.equal(orderItemsSchema.safeParse({ ...nameless, name_unavailable_reason: "other" }).success, false);
+	assert.equal(orderItemsSchema.safeParse({ ...ORDER_ITEM_RECORD, name: "" }).success, false);
+	assert.equal(orderItemsSchema.safeParse({ ...ORDER_ITEM_RECORD, name: "Quantity: 2." }).success, false);
 });

@@ -1120,7 +1120,11 @@ export async function fetchOrderDetail(
 		initialSourceItemTotal !== null &&
 		sourceItemTotal === initialSourceItemTotal &&
 		lineShape.lines === sourceItemTotal;
-	evidence.linklessLines = resolved.unresolved;
+	// Lines H-E-B serves with no name are kept as records only on a proven line
+	// count; otherwise they stay unresolved lines and the order keeps its gap.
+	const namelessKept = evidence.lineCountProven ? resolved.nameless : [];
+	detail.items.push(...namelessKept);
+	evidence.linklessLines = resolved.unresolved - namelessKept.length;
 	evidence.multiNameLines = lineShape.multiName;
 	// Distinct source lines must also become distinct records: two lines whose
 	// records share an id would overwrite one purchase with the other.
@@ -1139,7 +1143,9 @@ export async function fetchOrderDetail(
 		sourceItemTotal,
 		// Counts and shapes only: how far linkless-line resolution got. A gap
 		// leads with it because a stored gap message keeps only 300 characters.
-		linklessTrace: `ssr=${source.shape};${resolved.trace}`,
+		linklessTrace:
+			`ssr=${source.shape};${resolved.trace}` +
+			(resolved.nameless.length > 0 && namelessKept.length === 0 ? ";nameless_held=unproven_count" : ""),
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
 		...metrics(),
 		status: "hydrated",
@@ -2147,6 +2153,7 @@ async function emitOrderAndItems(
 			if (
 				deps.nutritionTargetSink &&
 				item.productId &&
+				item.name !== null &&
 				!deps.nutritionTargetSink.seenProductIds.has(item.productId)
 			) {
 				deps.nutritionTargetSink.seenProductIds.add(item.productId);

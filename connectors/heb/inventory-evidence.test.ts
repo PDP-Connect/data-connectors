@@ -13,12 +13,14 @@ import {
 	recoverPendingOrderItemDetailGaps,
 	runForwardScan,
 } from "./index.ts";
+import { orderItemsSchema } from "./schemas.ts";
 import {
 	type InventoryEvidence,
 	inventoryIsComplete,
 	inventoryMatchesSourceTotal,
 } from "./inventory-evidence.ts";
 import {
+	buildOrderItemRecord,
 	inspectOrderListParsing,
 	parseNutritionDom,
 	parseOrderDetailDom,
@@ -1151,3 +1153,102 @@ test("the detail diagnostic says which linkless step refused, in counts and shap
 	assert.match(diag(unread), /ssr=unread:order\.orderItems\.#\.product\.id:invalid_union/);
 });
 
+
+// ─── lines H-E-B serves with no name ──────────────────────────────────────
+// Invented data in the shape seen live: a weighed line with a quantity in lb and
+// a price, but no name, image, product link or product id.
+const nlLine = (quantity: number, total: string, extra = "") =>
+	`<li><span class="visuallyHidden">Item, . Quantity: ${quantity} lb. Price: ${total}.</span><img src="https://www.heb.com/static/invented.svg" alt=""><span data-qe-id="checkoutItemPrice">${total}</span><span data-qe-id="orderItemQty">Qty: ${quantity} lb</span>${extra}</li>`;
+const nlSsr = (total: string, quantity: number | null, product: Record<string, unknown> = { fullDisplayName: "" }) =>
+	({ product, quantity, totalLineItemPricePaid: { formattedAmount: total } });
+const asRecords = (r: Awaited<ReturnType<typeof resolveLinkless>>) =>
+	r.detail.items.map((item, i) => buildOrderItemRecord(order.orderId, "2026-07-14", item, i, "2026-07-15T00:00:00Z", r.detail.items));
+
+test("a left-over item with no name pairs with its linkless line by line total and is kept with name null", async () => {
+	const r = await resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + nlLine(1.2, "$3.17"));
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.equal(r.detail.items.length, 2);
+	const [named, nameless] = asRecords(r);
+	assert.equal(named?.name_unavailable_reason, null);
+	assert.deepEqual(nameless, {
+		id: `${order.orderId}|unknown|1`, order_id: order.orderId, name: null, name_unavailable_reason: "source_omits_name",
+		department: null, product_id: null, product_url: null, image_url: null,
+		quantity: 1.2, line_total: "$3.17", line_total_cents: 317, order_date: "2026-07-14",
+	});
+	assert.equal(orderItemsSchema.safeParse(nameless).success, true);
+	assert.match(r.linklessTrace ?? "", /;stop=nameless;nameless=1;/);
+	assert.doesNotMatch(r.linklessTrace ?? "", /3\.17/);
+});
+
+test("an order with nameless lines passes the order-total proof once every record is accepted", async () => {
+	const items = [ssrItem("500"), nlSsr("$3.17", 1.2), nlSsr("$8.40", 2.1)];
+	const r = await resolveLinkless(items, itemRow(0) + nlLine(1.2, "$3.17") + nlLine(2.1, "$8.40"));
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.equal(r.sourceItemTotal, 3);
+	// fetchOrderDetail leaves acceptedIds empty; the caller sets it after emitting.
+	assert.equal(inventoryMatchesSourceTotal(r.evidence, 3), false);
+	const accepted = { ...r.evidence, acceptedIds: [...r.evidence.sourceIds] };
+	assert.equal(inventoryMatchesSourceTotal(accepted, 3), true);
+	assert.equal(accepted.duplicateRecordIds, 0);
+	assert.ok(asRecords(r).every((record) => orderItemsSchema.safeParse(record).success));
+});
+
+test("nameless lines get ids from their SSR position: distinct, stable across reads, and clear of named ids", async () => {
+	const items = [nlSsr("$8.40", 2.1), ssrItem("500"), nlSsr("$3.17", 1.2)];
+	const rows = nlLine(2.1, "$8.40") + itemRow(0) + nlLine(1.2, "$3.17");
+	const [first, second] = [await resolveLinkless(items, rows), await resolveLinkless(items, rows)];
+	const ids = (r: typeof first) => asRecords(r).map((record) => record.id);
+	assert.deepEqual(ids(first), ids(second));
+	assert.deepEqual([...ids(first)].sort(), [`${order.orderId}|500`, `${order.orderId}|unknown|0`, `${order.orderId}|unknown|2`]);
+	assert.equal(first.evidence.duplicateRecordIds, 0);
+	assert.equal(inventoryMatchesSourceTotal({ ...first.evidence, acceptedIds: [...first.evidence.sourceIds] }, 3), true);
+});
+
+test("a tie among nameless left-overs is accepted only when their quantity and total match", async () => {
+	const same = await resolveLinkless(
+		[ssrItem("500"), nlSsr("$3.17", 1.2), nlSsr("$3.17", 1.2)],
+		itemRow(0) + nlLine(1.2, "$3.17") + nlLine(1.2, "$3.17"),
+	);
+	assert.equal(same.evidence.linklessLines, 0);
+	assert.equal(new Set(asRecords(same).map((record) => record.id)).size, 3);
+	const differ = await resolveLinkless(
+		[ssrItem("500"), nlSsr("$3.17", 1.2), nlSsr("$3.17", 1.3)],
+		itemRow(0) + nlLine(1.2, "$3.17") + nlLine(1.3, "$3.17"),
+	);
+	assert.equal(differ.evidence.linklessLines, 2);
+	assert.match(differ.linklessTrace ?? "", /;stop=unnamed;/);
+});
+
+test("nameless lines stay unresolved, with today's trace, unless every check passes", async () => {
+	const fails = await Promise.all([
+		// A line total that no left-over has.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + nlLine(1.2, "$3.18")),
+		// A line with a different total than its only left-over, and one left-over short.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2), nlSsr("$4.00", 1)], itemRow(0) + nlLine(1.2, "$3.17") + nlLine(1, "$3.17")),
+		// The line's quantity contradicts the item's.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + nlLine(1.5, "$3.17")),
+		// The line's sentence and its price span disagree.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + nlLine(1.2, "$3.17").replace("Price: $3.17.", "Price: $9.99.")),
+		// The line shows a name.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + nlLine(1.2, "$3.17", "<p>Invented Bakery Loaf</p>")),
+		// The line shows a product image.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + nlLine(1.2, "$3.17", '<img src="https://images.heb.com/is/image/HEBGrocery/prd-small/000000999.jpg">')),
+		// The left-over has a product page URL, an image, or a product id.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, { fullDisplayName: "", productPageURL: "https://www.heb.com/product-detail/x/501" })], itemRow(0) + nlLine(1.2, "$3.17")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, { fullDisplayName: "", image: "https://images.heb.com/x.jpg" })], itemRow(0) + nlLine(1.2, "$3.17")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, { id: "501", fullDisplayName: "" })], itemRow(0) + nlLine(1.2, "$3.17")),
+		// The left-over has no line total.
+		resolveLinkless([ssrItem("500"), { product: { fullDisplayName: "" }, quantity: 1.2 }], itemRow(0) + nlLine(1.2, "$3.17")),
+	]);
+	for (const [i, r] of fails.entries()) {
+		assert.equal(r.evidence.linklessLines >= 1, true, `case ${i}`);
+		assert.doesNotMatch(r.linklessTrace ?? "", /stop=nameless/, `case ${i}`);
+		assert.equal(inventoryMatchesSourceTotal({ ...r.evidence, acceptedIds: [...r.evidence.sourceIds] }, r.sourceItemTotal), false, `case ${i}`);
+		assert.ok(r.detail.items.every((item) => item.name !== null), `case ${i}`);
+	}
+});
+
+test("an SSR item that names itself but has no product id still fails the whole SSR read", async () => {
+	const r = await resolveLinkless([{ product: { fullDisplayName: "Named, no id" }, quantity: 1 }], itemRow(0));
+	assert.match(r.linklessTrace ?? "", /ssr=unread:/);
+});

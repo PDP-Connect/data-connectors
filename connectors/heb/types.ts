@@ -35,7 +35,10 @@ export interface DetailItem {
 	department: string | null;
 	imageUrl: string | null;
 	lineTotal: string | null;
-	name: string;
+	/** Null only for a line H-E-B serves with no name (see nameUnavailableReason). */
+	name: string | null;
+	/** Why `name` is null: H-E-B's order payload leaves the name out. */
+	nameUnavailableReason?: "source_omits_name";
 	productId: string | null;
 	productUrl: string | null;
 	quantity: number | null;
@@ -83,7 +86,8 @@ export interface OrderItemRecord {
 	image_url: string | null;
 	line_total: string | null;
 	line_total_cents: number | null;
-	name: string;
+	name: string | null;
+	name_unavailable_reason: "source_omits_name" | null;
 	order_date: string;
 	order_id: string;
 	product_id: string | null;
