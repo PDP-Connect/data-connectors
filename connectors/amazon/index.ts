@@ -216,7 +216,10 @@ const RETRY_FACTOR = 2;
 const RETRY_COUNT = 2;
 // Keep optional detail enrichment comfortably below the controller watchdog;
 // recovery-only runs can drain the durable gaps without re-walking the list.
-const MAX_DETAIL_ATTEMPTS_PER_RUN = 200;
+// With the 2-4 s pace after each detail page, 100 pages fit well inside the
+// host's run deadline; older orders are read from the list and their detail
+// is deferred to later runs.
+const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
 const MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN = 3;
 // Module-scoped regexes (Biome useTopLevelRegex)
 const RETRYABLE_ERROR_RE = /timeout|ECONN|ETIMEDOUT|net::|5\d\d/i;
@@ -2665,6 +2668,16 @@ if (isMainModule(import.meta.url)) {
 						message: `Amazon stopped the order history at ${year}; kept the ${ordersEmittedThisRun} orders read before it.`,
 						diagnostics: { code, year, orders_kept: ordersEmittedThisRun },
 					});
+					// The orders read are real: never follow with "no orders on this store".
+					ordersSeen += ordersEmittedThisRun;
+					// Save fingerprints and hydration for the orders read; the stopped
+					// year has no entry in newYearsState, so nothing is frozen or advanced.
+					await emit({
+						type: "STATE",
+						stream: "orders",
+						cursor: buildOrdersStateCursor(),
+					});
+					ordersStateEmitted = true;
 					break;
 				}
 				const {
