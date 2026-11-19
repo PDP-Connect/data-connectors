@@ -760,7 +760,8 @@ const NAMELESS_VOCABULARY = new Set([
 ]);
 const NAMELESS_ORDERED_RE = /Quantity:\s*(\d+(?:\.\d+)?)/i;
 const NAMELESS_SENTENCE_PRICE_RE = /Price:\s*(\$\d[\d,]*\.\d{2})/i;
-const NAMELESS_ACTUAL_RE = /^Qty:?\s*(\d+(?:\.\d+)?)/i;
+// A complete number: it ends at the end of the text, at whitespace or at a unit.
+const NAMELESS_ACTUAL_RE = /^Qty:?\s*(\d+(?:\.\d+)?)(?=$|\s|[A-Za-z])/i;
 const NAMELESS_ATTRIBUTES = ["aria-label", "title", "alt", "aria-labelledby"];
 
 /** A text's shape, built only from a fixed alphabet: vocabulary words (lower
@@ -793,12 +794,20 @@ type NamelessLine =
  * outside the fixed vocabulary. `actual` is the quantity span's one first
  * number (the charged amount, as the named path reads it); `ordered` is the
  * accessible sentence's quantity. A refusal is a fixed code, never text. */
-function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine {
+function namelessLineFacts(own: Element, hasProductImage: boolean, document: Document): NamelessLine {
 	if (own.querySelector("a") || hasProductImage) return { ok: false, reason: "text" };
 	const elements = [own, ...own.querySelectorAll("*")];
-	for (const element of elements)
+	for (const element of elements) {
 		for (const attribute of NAMELESS_ATTRIBUTES)
-			if (maskText(element.getAttribute(attribute) ?? "").unknown) return { ok: false, reason: "naming_attr" };
+			if (attribute !== "aria-labelledby" && maskText(element.getAttribute(attribute) ?? "").unknown)
+				return { ok: false, reason: "naming_attr" };
+		// aria-labelledby names other elements: read the text they hold, in the
+		// whole document; a reference that resolves to nothing is unproven.
+		for (const id of (element.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean)) {
+			const target = [...document.querySelectorAll("[id]")].find((candidate) => candidate.getAttribute("id") === id);
+			if (!target || maskText(target.textContent ?? "").unknown) return { ok: false, reason: "naming_attr" };
+		}
+	}
 	const totals = new Set<string>();
 	const structuredTotal = normText(own.querySelector('[data-qe-id="checkoutItemPrice"]'));
 	if (structuredTotal) totals.add(structuredTotal);
@@ -819,14 +828,10 @@ function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine
 		if (sentencePrice) totals.add(sentencePrice);
 	}
 	if (totals.size !== 1) return { ok: false, reason: "total" };
-	const charged = new Set<number | null>(
-		[...own.querySelectorAll('[data-qe-id="orderItemQty"]')].map((span) => {
-			const first = NAMELESS_ACTUAL_RE.exec(normText(span))?.[1];
-			return first ? Number(first) : null;
-		}),
-	);
-	const [actual] = [...charged];
-	if (charged.size !== 1 || actual === null || actual === undefined) return { ok: false, reason: "qty" };
+	const spans = [...own.querySelectorAll('[data-qe-id="orderItemQty"]')];
+	const first = spans.length === 1 ? NAMELESS_ACTUAL_RE.exec(normText(spans[0]))?.[1] : undefined;
+	if (first === undefined) return { ok: false, reason: "qty" };
+	const actual = Number(first);
 	return { ok: true, total: [...totals][0]!, actual, ordered };
 }
 
@@ -839,6 +844,7 @@ function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine
  * Otherwise the reason the order was held, as a fixed code. */
 function namelessRecords(
 	lines: readonly { own: Element; hasProductImage: boolean }[],
+	document: Document,
 	items: readonly {
 		productId: string | null;
 		productUrl: string | null;
@@ -859,7 +865,7 @@ function namelessRecords(
 	}
 	const facts: Extract<NamelessLine, { ok: true }>[] = [];
 	for (const line of lines) {
-		const fact = namelessLineFacts(line.own, line.hasProductImage);
+		const fact = namelessLineFacts(line.own, line.hasProductImage, document);
 		if (!fact.ok) return { held: fact.reason };
 		facts.push(fact);
 	}
@@ -911,7 +917,6 @@ export function resolveLinklessOrderItems(
 		fullDisplayName: string | null;
 		productUrl: string | null;
 		lineTotal: string | null;
-		unnamed?: { state: string; strings: readonly { path: string; value: string }[] };
 		naming?: "none" | "found" | "incomplete";
 	}[],
 ): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[] } {
@@ -1047,46 +1052,6 @@ export function resolveLinklessOrderItems(
 	// Why each unresolved linkless line stayed unresolved, as fixed classes.
 	const why = new Map<string, number>();
 	let linklessImage: string | null = null;
-	// The displayed texts of the linkless lines left unresolved.
-	const remainingNames = new Set<string>();
-	// The first unresolved linkless line's elements, in document order: each
-	// element with its own text as tag, letter-only data-qe-id and a fixed text
-	// class, and each image by whether its alt text is a word. Never text.
-	const domShape = (own: Element) => {
-		const parts: string[] = [];
-		for (const element of own.querySelectorAll("*")) {
-			const tag = element.tagName.toLowerCase();
-			let part: string | null = null;
-			if (tag === "img") {
-				const alt = element.getAttribute("alt");
-				part = `img:alt_${alt === null ? "none" : !alt.trim() ? "empty" : /[a-z]/i.test(alt) ? "word" : "other"}`;
-			} else {
-				const ownText = [...element.childNodes]
-					.filter((node) => node.nodeType === 3)
-					.map((node) => node.textContent ?? "")
-					.join(" ")
-					.replace(/\s+/g, " ")
-					.trim();
-				if (ownText) {
-					const qe = element.getAttribute("data-qe-id");
-					const id = qe === null ? "" : `.${/^[A-Za-z]{1,32}$/.test(qe) ? qe : "?"}`;
-					const kind = /^\$\s?\d[\d,]*(?:\.\d{2})?$/.test(ownText) ? "price"
-						: /^qty\b/i.test(ownText) ? "qty"
-						: /^\d+$/.test(ownText) ? "num"
-						: /[a-z]/i.test(ownText) ? "word" : "other";
-					part = `${tag}${id}:${kind}`;
-				}
-			}
-			if (part === null) continue;
-			if (parts.length >= 8 || [...parts, part].join(",").length > 110) {
-				parts.push("more");
-				break;
-			}
-			parts.push(part);
-		}
-		return parts.join(",") || "none";
-	};
-	let linklessDom: string | null = null;
 	const resolveLine = (line: Element, index: number, unordered = false) => {
 		const item = items[index]!;
 		claimed.add(index);
@@ -1122,8 +1087,6 @@ export function resolveLinklessOrderItems(
 		if (refusal !== null || index === undefined) {
 			why.set(refusal ?? "none", (why.get(refusal ?? "none") ?? 0) + 1);
 			linklessImage ??= imageShape(own);
-			linklessDom ??= domShape(own);
-			for (const name of names) if (name) remainingNames.add(name);
 			remaining.push(line);
 			// Even a key naming an already claimed item forbids elimination.
 			if (imageMatches.length || textMatches.length) eliminationSafe = false;
@@ -1148,6 +1111,7 @@ export function resolveLinklessOrderItems(
 				const own = ownCopy(line);
 				return { own, hasProductImage: ownImageIds(own).size > 0 };
 			}),
+			document,
 			items,
 			unclaimed,
 		)
@@ -1159,33 +1123,6 @@ export function resolveLinklessOrderItems(
 		// is not. Never attach a line's quantity/price/department to that guess.
 		for (const [i, line] of remaining.entries()) resolveLine(line, unclaimed[i]!, remaining.length > 1);
 		eliminated = remaining.length;
-	}
-	// For the first unclaimed item with no name: how H-E-B left the name out,
-	// and key paths only (never values) of its strings that equal a remaining
-	// line's text (un_hit), else contain or sit inside one (un_sub), and of its
-	// name-like keys (un_keys).
-	const unnamedItem = ledgerComplete
-		? unclaimed.map((i) => items[i]!).find((item) => item.fullDisplayName === null)
-		: undefined;
-	let unnamedTrace = "";
-	if (unnamedItem) {
-		const strings = unnamedItem.unnamed?.strings ?? [];
-		// At most `max` paths within `budget` characters; "more" marks any left out.
-		const paths = (keep: (value: string, path: string) => boolean, max: number, budget = 70) => {
-			const shown: string[] = [];
-			let more = false;
-			for (const path of new Set(strings.filter((s) => keep(normalize(s.value), s.path)).map((s) => s.path))) {
-				if (shown.length < max && [...shown, path].join("+").length <= budget) shown.push(path);
-				else more = true;
-			}
-			return [...shown, ...(more ? ["more"] : [])].join("+");
-		};
-		const hit = paths((value) => remainingNames.has(value), 3);
-		const partial = hit ? "" : paths((value) => value.length >= 4 &&
-			[...remainingNames].some((name) => name.length >= 4 && (name.includes(value) || value.includes(name))), 3);
-		const keys = paths((_, path) => /(?:^|\.)[^.]*(?:name|title|desc|label)[^.]*$/i.test(path), 4);
-		unnamedTrace = `;un=${unnamedItem.unnamed?.state ?? "-"};un_hit=${hit || "-"}` +
-			(partial ? `;un_sub=${partial}` : "") + `;un_keys=${keys || "-"}`;
 	}
 	const resolvedHtml = document.toString();
 	const parsed = parseOrderDetailDom(resolvedHtml);
@@ -1222,8 +1159,6 @@ export function resolveLinklessOrderItems(
 		(namelessItems
 			? `;stop=nameless;nameless=${namelessItems.length}`
 			: `;stop=${stop}` + (namelessHeld ? `;nameless_held=${namelessHeld}` : "")) +
-		(stop === "unnamed" && !namelessItems ? `;ll_dom=${linklessDom ?? "-"}` : "") +
-		unnamedTrace +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
 		`;ll_img=${linklessImage ?? "-"}` +
 		(unfitImage ? `;unfit_img=${unfitImage}` : "");
@@ -1491,7 +1426,8 @@ export function orderItemId(
 	// reordered or inserted line cannot move it to a different purchase.
 	if (item.name === null && !item.productId) {
 		const same = (other: (typeof siblingItems)[number]) =>
-			other.name === null && !other.productId && other.lineTotal === item.lineTotal && other.quantity === item.quantity;
+			other.name === null && !other.productId &&
+			parseCurrencyCents(other.lineTotal ?? null) === parseCurrencyCents(item.lineTotal ?? null) && other.quantity === item.quantity;
 		const k = siblingItems.slice(0, itemIndex).filter(same).length;
 		return `${orderId}|nameless|${parseCurrencyCents(item.lineTotal ?? null)}|${item.quantity}|${k}`;
 	}

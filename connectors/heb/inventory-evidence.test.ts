@@ -1058,65 +1058,27 @@ test("the diagnostic names why elimination refused: a line naming a claimed item
 	assert.equal(claimedText.evidence.linklessLines, 1);
 	assert.match(claimedText.linklessTrace ?? "", /elim:0;stop=unsafe;why=txt_claimed:1;ll_img=heb_image\/hebgrocery_id\/jpg(;|$)/);
 	assert.equal(unnamed.evidence.linklessLines, 1);
-	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
+	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;nameless_held=[a-z_]+(?::[^;]*)?;why=none:1;ll_img=/);
 	assert.doesNotMatch(`${claimedText.linklessTrace}${unnamed.linklessTrace}`, /500|501|999|SSR/);
 });
 
-test("an unnamed left-over item: the diagnostic says how the name is missing and which of its fields hold the line's text, never their values", async () => {
-	const [inField, nowhere, blank] = await Promise.all([
-		resolveLinkless(
-			[ssrItem("500"), {
-				product: { id: "501", fullDisplayName: null, displayName: "Invented Bakery Loaf", brand: { name: "Invented Kitchen" }, tags: ["Invented Bakery Loaf"] },
-				quantity: 1,
-			}],
-			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
-		),
-		resolveLinkless(
-			[ssrItem("500"), { product: { id: "501", fullDisplayName: null, productLabel: "Invented Other Thing" }, quantity: 1 }],
-			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
-		),
-		resolveLinkless(
-			[ssrItem("500"), { product: { id: "501", fullDisplayName: "  ", longName: "Invented Bakery Loaf, Sliced" }, quantity: 1 }],
-			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
-		),
-	]);
-	for (const r of [inField, nowhere, blank]) assert.equal(r.evidence.linklessLines, 1);
-	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
-	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
-	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
-	assert.doesNotMatch(`${inField.linklessTrace}${nowhere.linklessTrace}${blank.linklessTrace}`, /Invented|Bakery|Kitchen|Sliced|500|501|999/);
-});
-
-test("the unnamed-item paths print only lower camelCase letter keys, and each field stays within its budget", async () => {
-	const longKey = "a".repeat(20);
-	const [dataKeys, long] = await Promise.all([
-		resolveLinkless(
-			[ssrItem("500"), { product: { id: "501", fullDisplayName: null, OrganicLoaf: "Invented Bakery Loaf", item4417: { label: "x" } }, quantity: 1 }],
-			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
-		),
-		resolveLinkless(
-			[ssrItem("500"), { product: { id: "501", fullDisplayName: null,
-				[`${longKey}b`]: { [`${longKey}Name`]: "x" }, [`${longKey}c`]: { [`${longKey}Name`]: "x" }, [`${longKey}d`]: { [`${longKey}Name`]: "x" } }, quantity: 1 }],
-			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
-		),
-	]);
-	assert.match(dataKeys.linklessTrace ?? "", /;un=null;un_hit=product\.\?;un_keys=product\.\?\.label;why=/);
-	assert.doesNotMatch(dataKeys.linklessTrace ?? "", /Organic|4417/);
-	const keys = /;un_keys=([^;]*);/.exec(long.linklessTrace ?? "")?.[1] ?? "";
-	assert.ok(keys.length <= 75, keys);
-	assert.match(keys, /\+?more$/);
-});
-
-test("the linkless line's element shape leads the unnamed diagnostic: tags, letter-only qe ids and text classes, never text", async () => {
+test("the gap message carries only fixed codes and counts: no DOM ids, no SSR key names, no text", async () => {
 	const line = '<li><img src="https://www.heb.com/static/invented.svg" alt="Invented Bakery Loaf"><div><span data-qe-id="itemRowDetailsName">Invented Bakery Loaf</span><p></p></div>' +
 		'<span data-qe-id="orderItemQty">Qty: 2</span><span data-qe-id="checkoutItemPrice">$6.00</span><span data-qe-id="item4417">12</span></li>';
-	const r = await resolveLinkless(
-		[ssrItem("500"), { product: { id: "501", fullDisplayName: "" }, quantity: 2, totalLineItemPricePaid: { formattedAmount: "$6.00" } }],
-		itemRow(0) + line,
-	);
-	assert.equal(r.evidence.linklessLines, 1);
-	assert.match(r.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
-	assert.doesNotMatch(r.linklessTrace ?? "", /Invented|Bakery|4417|6\.00/);
+	const reads = await Promise.all([
+		resolveLinkless([ssrItem("500"), { product: { id: "501", fullDisplayName: null, displayName: "Invented Bakery Loaf", brand: { name: "Invented Kitchen" }, OrganicLoaf: "x", item4417: { label: "x" } }, quantity: 1 }],
+			itemRow(0) + linklessLine("999", "Invented Bakery Loaf")),
+		resolveLinkless([ssrItem("500"), { product: { id: "501", fullDisplayName: "  ", longName: "Invented Bakery Loaf, Sliced" }, quantity: 1 }],
+			itemRow(0) + linklessLine("999", "Invented Bakery Loaf")),
+		resolveLinkless([ssrItem("500"), { product: { id: "501", fullDisplayName: "" }, quantity: 2, totalLineItemPricePaid: { formattedAmount: "$6.00" } }], itemRow(0) + line),
+	]);
+	for (const r of reads) {
+		assert.equal(r.evidence.linklessLines, 1);
+		const trace = r.linklessTrace ?? "";
+		assert.match(trace, /;stop=unnamed;nameless_held=(?:naming_key|naming_attr|text|qty|total|pairing|count|scan_incomplete)(?::[^;]*)?;why=/);
+		assert.doesNotMatch(trace, /ll_dom|;un=|un_hit|un_sub|un_keys|qe|span|itemRow/);
+		assert.doesNotMatch(trace, /Invented|Bakery|Kitchen|Sliced|Organic|displayName|longName|brand|item4417|4417|500|501|999|6\.00/);
+	}
 });
 
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {
@@ -1265,9 +1227,14 @@ test("a missing, numberless or conflicting charged quantity holds the line; no f
 	const doubled = base("Qty: 1.2 lb").replace("</li>", '<span data-qe-id="orderItemQty">Qty: 1.3 lb</span></li>');
 	const reads = await Promise.all([base(""), base("Qty: lb"), doubled, base("Qty: 1.2 lb").replace("</li>", '<span data-qe-id="orderItemQty">Qty: 1.2 of 2 lb</span></li>')]
 		.map((row) => resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + row)));
-	assert.deepEqual(reads.map(heldOf), ["qty", "qty", "qty", undefined]);
-	assert.ok(reads.slice(0, 3).every((r) => r.evidence.linklessLines === 1));
-	assert.equal(reads[3]?.evidence.linklessLines, 0, "two spans stating the same first number are one charged amount");
+	assert.deepEqual(reads.map(heldOf), ["qty", "qty", "qty", "qty"], "two spans hold, even when they state the same number");
+	assert.ok(reads.every((r) => r.evidence.linklessLines === 1));
+	const truncated = await Promise.all(["Qty: 1.", "Qty: 1.2.3 lb", "Qty: 1.2-3", "Qty: ."].map((text) =>
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + base(text))));
+	assert.deepEqual(truncated.map(heldOf), ["qty", "qty", "qty", "qty"]);
+	const complete = await Promise.all(["Qty: 1.2", "Qty: 1.2lb", "Qty: 1.2 lb", "Qty: 1.2 of 1.3 lb"].map((text) =>
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + base(text))));
+	assert.ok(complete.every((r) => r.evidence.linklessLines === 0));
 });
 
 test("a held nameless order says why with a fixed code, never a source value", async () => {
@@ -1343,4 +1310,35 @@ test("nameless lines are held, not emitted, when the line count is not proven", 
 test("an SSR item that names itself but has no product id still fails the whole SSR read", async () => {
 	const r = await resolveLinkless([{ product: { fullDisplayName: "Named, no id" }, quantity: 1 }], itemRow(0));
 	assert.match(r.linklessTrace ?? "", /ssr=unread:/);
+});
+
+test("aria-labelledby is read through the element it names, anywhere in the document; an unresolved reference holds the line", async () => {
+	const line = (ref: string) => realLine({ ordered: 1.2, actualText: "Qty: 1.2 lb", total: "$3.17", attrs: ` aria-labelledby="${ref}"` });
+	const target = (id: string, text: string) => `<span id="${id}">${text}</span>`;
+	// The collected page holds only the order's lines, so a referenced element
+	// is found inside another line (here the named one) or not at all.
+	const read = (ref: string, targets = "") =>
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0).replace("</li>", `${targets}</li>`) + line(ref));
+	const [word, vocab, twoOneBad, missing, outside] = await Promise.all([
+		read("lbl", target("lbl", "Zq9x Bread")),
+		read("lbl", target("lbl", "Avg. 1.2 lb")),
+		read("a b", target("a", "lb") + target("b", "Zq9x Bread")),
+		read("gone"),
+		read("lbl", target("other", "Café Ñandú")),
+	]);
+	assert.deepEqual([word, twoOneBad, missing, outside].map(heldOf), ["naming_attr", "naming_attr", "naming_attr", "naming_attr"]);
+	assert.equal(vocab.evidence.linklessLines, 0, vocab.linklessTrace);
+	for (const r of [word, twoOneBad, missing, outside]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread|Caf|gone|lbl/);
+});
+
+test("two nameless lines whose cents are written differently still get distinct ids", async () => {
+	const r = await resolveLinkless(
+		[ssrItem("500"), nlSsr("$3.10", 1.2), nlSsr("$3.1", 1.2)],
+		itemRow(0) + nlLine(1.2, "$3.10") + nlLine(1.2, "$3.1"),
+	);
+	assert.equal(r.evidence.linklessLines, 0);
+	const ids = asRecords(r).map((record) => record.id);
+	assert.equal(new Set(ids).size, 3);
+	assert.deepEqual(ids.slice(1), [`${order.orderId}|nameless|310|1.2|0`, `${order.orderId}|nameless|310|1.2|1`]);
+	assert.equal(r.evidence.duplicateRecordIds, 0);
 });

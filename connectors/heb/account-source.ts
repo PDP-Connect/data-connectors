@@ -154,9 +154,6 @@ export interface SourceOrderItem {
 	/** The item's `totalLineItemPricePaid.formattedAmount` when it is a
 	 * non-blank string; the key that pairs a nameless item with its line. */
 	lineTotal: string | null;
-	/** Only when fullDisplayName is null, for diagnostics: how H-E-B left the
-	 * name out, and the item's non-blank strings by key path. */
-	unnamed?: UnnamedSourceItem;
 	/** Only when fullDisplayName is null: whether any non-blank string sits
 	 * under a key that could carry a name, link or image, at any depth. */
 	naming?: "none" | "found" | "incomplete";
@@ -186,39 +183,6 @@ function namingScan(raw: unknown): "none" | "found" | "incomplete" {
 	}
 	return "none";
 }
-
-export interface UnnamedSourceItem {
-	state: "absent" | "null" | "blank";
-	/** `path` joins key names with dots, `#` for an array index and `?` for any
-	 * key that is not a lower camelCase word of letters, so a key that carries an
-	 * id or a name is never printed. At most 64, at most 4 levels deep. */
-	strings: { path: string; value: string }[];
-}
-
-function stringLeaves(value: unknown, path: string, depth: number, out: UnnamedSourceItem["strings"]): void {
-	if (out.length >= 64) return;
-	if (typeof value === "string") {
-		if (value.trim()) out.push({ path: path.slice(1), value });
-		return;
-	}
-	if (depth >= 4 || value === null || typeof value !== "object") return;
-	if (Array.isArray(value)) {
-		for (const element of value.slice(0, 8)) stringLeaves(element, `${path}.#`, depth + 1, out);
-		return;
-	}
-	for (const [key, element] of Object.entries(value))
-		stringLeaves(element, `${path}.${/^[a-z][A-Za-z]{0,31}$/.test(key) ? key : "?"}`, depth + 1, out);
-}
-
-function unnamedSourceItem(raw: unknown): UnnamedSourceItem {
-	const product = (raw as { product?: Record<string, unknown> }).product ?? {};
-	const name = product.fullDisplayName;
-	const strings: UnnamedSourceItem["strings"] = [];
-	stringLeaves(raw, "", 0, strings);
-	return { state: name === undefined ? "absent" : name === null ? "null" : "blank", strings };
-}
-
-
 
 function productPageUrl(value: string | null | undefined, productId: string): string | null {
 	if (!value) return null;
@@ -295,7 +259,7 @@ export function readSourceOrderItems(
 				? item.quantity
 				: null,
 		lineTotal: namedAmount(item.totalLineItemPricePaid?.formattedAmount),
-		...(item.product?.fullDisplayName ? {} : { unnamed: unnamedSourceItem(rawItems[index]), naming: namingScan(rawItems[index]) }),
+		...(item.product?.fullDisplayName ? {} : { naming: namingScan(rawItems[index]) }),
 	}));
 	const quantityTypes = [...new Set(result.data.order.orderItems.map((item) => typeof item.quantity))].sort();
 	return { items, shape: `${items.length},qty:${quantityTypes.join("|") || "none"}` };
