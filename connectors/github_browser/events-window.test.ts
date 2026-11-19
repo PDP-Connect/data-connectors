@@ -132,3 +132,25 @@ test("more than 300 distinct served events fail closed with a bounded reason and
 	assert.deepEqual(messages.map(m => m.type), ["SKIP_RESULT"]);
 	assert.equal((messages[0]?.diagnostics as { cause?: string }).cause, "events_window_exceeded");
 });
+
+test("a review's own URLs are bound to the pull request even when the PR object is full", () => {
+	const fullPr = { ...compactPr, title: "Invented title", body: null, html_url: "https://github.com/sample-owner/demo/pull/7" };
+	const withReview = (fields: Record<string, unknown>) => {
+		const event = review(fullPr);
+		Object.assign(event.payload.review, fields);
+		return parseLegacyEventPageItem(event);
+	};
+	assert.equal(withReview({}).complete, true);
+	assert.equal(withReview({ pull_request_url: fullPr.url }).complete, true);
+	assert.equal(withReview({ html_url: null }).complete, true);
+	for (const fields of [
+		{ html_url: "https://github.com/sample-owner/demo/pull/8#pullrequestreview-1" },
+		{ html_url: "https://github.com/other-owner/demo/pull/7#pullrequestreview-1" },
+		{ pull_request_url: "https://api.github.com/repos/sample-owner/demo/pulls/8" },
+		{ pull_request_url: null },
+	]) {
+		const parsed = withReview(fields);
+		assert.equal(parsed.complete, false);
+		assert.ok(parsed.unreadableFields.includes("url"));
+	}
+});

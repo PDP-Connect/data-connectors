@@ -1307,15 +1307,19 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 			// The Events API sends a review's pull request as a compact reference: no title
 			// by source contract, so the title stays null. A present non-string title vetoes.
 			const compact = isCompactPullRequestReference(pr, value.repo);
-			// The review's own URLs must name that same pull request: its number and repository.
+			// The review's own URLs must name that same pull request, whatever form the PR
+			// object takes. An omitted URL proves nothing wrong. An explicit null html_url is
+			// stored as a null url, as before; a null pull_request_url is a witness the source
+			// always serves, so it is unreadable.
+			const validNumber = typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
 			const pullUrl = `https://github.com/${value.repo}/pull/${pr.number}`;
-			const boundReview = compact &&
-				(review.pull_request_url === undefined || review.pull_request_url === pr.url) &&
+			const apiUrl = typeof pr.url === "string" ? pr.url : `https://api.github.com/repos/${value.repo}/pulls/${pr.number}`;
+			const reviewUrlsBound = (review.pull_request_url === undefined || (validNumber && review.pull_request_url === apiUrl)) &&
 				(review.html_url === undefined || review.html_url === null ||
-					(typeof review.html_url === "string" && (review.html_url === pullUrl || review.html_url.startsWith(`${pullUrl}#`))));
-			requireField("title", boundReview || nullableText(pr.title));
+					(validNumber && typeof review.html_url === "string" && (review.html_url === pullUrl || review.html_url.startsWith(`${pullUrl}#`))));
+			requireField("title", (compact && reviewUrlsBound) || nullableText(pr.title));
 			requireField("body", nullableText(review.body));
-			requireField("url", nullableText(review.html_url) && (!compact || boundReview));
+			requireField("url", nullableText(review.html_url) && reviewUrlsBound);
 			break;
 		}
 		case "PullRequestReviewCommentEvent":
