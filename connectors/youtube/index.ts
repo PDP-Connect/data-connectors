@@ -223,6 +223,36 @@ export function setHistoryLoopCallDeadlineMsForTest(ms: number): number {
 	return previous;
 }
 
+/**
+ * The whole history path, from the browser-date evaluation to the last STATE
+ * acknowledgement, must finish inside this one outer deadline. It covers every
+ * await under it, including any an inner deadline misses; the inner deadlines
+ * only make the failure reason more specific.
+ */
+export const HISTORY_OUTER_DEADLINE_MS = 600_000;
+let historyOuterDeadlineMs = HISTORY_OUTER_DEADLINE_MS;
+/** Test seam: a short outer deadline. Returns the previous value. */
+export function setHistoryOuterDeadlineMsForTest(ms: number): number {
+	const previous = historyOuterDeadlineMs;
+	historyOuterDeadlineMs = ms;
+	return previous;
+}
+
+/** "done" when the work settled in time (its rejection propagates); "expired" otherwise. */
+async function raceOuterDeadline(work: Promise<void>): Promise<"done" | "expired"> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work.then(() => "done" as const),
+			new Promise<"expired">((resolve) => {
+				timer = setTimeout(() => resolve("expired"), historyOuterDeadlineMs);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 class HistoryLoopTimeout extends Error {
 	readonly reason: string;
 	constructor(reason: string) {
@@ -249,8 +279,31 @@ async function loopCall<T>(
 	}
 }
 
+/**
+ * True when the work settled in time; false when it did not. A rejection
+ * propagates. The timer is unref'd, so a long wait left behind by an abandoned
+ * call cannot keep the process alive.
+ */
+async function settlesWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work.then(() => true),
+			new Promise<false>((resolve) => {
+				timer = setTimeout(() => resolve(false), ms);
+				(timer as { unref?: () => void }).unref?.();
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 /** The value, or null when it does not settle in time or rejects. */
-async function withinDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+async function withinDeadline<T>(
+	work: Promise<T>,
+	ms: number,
+): Promise<T | null> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([
@@ -1434,10 +1487,18 @@ async function readHistoryVideoList(
 ): Promise<VideoReadResult> {
 	const startedAt = performance.now();
 	const responseTracker = new HistoryResponseTracker(page);
-	await page.goto(url, {
-		waitUntil: "domcontentloaded",
-		timeout: HISTORY_TIME_BUDGET_MS,
-	});
+	// The bridge's own goto timeout is not trusted: stop waiting a little after it.
+	const navigated = await settlesWithin(
+		page.goto(url, {
+			waitUntil: "domcontentloaded",
+			timeout: HISTORY_TIME_BUDGET_MS,
+		}),
+		HISTORY_TIME_BUDGET_MS + historyLoopCallDeadlineMs,
+	);
+	if (!navigated) {
+		responseTracker.dispose();
+		throw new Error("youtube_history_page_unreadable");
+	}
 	let remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
 	if (remainingMs <= 0) {
 		responseTracker.dispose();
@@ -2488,108 +2549,157 @@ export async function collectYoutubeBrowser(
 			});
 			return;
 		}
-		const priorCursor =
-			ctx.collectionMode === "full_refresh"
-				? undefined
-				: (ctx.state?.watch_history as HistoryCursor | undefined);
-		const readBrowserDate = () => {
-			const now = new Date();
-			return [now.getFullYear(), now.getMonth(), now.getDate()];
-		};
-		const browserDate = await page.evaluate(readBrowserDate);
-		const dateReference =
-			Array.isArray(browserDate) && browserDate.length === 3
-				? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
-				: new Date(capturedAt);
-		let unresolvedDateCount = 0;
-		const result = await readableVideos(
-			ctx,
-			streams,
-			`${HOME}feed/history`,
-			0,
-			"watch_history",
-			priorCursor,
-			async (video, position) => {
-				const watchedDate = resolveWatchedDate(
-					video.watched_date_label ?? null,
-					dateReference,
-				);
-				if (!watchedDate) unresolvedDateCount += 1;
-				await emit("watch_history", {
-					id: await youtubeRecordId(
-						`history|${historyIdentity(video, dateReference)}`,
-					),
-					position,
-					watched_date: watchedDate,
-					watched_date_label: video.watched_date_label ?? null,
-					video_id: video.video_id,
-					video_url: video.video_url,
-					video_title: video.video_title,
-					channel_title: video.channel_title,
-					channel_url: video.channel_url,
-					view_count: parseCount(video.views_text),
-					views_text: video.views_text ?? null,
-					description: video.description,
-				});
+		// One outer deadline bounds the whole history path. After it expires the
+		// path is abandoned: its late emits are dropped, so no STATE can follow.
+		let historyAbandoned = false;
+		let stateInFlight = false;
+		const gate = <A extends unknown[]>(send: (...args: A) => Promise<void>) =>
+			async (...args: A): Promise<void> => {
+				if (!historyAbandoned) await send(...args);
+			};
+		const gatedEmit = gate(ctx.emit.bind(ctx));
+		const historyCtx: BrowserContext = {
+			...ctx,
+			emit: async (message) => {
+				if (historyAbandoned) return;
+				const isState = (message as { type?: string }).type === "STATE";
+				if (isState) stateInFlight = true;
+				await gatedEmit(message);
+				if (isState) stateInFlight = false;
 			},
-			(video) => historyIdentity(video, dateReference),
-		);
-		if (result) {
+			emitRecord: gate(ctx.emitRecord.bind(ctx)),
+			...(ctx.reportStreamFailure
+				? { reportStreamFailure: gate(ctx.reportStreamFailure.bind(ctx)) }
+				: {}),
+		};
+		const historyStreams = createStreamReporter(historyCtx);
+		const emitHistoryRecord = async (record: Record<string, unknown>) => {
 			const fact = coverage.get("watch_history");
-			if (fact) {
-				fact.enumerated_count = result.scannedCount ?? 0;
-				fact.parsed_count = result.parsedCount ?? 0;
-				fact.deduped_count = result.dedupedCount ?? 0;
-				if (result.stopReason) fact.stop_reason = result.stopReason;
-				fact.incomplete = !result.exhausted;
-				fact.next_checkpoint = result.checkpointAnchor
-					? await youtubeRecordId(result.checkpointAnchor)
-					: null;
-				fact.unresolved_date_count = unresolvedDateCount;
-				if (unresolvedDateCount > 0) fact.incomplete = true;
-				if (result.historyDiagnostics)
-					reportHistoryTraversal(result.historyDiagnostics);
-			}
-			if (result.verifiedEmpty) {
-				await emitVerifiedEmptyState(ctx, "watch_history", capturedAt);
-			} else if (
-				!result.blocked &&
-				(result.exhausted ||
-					(result.checkpointAnchor &&
-						(!priorCursor?.complete || result.partialCheckpointAllowed)))
-			) {
-				const complete =
-					unresolvedDateCount === 0 &&
+			if (fact) fact.emitted_count += 1;
+			await historyCtx.emitRecord("watch_history", record);
+		};
+		const runHistory = async (): Promise<void> => {
+			const priorCursor =
+				ctx.collectionMode === "full_refresh"
+					? undefined
+					: (ctx.state?.watch_history as HistoryCursor | undefined);
+			const readBrowserDate = () => {
+				const now = new Date();
+				return [now.getFullYear(), now.getMonth(), now.getDate()];
+			};
+			const browserDate = await page.evaluate(readBrowserDate);
+			const dateReference =
+				Array.isArray(browserDate) && browserDate.length === 3
+					? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
+					: new Date(capturedAt);
+			let unresolvedDateCount = 0;
+			const result = await readableVideos(
+				historyCtx,
+				historyStreams,
+				`${HOME}feed/history`,
+				0,
+				"watch_history",
+				priorCursor,
+				async (video, position) => {
+					const watchedDate = resolveWatchedDate(
+						video.watched_date_label ?? null,
+						dateReference,
+					);
+					if (!watchedDate) unresolvedDateCount += 1;
+					await emitHistoryRecord({
+						id: await youtubeRecordId(
+							`history|${historyIdentity(video, dateReference)}`,
+						),
+						position,
+						watched_date: watchedDate,
+						watched_date_label: video.watched_date_label ?? null,
+						video_id: video.video_id,
+						video_url: video.video_url,
+						video_title: video.video_title,
+						channel_title: video.channel_title,
+						channel_url: video.channel_url,
+						view_count: parseCount(video.views_text),
+						views_text: video.views_text ?? null,
+						description: video.description,
+					});
+				},
+				(video) => historyIdentity(video, dateReference),
+			);
+			if (result) {
+				const fact = coverage.get("watch_history");
+				if (fact) {
+					fact.enumerated_count = result.scannedCount ?? 0;
+					fact.parsed_count = result.parsedCount ?? 0;
+					fact.deduped_count = result.dedupedCount ?? 0;
+					if (result.stopReason) fact.stop_reason = result.stopReason;
+					fact.incomplete = !result.exhausted;
+					fact.next_checkpoint = result.checkpointAnchor
+						? await youtubeRecordId(result.checkpointAnchor)
+						: null;
+					fact.unresolved_date_count = unresolvedDateCount;
+					if (unresolvedDateCount > 0) fact.incomplete = true;
+					if (result.historyDiagnostics)
+						reportHistoryTraversal(result.historyDiagnostics);
+				}
+				if (result.verifiedEmpty) {
+					await emitVerifiedEmptyState(historyCtx, "watch_history", capturedAt);
+				} else if (
+					!result.blocked &&
 					(result.exhausted ||
-						(priorCursor?.complete === true &&
-							result.stopReason === "head-reconciled"));
-				const evidence = result.exhausted
-					? result.evidence.kind
-					: result.partialCheckpointAllowed
-						? "youtube_history_budget_yield"
-						: "youtube_history_safe_prefix_before_gap";
-				await ctx.emit({
-					type: "STATE",
-					stream: "watch_history",
-					cursor: {
-						version: 2,
-						scope: "watch_history",
-						phase: complete
-							? "head_reconciliation"
-							: (result.phase ?? "backfill"),
-						backfill_anchor_id:
-							result.checkpointAnchor ??
-							priorCursor?.backfill_anchor_id ??
-							priorCursor?.last_seen_video_id,
-						position: result.checkpointPosition ?? priorCursor?.position ?? 0,
-						head_anchor_ids:
-							result.headAnchorIds ?? priorCursor?.head_anchor_ids ?? [],
-						complete,
-						stop_reason: result.stopReason,
-						evidence,
-					},
-				});
+						(result.checkpointAnchor &&
+							(!priorCursor?.complete || result.partialCheckpointAllowed)))
+				) {
+					const complete =
+						unresolvedDateCount === 0 &&
+						(result.exhausted ||
+							(priorCursor?.complete === true &&
+								result.stopReason === "head-reconciled"));
+					const evidence = result.exhausted
+						? result.evidence.kind
+						: result.partialCheckpointAllowed
+							? "youtube_history_budget_yield"
+							: "youtube_history_safe_prefix_before_gap";
+					await historyCtx.emit({
+						type: "STATE",
+						stream: "watch_history",
+						cursor: {
+							version: 2,
+							scope: "watch_history",
+							phase: complete
+								? "head_reconciliation"
+								: (result.phase ?? "backfill"),
+							backfill_anchor_id:
+								result.checkpointAnchor ??
+								priorCursor?.backfill_anchor_id ??
+								priorCursor?.last_seen_video_id,
+							position: result.checkpointPosition ?? priorCursor?.position ?? 0,
+							head_anchor_ids:
+								result.headAnchorIds ?? priorCursor?.head_anchor_ids ?? [],
+							complete,
+							stop_reason: result.stopReason,
+							evidence,
+						},
+					});
+				}
 			}
+		};
+		if ((await raceOuterDeadline(runHistory())) === "expired") {
+			historyAbandoned = true;
+			// A STATE that was sent but never acknowledged has an unknown outcome:
+			// it is reported as such, never as success.
+			const unacknowledged = stateInFlight;
+			await streams.fail(
+				"watch_history",
+				unacknowledged
+					? "youtube_history_state_unacknowledged"
+					: "youtube_history_outer_timeout",
+				{
+					stop_reason: unacknowledged
+						? "history-state-unacknowledged"
+						: "history-outer-timeout",
+					outcome: unacknowledged ? "unknown" : "failed",
+				},
+			);
 		}
 	}
 	await emitCoverageProgress(ctx, "youtube", coverage.values());
