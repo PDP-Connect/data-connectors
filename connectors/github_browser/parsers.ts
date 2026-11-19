@@ -1313,13 +1313,16 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 			// always serves, so it is unreadable.
 			const validNumber = typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
 			const pullUrl = `https://github.com/${value.repo}/pull/${pr.number}`;
-			const apiUrl = typeof pr.url === "string" ? pr.url : `https://api.github.com/repos/${value.repo}/pulls/${pr.number}`;
-			const reviewUrlsBound = (review.pull_request_url === undefined || (validNumber && review.pull_request_url === apiUrl)) &&
+			// Every URL is anchored to the canonical values built from the event's repository
+			// and the PR number, never to another URL the same payload supplies.
+			const apiUrl = `https://api.github.com/repos/${value.repo}/pulls/${pr.number}`;
+			const reviewUrlsBound = (pr.url === undefined || (validNumber && pr.url === apiUrl)) &&
+				(review.pull_request_url === undefined || (validNumber && review.pull_request_url === apiUrl)) &&
 				(review.html_url === undefined || review.html_url === null ||
 					(validNumber && typeof review.html_url === "string" && (review.html_url === pullUrl || review.html_url.startsWith(`${pullUrl}#`))));
 			requireField("title", (compact && reviewUrlsBound) || nullableText(pr.title));
 			requireField("body", nullableText(review.body));
-			requireField("url", nullableText(review.html_url) && reviewUrlsBound);
+			requireField("url", (review.html_url === undefined || nullableText(review.html_url)) && reviewUrlsBound);
 			break;
 		}
 		case "PullRequestReviewCommentEvent":
