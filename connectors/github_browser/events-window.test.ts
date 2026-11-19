@@ -154,3 +154,25 @@ test("a review's own URLs are bound to the pull request even when the PR object 
 		assert.ok(parsed.unreadableFields.includes("url"));
 	}
 });
+
+test("a review's pull request url and pull_request_url must be the canonical API url, not merely agree", () => {
+	const off = "https://api.github.com/repos/other-owner/demo/pulls/7";
+	const full = { ...compactPr, title: "Invented title", body: null, url: off };
+	const event = review(full);
+	Object.assign(event.payload.review, { pull_request_url: off });
+	const parsed = parseLegacyEventPageItem(event);
+	assert.equal(parsed.complete, false);
+	assert.ok(parsed.unreadableFields.includes("url"));
+	// A full PR with the canonical url and no review pull_request_url is complete.
+	assert.equal(parseLegacyEventPageItem(review({ ...compactPr, title: "Invented title", body: null })).complete, true);
+});
+
+test("a review that omits html_url is complete and stores a null url", () => {
+	for (const pull_request of [compactPr, { ...compactPr, title: "Invented title", body: null }]) {
+		const event = review(pull_request);
+		Reflect.deleteProperty(event.payload.review, "html_url");
+		const parsed = parseLegacyEventPageItem(event);
+		assert.equal(parsed.complete, true);
+		assert.equal(parsed.row?.url ?? null, null);
+	}
+});
