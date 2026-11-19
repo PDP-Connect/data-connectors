@@ -211,17 +211,59 @@ const PAGE_CONTENT_TIMEOUT_MS = 10_000;
 const LIST_PAGE_WAIT_MS = 10_000;
 const PAGE_LIMIT = 50;
 const START_INDEX_STEP = 10;
-const POLITE_DELAY_MS = 800;
+const POLITE_DELAY_MS = 300;
+/** Pause after each order-detail page: 1.5 to 3 seconds, a person's pace. */
+const DETAIL_PACE_MIN_MS = 1500;
+const DETAIL_PACE_SPREAD_MS = 1500;
+export function detailPaceMs(random: () => number = Math.random): number {
+	return DETAIL_PACE_MIN_MS + Math.floor(random() * DETAIL_PACE_SPREAD_MS);
+}
 const RETRY_MIN_TIMEOUT_MS = 1500;
 const RETRY_FACTOR = 2;
 const RETRY_COUNT = 2;
 // Keep optional detail enrichment comfortably below the controller watchdog;
 // recovery-only runs can drain the durable gaps without re-walking the list.
-const MAX_DETAIL_ATTEMPTS_PER_RUN = 200;
+// Live runs open one detail page: the most recent order's, for the shipping address
+// and zip code. Every other order comes from the list pages, which is what
+// makes a full read fast (live 2026-11-19: a buyer demo needs the order list
+// and a current zip in about a minute, not item-level detail per order).
+const AMAZON_DETAIL_PAGES_PER_RUN = 1;
+/** Upper bound when a caller sets no per-run limit (tests, other hosts). */
+const MAX_DETAIL_ATTEMPTS_PER_RUN = 60;
+/**
+ * The order walk's own time budget. The host cuts a run off at 14 minutes,
+ * sign-in included (a code by SMS can take several), and a cut-off run loses
+ * every record. Live 2026-11-19 (amazon.ca): sign-in 2 min, then the walk
+ * reached 2022 and the run was killed at 14 min with nothing kept. A demo
+ * also wants the order list in about 30 seconds. The walk stops opening detail
+ * pages 10 s before this and list pages at it, and the run ends with the
+ * orders read.
+ */
+export const AMAZON_WALK_BUDGET_MS = 30_000;
+const DETAIL_STOP_BEFORE_DEADLINE_MS = 10_000;
+export function walkTimeSpent(
+	flags: Pick<RunFlags, "walkDeadlineAt">,
+	marginMs = 0,
+	now: number = Date.now(),
+): boolean {
+	return (
+		flags.walkDeadlineAt !== undefined && now >= flags.walkDeadlineAt - marginMs
+	);
+}
 const MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN = 3;
 // Module-scoped regexes (Biome useTopLevelRegex)
 const RETRYABLE_ERROR_RE = /timeout|ECONN|ETIMEDOUT|net::|5\d\d/i;
 const SIGNIN_URL_RE = /\/ap\/(signin|challenge|mfa)/;
+/** Stops part way through the order walk where the orders already read are kept. */
+export const AMAZON_MID_WALK_STOP_RE =
+	/^amazon_(empty_list_page_(source_auth_or_challenge|empty_first_page_without_terminal_signal|selector_drift)|list_page_navigation_failed|list_page_readiness_timeout|walk_time_budget)$/;
+/** Amazon's own challenge forms: the character image, CVF and puzzle pages. */
+export const AMAZON_CHALLENGE_SELECTOR =
+	'form[action*="validateCaptcha"], input#captchacharacters, input[name="cvf_captcha_input"], form.cvf-widget-form-captcha, input#auth-captcha-guess, img#auth-captcha-image, awswaf-captcha, #cvf-aamation-challenge-iframe, [id^="aacb-captcha"]';
+/** Amazon's exact challenge wording. Bare words such as "robot" or "captcha"
+ * are product names too, so they are not evidence of a challenge. */
+export const AMAZON_CHALLENGE_TEXT_PATTERN =
+	"(enter|type) the characters (you see|shown|as they are given)|not a robot|unusual traffic|solve this puzzle";
 const ORDERS_URL_RE = /\/your-orders|\/order-history/;
 const YEAR_VALUE_RE = /year-(\d{4})/;
 const DETAIL_URL_RE =
@@ -582,6 +624,12 @@ export type CaptureDep = BrowserCollectContext["capture"];
 /** Ephemeral per-run flags that cross year boundaries. */
 export interface RunFlags {
 	detailAttempts: number;
+	/** Epoch ms after which the walk opens no more detail pages and no more
+	 *  list pages, so the run ends with what it read before the host's run
+	 *  deadline cuts it off (and every record with it). Absent: no limit. */
+	walkDeadlineAt?: number;
+	/** Detail pages this run may open; absent: MAX_DETAIL_ATTEMPTS_PER_RUN. */
+	maxDetailAttempts?: number;
 	detailCaptured: boolean;
 	failedDetailCaptured: boolean;
 	/** One-shot budget: at most one mid-run automated session-repair attempt
@@ -872,7 +920,11 @@ async function resolveOrderDetail(
 			status: "deferred",
 		});
 	}
-	if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
+	if (
+		flags.detailAttempts >=
+			(flags.maxDetailAttempts ?? MAX_DETAIL_ATTEMPTS_PER_RUN) ||
+		walkTimeSpent(flags, DETAIL_STOP_BEFORE_DEADLINE_MS)
+	) {
 		return Promise.resolve({
 			failureKind: "deferred_budget",
 			reason: reasonForDetailFailure("deferred_budget"),
@@ -1090,13 +1142,12 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 			suppressForward: options.recoveryOnly === true,
 		};
 	}
+	// A spent detail budget never skips the list walk: the order list comes
+	// from list pages, and only a recovery-only run skips it.
 	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
-	const detailBudgetExhausted =
-		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN ||
-		flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN;
 	return {
 		...recovery,
-		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
+		suppressForward: options.recoveryOnly === true,
 	};
 }
 
@@ -1509,41 +1560,76 @@ async function reportEmptyPageDiagnostics(
 ): Promise<void> {
 	let diag: ListPageDiagnostics;
 	try {
-		diag = await page.evaluate((noOrdersTextPattern): ListPageDiagnostics => {
-			// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-			const CAPTCHA_RE = /captcha|robot|unusual traffic/i;
-			const NO_ORDERS_RE = new RegExp(noOrdersTextPattern, "i");
-			const ZERO_COUNT_RE = /^0(?!\d)/;
-			const WS = /\s+/g;
-			// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-			return {
-				url: location.href,
-				title: document.title,
-				order_cards: document.querySelectorAll(
-					"div.order-card, div.js-order-card",
-				).length,
-				any_card: document.querySelectorAll(
-					'[class*="order" i][class*="card" i]',
-				).length,
-				any_order_header: document.querySelectorAll(
-					'[class*="order" i][class*="header" i]',
-				).length,
-				sign_in_form: Boolean(document.querySelector('form[name="signIn"]')),
-				captcha: CAPTCHA_RE.test(document.body?.innerText || "").toString(),
-				// The order count Amazon prints above the list ("0 orders placed
-				// in 2019", "0 Bestellungen aufgegeben in") is a terminal signal in
-				// every store's language; the empty-state copy is English only.
-				no_orders_text: (
-					NO_ORDERS_RE.test(document.body?.innerText || "") ||
-					ZERO_COUNT_RE.test(
-						(document.querySelector(".num-orders")?.textContent || "").trim(),
-					)
-				).toString(),
-				body_preview: (document.body?.innerText || "")
-					.replace(WS, " ")
-					.slice(0, 240),
-			};
-		}, AMAZON_NO_ORDERS_TEXT_PATTERN);
+		diag = await page.evaluate(
+			({
+				challengeSelector,
+				challengeTextPattern,
+				noOrdersTextPattern,
+			}): ListPageDiagnostics => {
+				// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+				const CHALLENGE_TEXT_RE = new RegExp(challengeTextPattern, "i");
+				const NO_ORDERS_RE = new RegExp(noOrdersTextPattern, "i");
+				const ZERO_COUNT_RE = /^0(?!\d)/;
+				const WS = /\s+/g;
+				// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+				return {
+					url: location.href,
+					title: document.title,
+					order_cards: document.querySelectorAll(
+						"div.order-card, div.js-order-card",
+					).length,
+					any_card: document.querySelectorAll(
+						'[class*="order" i][class*="card" i]',
+					).length,
+					any_order_header: document.querySelectorAll(
+						'[class*="order" i][class*="header" i]',
+					).length,
+					// Only a sign-in form the person could see. Amazon's header account
+					// menu carries a hidden form[name="signIn"] on ordinary pages, and an
+					// empty last page of a year ("0 orders") read as a lost sign-in
+					// (live 2026-11-19, amazon.ca: every run stopped after 2026).
+					sign_in_form: [
+						...document.querySelectorAll<HTMLFormElement>(
+							'form[name="signIn"]',
+						),
+					].some((form) => {
+						const rect = form.getBoundingClientRect();
+						const style = getComputedStyle(form);
+						return (
+							rect.width > 0 &&
+							rect.height > 0 &&
+							style.visibility !== "hidden" &&
+							style.display !== "none" &&
+							form.closest("[hidden],[aria-hidden='true']") === null
+						);
+					}),
+					// A challenge is Amazon's own challenge form or its exact wording.
+					// Never a bare word: an empty year's "Buy it again" carousel can
+					// list a product named "Robot ..." or "CAPTCHA ...".
+					captcha: (
+						Boolean(document.querySelector(challengeSelector)) ||
+						CHALLENGE_TEXT_RE.test(document.body?.innerText || "")
+					).toString(),
+					// The order count Amazon prints above the list ("0 orders placed
+					// in 2019", "0 Bestellungen aufgegeben in") is a terminal signal in
+					// every store's language; the empty-state copy is English only.
+					no_orders_text: (
+						NO_ORDERS_RE.test(document.body?.innerText || "") ||
+						ZERO_COUNT_RE.test(
+							(document.querySelector(".num-orders")?.textContent || "").trim(),
+						)
+					).toString(),
+					body_preview: (document.body?.innerText || "")
+						.replace(WS, " ")
+						.slice(0, 240),
+				};
+			},
+			{
+				challengeSelector: AMAZON_CHALLENGE_SELECTOR,
+				challengeTextPattern: AMAZON_CHALLENGE_TEXT_PATTERN,
+				noOrdersTextPattern: AMAZON_NO_ORDERS_TEXT_PATTERN,
+			},
+		);
 	} catch (error) {
 		await emit({
 			type: "SKIP_RESULT",
@@ -1563,6 +1649,21 @@ async function reportEmptyPageDiagnostics(
 		startIndex,
 		priorOrdersEvidence,
 	);
+	// Structural facts only (no page text, title or query): which signal made
+	// this page empty, so a stop in production says what Amazon showed.
+	connectorDiagnostic("amazon", "empty_list_page", {
+		reason: classification.reason,
+		action: classification.action,
+		year,
+		start_index: startIndex,
+		captcha: diag.captcha,
+		sign_in_form: diag.sign_in_form,
+		signin_url: SIGNIN_URL_RE.test(diag.url),
+		url_path: safeUrlPath(diag.url),
+		order_cards: diag.order_cards,
+		any_card: diag.any_card,
+		no_orders_text: diag.no_orders_text,
+	});
 	if (classification.action === "terminal") {
 		return;
 	}
@@ -1604,6 +1705,21 @@ async function reportEmptyPageDiagnostics(
 		});
 	}
 	throw new Error(`amazon_empty_list_page_${classification.reason}`);
+}
+
+/** The path of a URL with ids masked, never its query or host. */
+export function safeUrlPath(url: string): string {
+	try {
+		return new URL(url).pathname
+			.split("/")
+			.slice(0, 5)
+			.map((segment) =>
+				/\d/.test(segment) || segment.length >= 16 ? ":id" : segment,
+			)
+			.join("/");
+	} catch {
+		return "";
+	}
 }
 
 /** Browser text, titles, and URLs are useful for local classification but are
@@ -2157,6 +2273,9 @@ async function runYear(
 	const walk = await walkPagesWithCeiling({
 		maxPages: PAGE_LIMIT,
 		fetchPage: async () => {
+			if (walkTimeSpent(flags)) {
+				throw new Error("amazon_walk_time_budget");
+			}
 			await deps.progress(
 				`Amazon year ${year}: scanning page ${pageCount + 1}`,
 				{ stream: "orders" },
@@ -2190,7 +2309,13 @@ async function runYear(
 					`Amazon year ${year}: processing order ${index + 1}/${orders.length} on page ${pageCount + 1}`,
 					{ stream: "orders" },
 				);
+				const detailAttemptsBefore = flags.detailAttempts;
 				const processed = await processListOrder(page, deps, flags, o);
+				// Pace the order-detail pages: back to back they read as a bot, and
+				// live runs were stopped by Amazon after about 32 of them in 2 minutes.
+				if (flags.detailAttempts > detailAttemptsBefore) {
+					await politeDelay(detailPaceMs());
+				}
 				if (!processed) {
 					// biome-ignore lint/style/noIncrementDecrement: integration.test.ts asserts this literal `unparseableDateCount++` source text (source-regex oracle); switching to += would fail that pre-existing test for a purely cosmetic change.
 					unparseableDateCount++;
@@ -2346,6 +2471,347 @@ export function amazonNoOrdersOnStoreMessage(store: AmazonStore): string {
 // Guarded so `import "./index.ts"` in tests doesn't spin up the runtime
 // and block the Node event loop on stdin. Only fires when this module
 // IS the process entry point (i.e. `tsx connectors/amazon/index.ts`).
+/**
+ * The Amazon order walk. Lives outside the `isMainModule` block so tests can
+ * drive the real run (store-scoped years cursor, early stop, STATE) with a
+ * fake page; `runConnector` below passes it as `collect`.
+ */
+export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
+	const {
+		scope,
+		state,
+		emitRecord,
+		emit,
+		progress,
+		capture,
+		emittedAt,
+		page,
+		context,
+		credentials,
+		sendInteraction,
+	} = ctx;
+	const requested = new Map((scope?.streams || []).map((s) => [s.name, s]));
+	const wantsItems = requested.has("order_items");
+	const wantsOrders = requested.has("orders");
+	// THE STORE (stores.ts). Amazon keeps order history per store, so
+	// every page this run reads is on ONE store: the one asked for
+	// (PDPP_AMAZON_STORE), else the store of the page the run was handed
+	// (the hosted service signs in on the person's store and hands over
+	// its page), else the one store the browser is signed in to, else
+	// amazon.com.
+	const storeChoice = resolveAmazonStore({
+		cookies: await readStoreCookies(context),
+		pageUrl: page.url(),
+		requested: process.env.PDPP_AMAZON_STORE,
+	});
+	const { store } = storeChoice;
+	connectorDiagnostic("amazon", "store_resolved", {
+		from: storeChoice.from,
+		store: store.name,
+		...(storeChoice.unknownRequest ? { unknown_request: true } : {}),
+	});
+	await progress(
+		`Reading your Amazon orders on ${store.name}${
+			storeChoice.unknownRequest
+				? ` (PDPP_AMAZON_STORE names no Amazon store; using ${store.name})`
+				: ""
+		}`,
+	);
+	const flags: RunFlags = {
+		detailAttempts: 0,
+		walkDeadlineAt: Date.now() + AMAZON_WALK_BUDGET_MS,
+		maxDetailAttempts: AMAZON_DETAIL_PAGES_PER_RUN,
+		detailCaptured: false,
+		failedDetailCaptured: false,
+		repairAttempted: false,
+		sessionRepairRequired: false,
+		temporaryDetailFailures: 0,
+	};
+
+	// Seeded once for the whole run; mutated in place by the forward walk
+	// only (the recovery pass has no list-page row to fingerprint against
+	// — see AmazonDetailRecoveryDeps).
+	const hydratedOrders = readPriorHydratedOrders(state);
+
+	const gapRecovery = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+		page,
+		{
+			capture,
+			context,
+			credentials,
+			// A live run's one detail page goes to the newest order (the zip);
+			// pending gaps stay for a recovery-only run.
+			detailGaps: ctx.recoveryOnly === true ? ctx.detailGaps : [],
+			emit,
+			emitRecord,
+			requestDetailGapPage:
+				ctx.recoveryOnly === true ? ctx.requestDetailGapPage : undefined,
+			sendInteraction,
+			store,
+		},
+		flags,
+		{ recoveryOnly: ctx.recoveryOnly === true, wantsItems },
+	);
+	if (gapRecovery.stoppedWithPending) {
+		connectorDiagnostic("amazon", "gap_recovery_stopped_pending", {
+			stopped_with_pending: true,
+		});
+		await progress(
+			"Some order items are still missing; the next run will keep trying",
+		);
+	}
+	if (gapRecovery.suppressForward) {
+		return;
+	}
+
+	if (requested.has("profile")) {
+		await collectAmazonProfile(page, { emit, emitRecord }, store);
+	}
+
+	// STATE is stream-keyed per Collection Profile: `state` is
+	// { <stream>: <cursor>, ... }. We write STATE stream='orders'
+	// cursor={years:{...}}, so reads must go through state.orders.
+	const ordersState = (state.orders ?? {}) as OrdersStateShape;
+	// The cursor is scoped to the resolved store (see storeYearsCursor).
+	const { years: yearsState, otherStores } = storeYearsCursor(
+		ordersState,
+		store,
+	);
+
+	// Per-order fingerprint cursor (excludes the run-clock `fetched_at`).
+	// One cursor for the whole orders stream — order ids are globally
+	// unique across years. Only opened when orders are requested. NOT
+	// pruned: orders is a partial scan (year-freezing skips historical
+	// years — see emitOrderAndItems).
+	const ordersFingerprintCursor = requested.has("orders")
+		? openFingerprintCursor(state.orders, {
+				excludeFromFingerprint: ["fetched_at"],
+				priorFingerprints: readPriorOrderFingerprints(state),
+			})
+		: undefined;
+
+	await progress("Amazon session verified; discovering years");
+	const discoveredYears = await discoverYears(page);
+	let years: number[];
+	// Targeted-year override for spot checks and explicit backfills.
+	// Bypasses incremental planning entirely.
+	if (process.env.PDPP_AMAZON_YEARS) {
+		const filter = new Set(
+			process.env.PDPP_AMAZON_YEARS.split(",").map((y) => Number(y.trim())),
+		);
+		years = discoveredYears.filter((y) => filter.has(y));
+	} else {
+		// Incremental planning: bound the year set so historical years with
+		// prior scraped state are not re-scraped on every run.
+		const currentYear = new Date().getFullYear();
+		const { planned, skipped } = planIncrementalYears(
+			discoveredYears,
+			yearsState,
+			currentYear,
+		);
+		for (const { year, reason } of skipped) {
+			connectorDiagnostic("amazon", "year_skipped_incremental", {
+				year,
+				reason,
+			});
+			await progress(`Skipping year ${year} (already collected)`);
+		}
+		years = planned;
+	}
+	await progress(`Years to scrape: ${years.join(", ")}`);
+
+	// Capture fixtures (gated on PDPP_CAPTURE_FIXTURES=1). One orders-list
+	// page per year and one order-detail page overall is enough to drive
+	// offline parser tests — more just bloats the fixture tree.
+	// Order-item detail coverage is only meaningful when the detail-enriched
+	// `order_items` stream is in scope. When it is not requested, the
+	// accumulator stays undefined and processListOrder records nothing.
+	const orderItemsCoverage = wantsItems ? newOrderItemsCoverage() : undefined;
+	// `orders` list-stream coverage is only meaningful when `orders` itself
+	// is in scope — mirrors the `wantsItems`-gated accumulator above.
+	const ordersCoverage = wantsOrders ? newOrdersCoverage() : undefined;
+	const deps: EmitDeps = {
+		capture,
+		context,
+		credentials,
+		emit,
+		emitRecord,
+		emittedAt,
+		hydratedOrders,
+		orderItemsCoverage,
+		isRecordSelected: ctx.isRecordSelected,
+		itemResourcesRestricted:
+			requested.get("order_items")?.resources !== undefined,
+		ordersCoverage,
+		ordersFingerprintCursor,
+		progress,
+		sendInteraction,
+		skipDetail: process.env.PDPP_AMAZON_SKIP_DETAIL === "1",
+		store,
+		wantsItems,
+		wantsOrders,
+	};
+
+	const newYearsState: YearsCursor = { ...yearsState };
+	const buildOrdersStateCursor = (): OrdersStateShape =>
+		buildAmazonOrdersStateCursor(
+			newYearsState,
+			ordersFingerprintCursor,
+			hydratedOrders,
+			store,
+			otherStores,
+		);
+
+	// Tracks whether the loop below has emitted STATE at least once, so
+	// the trailing fallback emit (below the loop) fires exactly when the
+	// loop emitted nothing — including "every planned year is frozen",
+	// which `years.length === 0` does not cover: `planIncrementalYears`
+	// always plans the current and previous year, and the previous year
+	// CAN be frozen, so `years.length > 0` while every iteration
+	// `continue`s before reaching the STATE emit.
+	let ordersStateEmitted = false;
+	let ordersSeen = 0;
+	// Orders handed to the host this run, counted at the emit call. When
+	// Amazon stops the walk part way (sign-in again, a challenge, a page
+	// that will not load), the orders already read are kept and the run
+	// ends with them, rather than failing and losing every one.
+	let ordersEmittedThisRun = 0;
+	const yearDeps: EmitDeps = {
+		...deps,
+		emitRecord: async (stream, record, options) => {
+			if (stream === "orders") ordersEmittedThisRun += 1;
+			return deps.emitRecord(stream, record, options);
+		},
+	};
+
+	for (const year of years) {
+		const prior = yearsState[String(year)];
+		// Year-freezing: skip if already frozen
+		if (prior?.frozen) {
+			connectorDiagnostic("amazon", "year_skipped_frozen", { year });
+			await progress(`Skipping year ${year} (already complete)`);
+			continue;
+		}
+
+		// A prior `years[<year>].order_count > 0` is this connection's own
+		// record that Amazon has listed orders for this account in THIS year
+		// before. It is what makes a later "no orders in <year>" page a
+		// contradiction to escalate rather than a result to trust. Read here,
+		// next to the year cursor it derives from, and passed down explicitly.
+		let yearResult: Awaited<ReturnType<typeof runYear>>;
+		try {
+			yearResult = await runYear(
+				page,
+				yearDeps,
+				flags,
+				year,
+				priorOrdersEvidenceForYear(yearsState, year),
+			);
+		} catch (error) {
+			const code = error instanceof Error ? error.message : "";
+			if (ordersEmittedThisRun === 0 || !AMAZON_MID_WALK_STOP_RE.test(code)) {
+				throw error;
+			}
+			// Not frozen and no STATE for this year: the next run reads it again.
+			connectorDiagnostic("amazon", "stopped_early_kept_orders", {
+				code,
+				year,
+				orders_kept: ordersEmittedThisRun,
+			});
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "orders",
+				reason: "amazon_stopped_early",
+				message: `Amazon stopped the order history at ${year}; kept the ${ordersEmittedThisRun} orders read before it.`,
+				diagnostics: { code, year, orders_kept: ordersEmittedThisRun },
+			});
+			// The orders read are real: never follow with "no orders on this store".
+			ordersSeen += ordersEmittedThisRun;
+			// Save fingerprints and hydration for the orders read; the stopped
+			// year has no entry in newYearsState, so nothing is frozen or advanced.
+			await emit({
+				type: "STATE",
+				stream: "orders",
+				cursor: buildOrdersStateCursor(),
+			});
+			ordersStateEmitted = true;
+			break;
+		}
+		const {
+			orderCount: yearOrderCount,
+			truncated,
+			unparseableDateCount,
+		} = yearResult;
+
+		ordersSeen += yearOrderCount;
+		await applyYearCompletionState({
+			newYearsState,
+			prior,
+			progress,
+			truncated,
+			unparseableDateCount,
+			year,
+			yearOrderCount,
+		});
+		// Carry the per-order fingerprint map and known-hydrated order map
+		// forward alongside the year cursors so the next run can suppress
+		// re-scraped orders whose body is unchanged modulo the run clock, and
+		// skip re-fetching detail for orders whose list surface has not
+		// moved. NOT pruned: orders is a partial scan (frozen years are
+		// skipped, so their ids are never re-seen).
+		await emit({
+			type: "STATE",
+			stream: "orders",
+			cursor: buildOrdersStateCursor(),
+		});
+		ordersStateEmitted = true;
+	}
+	// NO ORDERS ON THIS STORE. Every year Amazon lists came back empty and
+	// this connection never stored an order: either the account has never
+	// ordered, or it orders on another Amazon store (a Canadian account
+	// signs in on amazon.com too, but its orders are on amazon.ca). Say
+	// which store was read, so the person can pick theirs.
+	if (
+		wantsOrders &&
+		!process.env.PDPP_AMAZON_YEARS &&
+		noOrdersOnStore(years, ordersSeen, yearsState)
+	) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "amazon_no_orders_on_store",
+			message: amazonNoOrdersOnStoreMessage(store),
+			diagnostics: { store: store.name, years_read: years.length },
+		});
+	}
+	// The loop may emit no STATE at all — every planned year frozen, or no
+	// years discovered — even though the recovery pass above hydrated
+	// gaps or a prior run's `hydratedOrders` map is non-empty. Without
+	// this, that durable progress would never reach a STATE emit this run.
+	if (shouldEmitTrailingOrdersState(ordersStateEmitted, hydratedOrders)) {
+		await emit({
+			type: "STATE",
+			stream: "orders",
+			cursor: buildOrdersStateCursor(),
+		});
+	}
+
+	// After every scraped year settles, emit one run-level `order_items`
+	// DETAIL_COVERAGE: the order list is a real "considered" denominator, so
+	// the console can tell a fully-hydrated run from one that degraded some
+	// order-detail fetches without inferring it from gaps alone. No-ops when
+	// order_items is out of scope or no order was considered.
+	if (orderItemsCoverage) {
+		await emitOrderItemsCoverage(deps, orderItemsCoverage);
+	}
+	// Same honesty posture as order_items: emit once the year sweep
+	// completes, including the zero-considered steady-state case, so the
+	// `orders` list stream is never left permanently unmeasured.
+	if (ordersCoverage) {
+		await emitOrdersCoverage(deps, ordersCoverage);
+	}
+}
+
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "amazon",
@@ -2395,293 +2861,6 @@ if (isMainModule(import.meta.url)) {
 				throw new Error("amazon_session_required");
 			}
 		},
-		async collect(ctx: BrowserCollectContext): Promise<void> {
-			const {
-				scope,
-				state,
-				emitRecord,
-				emit,
-				progress,
-				capture,
-				emittedAt,
-				page,
-				context,
-				credentials,
-				sendInteraction,
-			} = ctx;
-			const requested = new Map((scope?.streams || []).map((s) => [s.name, s]));
-			const wantsItems = requested.has("order_items");
-			const wantsOrders = requested.has("orders");
-			// THE STORE (stores.ts). Amazon keeps order history per store, so
-			// every page this run reads is on ONE store: the one asked for
-			// (PDPP_AMAZON_STORE), else the store of the page the run was handed
-			// (the hosted service signs in on the person's store and hands over
-			// its page), else the one store the browser is signed in to, else
-			// amazon.com.
-			const storeChoice = resolveAmazonStore({
-				cookies: await readStoreCookies(context),
-				pageUrl: page.url(),
-				requested: process.env.PDPP_AMAZON_STORE,
-			});
-			const { store } = storeChoice;
-			connectorDiagnostic("amazon", "store_resolved", {
-				from: storeChoice.from,
-				store: store.name,
-				...(storeChoice.unknownRequest ? { unknown_request: true } : {}),
-			});
-			await progress(
-				`Reading your Amazon orders on ${store.name}${
-					storeChoice.unknownRequest
-						? ` (PDPP_AMAZON_STORE names no Amazon store; using ${store.name})`
-						: ""
-				}`,
-			);
-			const flags: RunFlags = {
-				detailAttempts: 0,
-				detailCaptured: false,
-				failedDetailCaptured: false,
-				repairAttempted: false,
-				sessionRepairRequired: false,
-				temporaryDetailFailures: 0,
-			};
-
-			// Seeded once for the whole run; mutated in place by the forward walk
-			// only (the recovery pass has no list-page row to fingerprint against
-			// — see AmazonDetailRecoveryDeps).
-			const hydratedOrders = readPriorHydratedOrders(state);
-
-			const gapRecovery =
-				await recoverPendingOrderItemDetailGapsBeforeForwardRun(
-					page,
-					{
-						capture,
-						context,
-						credentials,
-						detailGaps: ctx.detailGaps,
-						emit,
-						emitRecord,
-						requestDetailGapPage: ctx.requestDetailGapPage,
-						sendInteraction,
-						store,
-					},
-					flags,
-					{ recoveryOnly: ctx.recoveryOnly === true, wantsItems },
-				);
-			if (gapRecovery.stoppedWithPending) {
-				connectorDiagnostic("amazon", "gap_recovery_stopped_pending", {
-					stopped_with_pending: true,
-				});
-				await progress(
-					"Some order items are still missing; the next run will keep trying",
-				);
-			}
-			if (gapRecovery.suppressForward) {
-				return;
-			}
-
-			if (requested.has("profile")) {
-				await collectAmazonProfile(page, { emit, emitRecord }, store);
-			}
-
-			// STATE is stream-keyed per Collection Profile: `state` is
-			// { <stream>: <cursor>, ... }. We write STATE stream='orders'
-			// cursor={years:{...}}, so reads must go through state.orders.
-			const ordersState = (state.orders ?? {}) as OrdersStateShape;
-			// The cursor is scoped to the resolved store (see storeYearsCursor).
-			const { years: yearsState, otherStores } = storeYearsCursor(
-				ordersState,
-				store,
-			);
-
-			// Per-order fingerprint cursor (excludes the run-clock `fetched_at`).
-			// One cursor for the whole orders stream — order ids are globally
-			// unique across years. Only opened when orders are requested. NOT
-			// pruned: orders is a partial scan (year-freezing skips historical
-			// years — see emitOrderAndItems).
-			const ordersFingerprintCursor = requested.has("orders")
-				? openFingerprintCursor(state.orders, {
-						excludeFromFingerprint: ["fetched_at"],
-						priorFingerprints: readPriorOrderFingerprints(state),
-					})
-				: undefined;
-
-			await progress("Amazon session verified; discovering years");
-			const discoveredYears = await discoverYears(page);
-			let years: number[];
-			// Targeted-year override for spot checks and explicit backfills.
-			// Bypasses incremental planning entirely.
-			if (process.env.PDPP_AMAZON_YEARS) {
-				const filter = new Set(
-					process.env.PDPP_AMAZON_YEARS.split(",").map((y) => Number(y.trim())),
-				);
-				years = discoveredYears.filter((y) => filter.has(y));
-			} else {
-				// Incremental planning: bound the year set so historical years with
-				// prior scraped state are not re-scraped on every run.
-				const currentYear = new Date().getFullYear();
-				const { planned, skipped } = planIncrementalYears(
-					discoveredYears,
-					yearsState,
-					currentYear,
-				);
-				for (const { year, reason } of skipped) {
-					connectorDiagnostic("amazon", "year_skipped_incremental", {
-						year,
-						reason,
-					});
-					await progress(`Skipping year ${year} (already collected)`);
-				}
-				years = planned;
-			}
-			await progress(`Years to scrape: ${years.join(", ")}`);
-
-			// Capture fixtures (gated on PDPP_CAPTURE_FIXTURES=1). One orders-list
-			// page per year and one order-detail page overall is enough to drive
-			// offline parser tests — more just bloats the fixture tree.
-			// Order-item detail coverage is only meaningful when the detail-enriched
-			// `order_items` stream is in scope. When it is not requested, the
-			// accumulator stays undefined and processListOrder records nothing.
-			const orderItemsCoverage = wantsItems
-				? newOrderItemsCoverage()
-				: undefined;
-			// `orders` list-stream coverage is only meaningful when `orders` itself
-			// is in scope — mirrors the `wantsItems`-gated accumulator above.
-			const ordersCoverage = wantsOrders ? newOrdersCoverage() : undefined;
-			const deps: EmitDeps = {
-				capture,
-				context,
-				credentials,
-				emit,
-				emitRecord,
-				emittedAt,
-				hydratedOrders,
-				orderItemsCoverage,
-				isRecordSelected: ctx.isRecordSelected,
-				itemResourcesRestricted:
-					requested.get("order_items")?.resources !== undefined,
-				ordersCoverage,
-				ordersFingerprintCursor,
-				progress,
-				sendInteraction,
-				skipDetail: process.env.PDPP_AMAZON_SKIP_DETAIL === "1",
-				store,
-				wantsItems,
-				wantsOrders,
-			};
-
-			const newYearsState: YearsCursor = { ...yearsState };
-			const buildOrdersStateCursor = (): OrdersStateShape =>
-				buildAmazonOrdersStateCursor(
-					newYearsState,
-					ordersFingerprintCursor,
-					hydratedOrders,
-					store,
-					otherStores,
-				);
-
-			// Tracks whether the loop below has emitted STATE at least once, so
-			// the trailing fallback emit (below the loop) fires exactly when the
-			// loop emitted nothing — including "every planned year is frozen",
-			// which `years.length === 0` does not cover: `planIncrementalYears`
-			// always plans the current and previous year, and the previous year
-			// CAN be frozen, so `years.length > 0` while every iteration
-			// `continue`s before reaching the STATE emit.
-			let ordersStateEmitted = false;
-			let ordersSeen = 0;
-
-			for (const year of years) {
-				const prior = yearsState[String(year)];
-				// Year-freezing: skip if already frozen
-				if (prior?.frozen) {
-					connectorDiagnostic("amazon", "year_skipped_frozen", { year });
-					await progress(`Skipping year ${year} (already complete)`);
-					continue;
-				}
-
-				// A prior `years[<year>].order_count > 0` is this connection's own
-				// record that Amazon has listed orders for this account in THIS year
-				// before. It is what makes a later "no orders in <year>" page a
-				// contradiction to escalate rather than a result to trust. Read here,
-				// next to the year cursor it derives from, and passed down explicitly.
-				const {
-					orderCount: yearOrderCount,
-					truncated,
-					unparseableDateCount,
-				} = await runYear(
-					page,
-					deps,
-					flags,
-					year,
-					priorOrdersEvidenceForYear(yearsState, year),
-				);
-
-				ordersSeen += yearOrderCount;
-				await applyYearCompletionState({
-					newYearsState,
-					prior,
-					progress,
-					truncated,
-					unparseableDateCount,
-					year,
-					yearOrderCount,
-				});
-				// Carry the per-order fingerprint map and known-hydrated order map
-				// forward alongside the year cursors so the next run can suppress
-				// re-scraped orders whose body is unchanged modulo the run clock, and
-				// skip re-fetching detail for orders whose list surface has not
-				// moved. NOT pruned: orders is a partial scan (frozen years are
-				// skipped, so their ids are never re-seen).
-				await emit({
-					type: "STATE",
-					stream: "orders",
-					cursor: buildOrdersStateCursor(),
-				});
-				ordersStateEmitted = true;
-			}
-			// NO ORDERS ON THIS STORE. Every year Amazon lists came back empty and
-			// this connection never stored an order: either the account has never
-			// ordered, or it orders on another Amazon store (a Canadian account
-			// signs in on amazon.com too, but its orders are on amazon.ca). Say
-			// which store was read, so the person can pick theirs.
-			if (
-				wantsOrders &&
-				!process.env.PDPP_AMAZON_YEARS &&
-				noOrdersOnStore(years, ordersSeen, yearsState)
-			) {
-				await emit({
-					type: "SKIP_RESULT",
-					stream: "orders",
-					reason: "amazon_no_orders_on_store",
-					message: amazonNoOrdersOnStoreMessage(store),
-					diagnostics: { store: store.name, years_read: years.length },
-				});
-			}
-			// The loop may emit no STATE at all — every planned year frozen, or no
-			// years discovered — even though the recovery pass above hydrated
-			// gaps or a prior run's `hydratedOrders` map is non-empty. Without
-			// this, that durable progress would never reach a STATE emit this run.
-			if (shouldEmitTrailingOrdersState(ordersStateEmitted, hydratedOrders)) {
-				await emit({
-					type: "STATE",
-					stream: "orders",
-					cursor: buildOrdersStateCursor(),
-				});
-			}
-
-			// After every scraped year settles, emit one run-level `order_items`
-			// DETAIL_COVERAGE: the order list is a real "considered" denominator, so
-			// the console can tell a fully-hydrated run from one that degraded some
-			// order-detail fetches without inferring it from gaps alone. No-ops when
-			// order_items is out of scope or no order was considered.
-			if (orderItemsCoverage) {
-				await emitOrderItemsCoverage(deps, orderItemsCoverage);
-			}
-			// Same honesty posture as order_items: emit once the year sweep
-			// completes, including the zero-considered steady-state case, so the
-			// `orders` list stream is never left permanently unmeasured.
-			if (ordersCoverage) {
-				await emitOrdersCoverage(deps, ordersCoverage);
-			}
-		},
+		collect: collectAmazon,
 	});
 }

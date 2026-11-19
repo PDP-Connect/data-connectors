@@ -10,7 +10,7 @@ import {
 	absoluteStoreUrl,
 	DEFAULT_AMAZON_STORE,
 	extractPostalCode,
-	matchPostalCode,
+	parsePostalCode,
 } from "./stores.ts";
 import type {
 	DetailItem,
@@ -60,15 +60,58 @@ const NAV_GREETING_RE = /Hello,\s*(.+)/;
 const ZERO_WIDTH_RE = /[\u200b-\u200f\u2060\ufeff]/g;
 const NAV_SIGN_IN_RE = /sign in/i;
 const PRIME_MEMBER_TEXT_RE = /your prime|prime benefits/i;
+// The nav's inline config, on every signed-in page of every store:
+// `$Nav.declare('config.isPrimeMember',true)` and the menu args'
+// `"isPrime":1`. Both read false/0 when signed out, so they are only trusted
+// on a signed-in page. `config.customerName` is `false` when signed out.
+const NAV_IS_PRIME_MEMBER_RE =
+	/\$Nav\.declare\(\s*['"]config\.isPrimeMember['"]\s*,\s*(true|false)\s*\)/;
+// Anchored to the nav menu's own config object: an `"isPrime":1` elsewhere on
+// the page (an item widget, a recommendation) says nothing about the account.
+const NAV_MENU_IS_PRIME_RE =
+	/\$Nav\.declare\(\s*['"]config\.dynamicMenuArgs['"]\s*,\s*\{[^{}]*?["']isPrime["']\s*:\s*(1|0|true|false)\b/;
+const NAV_CUSTOMER_SIGNED_OUT_RE =
+	/\$Nav\.declare\(\s*['"]config\.customerName['"]\s*,\s*false\s*\)/;
+
+// Elements whose text is never shown: a page's inline scripts (Amazon's
+// payment widget opens with `try{window.__UPX_HTML_PARSED_TIME__=...`) and
+// styles. linkedom's innerText is textContent, so they are removed first.
+const NON_VISIBLE_SELECTOR = "script, style, noscript, template";
 
 function textOf(el: Element | null | undefined): string {
 	if (!el) {
 		return "";
 	}
-	// linkedom exposes innerText on HTMLElement-ish nodes; fall back to
-	// textContent for safety. Both collapse similarly after our /\s+/ pass.
-	const maybe = (el as { innerText?: string }).innerText;
-	return typeof maybe === "string" ? maybe : (el.textContent ?? "");
+	if (!el.querySelector(NON_VISIBLE_SELECTOR)) {
+		return el.textContent ?? "";
+	}
+	const clone = el.cloneNode(true) as Element;
+	for (const hidden of clone.querySelectorAll(NON_VISIBLE_SELECTOR)) {
+		hidden.remove();
+	}
+	return clone.textContent ?? "";
+}
+
+/**
+ * Visible text with each image read as its alt text: Amazon draws the card
+ * brand as `<img alt="Visa">` beside "ending in 1234".
+ */
+function textWithAlts(el: Element | null | undefined): string {
+	if (!el) {
+		return "";
+	}
+	const clone = el.cloneNode(true) as Element;
+	for (const hidden of clone.querySelectorAll(NON_VISIBLE_SELECTOR)) {
+		hidden.remove();
+	}
+	for (const img of clone.querySelectorAll("img[alt]")) {
+		const alt = img.getAttribute("alt")?.trim();
+		const doc = img.ownerDocument;
+		if (alt && doc) {
+			img.replaceWith(doc.createTextNode(` ${alt} `));
+		}
+	}
+	return (clone.textContent ?? "").replace(WHITESPACE_RE, " ").trim();
 }
 
 function findHeaderValue(card: Element, labelPattern: RegExp): string | null {
@@ -192,6 +235,8 @@ const CARD_PATCH_RE =
 const CARD_ONLY_RE =
 	/((?:Visa|Mastercard|Amex|Discover|Diners|Unknown Credit Card|Credit Card|Debit Card) ending in \d{3,5})/i;
 const UNABLE_RE = /Unable to display payment details/i;
+// Script or markup that reached a text node is never a payment method.
+const CODE_LIKE_RE = /[{};<>]|=>|\bfunction\b|\bwindow\.|\bdocument\./;
 const GRAND_TOTAL_RE =
 	/Grand Total:?\s*((?:[A-Z]{1,3}\s?)?(?:[$£€₹]|R\$)?\s?\d[\d.,\s\u00a0\u202f]*[.,]\d{2}(?:\s?€)?)/i;
 const ASIN_RE = /\/(?:gp\/product|dp)\/([A-Z0-9]{10})/;
@@ -260,7 +305,7 @@ function parsePaymentMethod(payEl: Element | null): string | null {
 	if (!payEl) {
 		return null;
 	}
-	let raw = normText(payEl);
+	let raw = textWithAlts(payEl);
 	raw = raw
 		.replace(PAY_PREFIX_RE, "")
 		.replace(PAY_SUFFIX_RE, "")
@@ -270,7 +315,7 @@ function parsePaymentMethod(payEl: Element | null): string | null {
 	if (cardOnly?.[1]) {
 		return cardOnly[1];
 	}
-	if (raw && !UNABLE_RE.test(raw)) {
+	if (raw && !UNABLE_RE.test(raw) && !CODE_LIKE_RE.test(raw)) {
 		return raw.slice(0, PAY_METHOD_MAX_LEN);
 	}
 	return null;
@@ -775,32 +820,61 @@ export function parseAmazonProfileDom(
 	const greeting = normText(greetingEl);
 	// "Hello, sign in" is Amazon's signed-out greeting, not a name — the "Hello,"
 	// prefix is shared by both states, so the match alone can't tell them apart.
-	const isSignedOut = NAV_SIGN_IN_RE.test(greeting);
+	const isSignedOut =
+		NAV_SIGN_IN_RE.test(greeting) || NAV_CUSTOMER_SIGNED_OUT_RE.test(html);
 	const nameMatch = isSignedOut ? null : NAV_GREETING_RE.exec(greeting);
 	const name = nameMatch?.[1]?.trim() || null;
 
-	const primeEl = document.querySelector("#nav-prime-menu, #navbar-prime");
-	const primeText = normText(primeEl);
-	// Prime membership is only provable when the nav actually shows a
-	// membership-confirming link; a signed-out page or a page with neither
-	// element present tells us nothing, so is_prime stays null rather than
-	// defaulting to false.
-	const is_prime = primeEl ? PRIME_MEMBER_TEXT_RE.test(primeText) : null;
+	const is_prime = isSignedOut ? null : parsePrimeMembership(document, html);
 
 	// The nav's "Deliver to" location is the account's default delivery
-	// address while signed in: "Deliver to Ada" / "Vancouver V6B 1A1". Only its
-	// postal code is kept, in the store country's shape; never the street.
+	// address while signed in: "Deliver to Ada" / "Toronto M6J 0B3". Only its
+	// postal code is kept, never the street. It is in the shape of the
+	// country delivered to, which an amazon.com account can set to Canada.
 	const postal_code = isSignedOut
 		? null
-		: matchPostalCode(
-				normText(document.querySelector("#glow-ingress-line2")).replace(
-					ZERO_WIDTH_RE,
-					"",
-				),
-				store,
-			);
+		: parsePostalCode([navDeliverToText(document)], store, {
+				skipFirst: false,
+			});
 
 	return { id: "me", name, is_prime, postal_code, store: store.name };
+}
+
+/**
+ * Prime membership on a signed-in page. The nav's inline config states it on
+ * every store (`config.isPrimeMember`, then the menu args' `isPrime`). The old
+ * `#nav-prime-menu`/`#navbar-prime` elements are gone from amazon.com's nav
+ * and are only a fallback. Null when the page carries none of these.
+ */
+function parsePrimeMembership(
+	document: Document,
+	html: string,
+): boolean | null {
+	const declared = NAV_IS_PRIME_MEMBER_RE.exec(html)?.[1];
+	if (declared) {
+		return declared === "true";
+	}
+	const menu = NAV_MENU_IS_PRIME_RE.exec(html)?.[1];
+	if (menu) {
+		return menu === "1" || menu === "true";
+	}
+	const primeEl = document.querySelector("#nav-prime-menu, #navbar-prime");
+	return primeEl ? PRIME_MEMBER_TEXT_RE.test(normText(primeEl)) : null;
+}
+
+/** The nav's whole "Deliver to" text: both lines, or the one-line layout. */
+function navDeliverToText(document: Document): string {
+	const parts = [
+		"#glow-ingress-line1",
+		"#glow-ingress-line2",
+		"#glow-ingress-single-line",
+	]
+		.map((selector) => normText(document.querySelector(selector)))
+		.filter(Boolean);
+	const text = parts.length
+		? parts.join(" ")
+		: normText(document.querySelector("#nav-global-location-slot"));
+	return text.replace(ZERO_WIDTH_RE, "");
 }
 
 // Month names of every store's language, by their first three letters after

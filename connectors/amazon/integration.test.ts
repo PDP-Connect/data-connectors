@@ -29,9 +29,10 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
+import { parseHTML } from "linkedom";
 import type { Page } from "playwright";
 import {
 	assertUserFacingProgress,
@@ -48,14 +49,20 @@ import {
 	makeRecordingEmit,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	AMAZON_CHALLENGE_SELECTOR,
+	AMAZON_CHALLENGE_TEXT_PATTERN,
+	AMAZON_MID_WALK_STOP_RE,
 	AMAZON_NO_ORDERS_TEXT_PATTERN,
+	AMAZON_WALK_BUDGET_MS,
 	type AmazonRecoveryClass,
 	applyYearCompletionState,
 	buildOrderDetailGap,
 	classifyAmazonDetailFailure,
 	classifyDetailOutcome,
 	classifyEmptyListPageDiagnostics,
+	collectAmazon,
 	collectAmazonProfile,
+	detailPaceMs,
 	type EmitDeps,
 	emitOrderAndItems,
 	emitOrderItemsCoverage,
@@ -76,14 +83,16 @@ import {
 	recoverPendingOrderItemDetailGaps,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	redactAmazonListPageDiagnostics,
+	safeUrlPath,
 	scrapeListPage,
 	shouldEmitTrailingOrdersState,
 	storeYearsCursor,
+	walkTimeSpent,
 	type YearsCursor,
 } from "./index.ts";
 import { buildOrderRecord, parseOrderDate } from "./parsers.ts";
-import { DEFAULT_AMAZON_STORE, storeById } from "./stores.ts";
 import { validateRecord } from "./schemas.ts";
+import { DEFAULT_AMAZON_STORE, storeById } from "./stores.ts";
 import type {
 	DetailItem,
 	ListPageDiagnostics,
@@ -634,6 +643,112 @@ test("classifyEmptyListPageDiagnostics: current empty-year copy is terminal desp
 			reason: "no_orders_text",
 		},
 	);
+});
+
+test("empty-year page whose Buy it again carousel names a Robot product is not a challenge", () => {
+	// Live 2026-11-19 (amazon.ca): the run walked ~33 orders back through the
+	// years, reached a year with no orders, and failed as
+	// source_auth_or_challenge because the old detector matched the bare word
+	// "robot" anywhere on the page. Product names must not read as a challenge.
+	const carousel = readFileSync(AMAZON_EMPTY_YEAR_FIXTURE, "utf8").replace(
+		"</body>",
+		'<div class="a-carousel"><a>iRobot Roomba Combo j5+ Robot Vacuum</a><a>CAPTCHA Card Game</a></div></body>',
+	);
+	const { document } = parseHTML(carousel);
+	const text = document.body?.textContent ?? "";
+	assert.match(text, /robot/i);
+	assert.equal(document.querySelector(AMAZON_CHALLENGE_SELECTOR), null);
+	assert.doesNotMatch(text, new RegExp(AMAZON_CHALLENGE_TEXT_PATTERN, "i"));
+	assert.match(text, new RegExp(AMAZON_NO_ORDERS_TEXT_PATTERN, "i"));
+	assert.deepEqual(
+		classifyEmptyListPageDiagnostics(
+			makeEmptyPageDiagnostics({ captcha: "false", no_orders_text: "true" }),
+			0,
+		),
+		{ action: "terminal", reason: "no_orders_text" },
+	);
+});
+
+test("a stop part way through the order walk keeps the orders already read", () => {
+	// Live 2026-11-19 (amazon.ca), twice: 32 orders read, then a list page came
+	// back as sign-in or challenge and the run failed with none of them.
+	for (const code of [
+		"amazon_empty_list_page_source_auth_or_challenge",
+		"amazon_empty_list_page_empty_first_page_without_terminal_signal",
+		"amazon_empty_list_page_selector_drift",
+		"amazon_list_page_navigation_failed",
+		"amazon_list_page_readiness_timeout",
+	]) {
+		assert.match(code, AMAZON_MID_WALK_STOP_RE, code);
+	}
+	// A contradiction with stored history is still a hard failure.
+	assert.doesNotMatch(
+		"amazon_empty_list_page_amazon_empty_history_after_prior_orders",
+		AMAZON_MID_WALK_STOP_RE,
+	);
+	assert.doesNotMatch(
+		"amazon_empty_list_page_renderer_diagnostics_failed",
+		AMAZON_MID_WALK_STOP_RE,
+	);
+});
+
+test("order-detail pages are paced 1.5 to 3 seconds apart", () => {
+	assert.equal(
+		detailPaceMs(() => 0),
+		1500,
+	);
+	assert.equal(
+		detailPaceMs(() => 0.999),
+		2998,
+	);
+});
+
+test("the walk stops at its own time budget, detail pages earlier, and keeps the orders read", () => {
+	const flags = { walkDeadlineAt: 1_000_000 };
+	assert.equal(walkTimeSpent(flags, 0, 999_999), false);
+	assert.equal(walkTimeSpent(flags, 0, 1_000_000), true);
+	assert.equal(walkTimeSpent(flags, 60_000, 940_000), true);
+	assert.equal(walkTimeSpent(flags, 60_000, 939_999), false);
+	assert.equal(walkTimeSpent({}, 0, Number.MAX_SAFE_INTEGER), false);
+	assert.match("amazon_walk_time_budget", AMAZON_MID_WALK_STOP_RE);
+	// Sign-in (several minutes for a code) plus the walk stays under the host's 14 minute ceiling.
+	assert(AMAZON_WALK_BUDGET_MS <= 2 * 60_000);
+});
+
+test("stop diagnostics keep the URL path only, ids masked", () => {
+	assert.equal(
+		safeUrlPath(
+			"https://www.amazon.ca/ap/signin?openid.return_to=x&email=a%40b.c",
+		),
+		"/ap/signin",
+	);
+	assert.equal(
+		safeUrlPath(
+			"https://www.amazon.ca/gp/your-account/order-details/702-1234567-1234567",
+		),
+		"/gp/your-account/order-details/:id",
+	);
+	assert.equal(safeUrlPath("not a url"), "");
+});
+
+test("Amazon's own challenge pages still read as a challenge", () => {
+	const textRe = new RegExp(AMAZON_CHALLENGE_TEXT_PATTERN, "i");
+	const pages = [
+		'<form action="/errors/validateCaptcha"><h4>Enter the characters you see below</h4><p>Sorry, we just need to make sure you\'re not a robot.</p><input id="captchacharacters" name="field-keywords"></form>',
+		'<form class="cvf-widget-form cvf-widget-form-captcha"><input name="cvf_captcha_input"></form>',
+		"<div><awswaf-captcha></awswaf-captcha></div>",
+	];
+	for (const html of pages) {
+		const { document } = parseHTML(`<html><body>${html}</body></html>`);
+		assert.notEqual(
+			document.querySelector(AMAZON_CHALLENGE_SELECTOR),
+			null,
+			html,
+		);
+	}
+	assert.match("Enter the characters you see below", textRe);
+	assert.match("We have detected unusual traffic from your network", textRe);
+	assert.match("Sorry, we just need to make sure you're not a robot.", textRe);
 });
 
 test("Amazon empty-page diagnostics retain structural facts but redact page text, title, and URL", () => {
@@ -2897,7 +3012,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: zero-budget legacy stop
 	});
 });
 
-test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustion suppresses forward walk", async () => {
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a spent detail budget still walks the order list (only recovery-only skips it)", async () => {
 	const { deps } = makeRecordingDeps();
 	const orderId = "111-1234567-8901234";
 	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -2928,7 +3043,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustio
 	assert.deepEqual(result, {
 		recovered: 0,
 		stoppedWithPending: true,
-		suppressForward: true,
+		suppressForward: false,
 	});
 });
 
@@ -3961,4 +4076,188 @@ test("another store's orders no longer hide this store's empty history, and its 
 			skipped: [],
 		},
 	);
+});
+
+// ─── Early stop keeps the store's years cursor resumable ──────────────────
+//
+// The two meet in `collectAmazon`: the walk budget decides WHEN a run stops,
+// the store-scoped years cursor decides WHAT the stop saves. A run that stops
+// part way through a year must leave that year unfinished in its own store's
+// cursor, keep every other store's cursor untouched, and the next run must
+// read the whole year again and only then record it.
+
+function streamedListPage(
+	pages: Record<number, string>,
+	year: number,
+	log: string[],
+): Page {
+	const emptyHtml =
+		'<html><body><div id="ordersContainer"></div></body></html>';
+	let current = emptyHtml;
+	return Object.assign({} as Page, {
+		url: (): string => "https://www.amazon.com/your-orders/orders",
+		content: (): Promise<string> => Promise.resolve(current),
+		evaluate: (fn: () => unknown): Promise<unknown> => {
+			const src = String(fn);
+			if (src.includes("select#time-filter")) {
+				return Promise.resolve([`year-${year}`]);
+			}
+			if (src.includes("timeFilter=year-")) {
+				return Promise.resolve([]);
+			}
+			return Promise.resolve(
+				makeEmptyPageDiagnostics({
+					order_cards: 0,
+					any_card: 0,
+					any_order_header: 0,
+					no_orders_text: "false",
+				}),
+			);
+		},
+		goto: (url: string): Promise<null> => {
+			log.push(url);
+			const start = Number(/startIndex=(\d+)/.exec(url)?.[1] ?? "0");
+			current = pages[start] ?? emptyHtml;
+			return Promise.resolve(null);
+		},
+		locator: (): { first: () => { waitFor: () => Promise<null> } } => ({
+			first: () => ({ waitFor: (): Promise<null> => Promise.resolve(null) }),
+		}),
+	});
+}
+
+/** A list page of three synthetic, dated orders whose ids start with `prefix`. */
+function datedListPageHtml(prefix: string, year: number): string {
+	const cards = [1, 2, 3].map((n) => {
+		const id = `${prefix}-000000${n}-000000${n}`;
+		return `<div class="order-card js-order-card"><div class="order-header"><ul><li class="order-header__header-list-item"><span class="a-color-secondary a-text-caps">Order placed</span><span>January ${n + 10}, ${year}</span></li></ul><div class="yohtmlc-order-id"><span class="a-color-secondary a-text-caps">Order #</span><span class="a-color-secondary" dir="ltr">${id}</span></div></div><div class="item-box"><a href="/dp/B0SYNTH000${n}"><img src="https://example.com/img.jpg" /></a><span class="yohtmlc-product-title">Synthetic Item ${n}</span></div></div>`;
+	});
+	return `<html><body><div id="ordersContainer">${cards.join("")}</div></body></html>`;
+}
+
+function collectContextFor(
+	page: Page,
+	state: Record<string, unknown>,
+	messages: EmittedMessage[],
+): BrowserCollectContext {
+	return {
+		scope: { streams: [{ name: "orders" }] },
+		state,
+		emitRecord: () => Promise.resolve(),
+		emit: (message: EmittedMessage) => {
+			messages.push(message);
+			return Promise.resolve();
+		},
+		progress: () => Promise.resolve(),
+		capture: null,
+		emittedAt: "2026-01-01T00:00:00.000Z",
+		page,
+		context: { cookies: () => Promise.resolve([]) },
+		credentials: {},
+		sendInteraction: () => Promise.reject(new Error("no interaction")),
+		detailGaps: [],
+	} as unknown as BrowserCollectContext;
+}
+
+function lastOrdersCursor(messages: EmittedMessage[]): {
+	store?: string;
+	years?: Record<string, { order_count: number; frozen: boolean } | undefined>;
+	otherStores?: Record<string, unknown>;
+} {
+	const states = messages.filter(
+		(m) => m.type === "STATE" && m.stream === "orders",
+	);
+	return (states.at(-1) as { cursor: never }).cursor;
+}
+
+test("collectAmazon: a walk-budget stop part way through a year leaves that year unfinished in its own store's cursor, and the next run finishes it", async () => {
+	const year = new Date().getFullYear();
+	const pages = {
+		0: datedListPageHtml("111", year),
+		10: datedListPageHtml("222", year),
+	};
+	const canadianHistory = {
+		[String(year)]: {
+			order_count: 3,
+			frozen: true,
+			last_scraped: "2025-01-01",
+		},
+	};
+	const priorState = {
+		orders: {
+			store: "ca",
+			years: canadianHistory,
+		},
+	};
+	const env = process.env.PDPP_AMAZON_SKIP_DETAIL;
+	process.env.PDPP_AMAZON_SKIP_DETAIL = "1";
+	const realNow = Date.now.bind(Date);
+	try {
+		// PASS 1: the clock is past the walk deadline once page one is read.
+		const log1: string[] = [];
+		const messages1: EmittedMessage[] = [];
+		const page1 = streamedListPage(pages, year, log1);
+		mock.method(Date, "now", () =>
+			log1.some((u) => u.includes("startIndex=0"))
+				? realNow() + 3_600_000
+				: realNow(),
+		);
+		await collectAmazon(collectContextFor(page1, priorState, messages1));
+		mock.restoreAll();
+
+		assert.equal(
+			log1.length,
+			1,
+			"the walk stopped before reading a second page of the year",
+		);
+		const stop = messages1.find(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "amazon_stopped_early",
+		);
+		assert.ok(stop, "the stop is reported as amazon_stopped_early");
+		const cursor1 = lastOrdersCursor(messages1);
+		assert.equal(cursor1.store, "com");
+		assert.equal(
+			cursor1.years?.[String(year)],
+			undefined,
+			"the unfinished year is not recorded as read or frozen for amazon.com",
+		);
+		assert.deepEqual(
+			cursor1.otherStores,
+			{ ca: canadianHistory },
+			"amazon.ca's cursor is kept untouched; its finished year is not amazon.com's",
+		);
+
+		// PASS 2: the saved cursor goes back in; the stopped year is read whole.
+		const log2: string[] = [];
+		const messages2: EmittedMessage[] = [];
+		await collectAmazon(
+			collectContextFor(
+				streamedListPage(pages, year, log2),
+				{ orders: cursor1 },
+				messages2,
+			),
+		);
+		assert.deepEqual(
+			log2.map((u) => /startIndex=(\d+)/.exec(u)?.[1]),
+			["0", "10", "20"],
+			"the resumed run reads the year from its first page to its natural end",
+		);
+		const cursor2 = lastOrdersCursor(messages2);
+		assert.equal(cursor2.store, "com");
+		assert.equal(cursor2.years?.[String(year)]?.order_count, 6);
+		assert.deepEqual(cursor2.otherStores, { ca: canadianHistory });
+		assert.equal(
+			messages2.some(
+				(m) => m.type === "SKIP_RESULT" && m.reason === "amazon_stopped_early",
+			),
+			false,
+		);
+	} finally {
+		mock.restoreAll();
+		if (env === undefined) {
+			delete process.env.PDPP_AMAZON_SKIP_DETAIL;
+		} else {
+			process.env.PDPP_AMAZON_SKIP_DETAIL = env;
+		}
+	}
 });
