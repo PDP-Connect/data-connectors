@@ -1214,12 +1214,16 @@ export function buildContributionSnapshot(
 
 
 /** The compact pull-request reference the Events API serves: ids, API url and refs, no title or body. */
+/** An owner/name pair as GitHub allows it, so the canonical URLs built from it
+ * cannot gain extra path segments, a fragment or a query. */
+const GITHUB_REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/u;
+
 function isCompactPullRequestReference(pr: Record<string, unknown>, repo: string): boolean {
 	const ref = (side: unknown) => {
 		const value = objectValue(side).ref;
 		return typeof value === "string" && value.trim() !== "";
 	};
-	return pr.title === undefined && pr.body === undefined &&
+	return GITHUB_REPOSITORY.test(repo) && pr.title === undefined && pr.body === undefined &&
 		typeof pr.id === "number" && Number.isSafeInteger(pr.id) && pr.id > 0 &&
 		typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0 &&
 		pr.url === `https://api.github.com/repos/${repo}/pulls/${pr.number}` &&
@@ -1279,11 +1283,12 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 		}
 		case "PullRequestEvent": {
 			const expectedApiUrl = `https://api.github.com/repos/${value.repo}/pulls/${pr.number}`;
-			const validNumber = typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
+			const validNumber = GITHUB_REPOSITORY.test(value.repo) &&
+				typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
 			const htmlPrefix = `https://github.com/${value.repo}/pull/`;
 			const htmlNumber = typeof pr.html_url === "string" && pr.html_url.startsWith(htmlPrefix)
 				? Number(pr.html_url.slice(htmlPrefix.length)) : NaN;
-			const matchingHtmlUrl = Number.isSafeInteger(htmlNumber) && htmlNumber > 0 &&
+			const matchingHtmlUrl = GITHUB_REPOSITORY.test(value.repo) && Number.isSafeInteger(htmlNumber) && htmlNumber > 0 &&
 				pr.html_url === `${htmlPrefix}${htmlNumber}` &&
 				(pr.number === undefined || pr.number === htmlNumber) &&
 				(payload.number === undefined || payload.number === htmlNumber);
@@ -1311,7 +1316,8 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 			// object takes. An omitted URL proves nothing wrong. An explicit null html_url is
 			// stored as a null url, as before; a null pull_request_url is a witness the source
 			// always serves, so it is unreadable.
-			const validNumber = typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
+			const validNumber = GITHUB_REPOSITORY.test(value.repo) &&
+				typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
 			const pullUrl = `https://github.com/${value.repo}/pull/${pr.number}`;
 			// Every URL is anchored to the canonical values built from the event's repository
 			// and the PR number, never to another URL the same payload supplies.

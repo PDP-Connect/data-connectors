@@ -176,3 +176,22 @@ test("a review that omits html_url is complete and stores a null url", () => {
 		assert.equal(parsed.row?.url ?? null, null);
 	}
 });
+
+test("a review is complete only when the event repository is an owner/name pair, so a malformed name cannot shape the canonical URLs", () => {
+	for (const name of ["sample-owner/demo/pulls/7#", "sample-owner/../demo", "sample-owner", "sample owner/demo", "/demo"]) {
+		const pr = { ...compactPr, url: `https://api.github.com/repos/${name}/pulls/7` };
+		const event = review(pr);
+		event.repo = { name };
+		event.payload.review.html_url = `https://github.com/${name}/pull/7`;
+		assert.equal(parseLegacyEventPageItem(event).complete, false, name);
+	}
+	assert.equal(parseLegacyEventPageItem(review(compactPr)).complete, true);
+	const dotted = { ...compactPr, url: "https://api.github.com/repos/sample-owner/demo.site_v2/pulls/7" };
+	const event = review(dotted);
+	event.repo = { name: "sample-owner/demo.site_v2" };
+	event.payload.review.html_url = "https://github.com/sample-owner/demo.site_v2/pull/7";
+	assert.equal(parseLegacyEventPageItem(event).complete, true);
+	const prEvent = { id: "5", type: "PullRequestEvent", public: true, created_at: "2026-10-19T12:00:00Z", repo: { name: "sample-owner/demo/pull/7#x" },
+		payload: { action: "opened", number: 7, pull_request: { number: 7, title: "Invented", body: null, html_url: "https://github.com/sample-owner/demo/pull/7#x/pull/7", head: { ref: "feature" } } } };
+	assert.equal(parseLegacyEventPageItem(prEvent).complete, false);
+});
