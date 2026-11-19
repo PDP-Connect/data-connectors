@@ -37,7 +37,12 @@ Any correlated non-2xx answer, and any browse call the run cannot attribute
 last terminal response, vetoes the end claim for the run. A request for another
 page (a browseId other than history, no continuation) is counted as foreign and
 ignored only when its response is 2xx, reads, and shows no rows and no
-continuation; otherwise it counts as uncorrelated. A history browse still in
+continuation; otherwise it counts as uncorrelated. A request that failed at the
+transport is classified like a non-2xx answer: a failed history call (the initial
+request, or a known token) vetoes the run, and a failure with no body or a
+foreign body is unattributed and vetoes as uncorrelated. A response body gets
+one bounded read (five seconds); a body that stalls counts as unreadable and
+vetoes completion without stalling the chain. A history browse still in
 flight (started, not yet answered or failed) keeps the final refresh from being
 stable, bounded by the three refreshes and the page-log drain wait. A veto blocks the complete STATE only; the partial checkpoint rests on
 rows already read and is kept. On this path the terminal logged response must also

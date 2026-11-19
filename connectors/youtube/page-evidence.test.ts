@@ -951,3 +951,21 @@ test("a row nested in another row counts once", () => {
 	assert.equal(scan.itemCount, 2);
 	assert.equal(scan.recognized, true);
 });
+
+test("the page browse log keeps the request body of a fetch that failed", async () => {
+	await withFakeWindow(
+		async () => {
+			throw new TypeError("network down");
+		},
+		async (window) => {
+			assert.equal(installHistoryBrowseLog(), true);
+			await window.fetch(BROWSE_URL, {
+				method: "POST",
+				body: JSON.stringify({ continuation: "wanted" }),
+			}).catch(() => undefined);
+			const drained = await drainAll();
+			assert.deepEqual(drained.entries[0]?.requestBody, { continuation: "wanted" });
+			assert.equal(drained.entries[0]?.status, 0);
+		},
+	);
+});
