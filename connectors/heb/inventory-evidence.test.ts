@@ -1430,3 +1430,32 @@ test("a named row's department survives a section title with < and &", async () 
 	const r = await resolveLinkless([ssrItem("500")], `<main><section><h2 data-qe-id="orderDetailsGroupTitle">Fish &amp; &lt;Chips&gt;</h2><ul>${itemRow(0)}</ul></section></main>`);
 	assert.equal(r.detail.items[0]?.department, "Fish & <Chips>");
 });
+
+// ─── the ledger conflict trace (stop=ledger) ─────────────────────────────
+const lgOf = (r: { linklessTrace?: string }) => /;stop=ledger;(lg=[^;]*)/.exec(r.linklessTrace ?? "")?.[1];
+const promoRow = `<li><a data-qe-id="itemRowDetailsName" href="/product-detail/zq9x-free-sample/ZQ9X77">Zq9x Free Sample</a><span data-qe-id="orderItemQty">Qty: 1</span></li>`;
+
+test("a ledger stop counts the maximum matching and classifies each unplaced row, by fixed codes", async () => {
+	const withSubstitute = { product: { id: "500", fullDisplayName: "SSR 500" }, quantity: 1, subbedProducts: [{ product: { id: "501" } }] };
+	const [dup, flat, promo] = await Promise.all([
+		resolveLinkless([ssrItem("500"), ssrItem("501")], itemRow(0) + itemRow(1) + itemRow(0)),
+		resolveLinkless([withSubstitute], itemRow(0) + itemRow(1)),
+		resolveLinkless([ssrItem("500")], itemRow(0) + promoRow),
+	]);
+	assert.equal(lgOf(dup), "lg=mx:2/3/2,u:1[dup_product:1yn],ssr:0/0");
+	assert.equal(lgOf(flat), "lg=mx:1/2/1,u:1[sub_pair:1yn],ssr:1/0");
+	assert.equal(lgOf(promo), "lg=mx:1/2/1,u:1[no_ssr_product:1yy],ssr:0/0");
+	for (const r of [dup, flat, promo]) {
+		assert.match(r.linklessTrace ?? "", /;stop=ledger;lg=[^;]*;why=/);
+		assert.ok((lgOf(r) ?? "").length <= 120);
+		assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|ZQ9X|Sample|zq9x/i);
+		assert.equal(r.inventoryComplete, false);
+	}
+});
+
+test("the ledger trace changes no record: the parsed items are the rows' own", async () => {
+	const r = await resolveLinkless([ssrItem("500")], itemRow(0) + promoRow);
+	assert.deepEqual(r.detail.items.map((item) => item.productId), ["500", "ZQ9X77"]);
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.doesNotMatch(r.linklessTrace ?? "", /nameless/);
+});

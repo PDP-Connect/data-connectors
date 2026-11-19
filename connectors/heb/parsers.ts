@@ -1150,6 +1150,63 @@ export function resolveLinklessOrderItems(
 			index++;
 		}
 	}
+	// When the ledger fails, count and classify what the matcher saw, with
+	// fixed codes only. Read-only: it changes no record and no decision.
+	const ledgerConflict = (): string => {
+		// The full maximum matching: a row that cannot be placed is skipped
+		// instead of ending the run.
+		const owner = new Map<number, number>();
+		const tryPlace = (row: number, tried: Set<number>): boolean => {
+			for (const item of candidates[row]!) {
+				if (tried.has(item)) continue;
+				tried.add(item);
+				const holder = owner.get(item);
+				if (holder === undefined || tryPlace(holder, tried)) {
+					owner.set(item, row);
+					return true;
+				}
+			}
+			return false;
+		};
+		const unplaced = candidates.map((_, row) => row).filter((row) => !tryPlace(row, new Set()));
+		const namedLines = outerLines.filter((line) => ownCopy(line).querySelector(nameSelector));
+		const ownIds = (line: Element) => [...ownCopy(line).querySelectorAll(nameSelector)].map(
+			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "");
+		const idCounts = new Map<string, number>();
+		for (const line of namedLines) for (const id of new Set(ownIds(line))) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+		const ssrIds = new Set(items.flatMap((item) => itemIds(item)));
+		const hasSubstitutes = (ids: string[]) =>
+			items.some((item) => item.substituteIds.length > 0 && item.productId !== null && ids.includes(item.productId));
+		const rowClass = (line: (typeof outerLines)[number]) => {
+			const ids = ownIds(line);
+			const at = outerLines.indexOf(line);
+			const neighbours = outerLines.slice(Math.max(at - 1, 0), at + 2).filter((n) => n !== line);
+			return ids.some((id) => (idCounts.get(id) ?? 0) > 1) ? "dup_product"
+				: neighbours.some((n) => hasSubstitutes(ownIds(n))) ? "sub_pair"
+				: ids.length > 0 && ids.every((id) => !ssrIds.has(id)) ? "no_ssr_product"
+				: "other";
+		};
+		const unplacedFlags = unplaced.map((row) => {
+			const line = namedLines[row]!;
+			const at = outerLines.indexOf(line);
+			const own = ownCopy(line);
+			const anchors = Math.min(own.querySelectorAll(nameSelector).length, 9);
+			const sameParent = at > 0 && outerLines[at - 1]!.parentElement === line.parentElement;
+			const priceOrPromo = /\$\s*\d|\b(?:free|promo|bonus)\b/i.test(normText(own));
+			return `${rowClass(line)}:${anchors}${sameParent ? "y" : "n"}${priceOrPromo ? "y" : "n"}`;
+		});
+		const repeatedSsr = [...items.reduce((counts, item) => item.productId === null ? counts
+			: counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1), new Map<string, number>()).values()]
+			.filter((n) => n > 1).length;
+		const subItems = items.filter((item) => item.substituteIds.length > 0).length;
+		const head = `lg=mx:${candidates.length - unplaced.length}/${candidates.length}/${items.length}`;
+		const tail = `,ssr:${subItems}/${repeatedSsr}`;
+		// Keep the field under 120 characters: drop listed rows from the end.
+		const shown = unplacedFlags.slice(0, 4);
+		const render = () => `${head},u:${unplaced.length}${shown.length ? `[${shown.join("|")}]` : ""}${tail}`;
+		while (render().length > 120 && shown.length > 0) shown.pop();
+		return render();
+	};
 	const trace = [
 		`linkless_trace=ssr:${items.length}`,
 		`linked:${candidates.length}`,
@@ -1164,7 +1221,7 @@ export function resolveLinklessOrderItems(
 	].join(",") +
 		(namelessItems
 			? `;stop=nameless;nameless=${namelessItems.length}`
-			: `;stop=${stop}` + (namelessHeld ? `;nameless_held=${namelessHeld}` : "")) +
+			: `;stop=${stop}` + (stop === "ledger" ? `;${ledgerConflict()}` : "") + (namelessHeld ? `;nameless_held=${namelessHeld}` : "")) +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
 		`;ll_img=${linklessImage ?? "-"}` +
 		(unfitImage ? `;unfit_img=${unfitImage}` : "");
