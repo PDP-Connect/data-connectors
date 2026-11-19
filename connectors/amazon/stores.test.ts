@@ -185,6 +185,49 @@ test("resolveAmazonStore: request, then page, then the one signed-in store, then
 	);
 });
 
+test("resolveAmazonStore: a page on a store the browser is not signed in to does not win", () => {
+	const caOnly = [{ domain: ".amazon.ca", name: "at-acbca", value: "x" }];
+	// Signed in only on amazon.ca, handed a fresh amazon.com page: read amazon.ca.
+	assert.deepEqual(
+		resolveAmazonStore({ cookies: caOnly, pageUrl: "https://www.amazon.com/" }),
+		{ store: store("ca"), from: "cookies" },
+	);
+	// The page's store is among the signed-in stores: the page wins.
+	const both = [
+		...caOnly,
+		{ domain: ".amazon.com", name: "at-main", value: "x" },
+	];
+	assert.deepEqual(
+		resolveAmazonStore({ cookies: both, pageUrl: "https://www.amazon.ca/" }),
+		{ store: store("ca"), from: "page" },
+	);
+	// No cookie signal at all (a fresh or restricted context): the page wins.
+	assert.deepEqual(
+		resolveAmazonStore({ cookies: [], pageUrl: "https://www.amazon.ca/" }),
+		{ store: store("ca"), from: "page" },
+	);
+	// Several signed-in stores, none of them the page's: not guessed.
+	assert.deepEqual(
+		resolveAmazonStore({
+			cookies: [
+				...both,
+				{ domain: ".amazon.de", name: "at-acbde", value: "x" },
+			],
+			pageUrl: "https://www.amazon.co.uk/",
+		}),
+		{ store: DEFAULT_AMAZON_STORE, from: "default" },
+	);
+	// "requested" still comes first.
+	assert.deepEqual(
+		resolveAmazonStore({
+			cookies: caOnly,
+			pageUrl: "https://www.amazon.ca/",
+			requested: "com",
+		}),
+		{ store: DEFAULT_AMAZON_STORE, from: "requested" },
+	);
+});
+
 test("postal codes in each store country's shape, normalized", () => {
 	assert.equal(
 		matchPostalCode("Seattle, WA 98101-1234", store("com")),

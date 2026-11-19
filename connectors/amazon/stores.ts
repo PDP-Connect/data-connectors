@@ -185,9 +185,12 @@ export interface ResolvedAmazonStore {
 /**
  * The store this run reads, first that applies:
  *   1. `requested`: an explicit choice (`PDPP_AMAZON_STORE`), when it names a store;
- *   2. `page`: the store of the page the run was handed. On the hosted service
- *      the host signs in on the person's store and hands over its page, so
- *      this is where the person signed in;
+ *   2. `page`: the store of the page the run was handed, when the browser holds
+ *      a signed-in token for that store (or holds none at all, so there is no
+ *      cookie signal to contradict it). On the hosted service the host signs in
+ *      on the person's store and hands over its page. A page on a store the
+ *      browser is NOT signed in to is where the run happened to start, not
+ *      where the person's history is, so it does not win;
  *   3. `cookies`: the ONE store the browser holds a signed-in token for;
  *   4. `default`: amazon.com.
  * Several signed-in stores and no page or request to choose between them is
@@ -209,10 +212,10 @@ export function resolveAmazonStore({
 	}
 	const unknown = ask ? { unknownRequest: ask } : {};
 	const fromPage = storeForUrl(pageUrl);
-	if (fromPage) {
+	const signedIn = signedInStores(cookies);
+	if (fromPage && (signedIn.length === 0 || signedIn.includes(fromPage))) {
 		return { store: fromPage, from: "page", ...unknown };
 	}
-	const signedIn = signedInStores(cookies);
 	if (signedIn.length === 1 && signedIn[0]) {
 		return { store: signedIn[0], from: "cookies", ...unknown };
 	}
