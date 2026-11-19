@@ -5387,12 +5387,21 @@ function syntheticLine(product: string | null, quantity = 1, nested = ""): strin
 		<p data-qe-id="orderItemQty">Qty: ${quantity}</p><p data-qe-id="checkoutItemPrice">$${quantity}.00</p>${nested}</li>`;
 }
 
-function syntheticLinePage(lines: string, total: number): string {
+// Realistic SSR: every item has a product id and a subbedProducts key, and a
+// nested substitute is listed under its original (as the live page serves it).
+// Without `items` the SSR is bare objects, which proves no line placement.
+type SyntheticItem = { id: string; subs?: string[] };
+function syntheticLinePage(lines: string, total: number, items?: SyntheticItem[]): string {
 	return `<main><div data-qe-id="orderSummaryCard"></div><ul id="lines">${lines}</ul></main>
 		<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({
 			page: "/my-account/order-history/[orderId]", gssp: true,
 			props: { __N_SSP: true, pageProps: { order: {
-				orderId: "SYNTHETIC-LINES", orderItems: Array.from({ length: total }, () => ({})),
+				orderId: "SYNTHETIC-LINES", orderItems: items
+					? items.map((item) => ({
+						product: { id: item.id }, quantity: 1,
+						subbedProducts: (item.subs ?? []).map((sub) => ({ product: { id: sub } })),
+					}))
+					: Array.from({ length: total }, () => ({})),
 			} } },
 		})}</script>`;
 }
@@ -5401,17 +5410,17 @@ test("fetchOrderDetail: SSR outer lines preserve substitution and duplicate reco
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const cases = [
-			{ lines: syntheticLine("original", 2, `<ul>${syntheticLine("substitute", 3)}</ul>`), total: 1, complete: true, ids: ["original", "substitute"], quantities: [2, 3] },
-			{ lines: syntheticLine("repeat") + syntheticLine("repeat", 2), total: 2, complete: true, ids: ["repeat|0", "repeat|1"], quantities: [1, 2] },
+			{ lines: syntheticLine("original", 2, `<ul>${syntheticLine("substitute", 3)}</ul>`), total: 1, items: [{ id: "original", subs: ["substitute"] }], complete: true, ids: ["original", "substitute"], quantities: [2, 3] },
+			{ lines: syntheticLine("repeat") + syntheticLine("repeat", 2), total: 2, items: [{ id: "repeat" }, { id: "repeat" }], complete: true, ids: ["repeat|0", "repeat|1"], quantities: [1, 2] },
 			{ lines: syntheticLine("first") + syntheticLine(null), total: 2, complete: false, linkless: 1 },
 			{ lines: syntheticLine("first"), total: 2, complete: false },
 			{ lines: syntheticLine("first") + syntheticLine("second"), total: 1, complete: false },
-			{ lines: syntheticLine("first") + syntheticLine("second", 2), total: 2, complete: true, ids: ["first", "second"], quantities: [1, 2] },
+			{ lines: syntheticLine("first") + syntheticLine("second", 2), total: 2, items: [{ id: "first" }, { id: "second" }], complete: true, ids: ["first", "second"], quantities: [1, 2] },
 		];
 		await Promise.all(cases.map(async (scenario) => {
 			const page = await browser.newPage();
 			await page.route("https://www.heb.com/my-account/order-history/SYNTHETIC-LINES",
-				(route) => route.fulfill({ body: syntheticLinePage(scenario.lines, scenario.total), contentType: "text/html" }));
+				(route) => route.fulfill({ body: syntheticLinePage(scenario.lines, scenario.total, scenario.items), contentType: "text/html" }));
 			const result = await fetchOrderDetail(page, "SYNTHETIC-LINES", {
 				expectedItemCount: 99, detailSurfaceTimeoutMs: 3000, waitForHydration: immediateWait,
 			});
@@ -5448,7 +5457,7 @@ test("fetchOrderDetail: partial then full SSR snapshot never accumulates documen
 		const partial = syntheticLine("repeat");
 		const full = partial + syntheticLine("repeat", 2);
 		await page.route("https://www.heb.com/my-account/order-history/SYNTHETIC-LINES",
-			(route) => route.fulfill({ body: syntheticLinePage(partial, 2), contentType: "text/html" }));
+			(route) => route.fulfill({ body: syntheticLinePage(partial, 2, [{ id: "repeat" }, { id: "repeat" }]), contentType: "text/html" }));
 		let observations = 0;
 		const evaluate = page.evaluate.bind(page);
 		page.evaluate = (async (...args: Parameters<Page["evaluate"]>) => {

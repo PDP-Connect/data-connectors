@@ -486,7 +486,7 @@ for (const [label, bad] of [
 }
 /** A synthetic order-detail page as H-E-B renders it for the signed-in owner
  * (shape captured live on 2026-11-18; every value here is invented). */
-const detailPage = (opts: { lines: number; orderId?: string; control?: boolean }) => {
+const detailPage = (opts: { lines: number; orderId?: string; control?: boolean; subs?: string[] }) => {
 	const data = {
 		page: "/my-account/order-history/[orderId]",
 		gssp: true,
@@ -499,6 +499,7 @@ const detailPage = (opts: { lines: number; orderId?: string; control?: boolean }
 						sequenceNumber: i + 1,
 						quantity: 1,
 						product: { id: String(500 + i) },
+						...(opts.subs && i === 0 ? { subbedProducts: opts.subs.map((id) => ({ product: { id } })) } : {}),
 					})),
 				},
 			},
@@ -791,7 +792,7 @@ for (const [label, lineHtml] of [
 		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), false);
 	});
 test("a substituted line with one name link per line proves its one source line", async () => {
-	const html = detailPage({ lines: 1 }).replace(
+	const html = detailPage({ lines: 1, subs: ["501"] }).replace(
 		itemRow(0) + itemRow(1),
 		'<li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="orderItemQty">Qty: 1</span><ul><li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/501">Substitute</a><span data-qe-id="orderItemQty">Qty: 1</span></li></ul></li>',
 	);
@@ -803,6 +804,21 @@ test("a substituted line with one name link per line proves its one source line"
 	if (result.status !== "hydrated") return;
 	assert.equal(result.detail.items.length, 2);
 	assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), true);
+});
+// Behaviour change (0.6.66): recovery needs the ledger to place every SSR item
+// on a distinct row, so SSR that lost its ids, or omits a nested substitute from
+// its original's subbedProducts, no longer certifies the line.
+test("a substituted line no longer certifies when SSR lacks product ids or leaves the substitute unlisted", async () => {
+	const nested = '<li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/500">Widget</a><span data-qe-id="orderItemQty">Qty: 1</span><ul><li><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/501">Substitute</a><span data-qe-id="orderItemQty">Qty: 1</span></li></ul></li>';
+	const unlisted = detailPage({ lines: 1 }).replace(itemRow(0) + itemRow(1), nested);
+	const idless = unlisted.replace(/"orderItems":\[[^\]]*\]/, '"orderItems":[{}]');
+	const results = await Promise.all([unlisted, idless].map((html) =>
+		fetchOrderDetail(pageFor(html), order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50 })));
+	for (const result of results) {
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(inventoryMatchesSourceTotal({ ...result.evidence, acceptedIds: result.evidence.sourceIds }, result.sourceItemTotal), false);
+	}
 });
 test("two lines whose records would share one id do not prove an order's lines", async () => {
 	const line = (quantity: number) =>
@@ -1824,4 +1840,40 @@ test("virtualized: the live-shaped case recovers with every SSR line", async () 
 	assert.match(r.linklessTrace ?? "", /;dup_render=1/);
 	assert.equal(r.evidence.sourceIds.length, 5);
 	assert.equal(matchesTotal(r, 5), true);
+});
+
+// ─── round 18: no collapse, an unmounted real row and an extra rendering ──
+// 901 (second) is unmounted and 900 is drawn twice, so mounted rows equal the
+// SSR count (5). No item_count is given, so nothing collapses.
+const swapped = () => dupRow("900") + dupRow("900") + dupRow("902") + dupRow("901", { cents: "$3.00" }) + dupRow("903", { nested: nestedSub("904") });
+for (const virtualized of [true, false]) {
+	test(`no collapse (${virtualized ? "virtualized" : "not virtualized"}): an unmounted real row offset by an extra rendering is not certified complete`, async () => {
+		const html = virtualized ? indexed(swapped()) : swapped();
+		const r = await resolveLinkless(dupSsr, html, undefined, virtualized);
+		assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+		assert.equal(matchesTotal(r, 5), false);
+		assert.equal(r.inventoryComplete, false);
+	});
+}
+
+// ─── round 18b: an unplaced SSR item keeps the gap, and a collapse needs own-link placement ───
+// SSR holds P and Q. Two coherent P rows are mounted (own data-index, own
+// price) and Q is unmounted, so mounted rows equal the SSR count.
+for (const virtualized of [true, false]) {
+	test(`an SSR item the ledger cannot place keeps the gap (${virtualized ? "virtualized" : "not virtualized"}): two P rows, Q unmounted`, async () => {
+		const rows = `<li data-index="0">${dupRow("700").slice(4)}` + `<li data-index="1">${dupRow("700", { cents: "$6.00" }).slice(4)}`;
+		const items = [{ ...ssrItem("700"), fulfilledQuantity: 1 }, { ...ssrItem("701"), fulfilledQuantity: 1 }];
+		const r = await resolveLinkless(items, rows, 2, virtualized);
+		assert.equal(matchesTotal(r, 2), false);
+		assert.equal(r.inventoryComplete, false);
+	});
+}
+
+test("a stray row with a link to another product and a missing item's image blocks the collapse; the gap stays open", async () => {
+	const stray = `<li><a aria-hidden="true" href="/product-detail/x/999"><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${"901".padStart(9, "0")}.jpg"></a>` +
+		`<a data-qe-id="itemRowDetailsName" href="/product-detail/x/999">Other</a><span data-qe-id="checkoutItemPrice">$4.00</span><span data-qe-id="orderItemQty">Qty: 1</span></li>`;
+	const rows = dupRow("900") + dupRow("902") + dupRow("901", { cents: "$3.00" }) + dupRow("903", { nested: nestedSub("904") }) + stray + dupRow("900");
+	const r = await resolveLinkless(dupSsr, rows, DUP_COUNT);
+	assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+	assert.equal(matchesTotal(r, 5), false);
 });

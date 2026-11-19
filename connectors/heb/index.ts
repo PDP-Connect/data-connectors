@@ -1116,6 +1116,8 @@ export async function fetchOrderDetail(
 	// collapse recovers the gap only when all of these hold on this run:
 	//  (a) the matcher places every SSR item on a distinct kept row (ledger
 	//      complete), so a stray row that fits no item fails here;
+	//      Every kept row must also be placed by its own link id or a listed
+	//      substitute id, never by image or text alone;
 	//  (b) kept rows equal the SSR item count;
 	//  (c) mounted raw rows equal SSR count + collapsed, exactly;
 	//  (d) item_count equals the fulfilled-units sum (checked in
@@ -1128,6 +1130,9 @@ export async function fetchOrderDetail(
 		!(
 			initialSourceItemTotal !== null &&
 			resolved.allItemsPlaced &&
+			// A row placed by image or text alone could be a stray row that
+			// fills a missing item: a collapse stands on link ids only.
+			resolved.placedByOwnLink &&
 			surfaceIds.length === source.items.length &&
 			surfaceIds.length === initialSourceItemTotal &&
 			surface.declaredCountAt(source.items.length + collapse.collapsed)
@@ -1138,7 +1143,10 @@ export async function fetchOrderDetail(
 		surfaceIds = surface.sourceIds;
 		resolved = resolveLinklessOrderItems(surfaceHtml, source.items);
 	}
-	const lineCountMatches = collapse ? true : surface.lineCountMatches;
+	// Matching counts are not enough on either path: the ledger must also place
+	// every SSR item on a distinct row, or an unmounted real row offset by an
+	// extra rendering would read as a complete inventory.
+	const lineCountMatches = collapse ? true : surface.lineCountMatches && resolved.allItemsPlaced;
 	const detail = resolved.detail;
 	if (!detail) {
 		return failed(

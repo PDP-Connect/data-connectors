@@ -1127,7 +1127,7 @@ export function resolveLinklessOrderItems(
 		naming?: "none" | "found" | "incomplete";
 		namingPath?: string;
 	}[],
-): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[]; ledgerExhausted: boolean; allItemsPlaced: boolean } {
+): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[]; ledgerExhausted: boolean; allItemsPlaced: boolean; placedByOwnLink: boolean } {
 	const { document } = parseHTML(html);
 	const claimed = new Set<number>();
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
@@ -1504,6 +1504,9 @@ export function resolveLinklessOrderItems(
 		trace,
 		nameless: namelessItems ?? [],
 		ledgerExhausted: budgetSpent || diagnosticSpent,
+		// No row took its item through an image or a text key: every linked row
+		// fit through its own link id (or a listed substitute id).
+		placedByOwnLink: fitByImage === 0 && keyed === 0,
 		// The ledger is complete (every linked row sits on its own SSR item) and
 		// every SSR item ended on a distinct row: claimed, or paired as nameless.
 		allItemsPlaced: ledgerComplete && (
@@ -1796,6 +1799,8 @@ export function orderItemId(
 		if (isNameless(item)) {
 			return `${orderId}|nameless|${parseCurrencyCents(item.lineTotal ?? null)}|${item.quantity}|${context.ordinal[itemIndex]}`;
 		}
+		// A product the collapse reduced to one row takes the product-only id (no
+		// suffix): SSR lists it once, so that is its one purchase's id.
 		const key = idKeyOf(item);
 		return context.keyCount.get(key)! > 1
 			? `${orderId}|${key}|${item.sourcePosition ?? itemIndex}`
