@@ -1550,7 +1550,12 @@ export async function runConnectorLifecycle(
 			state: startMsg.state ?? {},
 			requested,
 			credentials,
-			emit: emitConnectorMessage,
+			// A raw RECORD is joined, fenced and failure-tracked like emitRecord, so a
+			// caught transport rejection cannot be invisible to settlement.
+			emit: (msg) =>
+				msg.type === "RECORD"
+					? emitRecord.track(() => emitConnectorMessage(msg))
+					: emitConnectorMessage(msg),
 			emitRecord: emitRecord.emit,
 			isRecordSelected: emitRecord.isSelected,
 			assist,
@@ -1811,6 +1816,8 @@ export function makeEmitRecord(deps: {
 	settle: (timeoutMs: number) => Promise<void>;
 	/** Throw if any record's delivery has rejected. */
 	assertDelivered: () => void;
+	/** Run a raw RECORD emission under the same tracking, fence and failure rules. */
+	track: (run: () => Promise<void>) => Promise<void>;
 } {
 	const {
 		requested,
@@ -1922,45 +1929,67 @@ export function makeEmitRecord(deps: {
 	// first delivery failure. The failure is sticky: a collector that catches a
 	// rejected emitRecord cannot turn the run into a succeeded DONE.
 	const inFlight = new Set<Promise<void>>();
-	let deliveryFailure: Error | null = null;
-	const emit = (message: EmittedMessage): Promise<void> => {
-		const tracked = emitOutput(message);
+	let deliveryFailure: TerminalError | null = null;
+	// `closed`: settlement began, so no new emission is admitted. `fenced`:
+	// settlement ended (or timed out), so a gate that resolves later writes
+	// nothing, and nothing lands after DONE.
+	let closed = false;
+	let fenced = false;
+	// A delivery failure carries a fixed message: the underlying error can
+	// quote record content. A connector's own TerminalError is already a
+	// deliberate message and passes through.
+	const fail = (error: unknown): TerminalError => {
+		const failure =
+			error instanceof TerminalError
+				? error
+				: new TerminalError(
+						"A record could not be delivered; the run is incomplete",
+						{ code: "record_delivery_failed", retryable: true },
+					);
+		deliveryFailure ??= failure;
+		return failure;
+	};
+	const output = (message: EmittedMessage): Promise<void> => {
+		if (fenced) return Promise.reject(new Error("delivery fenced"));
+		try {
+			return emitOutput(message);
+		} catch (error) {
+			return Promise.reject(error);
+		}
+	};
+	const gate = (beforeEmit: () => Promise<void>): Promise<void> => {
+		if (fenced) return Promise.reject(new Error("delivery fenced"));
+		try {
+			return Promise.resolve(beforeEmit());
+		} catch (error) {
+			return Promise.reject(error);
+		}
+	};
+	/** Admit one emission as a tracked unit; a synchronous throw is a rejection. */
+	const admit = (run: () => Promise<void>): Promise<void> => {
+		if (closed)
+			return Promise.reject(fail(new Error("emission after settlement")));
+		let unit: Promise<void>;
+		try {
+			unit = run();
+		} catch (error) {
+			unit = Promise.reject(error);
+		}
+		const tracked = unit.catch((error: unknown) => {
+			throw fail(error);
+		});
+		inFlight.add(tracked);
 		const done = (): void => {
 			inFlight.delete(tracked);
 		};
-		inFlight.add(tracked);
-		tracked.then(done, (error: unknown) => {
-			deliveryFailure ??=
-				error instanceof Error ? error : new Error(String(error));
-			done();
-		});
+		tracked.then(done, done);
 		return tracked;
 	};
-	const trackGate = <T>(gate: Promise<T>): Promise<T> => {
-		const marker = gate.then(
-			() => undefined,
-			(error: unknown) => {
-				deliveryFailure ??=
-					error instanceof Error ? error : new Error(String(error));
-			},
-		);
-		inFlight.add(marker);
-		void marker.then(() => inFlight.delete(marker));
-		return gate;
-	};
 	const assertDelivered = (): void => {
-		if (deliveryFailure) {
-			throw new TerminalError(
-				"A record could not be delivered; the run is incomplete",
-				{
-					code: "record_delivery_failed",
-					retryable: true,
-					cause: deliveryFailure,
-				},
-			);
-		}
+		if (deliveryFailure) throw deliveryFailure;
 	};
 	const settle = async (timeoutMs: number): Promise<void> => {
+		closed = true;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const expired = new Promise<"expired">((resolve) => {
 			timer = setTimeout(() => resolve("expired"), timeoutMs);
@@ -1980,6 +2009,7 @@ export function makeEmitRecord(deps: {
 			}
 		} finally {
 			clearTimeout(timer);
+			fenced = true;
 		}
 		assertDelivered();
 	};
@@ -1997,24 +2027,26 @@ export function makeEmitRecord(deps: {
 		// must not include a record whose output or beforeEmit gate rejected.
 		if (selection === "tombstone") {
 			const fields = keyFieldsFor(stream) ?? ["id"];
-			return emit({
-				type: "RECORD",
-				stream,
-				key: identity.key,
-				data: Object.fromEntries(fields.map((field) => [field, data[field]])),
-				emitted_at: emittedAt,
-				op: "delete",
-			}).then(() => {
-				counters.totalEmitted += 1;
-			});
+			return admit(() =>
+				output({
+					type: "RECORD",
+					stream,
+					key: identity.key,
+					data: Object.fromEntries(fields.map((field) => [field, data[field]])),
+					emitted_at: emittedAt,
+					op: "delete",
+				}).then(() => {
+					counters.totalEmitted += 1;
+				}),
+			);
 		}
 
 		const validation = validateRecord?.(stream, data);
 		if (validation && !validation.ok) {
-			return emit(makeShapeCheckSkip(stream, data, validation.issues)).then(
-				() => {
+			return admit(() =>
+				output(makeShapeCheckSkip(stream, data, validation.issues)).then(() => {
 					counters.totalSkipped += 1;
-				},
+				}),
 			);
 		}
 		// Present only when the record was RETAINED despite carrying a value the
@@ -2029,8 +2061,8 @@ export function makeEmitRecord(deps: {
 		};
 		const deliver = (): Promise<void> =>
 			(options.beforeEmit
-				? trackGate(options.beforeEmit()).then(() => emit(record))
-				: emit(record)
+				? gate(options.beforeEmit).then(() => output(record))
+				: output(record)
 			).then(() => {
 				counters.totalEmitted += 1;
 				if (anomalies?.length) counters.totalAnomalous += 1;
@@ -2039,9 +2071,11 @@ export function makeEmitRecord(deps: {
 		// so the unmodeled value is visible rather than silently tolerated. Reported
 		// BEFORE the RECORD so a truncated stream never shows the record without the
 		// caveat attached to it.
-		return anomalies?.length
-			? emit(makeShapeAnomalyReport(stream, data, anomalies)).then(deliver)
-			: deliver();
+		return admit(() =>
+			anomalies?.length
+				? output(makeShapeAnomalyReport(stream, data, anomalies)).then(deliver)
+				: deliver(),
+		);
 	};
 
 	return {
@@ -2052,6 +2086,7 @@ export function makeEmitRecord(deps: {
 		withheldAtOrAfterUntil,
 		settle,
 		assertDelivered,
+		track: admit,
 	};
 }
 

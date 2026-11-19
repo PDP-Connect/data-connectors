@@ -2041,7 +2041,10 @@ test("makeEmitRecord counters stay exact when a rejected emit is retried", async
 		isTombstone: undefined,
 		timeRangeFieldFor: () => null,
 	});
-	await assert.rejects(gate.emit("items", { id: "a" }), /synthetic output/);
+	await assert.rejects(
+		gate.emit("items", { id: "a" }),
+		/could not be delivered/,
+	);
 	assert.equal(gate.counters.totalEmitted, 0);
 	await gate.emit("items", { id: "a" });
 	assert.equal(gate.counters.totalEmitted, 1);
@@ -2166,3 +2169,164 @@ function lastDone(messages: EmittedMessage[]) {
 			message.type === "DONE",
 	);
 }
+
+const LEAK = "ACME-4417";
+
+function customTransport(
+	messages: EmittedMessage[],
+	emit: (message: EmittedMessage) => Promise<void>,
+	extra: { inflightSettleTimeoutMs?: number } = {},
+) {
+	return {
+		...lifecycleTransport(messages, undefined, extra),
+		// Not async: `emit` may throw synchronously, as a real transport can.
+		emit: (message: EmittedMessage): Promise<void> =>
+			emit(message).then(() => {
+				messages.push(message);
+			}),
+	};
+}
+
+for (const source of ["output", "gate"] as const) {
+	for (const caught of [true, false]) {
+		test(`a synchronous ${source} throw is a tracked delivery failure with a fixed message: caught=${caught}`, async () => {
+			const messages: EmittedMessage[] = [];
+			const emitOutput = (message: EmittedMessage): Promise<void> => {
+				if (source === "output" && message.type === "RECORD")
+					throw new Error(`cannot write row ${LEAK}`);
+				return Promise.resolve();
+			};
+			const result = await runConnectorLifecycle(
+				{
+					name: "synthetic_sync_throw",
+					collect: async ({ emitRecord }) => {
+						const sent = (): Promise<void> =>
+							emitRecord(
+								"items",
+								{ id: "x" },
+								source === "gate"
+									? {
+											beforeEmit: () => {
+												throw new Error(`cannot gate row ${LEAK}`);
+											},
+										}
+									: {},
+							);
+						if (caught) await sent().catch(() => undefined);
+						else await sent();
+					},
+				},
+				customTransport(messages, emitOutput),
+			);
+			assert.equal(result.exitCode, 1);
+			const done = lastDone(messages);
+			assert.equal(done?.status, "failed");
+			assert.equal(done?.error?.code, "record_delivery_failed");
+			assert.equal(JSON.stringify(messages).includes(LEAK), false);
+		});
+	}
+}
+
+test("a raw RECORD sent through ctx.emit is joined: a caught transport rejection fails the run", async () => {
+	const messages: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_raw_record",
+			collect: async ({ emit }) => {
+				await emit({
+					type: "RECORD",
+					stream: "items",
+					key: "raw",
+					data: { id: "raw" },
+					emitted_at: "2026-11-12T00:00:00.000Z",
+				}).catch(() => undefined);
+			},
+		},
+		customTransport(messages, async (message) => {
+			if (message.type === "RECORD") throw new Error(`raw ${LEAK}`);
+		}),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(messages)?.error?.code, "record_delivery_failed");
+	assert.equal(JSON.stringify(messages).includes(LEAK), false);
+});
+
+test("an emit admitted after settlement began is refused and fails the run", async () => {
+	const messages: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_late_admission",
+			collect: async ({ emitRecord }) => {
+				void emitRecord(
+					"items",
+					{ id: "held" },
+					{
+						beforeEmit: () =>
+							new Promise<void>((resolve) => setTimeout(resolve, 40)),
+					},
+				);
+				// Lands while settlement is draining the held emission.
+				setTimeout(() => {
+					void emitRecord("items", { id: "late" }).catch(() => undefined);
+				}, 10);
+			},
+		},
+		lifecycleTransport(messages),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(messages)?.error?.code, "record_delivery_failed");
+	assert.equal(
+		messages.some((message) => (message as { key?: unknown }).key === "late"),
+		false,
+	);
+});
+
+test("a gate that outlasts the settlement deadline writes nothing after DONE", async () => {
+	const messages: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_late_gate",
+			collect: async ({ emitRecord }) => {
+				void emitRecord(
+					"items",
+					{ id: "slow" },
+					{
+						beforeEmit: () =>
+							new Promise<void>((resolve) => setTimeout(resolve, 80)),
+					},
+				);
+			},
+		},
+		lifecycleTransport(messages, undefined, { inflightSettleTimeoutMs: 20 }),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(messages)?.error?.code, "record_settlement_timeout");
+	await new Promise((resolve) => setTimeout(resolve, 150));
+	assert.equal(messages.at(-1)?.type, "DONE");
+	assert.equal(
+		messages.some((message) => message.type === "RECORD"),
+		false,
+	);
+});
+
+test("a transport write that never completes is bounded by the settlement deadline", async () => {
+	const messages: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_hung_write",
+			collect: async ({ emitRecord }) => {
+				void emitRecord("items", { id: "hung" });
+			},
+		},
+		customTransport(
+			messages,
+			(message) =>
+				message.type === "RECORD"
+					? new Promise<void>(() => {})
+					: Promise.resolve(),
+			{ inflightSettleTimeoutMs: 20 },
+		),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(messages)?.error?.code, "record_settlement_timeout");
+});

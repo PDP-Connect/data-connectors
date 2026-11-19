@@ -16,18 +16,21 @@
 // adapter owns login, protocol evidence delivery and the result spool.
 import {
 	consentTimeFieldResolver,
+	type EmittedMessage,
 	type makeEmitRecord,
 	type RunConnectorConfig,
 	runConnectorLifecycle,
-	type EmittedMessage,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	TerminalError,
+	type TerminalErrorDetails,
+} from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
-import { TerminalError, type TerminalErrorDetails } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import {
 	CollectionOutcome,
-	fatalCollectionError,
 	type ConnectorError,
+	fatalCollectionError,
 } from "./collection-outcome.ts";
 
 /** Set by build.mjs: the connector directory whose manifest declares the streams. */
@@ -94,31 +97,60 @@ declare const PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: number;
 // (a JSON error quoting a value, a host echoing a payload). Diagnostics get a
 // fixed class and an error name from a fixed vocabulary, never the message.
 const SAFE_ERROR_NAMES = new Set([
-	"Error", "TypeError", "RangeError", "SyntaxError", "TimeoutError", "AbortError",
+	"Error",
+	"TypeError",
+	"RangeError",
+	"SyntaxError",
+	"TimeoutError",
+	"AbortError",
 ]);
-type FailureClass = "serialize_failed" | "bridge_rejected" | "bridge_timeout";
+type FailureClass =
+	| "serialize_failed"
+	| "bridge_rejected"
+	| "bridge_timeout"
+	| "evaluate_failed"
+	| "chunk_parse_failed";
+// Classification is total: every property read on an unknown exception is
+// guarded, and anything unexpected is "other".
 function safeErrorName(error: unknown): string {
-	const name = error instanceof Error ? error.name : "";
-	return SAFE_ERROR_NAMES.has(name) ? name : "other";
-}
-class ClassifiedFailure extends Error {
-	constructor(readonly failureClass: FailureClass, cause: unknown) {
-		super(`${failureClass} (${safeErrorName(cause)})`);
+	try {
+		const name = (error as { name?: unknown } | null | undefined)?.name;
+		return typeof name === "string" && SAFE_ERROR_NAMES.has(name)
+			? name
+			: "other";
+	} catch {
+		return "other";
 	}
 }
+class ClassifiedFailure extends Error {
+	readonly failureClass: FailureClass;
+	constructor(failureClass: FailureClass, cause: unknown) {
+		super(`${failureClass} (${safeErrorName(cause)})`);
+		this.failureClass = failureClass;
+	}
+}
+/** An error whose fixed text is authored here, so it never carries page content. */
+class FixedMessageError extends Error {}
 const BRIDGE_TIMEOUT_MARK = Symbol("pageshim.bridgeTimeout");
-function classifyBridgeFailure(error: unknown): ClassifiedFailure {
-	if (error instanceof ClassifiedFailure) return error;
-	return new ClassifiedFailure(
-		(error as { [BRIDGE_TIMEOUT_MARK]?: true } | null)?.[BRIDGE_TIMEOUT_MARK]
-			? "bridge_timeout" : "bridge_rejected",
-		error,
-	);
+function classifyBridgeFailure(
+	error: unknown,
+	fallback: FailureClass = "bridge_rejected",
+): ClassifiedFailure {
+	try {
+		if (error instanceof ClassifiedFailure) return error;
+		if (
+			(error as { [BRIDGE_TIMEOUT_MARK]?: true } | null)?.[BRIDGE_TIMEOUT_MARK]
+		)
+			return new ClassifiedFailure("bridge_timeout", error);
+	} catch {
+		// An unreadable exception is still a bridge failure.
+	}
+	return new ClassifiedFailure(fallback, error);
 }
 
 const USER_WAIT_CALLS = new Set<PropertyKey>(["promptUser"]);
 
-function withBridgeCallTimeout(
+export function withBridgeCallTimeout(
 	shim: ShimPage,
 	onBridgeCall: (
 		method: string,
@@ -134,7 +166,12 @@ function withBridgeCallTimeout(
 			: DEFAULT_BRIDGE_CALL_TIMEOUT_MS;
 	return new Proxy(shim, {
 		get(target, property, receiver) {
-			const value = Reflect.get(target, property, receiver);
+			let value: unknown;
+			try {
+				value = Reflect.get(target, property, receiver);
+			} catch (error) {
+				throw classifyBridgeFailure(error);
+			}
 			if (property === "requestedScopes" || typeof value !== "function")
 				return value;
 			return async (...args: unknown[]) => {
@@ -143,11 +180,14 @@ function withBridgeCallTimeout(
 				let result: unknown;
 				try {
 					if (USER_WAIT_CALLS.has(property)) {
-						result = await value.apply(target, args);
+						result = await (value as (...a: unknown[]) => unknown).apply(
+							target,
+							args,
+						);
 						return result;
 					}
 					result = await Promise.race([
-						value.apply(target, args),
+						(value as (...a: unknown[]) => unknown).apply(target, args),
 						new Promise<never>((_, reject) => {
 							timer = setTimeout(
 								() =>
@@ -156,7 +196,10 @@ function withBridgeCallTimeout(
 											new Error(
 												`PageShim bridge call ${String(property)} timed out after ${timeoutMs}ms`,
 											),
-											{ name: "TimeoutError", [BRIDGE_TIMEOUT_MARK]: true as const },
+											{
+												name: "TimeoutError",
+												[BRIDGE_TIMEOUT_MARK]: true as const,
+											},
 										),
 									),
 								timeoutMs,
@@ -165,10 +208,10 @@ function withBridgeCallTimeout(
 					]);
 					return result;
 				} catch (error) {
-					// setData carries result rows and checkpoints; its failures
-					// are reported by class only.
-					if (property === "setData") throw classifyBridgeFailure(error);
-					throw error;
+					// Host rejections can echo page or row content. Report a class
+					// only; the person's login wait keeps its own message.
+					if (USER_WAIT_CALLS.has(property)) throw error;
+					throw classifyBridgeFailure(error);
 				} finally {
 					if (timer) clearTimeout(timer);
 					try {
@@ -225,7 +268,9 @@ function boundedPageEvaluate(shim: ShimPage) {
 				store[${JSON.stringify(id)}] = json;
 				return { type: "chunked", id: ${JSON.stringify(id)}, length: json.length };
 			} catch (error) {
-				return { type: "error", message: String(error?.message ?? error).slice(0, 1000) };
+				let name = "other";
+				try { name = String(error?.name); } catch {}
+				return { type: "error", name };
 			}
 		})()`;
 		const response = (await shim.evaluate(wrapped)) as {
@@ -233,19 +278,17 @@ function boundedPageEvaluate(shim: ShimPage) {
 			value?: unknown;
 			id?: string;
 			length?: number;
-			message?: string;
+			name?: unknown;
 		};
 		if (response?.type === "undefined") return undefined;
 		if (response?.type === "value") return response.value;
 		if (response?.type === "too-large") {
-			throw new Error(
+			throw new FixedMessageError(
 				`PageShim evaluation result is ${response.length} UTF-16 code units; the per-item limit is ${EVALUATE_RESULT_MAX_UNITS}`,
 			);
 		}
 		if (response?.type === "error") {
-			throw new Error(
-				`PageShim evaluation failed: ${response.message ?? "unknown error"}`,
-			);
+			throw new ClassifiedFailure("evaluate_failed", { name: response.name });
 		}
 		if (
 			response?.type !== "chunked" ||
@@ -255,7 +298,7 @@ function boundedPageEvaluate(shim: ShimPage) {
 			(response.length ?? 0) <= EVALUATE_INLINE_MAX_UNITS ||
 			(response.length ?? 0) > EVALUATE_RESULT_MAX_UNITS
 		) {
-			throw new Error(
+			throw new FixedMessageError(
 				"PageShim evaluation returned an invalid transfer marker",
 			);
 		}
@@ -267,7 +310,7 @@ function boundedPageEvaluate(shim: ShimPage) {
 				`globalThis[${JSON.stringify(EVALUATE_RESULT_STORE)}]?.[${JSON.stringify(id)}]?.slice(${offset}, ${end}) ?? null`,
 			);
 			if (typeof piece !== "string" || piece.length !== end - offset) {
-				throw new Error(
+				throw new FixedMessageError(
 					"PageShim evaluation chunk exceeded its transfer bound",
 				);
 			}
@@ -292,14 +335,24 @@ function boundedPageEvaluate(shim: ShimPage) {
 			}
 			const json = chunks.join("");
 			if (json.length !== response.length) {
-				throw new Error(
+				throw new FixedMessageError(
 					"PageShim evaluation chunks did not match their declared size",
 				);
 			}
-			return JSON.parse(json);
+			try {
+				return JSON.parse(json);
+			} catch (error) {
+				throw new ClassifiedFailure("chunk_parse_failed", error);
+			}
 		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			throw new Error(`PageShim evaluation transfer failed: ${reason}`);
+			// Our own fixed texts and classified failures pass; a transfer
+			// error never quotes the page's text.
+			if (
+				error instanceof FixedMessageError ||
+				error instanceof ClassifiedFailure
+			)
+				throw error;
+			throw classifyBridgeFailure(error);
 		} finally {
 			// Cleanup only frees page memory; the caller need not wait a round trip.
 			void shim
@@ -479,7 +532,9 @@ function capturedConnectorPolicy(): Partial<RunConnectorConfig> | undefined {
 		throw new Error("PageShim connector policy was not captured as an object");
 	for (const key of keys) {
 		if ((policy as Record<string, unknown>)[String(key)] === undefined)
-			throw new Error(`PageShim connector policy ${String(key)} resolved to undefined`);
+			throw new Error(
+				`PageShim connector policy ${String(key)} resolved to undefined`,
+			);
 	}
 	return policy as Partial<RunConnectorConfig>;
 }
@@ -553,9 +608,13 @@ export async function runOnPageShim(
 	const streamingHost = hostAcceptsStreamedResults(pageShim);
 	let rawEndHost = false;
 	try {
-		rawEndHost = (pageShim as ShimPage & { capabilities?: () => string[] })
-			.capabilities?.().includes("connector-end-evidence/1") === true;
-	} catch { /* Older hosts throw on unknown optional members. */ }
+		rawEndHost =
+			(pageShim as ShimPage & { capabilities?: () => string[] })
+				.capabilities?.()
+				.includes("connector-end-evidence/1") === true;
+	} catch {
+		/* Older hosts throw on unknown optional members. */
+	}
 	const streamConfig =
 		connector.streamScopeRecords && streamingHost
 			? connector.streamScopeRecords
@@ -784,7 +843,7 @@ export async function runOnPageShim(
 		activeSequence = 0;
 		activeRecordCount = 0;
 		activeChunkConversationIds = new Set();
-		pendingStreamText = `{${JSON.stringify(rawEndHost ? "records" : streamConfig?.arrayKey ?? "records")}:[`;
+		pendingStreamText = `{${JSON.stringify(rawEndHost ? "records" : (streamConfig?.arrayKey ?? "records"))}:[`;
 		pendingChunkSpans = [];
 	};
 	const appendStreamRecord = async (
@@ -886,13 +945,23 @@ export async function runOnPageShim(
 			const stream = String(msg.stream);
 			if (!recordMarkerStreams.has(stream)) {
 				recordMarkerStreams.add(stream);
-				await shim.setData("connector:message", { type: "RECORD", stream: msg.stream });
+				await shim.setData("connector:message", {
+					type: "RECORD",
+					stream: msg.stream,
+				});
 			}
-		} else if ([
-			"SKIP_RESULT", "DETAIL_COVERAGE", "DETAIL_GAP", "DETAIL_GAP_RECOVERED",
-			"WHOLE_STREAM_EVIDENCE", "PREFLIGHT_EXCLUDED",
-		].includes(msg.type)) {
-			if (msg.type === "DETAIL_COVERAGE") recordMarkerStreams.delete(String(msg.stream));
+		} else if (
+			[
+				"SKIP_RESULT",
+				"DETAIL_COVERAGE",
+				"DETAIL_GAP",
+				"DETAIL_GAP_RECOVERED",
+				"WHOLE_STREAM_EVIDENCE",
+				"PREFLIGHT_EXCLUDED",
+			].includes(msg.type)
+		) {
+			if (msg.type === "DETAIL_COVERAGE")
+				recordMarkerStreams.delete(String(msg.stream));
 			await shim.setData("connector:message", msg);
 		}
 		switch (msg.type) {
@@ -935,7 +1004,8 @@ export async function runOnPageShim(
 				return;
 			}
 			case "SKIP_RESULT":
-				if (msg.reason === "scope_not_supported") unsupportedStreams.add(String(msg.stream));
+				if (msg.reason === "scope_not_supported")
+					unsupportedStreams.add(String(msg.stream));
 				outcome.skip(msg);
 				return;
 			case "DETAIL_COVERAGE":
@@ -972,7 +1042,8 @@ export async function runOnPageShim(
 				if (msg.status === "failed") {
 					const error = msg.error as TerminalErrorDetails | undefined;
 					lifecycle.failure = new TerminalError(
-						error?.message ?? "Connector collection failed", {
+						error?.message ?? "Connector collection failed",
+						{
 							code: error?.code,
 							retryable: error?.retryable,
 							recoveryHint: error?.recovery_hint,
@@ -1007,7 +1078,8 @@ export async function runOnPageShim(
 		if (rejected) return rejected;
 		const pending = messageChain.then(() => emitMessage(msg));
 		messageChain = pending.catch((error: unknown) => {
-			streamFailure ??= error instanceof Error ? error : new Error(String(error));
+			streamFailure ??=
+				error instanceof Error ? error : new Error(String(error));
 		});
 		if (msg.type === "STATE") {
 			const settled = pending.then(
@@ -1042,23 +1114,36 @@ export async function runOnPageShim(
 	});
 
 	let completeResult: (() => Promise<void>) | undefined;
-	const settleResult = async (withheldAtOrAfterUntil: ReadonlySet<string>): Promise<void> => {
+	const settleResult = async (
+		withheldAtOrAfterUntil: ReadonlySet<string>,
+	): Promise<void> => {
 		settlementSealed = true;
 		await messageChain;
 		// Some entry adapters attach host bounds during collect. Preserve their
 		// unsupported-scope diagnostics after those mutations, without repeating
 		// diagnostics already emitted by the shared lifecycle's preflight.
 		const timeRangeFieldFor = consentTimeFieldResolver(
-			typeof PAGESHIM_CONNECTOR_MANIFEST === "string" ? PAGESHIM_CONNECTOR_MANIFEST : connector.platform,
+			typeof PAGESHIM_CONNECTOR_MANIFEST === "string"
+				? PAGESHIM_CONNECTOR_MANIFEST
+				: connector.platform,
 		);
 		for (const [stream, scope] of requested) {
 			if (unsupportedStreams.has(stream)) continue;
 			const unsupported = timeRangeUnsupportedReason(
-				stream, scope.time_range, timeRangeFieldFor(stream),
+				stream,
+				scope.time_range,
+				timeRangeFieldFor(stream),
 			);
-			if (unsupported !== null) await emit({
-				type: "SKIP_RESULT", stream, reason: "scope_not_supported", message: unsupported,
-			}, true);
+			if (unsupported !== null)
+				await emit(
+					{
+						type: "SKIP_RESULT",
+						stream,
+						reason: "scope_not_supported",
+						message: unsupported,
+					},
+					true,
+				);
 		}
 		const finalized = outcome.finalize(
 			new Set(
@@ -1144,8 +1229,13 @@ export async function runOnPageShim(
 			// one entry for each native RECORD; legacy envelopes can expand one
 			// RECORD into several rows and make DONE's count disagree.
 			const scopeEntries = rawEndHost
-				? Object.keys(scopes).map((scope) => [scope,
-					{ records: records[scope.slice(prefix.length)] ?? [] }] as const)
+				? Object.keys(scopes).map(
+						(scope) =>
+							[
+								scope,
+								{ records: records[scope.slice(prefix.length)] ?? [] },
+							] as const,
+					)
 				: Object.entries(scopes);
 			if (scopeEntries.length === 0)
 				throw new Error(errors[0]?.reason ?? "no records collected");
@@ -1251,8 +1341,10 @@ export async function runOnPageShim(
 		// A reported stream failure still closes the partial spool; its failed
 		// DONE remains authoritative. A thrown collection/login error keeps the
 		// existing fatal transport path.
-		if ((exitCode !== 0 || lifecycle.failure) &&
-			lifecycle.failure?.code !== "stream_collection_failed")
+		if (
+			(exitCode !== 0 || lifecycle.failure) &&
+			lifecycle.failure?.code !== "stream_collection_failed"
+		)
 			throw (
 				initError ??
 				lifecycle.failure ??

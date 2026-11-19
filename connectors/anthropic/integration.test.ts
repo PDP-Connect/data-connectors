@@ -4054,7 +4054,7 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 						}
 					},
 				}),
-				/sink rejected final record/,
+				/could not be delivered/,
 			);
 			assert.equal(
 				observed.filter(

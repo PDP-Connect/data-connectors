@@ -11,6 +11,8 @@ import { buildPageshim } from "./build.mjs";
 import { fixtureCorsHeaders, runHarness } from "./harness.mjs";
 import { ResultStreamHarness } from "./result-stream-harness.mjs";
 
+// A record that cannot be delivered ends the run with the lifecycle's fixed text.
+const DELIVERY_FAILED = "A record could not be delivered; the run is incomplete";
 const root = join(process.cwd(), ".scratch", "pageshim-streaming-test");
 const entryPoint = new URL(
 	"./test-fixtures/streaming-runtime.ts",
@@ -217,10 +219,37 @@ for (const [kind, expected] of [["serialize", "serialize_failed (Error)"], ["bri
 			const done = run.connectorMessages.filter(message => message.type === "DONE");
 			assert.equal(done.length, 1);
 			assert.equal(done[0].status, "failed");
-			assert.equal(run.data.error, expected);
+			assert.equal(run.data.error, kind === "serialize" && !streamRecords ? expected : DELIVERY_FAILED);
 			assert.equal(JSON.stringify([run.data, run.connectorMessages, run.log]).includes("ACME-4417"), false);
 		});
 	}
+}
+
+for (const [mode, expected] of [
+	["error", "evaluate_failed (Error)"],
+	["corrupt_chunk", "chunk_parse_failed (SyntaxError)"],
+]) {
+	test(`an evaluate ${mode} reports a fixed class and never page content`, { timeout: 60_000 }, async () => {
+		await mkdir(root, { recursive: true });
+		const bundle = join(root, `evaluate-${mode}.js`);
+		await buildPageshim({ connector: "chatgpt", outfile: bundle,
+			entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+			extraDefines: {
+				PAGESHIM_COVERAGE_MESSAGES: "[]", PAGESHIM_COVERAGE_THROW: "false",
+				PAGESHIM_COVERAGE_RECORD: "false", PAGESHIM_COVERAGE_STREAM: "false",
+				PAGESHIM_COVERAGE_EVALUATE: JSON.stringify(mode),
+			},
+		});
+		const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], fixtureReady: true,
+			resultStreaming: true, connectorEndEvidence: true,
+			resultSpoolDirectory: join(root, `evaluate-spool-${mode}`) });
+		assertCleanRun(run);
+		const done = run.connectorMessages.filter(message => message.type === "DONE");
+		assert.equal(done.length, 1);
+		assert.equal(done[0].status, "failed");
+		assert.equal(run.data.error, expected);
+		assert.equal(JSON.stringify([run.data, run.connectorMessages, run.log]).includes("ACME-4417"), false);
+	});
 }
 
 for (const [label, setup, failed] of [
@@ -300,7 +329,7 @@ test("a swallowed evidence acknowledgement failure cannot produce succeeded DONE
 	const terminals = run.connectorMessages.filter(message => message.type === "DONE");
 	assert.equal(terminals.length, 1);
 	assert.equal(terminals[0].status, "failed");
-	assert.equal(run.data.error, "bridge_rejected (Error)");
+	assert.equal(run.data.error, DELIVERY_FAILED);
 	// Every record's delivery was rejected, so none counts as emitted.
 	assert.equal(terminals[0].records_emitted, 0);
 	assert.equal(run.streamResult?.completed === true, false);
@@ -784,7 +813,7 @@ test("a shell that never acknowledges a result call fails with a timeout", {
 		resultStreamNeverAck: true,
 		resultSpoolDirectory: join(root, "spool-never-ack"),
 	});
-	assert.equal(run.data.error, "bridge_timeout (TimeoutError)");
+	assert.equal(run.data.error, DELIVERY_FAILED);
 	assert.ok(run.elapsedMs < 5_000, `run took ${run.elapsedMs}ms`);
 	assertCleanRun(run);
 });
@@ -998,7 +1027,7 @@ test("a rejected stream chunk is terminal and is not retried", {
 			resultStreamFailure: { key: "result:chunk", sequence: 0 },
 		});
 		assert.equal(run.result, null);
-		assert.equal(run.data.error, "bridge_rejected (Error)");
+		assert.equal(run.data.error, DELIVERY_FAILED);
 		assert.equal(run.streamResult.completed, false);
 		assert.equal(run.streamResult.rejectedMessages, 1);
 		assert.equal(run.streamResult.messageCount, 2);
@@ -1022,7 +1051,7 @@ test("a collector cannot swallow a rejected chunk and complete a partial scope",
 			resultSpoolDirectory: spoolDirectory,
 			resultStreamFailure: { key: "result:chunk", sequence: 0 },
 		});
-		assert.equal(run.data.error, "bridge_rejected (Error)");
+		assert.equal(run.data.error, DELIVERY_FAILED);
 		assert.equal(run.streamResult.completed, false);
 		assert.equal(run.streamResult.rejectedMessages, 1);
 		assert.equal(run.streamResult.messageCount, 2);
@@ -1044,7 +1073,7 @@ test("a collector cannot swallow a record serialization error and complete inval
 			resultStreaming: true,
 			resultSpoolDirectory: spoolDirectory,
 		});
-		assert.equal(run.data.error, "serialize_failed (TypeError)");
+		assert.equal(run.data.error, DELIVERY_FAILED);
 		assert.equal(run.streamResult.completed, false);
 		assert.ok(run.streamResult.totalCodeUnits > 100_000);
 		const partial = await readFile(
