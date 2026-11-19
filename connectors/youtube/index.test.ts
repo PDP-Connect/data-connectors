@@ -4267,56 +4267,151 @@ test("a second run on the same page does not see the first run's progress hook",
 	}
 });
 
-test("a walk stopped at the time budget and resumed equals one full walk", { timeout: 30_000 }, async () => {
-	const videos = Array.from({ length: 110 }, (_, i) => ({
-		...VIDEO,
-		video_id: `video${i}`,
-		video_url: `https://www.youtube.com/watch?v=video${i}`,
-	}));
-	const run = async (state: Record<string, unknown>, jumpAfter?: number) => {
-		const records: Record<string, unknown>[] = [];
-		const messages: Record<string, unknown>[] = [];
-		const failures: string[] = [];
-		const realNow = performance.now.bind(performance);
-		let jumped = false;
-		performance.now = () => realNow() + (jumped ? 400_000 : 0);
-		try {
-			await collectYoutubeBrowser({
-				page: historyFixturePage(videos) as never,
-				requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
-				state,
-				emitRecord: async (_stream, data) => {
-					records.push(data);
-					if (jumpAfter !== undefined && records.length === jumpAfter) jumped = true;
-				},
-				emit: async (message) => {
-					messages.push(message as Record<string, unknown>);
-				},
-				reportStreamFailure: async (_stream, message) => {
-					failures.push(message);
-				},
-				progress: async () => undefined,
-			});
-		} finally {
-			performance.now = realNow;
-		}
-		return { ids: records.map((record) => record.video_id as string), messages, failures };
+/**
+ * A history that loads only by scrolling from the top: each navigation starts
+ * with one page of rows, and each scroll round adds `perScroll` rows and costs
+ * `scrollCostMs` on a fake clock. Nothing in the page lets a run jump past rows
+ * it already has.
+ */
+function scrollLoadedHistoryPage(
+	videos: Record<string, unknown>[],
+	perScroll: number,
+	scrollCostMs: number,
+	clock: { offsetMs: number },
+): FixturePage {
+	const page = new FixturePage();
+	let loaded = Math.min(videos.length, perScroll);
+	let top = 0;
+	const base = page.goto.bind(page);
+	page.goto = async (url: string, ...rest: never[]) => {
+		loaded = Math.min(videos.length, perScroll);
+		top = 0;
+		return base(url, ...(rest as []));
 	};
-	const full = await run({});
-	const stopped = await run({}, 50);
-	assert.ok(stopped.ids.length < full.ids.length, "the first run must stop early");
-	assert.equal(completeCursorEmitted(stopped.messages), false);
-	const cursor = historyStateMessages(stopped.messages).at(-1)?.cursor;
-	assert.ok(cursor, "the stopped run checkpoints");
-	const resumed = await run({ watch_history: cursor });
-	// The resumed run replays the accounted prefix as idempotent upserts (the
-	// walk never trusts a position above the saved identity). So "no duplicate"
-	// holds per run, and the rows keyed by id equal one full walk: no gap.
-	for (const ids of [full.ids, stopped.ids, resumed.ids])
-		assert.equal(new Set(ids).size, ids.length);
-	const merged = new Map<string, number>();
-	for (const id of [...stopped.ids, ...resumed.ids]) merged.set(id, (merged.get(id) ?? 0) + 1);
-	assert.deepEqual([...merged.keys()].sort(), [...full.ids].sort());
-	assert.ok(resumed.ids.length >= full.ids.length - stopped.ids.length);
-	assert.equal(completeCursorEmitted(resumed.messages), true);
+	const more = () => loaded < videos.length;
+	page.evaluate = async (_fn: Function, arg?: unknown) => {
+		const request = (typeof arg === "object" && arg !== null ? arg : {}) as Record<string, unknown>;
+		if ("itemSelector" in request) {
+			loaded = Math.min(videos.length, loaded + perScroll);
+			top += 1000;
+			clock.offsetMs += scrollCostMs;
+			return {
+				containerFound: true,
+				containerHeight: 100_000,
+				containerClientHeight: 1000,
+				containerTop: top,
+				documentHeight: 100_000,
+				windowHeight: 1000,
+				windowScrollY: top,
+			};
+		}
+		if ("offset" in request) {
+			const offset = request.offset as number;
+			return {
+				offset,
+				totalRows: loaded,
+				rows: videos.slice(offset, Math.min(loaded, offset + (request.limit as number))),
+			};
+		}
+		if ("kind" in request)
+			return {
+				dataReadable: true,
+				dataItemCount: loaded,
+				dataHasContinuation: more(),
+				domHasContinuation: more(),
+				declaredTotal: null,
+				domItemCount: loaded,
+				domHasEndMarker: false,
+				verifiedEmpty: false,
+				pageBlocked: false,
+				latestHistoryResponse: request.latestHistoryResponse ?? null,
+			};
+		return undefined;
+	};
+	return page;
+}
+
+test("a history three budgets long completes: resumed runs do not stall at their own prefix", { timeout: 120_000 }, async () => {
+	const realNow = performance.now.bind(performance);
+	const clock = { offsetMs: 0 };
+	performance.now = () => realNow() + clock.offsetMs;
+	try {
+		// 20 rows per round, 3 s per round: 3,500 rows need about 525 s, about
+		// three 180 s budgets. A second shape needs about three 400-round budgets.
+		for (const shape of [
+			{ rows: 3_500, perScroll: 20, scrollCostMs: 3_000 },
+			{ rows: 6_000, perScroll: 5, scrollCostMs: 100 },
+		]) {
+			const videos = Array.from({ length: shape.rows }, (_, i) => ({
+				...VIDEO,
+				video_id: `long${String(i).padStart(5, "0")}`,
+				video_url: `https://www.youtube.com/watch?v=long${i}`,
+			}));
+			const seen = new Set<string>();
+			let state: Record<string, unknown> = {};
+			let runs = 0;
+			let complete = false;
+			while (!complete && runs < 8) {
+				runs += 1;
+				const messages: Record<string, unknown>[] = [];
+				await collectYoutubeBrowser({
+					page: scrollLoadedHistoryPage(videos, shape.perScroll, shape.scrollCostMs, clock) as never,
+					requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+					state,
+					emitRecord: async (_stream, data) => {
+						seen.add(data.video_id as string);
+					},
+					emit: async (message) => {
+						messages.push(message as Record<string, unknown>);
+					},
+					reportStreamFailure: async () => undefined,
+					progress: async () => undefined,
+				});
+				complete = completeCursorEmitted(messages);
+				const cursor = historyStateMessages(messages).at(-1)?.cursor;
+				if (cursor) state = { watch_history: cursor };
+			}
+			assert.equal(complete, true, `shape ${shape.rows} never completed in ${runs} runs (${seen.size} rows)`);
+			assert.equal(runs, 1, `shape ${shape.rows} needed ${runs} runs`);
+			assert.equal(seen.size, shape.rows);
+		}
+	} finally {
+		performance.now = realNow;
+	}
+});
+
+test("browse responses that keep returning the same rows do not keep a stuck walk alive", { timeout: 8_000 }, async () => {
+	let release: () => void = () => undefined;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let ticker: ReturnType<typeof setInterval> | undefined;
+	const previous = setHistoryOuterDeadlineMsForTest(300);
+	try {
+		const { messages, outcome } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{ scrollGate: gate },
+			(created) => {
+				// The walk is stuck in a scroll; the page keeps answering with rows.
+				ticker = setInterval(
+					() =>
+						(
+							created as unknown as {
+								emitHistoryResponse: (r: string, n: string | null, o: object) => void;
+							}
+						).emitHistoryResponse("bootstrap-C", "bootstrap-C", { itemCount: 3 }),
+					50,
+				);
+			},
+		);
+		assert.ok(outcome("watch_history").includes("stream_collection_failed"));
+		assert.equal(messages.some((message) => message.type === "STATE" && completeCursorEmitted([message])), false);
+	} finally {
+		clearInterval(ticker);
+		release();
+		setHistoryOuterDeadlineMsForTest(previous);
+	}
 });
