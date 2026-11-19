@@ -90,3 +90,45 @@ test("a rejected events row names its type and field counts, never row values", 
 	assert.deepEqual(diagnostics.unreadable_fields_by_type, { PullRequestReviewEvent: { title: 2 } });
 	assert.doesNotMatch(JSON.stringify(messages[0]), /Invented|sample-owner/);
 });
+
+test("a compact reference with a blank or whitespace-only ref is not complete", () => {
+	for (const pull_request of [
+		{ ...compactPr, head: { ref: " " } }, { ...compactPr, base: { ref: "\t\n" } },
+		{ ...compactPr, head: { ref: "" } },
+	]) {
+		assert.equal(parseLegacyEventPageItem(review(pull_request)).complete, false);
+		const pr = parseLegacyEventPageItem({ id: "5", type: "PullRequestEvent", public: true, created_at: "2026-10-19T12:00:00Z", repo: { name: "sample-owner/demo" },
+			payload: { action: "opened", number: 7, pull_request } });
+		assert.equal(pr.complete, false);
+	}
+});
+
+test("a review whose own URL names another pull request or repository is not complete", () => {
+	const withReview = (fields: Record<string, unknown>) => {
+		const event = review(compactPr);
+		Object.assign(event.payload.review, fields);
+		return parseLegacyEventPageItem(event);
+	};
+	assert.equal(withReview({}).complete, true);
+	assert.equal(withReview({ pull_request_url: compactPr.url }).complete, true);
+	assert.equal(withReview({ html_url: "https://github.com/sample-owner/demo/pull/8#pullrequestreview-1" }).complete, false);
+	assert.equal(withReview({ html_url: "https://github.com/other-owner/demo/pull/7#pullrequestreview-1" }).complete, false);
+	assert.equal(withReview({ pull_request_url: "https://api.github.com/repos/sample-owner/demo/pulls/8" }).complete, false);
+	assert.equal(withReview({ pull_request_url: 7 }).complete, false);
+});
+
+test("unreadable-field diagnostics key only known event types and fields; source text lands in other", async () => {
+	const odd = { ...push("9"), type: "InventedSecretEvent", payload: { action: 5 } };
+	const { messages } = await walkEvents([[odd, review({ ...compactPr, title: 5 }, "2")]]);
+	const diagnostics = messages[0]?.diagnostics as { unreadable_fields_by_type?: Record<string, Record<string, number>> };
+	assert.deepEqual(Object.keys(diagnostics.unreadable_fields_by_type ?? {}).sort(), ["PullRequestReviewEvent", "other"]);
+	assert.doesNotMatch(JSON.stringify(messages[0]), /InventedSecret/);
+});
+
+test("more than 300 distinct served events fail closed with a bounded reason and no STATE", async () => {
+	const page = (tag: string, n: number) => Array.from({ length: n }, (_, i) => push(`${tag}${i}`));
+	const { messages, records } = await walkEvents([page("a", 100), page("b", 100), page("c", 101)]);
+	assert.deepEqual(records, []);
+	assert.deepEqual(messages.map(m => m.type), ["SKIP_RESULT"]);
+	assert.equal((messages[0]?.diagnostics as { cause?: string }).cause, "events_window_exceeded");
+});
