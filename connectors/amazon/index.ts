@@ -205,6 +205,12 @@ const LIST_PAGE_WAIT_MS = 10_000;
 const PAGE_LIMIT = 50;
 const START_INDEX_STEP = 10;
 const POLITE_DELAY_MS = 800;
+/** Pause after each order-detail page: 2 to 4 seconds, a person's pace. */
+const DETAIL_PACE_MIN_MS = 2000;
+const DETAIL_PACE_SPREAD_MS = 2000;
+export function detailPaceMs(random: () => number = Math.random): number {
+	return DETAIL_PACE_MIN_MS + Math.floor(random() * DETAIL_PACE_SPREAD_MS);
+}
 const RETRY_MIN_TIMEOUT_MS = 1500;
 const RETRY_FACTOR = 2;
 const RETRY_COUNT = 2;
@@ -2203,7 +2209,13 @@ async function runYear(
 					`Amazon year ${year}: processing order ${index + 1}/${orders.length} on page ${pageCount + 1}`,
 					{ stream: "orders" },
 				);
+				const detailAttemptsBefore = flags.detailAttempts;
 				const processed = await processListOrder(page, deps, flags, o);
+				// Pace the order-detail pages: back to back they read as a bot, and
+				// live runs were stopped by Amazon after about 32 of them in 2 minutes.
+				if (flags.detailAttempts > detailAttemptsBefore) {
+					await politeDelay(detailPaceMs());
+				}
 				if (!processed) {
 					// biome-ignore lint/style/noIncrementDecrement: integration.test.ts asserts this literal `unparseableDateCount++` source text (source-regex oracle); switching to += would fail that pre-existing test for a purely cosmetic change.
 					unparseableDateCount++;

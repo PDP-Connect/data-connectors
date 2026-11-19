@@ -60,6 +60,7 @@ import {
 	classifyDetailOutcome,
 	classifyEmptyListPageDiagnostics,
 	collectAmazonProfile,
+	detailPaceMs,
 	type EmitDeps,
 	emitOrderAndItems,
 	emitOrderItemsCoverage,
@@ -682,6 +683,17 @@ test("a stop part way through the order walk keeps the orders already read", () 
 	assert.doesNotMatch(
 		"amazon_empty_list_page_renderer_diagnostics_failed",
 		AMAZON_MID_WALK_STOP_RE,
+	);
+});
+
+test("order-detail pages are paced 2 to 4 seconds apart", () => {
+	assert.equal(
+		detailPaceMs(() => 0),
+		2000,
+	);
+	assert.equal(
+		detailPaceMs(() => 0.999),
+		3998,
 	);
 });
 
