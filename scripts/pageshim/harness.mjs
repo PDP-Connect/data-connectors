@@ -518,6 +518,7 @@ function untilAborted(promise, signal) {
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
  * @param {number} [o.failStateWriteAt] reject this one-based STATE attempt before acknowledgement or commit
+ * @param {boolean} [o.stateNeverAck] never acknowledge a STATE bridge call
  * @param {boolean} [o.failFinalStatusWrite] reject Complete/Partial status before storing it
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {(args: {url:string,loggedIn:boolean,call:number}) => string|undefined} [o.fixtures.failGoto] return an error to emulate a PageShim navigation failure
@@ -550,6 +551,7 @@ export async function runHarness({
 	stateAckDelayMs = 0,
 	failResultWrite = false,
 	failStateWriteAt = 0,
+	stateNeverAck = false,
 	failFinalStatusWrite = false,
 	resultStreamNeverAck = false,
 	readBridgeLatencyMs = 0,
@@ -718,6 +720,7 @@ export async function runHarness({
 							)
 						)
 							return { __shimError: "invalid PDPP STATE message" };
+						if (stateNeverAck) return new Promise(() => {});
 						if (++stateWriteAttempts === failStateWriteAt)
 							return { __shimError: "synthetic STATE write failed" };
 						if (stateAckDelayMs > 0)

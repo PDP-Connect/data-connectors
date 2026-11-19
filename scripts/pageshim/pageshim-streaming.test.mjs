@@ -118,6 +118,108 @@ for (const streamRecords of [false, true]) {
 }
 
 for (const streamRecords of [false, true]) {
+	test(`an emission admitted after settlement began fails the run: records=${streamRecords}`, { timeout: 60_000 }, async () => {
+		await mkdir(root, { recursive: true });
+		const bundle = join(root, `late-emit-${streamRecords}.js`);
+		await buildPageshim({ connector: "chatgpt", outfile: bundle,
+			entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+			extraDefines: {
+				PAGESHIM_COVERAGE_MESSAGES: "[]", PAGESHIM_COVERAGE_THROW: "false",
+				PAGESHIM_COVERAGE_RECORD: "true", PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+				PAGESHIM_COVERAGE_LATE_EMIT: "true",
+			},
+		});
+		const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], fixtureReady: true,
+			resultStreaming: true, connectorEndEvidence: true,
+			resultSpoolDirectory: join(root, `late-emit-spool-${streamRecords}`) });
+		assertCleanRun(run);
+		const terminals = run.connectorMessages.filter(message => message.type === "DONE");
+		assert.equal(terminals.length, 1);
+		assert.equal(terminals[0].status, "failed");
+		assert.match(String(run.data.error), /after settlement/);
+		assert.equal(run.streamResult?.completed === true, false);
+	});
+}
+
+for (const streamRecords of [false, true]) {
+	test(`a record whose bridge delivery was rejected is not counted in the failed DONE: records=${streamRecords}`, { timeout: 60_000 }, async () => {
+		await mkdir(root, { recursive: true });
+		const bundle = join(root, `rejected-record-count-${streamRecords}.js`);
+		await buildPageshim({ connector: "chatgpt", outfile: bundle,
+			entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+			extraDefines: {
+				PAGESHIM_COVERAGE_MESSAGES: "[]", PAGESHIM_COVERAGE_THROW: "false",
+				PAGESHIM_COVERAGE_RECORD: "true", PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+			},
+		});
+		const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], fixtureReady: true,
+			resultStreaming: true, connectorEndEvidence: true,
+			resultSpoolDirectory: join(root, `rejected-record-count-spool-${streamRecords}`),
+			observeBridge: (method, args) => {
+				if (method === "setData" && args[0] === "connector:message" && args[1].type === "RECORD")
+					throw new Error("synthetic record acknowledgement failed");
+			},
+		});
+		assertCleanRun(run);
+		const terminals = run.connectorMessages.filter(message => message.type === "DONE");
+		assert.equal(terminals.length, 1);
+		assert.equal(terminals[0].status, "failed");
+		assert.equal(terminals[0].records_emitted, 0);
+	});
+}
+
+for (const streamRecords of [false, true]) {
+	test(`a STATE acknowledgement that never arrives ends in a failed DONE, not a hang: records=${streamRecords}`, { timeout: 60_000 }, async () => {
+		await mkdir(root, { recursive: true });
+		const bundle = join(root, `state-never-ack-${streamRecords}.js`);
+		await buildPageshim({ connector: "chatgpt", outfile: bundle, bridgeCallTimeoutMs: 500,
+			entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+			extraDefines: {
+				PAGESHIM_COVERAGE_MESSAGES: JSON.stringify([{ type: "STATE", stream: "conversations", cursor: { done: true } }]),
+				PAGESHIM_COVERAGE_THROW: "false", PAGESHIM_COVERAGE_RECORD: "true",
+				PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+			},
+		});
+		const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], fixtureReady: true,
+			resultStreaming: true, connectorEndEvidence: true, stateNeverAck: true,
+			resultSpoolDirectory: join(root, `state-never-ack-spool-${streamRecords}`) });
+		assertCleanRun(run);
+		const terminals = run.connectorMessages.filter(message => message.type === "DONE");
+		assert.equal(terminals.length, 1);
+		assert.equal(terminals[0].status, "failed");
+		assert.match(String(run.data.error), /timed out/);
+		assert.equal(run.streamResult?.completed === true, false);
+	});
+}
+
+for (const [label, setup, failed] of [
+	["a captured policy key that resolves to undefined", { __pageshimConnectorConfigKeys: ["retryablePattern"], UNDEFINED_MEMBER: true }, true],
+	["a captured policy that is not an object", { __pageshimConnectorConfigKeys: ["retryablePattern"], __pageshimConnectorConfig: 1 }, true],
+	["a captured policy whose keys all resolve", { __pageshimConnectorConfigKeys: ["name"], __pageshimConnectorConfig: { name: "synthetic" } }, false],
+]) {
+	test(`${label} ${failed ? "fails the run closed" : "runs normally"}`, { timeout: 60_000 }, async () => {
+		await mkdir(root, { recursive: true });
+		const bundle = join(root, `policy-${label.replaceAll(/\W+/g, "-")}.js`);
+		await buildPageshim({ connector: "chatgpt", outfile: bundle,
+			entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+			extraDefines: {
+				PAGESHIM_COVERAGE_MESSAGES: "[]", PAGESHIM_COVERAGE_THROW: "false",
+				PAGESHIM_COVERAGE_RECORD: "true", PAGESHIM_COVERAGE_STREAM: "false",
+				PAGESHIM_POLICY_SETUP: JSON.stringify(JSON.stringify(setup)),
+			},
+		});
+		const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], fixtureReady: true,
+			resultStreaming: true, connectorEndEvidence: true,
+			resultSpoolDirectory: join(root, `policy-spool-${label.replaceAll(/\W+/g, "-")}`) });
+		assertCleanRun(run);
+		const terminals = run.connectorMessages.filter(message => message.type === "DONE");
+		assert.equal(terminals.length, 1);
+		assert.equal(terminals[0].status, failed ? "failed" : "succeeded");
+		if (failed) assert.match(String(run.data.error), /connector policy/);
+	});
+}
+
+for (const streamRecords of [false, true]) {
 	for (const concurrent of [false, true]) {
 		for (const coverage of [false, true]) {
 			test(`ordered record marker intervals: stream=${streamRecords}, concurrent=${concurrent}, coverage=${coverage}`, { timeout: 60_000 }, async () => {
@@ -168,6 +270,8 @@ test("a swallowed evidence acknowledgement failure cannot produce succeeded DONE
 	assert.equal(terminals.length, 1);
 	assert.equal(terminals[0].status, "failed");
 	assert.equal(run.data.error, "synthetic evidence acknowledgement failed");
+	// Every record's delivery was rejected, so none counts as emitted.
+	assert.equal(terminals[0].records_emitted, 0);
 	assert.equal(run.streamResult?.completed === true, false);
 });
 

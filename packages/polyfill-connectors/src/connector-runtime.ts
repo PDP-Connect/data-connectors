@@ -1235,7 +1235,12 @@ export function runConnector(config: RunConnectorConfig): void {
 
 /** Host I/O for the shared START-to-DONE lifecycle. No process exit on this path. */
 export interface ConnectorLifecycleTransport {
-	/** Await durable record/checkpoint output before the lifecycle emits DONE. */
+	/**
+	 * Await durable record/checkpoint output before the lifecycle emits DONE.
+	 * The lifecycle imposes no deadline: a promise that never settles leaves the
+	 * run pending with no DONE. The transport must enforce its own deadline on
+	 * everything this awaits and reject, so the run ends in a failed DONE.
+	 */
 	beforeDone?: (withheldAtOrAfterUntil: ReadonlySet<string>) => Promise<void>;
 	readStart: () => Promise<StartMessage>;
 	emit: (message: EmittedMessage) => Promise<void>;
@@ -1905,8 +1910,9 @@ export function makeEmitRecord(deps: {
 		if (identity === null) return Promise.resolve();
 		const selection = selectRecord(stream, data, options);
 		if (selection === "skip") return Promise.resolve();
+		// A record counts only once its delivery succeeded: DONE.records_emitted
+		// must not include a record whose output or beforeEmit gate rejected.
 		if (selection === "tombstone") {
-			counters.totalEmitted += 1;
 			const fields = keyFieldsFor(stream) ?? ["id"];
 			return emit({
 				type: "RECORD",
@@ -1915,18 +1921,22 @@ export function makeEmitRecord(deps: {
 				data: Object.fromEntries(fields.map((field) => [field, data[field]])),
 				emitted_at: emittedAt,
 				op: "delete",
+			}).then(() => {
+				counters.totalEmitted += 1;
 			});
 		}
 
 		const validation = validateRecord?.(stream, data);
 		if (validation && !validation.ok) {
-			counters.totalSkipped += 1;
-			return emit(makeShapeCheckSkip(stream, data, validation.issues));
+			return emit(makeShapeCheckSkip(stream, data, validation.issues)).then(
+				() => {
+					counters.totalSkipped += 1;
+				},
+			);
 		}
 		// Present only when the record was RETAINED despite carrying a value the
 		// schema does not model (see makeValidateRecord in schema-registry.ts).
 		const anomalies = validation?.anomalies;
-		counters.totalEmitted += 1;
 		const record: EmittedMessage = {
 			type: "RECORD",
 			stream,
@@ -1934,21 +1944,21 @@ export function makeEmitRecord(deps: {
 			data,
 			emitted_at: emittedAt,
 		};
+		const deliver = (): Promise<void> =>
+			(options.beforeEmit
+				? options.beforeEmit().then(() => emit(record))
+				: emit(record)
+			).then(() => {
+				counters.totalEmitted += 1;
+				if (anomalies?.length) counters.totalAnomalous += 1;
+			});
 		// A retained-with-drift record still emits; its diagnostic rides alongside
 		// so the unmodeled value is visible rather than silently tolerated. Reported
 		// BEFORE the RECORD so a truncated stream never shows the record without the
 		// caveat attached to it.
-		if (anomalies?.length) {
-			counters.totalAnomalous += 1;
-			return emit(makeShapeAnomalyReport(stream, data, anomalies)).then(() =>
-				options.beforeEmit
-					? options.beforeEmit().then(() => emit(record))
-					: emit(record),
-			);
-		}
-		return options.beforeEmit
-			? options.beforeEmit().then(() => emit(record))
-			: emit(record);
+		return anomalies?.length
+			? emit(makeShapeAnomalyReport(stream, data, anomalies)).then(deliver)
+			: deliver();
 	};
 
 	return {

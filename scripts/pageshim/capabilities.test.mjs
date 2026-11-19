@@ -356,7 +356,38 @@ test("hosted bundles capture every connector's original runtime policy", () => {
 		assert.equal(captured.includes("if (isMainModule(import.meta.url))"), false, name);
 	}
 	const source = 'if (isMainModule(import.meta.url)) { runConnector({name:"synthetic", retryablePattern:/retry/, recordKeyFields:{rows:["account","id"]}, normalizeTerminalError: normalize}); }';
-	assert.equal(captureLifecycleConfig(source), 'if (true) { globalThis.__pageshimConnectorConfig = ({name:"synthetic", retryablePattern:/retry/, recordKeyFields:{rows:["account","id"]}, normalizeTerminalError: normalize}); }');
+	assert.equal(captureLifecycleConfig(source), 'if (true) { globalThis.__pageshimConnectorConfigKeys = ["name","retryablePattern","recordKeyFields","normalizeTerminalError"];globalThis.__pageshimConnectorConfig = ({name:"synthetic", retryablePattern:/retry/, recordKeyFields:{rows:["account","id"]}, normalizeTerminalError: normalize}); }');
 	assert.throws(() => captureLifecycleConfig('runConnector({});'), /one guarded/);
 	assert.throws(() => captureLifecycleConfig('if (isMainModule(import.meta.url)) { startServer(); runConnector({}); }'), /one guarded/);
+});
+
+test("policy capture fails closed unless the configuration shape resolves fully", () => {
+	const guarded = (call, before = "") => `${before}\nif (isMainModule(import.meta.url)) { ${call} }`;
+	const keysOf = (captured) => JSON.parse(/ConfigKeys = (\[.*?\]);/.exec(captured)[1]);
+	// Supported: a literal, and an identifier bound once to a top-level const
+	// literal (exported, or typed with satisfies/as).
+	assert.deepEqual(keysOf(captureLifecycleConfig(guarded("runConnector({ name: 'a', 'quoted-key': 1, async collect() {} });"))),
+		["name", "quoted-key", "collect"]);
+	assert.deepEqual(keysOf(captureLifecycleConfig(guarded("runConnector(CONFIG);", "export const CONFIG = { name: 'a', retryablePattern: /x/ } satisfies Cfg;"))),
+		["name", "retryablePattern"]);
+	assert.deepEqual(keysOf(captureLifecycleConfig(guarded("runConnector(CONFIG);", "const CONFIG = { name: 'a' } as Cfg;"))), ["name"]);
+	// Refused: nothing may be silently dropped from the captured policy.
+	const refused = [
+		guarded("runConnector({ ...base, name: 'a' });"),
+		guarded("runConnector(...args);"),
+		guarded("runConnector(config);", "const config = { ...base };"),
+		guarded("runConnector(config);", "const config = makeConfig();"),
+		guarded("runConnector(config);", "let config = { name: 'a' };"),
+		guarded("runConnector(config);"),
+		guarded("runConnector({ [dynamic]: 1 });"),
+		guarded("runConnector({ get name() { return 'a'; } });"),
+		guarded("runConnector(makeConfig());"),
+		guarded("runConnector(a ? { name: 'a' } : { name: 'b' });"),
+		guarded("runConnector({ name: 'a' });", "runConnector({ name: 'other' });"),
+		guarded("runConnector({ name: 'a' });", "function helper() { runConnector({ name: 'other' }); }"),
+		guarded("runConnector({ name: 'a' });") + "\nexport const later = () => runConnector({ name: 'b' });",
+		`if (isMainModule(import.meta.url)) { runConnector({ name: 'a' }); } else { other(); }`,
+	];
+	for (const source of refused)
+		assert.throws(() => captureLifecycleConfig(source), /PageShim requires/, source);
 });
