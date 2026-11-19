@@ -105,8 +105,11 @@ persistence on supported hosts. Do not claim a verified full history export from
 The whole history path, from the browser-date evaluation to the last STATE
 acknowledgement, runs under one no-progress watchdog (`HISTORY_OUTER_DEADLINE_MS`,
 10 minutes) in `collectYoutubeBrowser`. It is not a cap on total length: each real
-progress event re-arms it (a row accounted or acknowledged, a browse response that
-adds rows, a STATE or checkpoint acknowledged), so a long history that keeps
+progress event re-arms it: a STATE or record acknowledged, or a row identity this
+run has not seen before (from a browse response or the walk). A scan that keeps
+returning the same rows re-arms nothing. The progress channel is one object per
+run, passed to the walk and the tracker, and closed on every exit path, so a
+second run on the same page never meets the first run's hook. So a long history that keeps
 moving never expires. A path that goes the full window with no progress expires.
 Ten minutes is above the longest legitimate gap between events: setup before the
 first row takes about 6 minutes at worst (navigation up to 180 s plus a 60 s
@@ -118,7 +121,11 @@ are dropped, so no STATE can follow), and the stream fails with a fixed reason:
 `youtube_history_outer_timeout`, or `youtube_history_state_unacknowledged` with
 `outcome: "unknown"` when a STATE was sent and never acknowledged. The outcome of
 that STATE is unknown, never reported as success. The checkpoint stays at the rows
-already acknowledged, because the one STATE is written last.
+already acknowledged, because the one STATE is written last. After expiry the two
+sink writes (the failure report, then the coverage progress write) each run under
+their own fixed deadline (`HISTORY_EXPIRY_SINK_DEADLINE_MS`, 15 s). A sink that
+stalls or rejects is logged as `history_expiry_sink` with `outcome: "unknown"`
+and collection settles anyway; the write is not retried.
 
 Other limits on the walk, and whether they can end a progressing walk: the
 60 s per-call deadlines, the 5 s evidence deadlines and the navigation deadline
@@ -136,65 +143,66 @@ covers it; the watchdog covers every row. Line numbers are for
 | Line | Function | Await | Inner deadline |
 | --- | --- | --- | --- |
 | index.ts:169 | readBrowseRequestBody | `? JSON.parse(await gunzipText(new Uint8Array(buffer)))` | body-read deadline (5 s) |
-| index.ts:339 | withinDeadline | `return await Promise.race([` | is itself the inner deadline |
+| index.ts:400 | withinDeadline | `return await Promise.race([` | is itself the inner deadline |
 | index.ts:201 | evaluateWithinDeadline | `return await Promise.race([` | is itself the inner deadline |
-| index.ts:320 | settlesWithin | `return await Promise.race([` | is itself the inner deadline |
-| index.ts:301 | loopCall | `return await Promise.race([` | is itself the inner deadline |
-| index.ts:270 | raceNoProgress | `return await Promise.race([` | is itself the watchdog |
-| index.ts:462 | HistoryResponseTracker.attach | `const result = await evaluateWithinDeadline(` | install evaluate: 5 s evaluate deadline |
-| index.ts:565 | HistoryResponseTracker.flush | `const settled = await withinDeadline(` | flush deadline (loop-call deadline) |
-| index.ts:567 | HistoryResponseTracker.flush | `await this.pending;` | flush deadline (loop-call deadline) |
-| index.ts:568 | HistoryResponseTracker.flush | `await this.drainPageLog();` | flush deadline (loop-call deadline) |
-| index.ts:593 | HistoryResponseTracker.drainPageLog | `const result = await evaluateWithinDeadline(` | evaluate deadline (5 s) for the drain; wait covered by the flush deadline |
-| index.ts:614 | HistoryResponseTracker.drainPageLog | `await this.observe({` | evaluate deadline (5 s) for the drain; wait covered by the flush deadline |
-| index.ts:627 | HistoryResponseTracker.drainPageLog | `await this.page.waitForTimeout(PAGE_LOG_DRAIN_WAIT_MS);` | evaluate deadline (5 s) for the drain; wait covered by the flush deadline |
-| index.ts:649 | HistoryResponseTracker.inspectFailure | `await this.observe({` | body-read deadline (5 s) |
-| index.ts:650 | HistoryResponseTracker.inspectFailure | `requestBody: await decodeBrowseRequestBody(request),` | body-read deadline (5 s) |
-| index.ts:658 | HistoryResponseTracker.inspect | `await this.observe({` | body-read deadline (5 s) for the request body and the response scan |
-| index.ts:659 | HistoryResponseTracker.inspect | `requestBody: await decodeBrowseRequestBody(response.request()),` | body-read deadline (5 s) for the request body and the response scan |
-| index.ts:693 | HistoryResponseTracker.observe | `const scan = await observation.readScan();` | scan read: body-read deadline (5 s) |
-| index.ts:737 | HistoryResponseTracker.observe | `const scan = await observation.readScan();` | scan read: body-read deadline (5 s) |
-| index.ts:973 | waitForContentBounded | `const handle = await page.waitForFunction(` | setup deadline (loop-call deadline) |
-| index.ts:982 | waitForContentBounded | `const state = (await handle.jsonValue()) as "content" / "empty";` | setup deadline (loop-call deadline) |
-| index.ts:983 | waitForContentBounded | `await handle.dispose();` | setup deadline (loop-call deadline) |
-| index.ts:989 | waitForContentBounded | `const settled = await withinDeadline(sequence, historyLoopCallDeadline` | setup deadline (loop-call deadline) |
-| index.ts:1466 | scrollHistoryOnce | `const geometry = (await loopCall(` | loopCall at the call site (60 s) |
-| index.ts:1505 | scrollHistoryOnce | `await page.waitForTimeout(` | loopCall at the call site (60 s) |
-| index.ts:1523 | readHistoryVideoList | `const navigated = await settlesWithin(` | navigation deadline (budget + loop-call deadline) |
-| index.ts:1541 | readHistoryVideoList | `const hydrated = await withinDeadline(` | hydration deadline (loop-call deadline) |
-| index.ts:1550 | readHistoryVideoList | `const state = await waitForContentBounded(` | setup deadline (loop-call deadline) |
-| index.ts:1567 | readHistoryVideoList | `await responseTracker.attach();` | install evaluate deadline (5 s) |
-| index.ts:1568 | readHistoryVideoList | `await loopCall(` | loop-call deadline (60 s) |
-| index.ts:1571 | readHistoryVideoList | `let currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
-| index.ts:1573 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
-| index.ts:1580 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
-| index.ts:1581 | readHistoryVideoList | `currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
-| index.ts:1583 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
-| index.ts:1640 | readHistoryVideoList | `const rawBatch: unknown = await loopEvaluate(` | loop-call deadline (60 s) |
-| index.ts:1658 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
-| index.ts:1659 | readHistoryVideoList | `currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
-| index.ts:1661 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
-| index.ts:1713 | readHistoryVideoList | `lastScrollGeometry = await loopCall(` | loop-call deadline (60 s) |
-| index.ts:1719 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
-| index.ts:1720 | readHistoryVideoList | `const afterScrollRaw: unknown = await loopEvaluate(` | loop-call deadline (60 s) |
-| index.ts:1729 | readHistoryVideoList | `currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
-| index.ts:1731 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
-| index.ts:1795 | readHistoryVideoList | `await loopCall(` | loop-call deadline (60 s) |
-| index.ts:1814 | readHistoryVideoList | `await loopCall(` | loop-call deadline (60 s) |
-| index.ts:1840 | readHistoryVideoList | `await withinDeadline(` | stop-token evaluate deadline (5 s) |
-| index.ts:1847 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
-| index.ts:1850 | readHistoryVideoList | `const waited = await withinDeadline(` | final-refresh wait deadline (loop-call deadline) |
-| index.ts:1865 | readHistoryVideoList | `const refreshed = await evaluateWithinDeadline(` | evaluate deadline (5 s), final refresh |
-| index.ts:1869 | readHistoryVideoList | `sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),` | evaluate deadline (5 s), final refresh |
-| index.ts:1878 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
-| index.ts:2138 | readableVideos | `? await readWatchHistoryList(` | outer only |
-| index.ts:2147 | readableVideos | `: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);` | outer only |
-| index.ts:2152 | readableVideos | `await streams.fail(` | outer only |
-| index.ts:2166 | readableVideos | `await streams.fail(` | outer only |
-| index.ts:2629 | collectYoutubeBrowser (history block) | `const browserDate = await page.evaluate(readBrowserDate);` | outer only |
-| index.ts:2635 | collectYoutubeBrowser (history block) | `const result = await readableVideos(` | outer only |
-| index.ts:2648 | collectYoutubeBrowser (history block) | `await emitHistoryRecord({` | outer only |
-| index.ts:2649 | collectYoutubeBrowser (history block) | `id: await youtubeRecordId(` | outer only |
-| index.ts:2676 | collectYoutubeBrowser (history block) | `? await youtubeRecordId(result.checkpointAnchor)` | outer only |
-| index.ts:2684 | collectYoutubeBrowser (history block) | `await emitVerifiedEmptyState(historyCtx, "watch_history", capturedAt);` | outer only |
-| index.ts:2701 | collectYoutubeBrowser (history block) | `await historyCtx.emit({` | outer only |
+| index.ts:381 | settlesWithin | `return await Promise.race([` | is itself the inner deadline |
+| index.ts:336 | settleSink | `settled = await settlesWithin(work, historyExpirySinkDeadlineMs);` | is itself the sink deadline (15 s) |
+| index.ts:362 | loopCall | `return await Promise.race([` | is itself the inner deadline |
+| index.ts:302 | raceNoProgress | `return await Promise.race([` | is itself the watchdog |
+| index.ts:529 | HistoryResponseTracker.attach | `const result = await evaluateWithinDeadline(` | install evaluate: 5 s evaluate deadline |
+| index.ts:632 | HistoryResponseTracker.flush | `const settled = await withinDeadline(` | flush deadline (loop-call deadline) |
+| index.ts:634 | HistoryResponseTracker.flush | `await this.pending;` | flush deadline (loop-call deadline) |
+| index.ts:635 | HistoryResponseTracker.flush | `await this.drainPageLog();` | flush deadline (loop-call deadline) |
+| index.ts:660 | HistoryResponseTracker.drainPageLog | `const result = await evaluateWithinDeadline(` | evaluate deadline (5 s) for the drain; wait covered by the flush deadline |
+| index.ts:681 | HistoryResponseTracker.drainPageLog | `await this.observe({` | evaluate deadline (5 s) for the drain; wait covered by the flush deadline |
+| index.ts:694 | HistoryResponseTracker.drainPageLog | `await this.page.waitForTimeout(PAGE_LOG_DRAIN_WAIT_MS);` | evaluate deadline (5 s) for the drain; wait covered by the flush deadline |
+| index.ts:716 | HistoryResponseTracker.inspectFailure | `await this.observe({` | body-read deadline (5 s) |
+| index.ts:717 | HistoryResponseTracker.inspectFailure | `requestBody: await decodeBrowseRequestBody(request),` | body-read deadline (5 s) |
+| index.ts:725 | HistoryResponseTracker.inspect | `await this.observe({` | body-read deadline (5 s) for the request body and the response scan |
+| index.ts:726 | HistoryResponseTracker.inspect | `requestBody: await decodeBrowseRequestBody(response.request()),` | body-read deadline (5 s) for the request body and the response scan |
+| index.ts:760 | HistoryResponseTracker.observe | `const scan = await observation.readScan();` | scan read: body-read deadline (5 s) |
+| index.ts:804 | HistoryResponseTracker.observe | `const scan = await observation.readScan();` | scan read: body-read deadline (5 s) |
+| index.ts:1040 | waitForContentBounded | `const handle = await page.waitForFunction(` | setup deadline (loop-call deadline) |
+| index.ts:1049 | waitForContentBounded | `const state = (await handle.jsonValue()) as "content" / "empty";` | setup deadline (loop-call deadline) |
+| index.ts:1050 | waitForContentBounded | `await handle.dispose();` | setup deadline (loop-call deadline) |
+| index.ts:1056 | waitForContentBounded | `const settled = await withinDeadline(sequence, historyLoopCallDeadline` | setup deadline (loop-call deadline) |
+| index.ts:1533 | scrollHistoryOnce | `const geometry = (await loopCall(` | loopCall at the call site (60 s) |
+| index.ts:1572 | scrollHistoryOnce | `await page.waitForTimeout(` | loopCall at the call site (60 s) |
+| index.ts:1591 | readHistoryVideoList | `const navigated = await settlesWithin(` | navigation deadline (budget + loop-call deadline) |
+| index.ts:1609 | readHistoryVideoList | `const hydrated = await withinDeadline(` | hydration deadline (loop-call deadline) |
+| index.ts:1618 | readHistoryVideoList | `const state = await waitForContentBounded(` | setup deadline (loop-call deadline) |
+| index.ts:1635 | readHistoryVideoList | `await responseTracker.attach();` | install evaluate deadline (5 s) |
+| index.ts:1636 | readHistoryVideoList | `await loopCall(` | loop-call deadline (60 s) |
+| index.ts:1639 | readHistoryVideoList | `let currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
+| index.ts:1641 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
+| index.ts:1648 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
+| index.ts:1649 | readHistoryVideoList | `currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
+| index.ts:1651 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
+| index.ts:1708 | readHistoryVideoList | `const rawBatch: unknown = await loopEvaluate(` | loop-call deadline (60 s) |
+| index.ts:1726 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
+| index.ts:1727 | readHistoryVideoList | `currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
+| index.ts:1729 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
+| index.ts:1781 | readHistoryVideoList | `lastScrollGeometry = await loopCall(` | loop-call deadline (60 s) |
+| index.ts:1787 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
+| index.ts:1788 | readHistoryVideoList | `const afterScrollRaw: unknown = await loopEvaluate(` | loop-call deadline (60 s) |
+| index.ts:1797 | readHistoryVideoList | `currentEnd = await loopEvaluate(readListEndInBrowser, {` | loop-call deadline (60 s) |
+| index.ts:1799 | readHistoryVideoList | `sessionPresent: await loopEvaluate(hasYoutubeSessionOnCurrentPage),` | loop-call deadline (60 s) |
+| index.ts:1863 | readHistoryVideoList | `await loopCall(` | loop-call deadline (60 s) |
+| index.ts:1882 | readHistoryVideoList | `await loopCall(` | loop-call deadline (60 s) |
+| index.ts:1908 | readHistoryVideoList | `await withinDeadline(` | stop-token evaluate deadline (5 s) |
+| index.ts:1915 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
+| index.ts:1918 | readHistoryVideoList | `const waited = await withinDeadline(` | final-refresh wait deadline (loop-call deadline) |
+| index.ts:1933 | readHistoryVideoList | `const refreshed = await evaluateWithinDeadline(` | evaluate deadline (5 s), final refresh |
+| index.ts:1937 | readHistoryVideoList | `sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),` | evaluate deadline (5 s), final refresh |
+| index.ts:1946 | readHistoryVideoList | `await responseTracker.flush();` | flush deadline |
+| index.ts:2209 | readableVideos | `? await readWatchHistoryList(` | outer only |
+| index.ts:2219 | readableVideos | `: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);` | outer only |
+| index.ts:2224 | readableVideos | `await streams.fail(` | outer only |
+| index.ts:2238 | readableVideos | `await streams.fail(` | outer only |
+| index.ts:2701 | collectYoutubeBrowser (history block) | `const browserDate = await page.evaluate(readBrowserDate);` | outer only |
+| index.ts:2707 | collectYoutubeBrowser (history block) | `const result = await readableVideos(` | outer only |
+| index.ts:2720 | collectYoutubeBrowser (history block) | `await emitHistoryRecord({` | outer only |
+| index.ts:2721 | collectYoutubeBrowser (history block) | `id: await youtubeRecordId(` | outer only |
+| index.ts:2749 | collectYoutubeBrowser (history block) | `? await youtubeRecordId(result.checkpointAnchor)` | outer only |
+| index.ts:2757 | collectYoutubeBrowser (history block) | `await emitVerifiedEmptyState(historyCtx, "watch_history", capturedAt);` | outer only |
+| index.ts:2774 | collectYoutubeBrowser (history block) | `await historyCtx.emit({` | outer only |
