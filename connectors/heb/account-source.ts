@@ -171,7 +171,9 @@ const NAMING_SCAN_MAX_DEPTH = 256;
 const NAMING_ALLOWED_LEAVES = new Set([
 	"product.productCategory.name",
 	"product.productImageUrls.#.url",
+	"product.productImageUrls.#.size",
 	"product.thumbnailImageUrls.#.url",
+	"product.thumbnailImageUrls.#.size",
 ]);
 
 /** The only key text a held trace may print: H-E-B's own known keys. Any other
@@ -180,7 +182,7 @@ const NAMING_PATH_VOCABULARY = new Set([
 	"SKUs", "__typename", "bestAvailable", "fullDisplayName", "id", "isEbtSnapProduct", "maximumOrderQuantity",
 	"minimumOrderQuantity", "productCategory", "productImageUrls", "productPageURL", "shoppingContext", "storeId",
 	"thumbnailImageUrls", "customerFriendlySize", "weightSelectionIncrements", "twelveDigitUPC", "contextPrices",
-	"product", "url", "name", "displayName", "title", "description",
+	"product", "url", "size", "name", "displayName", "title", "description",
 ]);
 
 function namingPathText(path: readonly (string | number)[]): string {

@@ -1348,9 +1348,9 @@ test("two nameless lines whose cents are written differently still get distinct 
 const liveLeftOver = (extra: Record<string, unknown> = {}) => ({
 	id: "7001", fullDisplayName: "", productPageURL: "",
 	__typename: "Product", bestAvailable: true, isEbtSnapProduct: false, maximumOrderQuantity: 50, minimumOrderQuantity: 1,
-	productCategory: { name: "Produce", __typename: "Category" },
-	productImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001", __typename: "Image" }],
-	thumbnailImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001-t", __typename: "Image" }],
+	productCategory: { __typename: "Category", id: "cat-42", name: "Produce" },
+	productImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001", size: "MEDIUM", __typename: "Image" }],
+	thumbnailImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001-t", size: "SMALL", __typename: "Image" }],
 	shoppingContext: "CURBSIDE_PICKUP", storeId: 92,
 	SKUs: [{ id: "9001", customerFriendlySize: "1 lb", weightSelectionIncrements: [0.5], twelveDigitUPC: "000000000001", contextPrices: [{ isOnSale: false }], __typename: "SKU" }],
 	...extra,
@@ -1392,6 +1392,13 @@ test("a name hidden in a skipped-looking subtree still holds; only the proven le
 	assert.equal(heldOf(b), "naming_key:product.productCategory.description");
 	assert.equal(heldOf(c), "naming_key:product.thumbnailImageUrls.#.title");
 	for (const r of [a, b, c]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread/);
+});
+
+test("a displayName added to a real image object still holds the line", async () => {
+	const product = liveLeftOver({ productImageUrls: [{ url: "https://images.heb.com/x", size: "MEDIUM", __typename: "Image", displayName: "Zq9x Bread" }] });
+	const r = await resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, product)], inSection(itemRow(0) + nlLine(1.2, "$3.17")));
+	assert.equal(heldOf(r), "naming_key:product.productImageUrls.#.displayName");
+	assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread/);
 });
 
 test("a named row's department survives a section title with < and &", async () => {
