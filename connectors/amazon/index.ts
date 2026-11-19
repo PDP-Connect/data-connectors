@@ -204,7 +204,7 @@ const PAGE_CONTENT_TIMEOUT_MS = 10_000;
 const LIST_PAGE_WAIT_MS = 10_000;
 const PAGE_LIMIT = 50;
 const START_INDEX_STEP = 10;
-const POLITE_DELAY_MS = 800;
+const POLITE_DELAY_MS = 300;
 /** Pause after each order-detail page: 1.5 to 3 seconds, a person's pace. */
 const DETAIL_PACE_MIN_MS = 1500;
 const DETAIL_PACE_SPREAD_MS = 1500;
@@ -228,12 +228,12 @@ const MAX_DETAIL_ATTEMPTS_PER_RUN = 60;
  * sign-in included (a code by SMS can take several), and a cut-off run loses
  * every record. Live 2026-11-19 (amazon.ca): sign-in 2 min, then the walk
  * reached 2022 and the run was killed at 14 min with nothing kept. A demo
- * also wants the order list in about a minute. The walk stops opening detail
- * pages 15 s before this and list pages at it, and the run ends with the
+ * also wants the order list in about 30 seconds. The walk stops opening detail
+ * pages 10 s before this and list pages at it, and the run ends with the
  * orders read.
  */
-export const AMAZON_WALK_BUDGET_MS = 75_000;
-const DETAIL_STOP_BEFORE_DEADLINE_MS = 15_000;
+export const AMAZON_WALK_BUDGET_MS = 30_000;
+const DETAIL_STOP_BEFORE_DEADLINE_MS = 10_000;
 export function walkTimeSpent(
 	flags: Pick<RunFlags, "walkDeadlineAt">,
 	marginMs = 0,
@@ -1135,15 +1135,12 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 			suppressForward: options.recoveryOnly === true,
 		};
 	}
+	// A spent detail budget never skips the list walk: the order list comes
+	// from list pages, and only a recovery-only run skips it.
 	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
-	const detailBudgetExhausted =
-		flags.detailAttempts >=
-			(flags.maxDetailAttempts ?? MAX_DETAIL_ATTEMPTS_PER_RUN) ||
-		flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN ||
-		walkTimeSpent(flags, DETAIL_STOP_BEFORE_DEADLINE_MS);
 	return {
 		...recovery,
-		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
+		suppressForward: options.recoveryOnly === true,
 	};
 }
 
@@ -2543,10 +2540,13 @@ if (isMainModule(import.meta.url)) {
 						capture,
 						context,
 						credentials,
-						detailGaps: ctx.detailGaps,
+						// A live run's one detail page goes to the newest order (the zip);
+						// pending gaps stay for a recovery-only run.
+						detailGaps: ctx.recoveryOnly === true ? ctx.detailGaps : [],
 						emit,
 						emitRecord,
-						requestDetailGapPage: ctx.requestDetailGapPage,
+						requestDetailGapPage:
+							ctx.recoveryOnly === true ? ctx.requestDetailGapPage : undefined,
 						sendInteraction,
 						store,
 					},

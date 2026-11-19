@@ -699,7 +699,7 @@ test("order-detail pages are paced 1.5 to 3 seconds apart", () => {
 	);
 });
 
-test("the walk stops at its own time budget, detail pages a minute earlier, and keeps the orders read", () => {
+test("the walk stops at its own time budget, detail pages earlier, and keeps the orders read", () => {
 	const flags = { walkDeadlineAt: 1_000_000 };
 	assert.equal(walkTimeSpent(flags, 0, 999_999), false);
 	assert.equal(walkTimeSpent(flags, 0, 1_000_000), true);
@@ -3008,7 +3008,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: zero-budget legacy stop
 	});
 });
 
-test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustion suppresses forward walk", async () => {
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a spent detail budget still walks the order list (only recovery-only skips it)", async () => {
 	const { deps } = makeRecordingDeps();
 	const orderId = "111-1234567-8901234";
 	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -3039,7 +3039,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustio
 	assert.deepEqual(result, {
 		recovered: 0,
 		stoppedWithPending: true,
-		suppressForward: true,
+		suppressForward: false,
 	});
 });
 
