@@ -1958,3 +1958,93 @@ test("an SSR item with no paid amount leaves an eliminated row uncorroborated an
 	assert.match(r.linklessTrace ?? "", /;stop=uncorroborated;/);
 	assert.equal(matchesTotal(r, 2), false);
 });
+
+// ─── a recovery run gets the list card's item count from the gap locator ──
+const dupFullPage = () => {
+	const data = { page: "/my-account/order-history/[orderId]", gssp: true, props: { __N_SSP: true, pageProps: { order: { orderId: order.orderId, orderItems: dupSsr } } } };
+	return dupPage(dupRow("900"), dupRow("900")) + '<section data-qe-id="orderSummaryCard"></section>' + `<script id="__NEXT_DATA__">${JSON.stringify(data)}</script>`;
+};
+const recoveryGap = (locatorExtra: Record<string, unknown>) => ({
+	detail_locator: { kind: "heb.order_detail", order_id: order.orderId, order_date: "2026-07-14", ...locatorExtra },
+	gap_id: "gap-count",
+	record_key: order.orderId,
+	reference_only: true as const,
+	status: "pending" as const,
+	stream: "order_items" as const,
+});
+const recoverGap = async (html: string, locatorExtra: Record<string, unknown>) => {
+	const deps = sink();
+	const result = await recoverPendingOrderItemDetailGaps(
+		pageFor(html),
+		{ ...deps, sendInteraction: async () => { throw new Error("unexpected interaction"); }, detailSurfaceTimeoutMs: 50, detailGaps: [recoveryGap(locatorExtra)] },
+		flags(),
+	);
+	return { deps, result };
+};
+const gapMessages = (deps: ReturnType<typeof sink>) => deps.messages.filter((m) => m.type === "DETAIL_GAP");
+
+test("a recovery gap whose locator holds item_count collapses the duplicate rendering and recovers", async () => {
+	const { deps, result } = await recoverGap(dupFullPage(), { item_count: DUP_COUNT });
+	assert.equal(result.recovered, 1);
+	assert.equal(gapMessages(deps).length, 0);
+	assert.equal(deps.messages.filter((m) => m.type === "DETAIL_GAP_RECOVERED").length, 1);
+	assert.equal(deps.records.filter((r) => r.stream === "order_items").length, 6);
+});
+
+test("the same recovery gap without item_count stays open", async () => {
+	const extras = [{}, { item_count: 0 }, { item_count: -6 }, { item_count: 6.5 }, { item_count: "6" }, { item_count: null }];
+	const runs = await Promise.all(extras.map((extra) => recoverGap(dupFullPage(), extra)));
+	for (const [i, { deps, result }] of runs.entries()) {
+		assert.equal(result.recovered, 0, JSON.stringify(extras[i]));
+		assert.equal(gapMessages(deps).length, 1, JSON.stringify(extras[i]));
+	}
+});
+
+test("a gap that re-defers sends its locator back with item_count unchanged", async () => {
+	// Unproven inventory: the count is wrong for this page, so the gap stays open.
+	const unproven = await recoverGap(dupFullPage(), { item_count: DUP_COUNT + 3 });
+	assert.equal(gapMessages(unproven.deps)[0]?.detail_locator.item_count, DUP_COUNT + 3);
+	// A failed read re-defers too.
+	const deps = sink();
+	const failing = { ...pageFor(dupFullPage()), content: async () => { throw new Error("boom"); }, goto: async () => { throw new Error("boom"); } } as unknown as Page;
+	await recoverPendingOrderItemDetailGaps(
+		failing,
+		{ ...deps, sendInteraction: async () => { throw new Error("unexpected interaction"); }, detailSurfaceTimeoutMs: 50, detailGaps: [recoveryGap({ item_count: DUP_COUNT })] },
+		flags(),
+	);
+	assert.equal(gapMessages(deps)[0]?.detail_locator.item_count, DUP_COUNT);
+	// A legacy gap without a date re-defers with the count as well.
+	const legacy = await recoverGap(dupFullPage(), { item_count: DUP_COUNT, order_date: undefined });
+	assert.equal(gapMessages(legacy.deps)[0]?.detail_locator.item_count, DUP_COUNT);
+});
+
+test("a forward run that records a gap puts item_count in the locator", async () => {
+	const forward = async (itemCount: number | null, html: string) => {
+		const deps = sink();
+		await processListOrder(
+			pageFor(html),
+			{
+				...deps,
+				detailSurfaceTimeoutMs: 50,
+				emitItems: true,
+				wantsItems: true,
+				wantsOrders: true,
+				orderItemsCoverage: newOrderItemsCoverage(),
+				ordersCoverage: undefined,
+				ordersFingerprintCursor: undefined,
+				progress: async () => {},
+				sendInteraction: async () => { throw new Error("unexpected interaction"); },
+			},
+			flags(),
+			{ ...order, itemCount },
+		);
+		return gapMessages(deps);
+	};
+	// Unproven inventory (count differs from the page).
+	const unproven = await forward(DUP_COUNT + 3, dupFullPage());
+	assert.equal(unproven[0]?.detail_locator.item_count, DUP_COUNT + 3);
+	// No declared count: the key is left out.
+	const none = await forward(null, dupFullPage());
+	assert.equal(none.length, 1);
+	assert.equal("item_count" in none[0]!.detail_locator, false);
+});

@@ -1654,6 +1654,10 @@ export function recordDetailOutcome(
 	}
 }
 
+function isPositiveInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
 function buildHebDetailGap(
 	orderId: string,
 	reason: HebDetailGapReason,
@@ -1665,6 +1669,7 @@ function buildHebDetailGap(
 		pollCount?: number | undefined;
 	} = {},
 	lead?: string | undefined,
+	itemCount?: number | null | undefined,
 ) {
 	const elapsedMs = Math.max(0, Math.round(metrics.elapsedMs ?? 0));
 	const pollCount = Math.max(0, Math.floor(metrics.pollCount ?? 0));
@@ -1684,6 +1689,10 @@ function buildHebDetailGap(
 			kind: "heb.order_detail",
 			order_id: orderId,
 			...(orderDate ? { order_date: orderDate } : {}),
+			// The list card's declared unit count. Recovery has no list card, so
+			// the locator carries it to the collapse proof (see
+			// readRecoverableHebOrderDetailGap).
+			...(isPositiveInteger(itemCount) ? { item_count: itemCount } : {}),
 		},
 		error: {
 			class: classifyHebDetailFailure(failureKind),
@@ -1887,6 +1896,7 @@ function readRecoverableHebOrderDetailGap(
 	gap: BrowserCollectContext["detailGaps"][number],
 ): {
 	gapId: string;
+	itemCount: number | null;
 	orderDate: string | undefined;
 	orderId: string;
 	recordKey: string | number;
@@ -1908,6 +1918,7 @@ function readRecoverableHebOrderDetailGap(
 			: undefined;
 	return {
 		gapId: gap.gap_id,
+		itemCount: isPositiveInteger(locator.item_count) ? locator.item_count : null,
 		orderDate,
 		orderId,
 		recordKey: gap.record_key ?? orderId,
@@ -1956,6 +1967,7 @@ async function recoverPendingOrderItemDetailGapPage(
 		const result = await resolveOrderDetail(page, flags, locator.orderId, {
 			...(deps.capture ? { capture: deps.capture } : {}),
 			detailSurfaceTimeoutMs: deps.detailSurfaceTimeoutMs,
+			expectedItemCount: locator.itemCount,
 			sendInteraction: deps.sendInteraction,
 			waitForHydration: deps.waitForHydration,
 		});
@@ -1973,6 +1985,10 @@ async function recoverPendingOrderItemDetailGapPage(
 						"temporary_unavailable",
 						"parse_missing",
 						locator.orderDate,
+						undefined,
+						{},
+						undefined,
+						locator.itemCount,
 					),
 				);
 				reDeferred += 1;
@@ -2012,6 +2028,7 @@ async function recoverPendingOrderItemDetailGapPage(
 						`${itemProofDiagnostic(result.evidence, result.sourceItemTotal)};${result.diagnostic}`,
 						{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
 						result.linklessTrace,
+						locator.itemCount,
 					),
 				);
 				reDeferred += 1;
@@ -2041,6 +2058,8 @@ async function recoverPendingOrderItemDetailGapPage(
 				locator.orderDate,
 				result.diagnostic,
 				{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+				undefined,
+				locator.itemCount,
 			),
 		);
 		reDeferred += 1;
@@ -2359,6 +2378,7 @@ async function fetchDetailAndRecordCoverage(
 					`${itemProofDiagnostic(result.evidence, result.sourceItemTotal)};${result.diagnostic}`,
 					{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
 					result.linklessTrace,
+					listOrder.itemCount,
 				),
 			);
 		}
@@ -2371,6 +2391,8 @@ async function fetchDetailAndRecordCoverage(
 					orderDate,
 					result.diagnostic,
 					{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+					undefined,
+					listOrder.itemCount,
 				),
 			);
 		}
@@ -2410,6 +2432,10 @@ export async function processListOrder(
 					"temporary_unavailable",
 					"parse_missing",
 					undefined,
+					undefined,
+					{},
+					undefined,
+					listOrder.itemCount,
 				),
 			);
 		}
