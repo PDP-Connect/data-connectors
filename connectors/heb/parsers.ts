@@ -767,6 +767,12 @@ function hebGroceryImageId(pathname: string): string | undefined {
  * the two cannot be split safely), its ordered quantity and its line total. */
 const A11Y_SENTENCE_RE = /^Item(?: with preference)?, (.+)\. Quantity: (.+?)\. Price: (\$\d[\d,]*\.\d{2})\.?$/;
 
+/** Words an accessible sentence may hold that name no product. */
+const A11Y_WORDS = new Set([
+	"item", "with", "preference", "quantity", "price", "each", "ea", "of", "avg",
+	"lb", "lbs", "oz", "fl", "ct", "pk", "count", "gal", "qt", "pt", "l", "ml", "g", "kg",
+]);
+
 export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
@@ -1017,6 +1023,7 @@ export function resolveLinklessOrderItems(
 	// lines and unclaimed items one to one (price_none, price_shared); and a
 	// named item's name starts the sentence's name part (name_mismatch).
 	let a11y: string | null = null;
+	let a11yFormat = "";
 	if (stop === "unnamed") {
 		const sentence = (own: Element) => {
 			const found = [...own.querySelectorAll("*")].filter((el) => A11Y_SENTENCE_RE.test(normText(el)));
@@ -1035,6 +1042,7 @@ export function resolveLinklessOrderItems(
 			: linkedOwn.some((own, i) => !startsName(linkedSentences[i]![1]!, normText(own.querySelector(nameSelector))))
 				? "linked_mismatch"
 			: lineSentences.some((match) => match === null) ? "format"
+			: lineSentences.some((match) => !/^[\p{L}\p{N}]/u.test(match![1]!) || !/\p{L}/u.test(match![1]!)) ? "no_name"
 			: lineSentences.some((match, i) => !lineTotals[i] || match![3] !== lineTotals[i]) ? "price_mismatch"
 			: pairs.some((fitting) => fitting.length === 0) ? "price_none"
 			: pairs.some((fitting) => fitting.length > 1) || new Set(paired).size !== paired.length ? "price_shared"
@@ -1045,6 +1053,25 @@ export function resolveLinklessOrderItems(
 			for (const [i, line] of remaining.entries())
 				resolveLine(line, paired[i]!, false, items[paired[i]!]!.fullDisplayName ?? lineSentences[i]![1]!);
 			stop = "price";
+		}
+		if (a11y === "format") {
+			// The first unread line's sentence as structure only: the count of
+			// elements whose text starts with "Item", then that element's text (or
+			// else the line's first text with a letter) with each word outside a
+			// fixed vocabulary as w (runs of them as w+), each number as d and any
+			// other character as ?. Never a name, an id or a price.
+			const own = ownCopy(remaining[lineSentences.findIndex((match) => match === null)]!);
+			const all = [...own.querySelectorAll("*")];
+			const starts = all.filter((el) => /^Item\b/.test(normText(el)));
+			const leaves = starts.filter((el) => !starts.some((other) => other !== el && el.contains(other)));
+			const text = normText(leaves[0] ?? all.find((el) =>
+				[...el.childNodes].some((node) => node.nodeType === 3 && /\p{L}/u.test(node.textContent ?? ""))));
+			const shape = text
+				.replace(/\p{L}+/gu, (word) => (A11Y_WORDS.has(word.toLowerCase()) ? word : "w"))
+				.replace(/\d+/g, "d")
+				.replace(/\bw(?: w\b)+/g, "w+")
+				.replace(/[^A-Za-z ,.:;$%/&'()+-]/g, "?");
+			a11yFormat = `;a11y_fmt=${leaves.length}:${shape.length > 60 ? `${shape.slice(0, 60)}more` : shape || "-"}`;
 		}
 	}
 	// For the first unclaimed item with no name: how H-E-B left the name out,
@@ -1105,6 +1132,7 @@ export function resolveLinklessOrderItems(
 	].join(",") +
 		`;stop=${stop}` +
 		(a11y ? `;a11y=${a11y}` : "") +
+		a11yFormat +
 		(stop === "unnamed" ? `;ll_dom=${linklessDom ?? "-"}` : "") +
 		(stop === "price" ? "" : unnamedTrace) +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +

@@ -1172,6 +1172,24 @@ test("pairing by line total refuses, and says why, on a shared price, an unmatch
 	assert.doesNotMatch(`${shared.linklessTrace}${none.linklessTrace}${disagree.linklessTrace}${format.linklessTrace}`, /Invented|Bakery|Cake|Other|\$/);
 });
 
+test("a linkless line whose sentence does not read says so as structure only, and a sentence with no name never names an item", async () => {
+	const linked = a11yRow(0, "Invented Milk", "$4.29");
+	const line = (sentence: string) =>
+		`<li><span class="visuallyHidden">${sentence}</span><img src="https://www.heb.com/static/invented.svg" alt=""><span data-qe-id="checkoutItemPrice">$6.00</span><span>$3.00 / ea</span><span data-qe-id="orderItemQty">Qty: 2</span></li>`;
+	const items = [namedSsr("500", "Invented Milk"), unnamedSsr("501", "$6.00")];
+	const [blank, noComma, comma] = await Promise.all([
+		resolveLinkless(items, linked + line("Item, . Quantity: 2 each. Price: $6.00.")),
+		resolveLinkless(items, linked + line("Invented Bakery Loaf 12 ct, quantity 2, $6.00")),
+		resolveLinkless(items, linked + line("Item, , 1 each. Quantity: 2 each. Price: $6.00.")),
+	]);
+	assert.equal(blank.evidence.linklessLines, 1);
+	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;a11y=format;a11y_fmt=1:Item, \. Quantity: d each\. Price: \$d\.d\.;ll_dom=/);
+	assert.match(noComma.linklessTrace ?? "", /;a11y=format;a11y_fmt=0:w\+ d ct, quantity d, \$d\.d;/);
+	assert.equal(comma.evidence.linklessLines, 1);
+	assert.match(comma.linklessTrace ?? "", /;stop=unnamed;a11y=no_name;ll_dom=/);
+	assert.doesNotMatch(`${blank.linklessTrace}${noComma.linklessTrace}${comma.linklessTrace}`, /Invented|Bakery|6\.00/);
+});
+
 test("on the real order-detail structure, a weighed item that lost its links and image pairs by line total and keeps its sentence name", () => {
 	const fixture = readFileSync(new URL("./__fixtures__/order-detail.html", import.meta.url), "utf8");
 	const bananas = fixture.indexOf('<span class="visuallyHidden">Item, Organic Bananas');
