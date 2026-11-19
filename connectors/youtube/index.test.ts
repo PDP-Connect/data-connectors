@@ -4278,6 +4278,7 @@ function scrollLoadedHistoryPage(
 	perScroll: number,
 	scrollCostMs: number,
 	clock: { offsetMs: number },
+	scrollDelayMs = 0,
 ): FixturePage {
 	const page = new FixturePage();
 	let loaded = Math.min(videos.length, perScroll);
@@ -4292,6 +4293,8 @@ function scrollLoadedHistoryPage(
 	page.evaluate = async (_fn: Function, arg?: unknown) => {
 		const request = (typeof arg === "object" && arg !== null ? arg : {}) as Record<string, unknown>;
 		if ("itemSelector" in request) {
+			if (scrollDelayMs > 0)
+				await new Promise((resolve) => setTimeout(resolve, scrollDelayMs));
 			loaded = Math.min(videos.length, loaded + perScroll);
 			top += 1000;
 			clock.offsetMs += scrollCostMs;
@@ -4414,4 +4417,53 @@ test("browse responses that keep returning the same rows do not keep a stuck wal
 		release();
 		setHistoryOuterDeadlineMsForTest(previous);
 	}
+});
+
+test("a source that keeps returning old identities beyond the dedup window lets the watchdog expire", { timeout: 20_000 }, async () => {
+	// 600 distinct rows, then the same 600 again and again, each re-delivered
+	// (the 500-row dedup window has forgotten them) and each acknowledged.
+	const base = Array.from({ length: 600 }, (_, i) => ({
+		...VIDEO,
+		video_id: `cycle${String(i).padStart(4, "0")}`,
+		video_url: `https://www.youtube.com/watch?v=cycle${i}`,
+	}));
+	const videos = Array.from({ length: 6_000 }, (_, i) => base[i % base.length]!);
+	const previous = setHistoryOuterDeadlineMsForTest(400);
+	let acknowledged = 0;
+	const messages: Record<string, unknown>[] = [];
+	try {
+		await collectYoutubeBrowser({
+			page: scrollLoadedHistoryPage(videos, 50, 0, { offsetMs: 0 }, 30) as never,
+			requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+			state: {},
+			emitRecord: async () => {
+				acknowledged += 1;
+			},
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
+			reportStreamFailure: failureReporter(messages),
+			progress: async () => undefined,
+		});
+	} finally {
+		setHistoryOuterDeadlineMsForTest(previous);
+	}
+	assert.ok(acknowledged > 600, `duplicates were upserted (${acknowledged})`);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(
+		messages.find((message) => message.stream === "watch_history" && message.reason === "stream_collection_failed")?.message,
+		"youtube_history_outer_timeout",
+	);
+});
+
+test("an acknowledged record re-arms the watchdog only the first time its identity is acknowledged", () => {
+	const progress = new HistoryRunProgress();
+	let arms = 0;
+	progress.open(() => {
+		arms += 1;
+	});
+	progress.acknowledgedRecord("watch_history|a");
+	progress.acknowledgedRecord("watch_history|a");
+	progress.acknowledgedRecord("watch_history|b");
+	assert.equal(arms, 2);
 });
