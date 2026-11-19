@@ -4167,7 +4167,9 @@ function lastOrdersCursor(messages: EmittedMessage[]): {
 	const states = messages.filter(
 		(m) => m.type === "STATE" && m.stream === "orders",
 	);
-	return (states.at(-1) as { cursor: never }).cursor;
+	const last = states.at(-1);
+	assert.ok(last && last.type === "STATE", "a STATE message was emitted");
+	return last.cursor as ReturnType<typeof lastOrdersCursor>;
 }
 
 test("collectAmazon: a walk-budget stop part way through a year leaves that year unfinished in its own store's cursor, and the next run finishes it", async () => {
