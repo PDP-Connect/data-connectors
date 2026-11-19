@@ -14,6 +14,7 @@ import {
 	readPageReadiness,
 	resolveWatchedDate,
 	setHistoryLoopCallDeadlineMsForTest,
+	setHistoryOuterDeadlineMsForTest,
 } from "./index.ts";
 import { readSubscriptions } from "./browser-dom.ts";
 import { enumerationEnded, readListEnd } from "./page-evidence.ts";
@@ -1938,6 +1939,8 @@ class DocumentPage {
 	private readonly hangReadListEndFrom: number | undefined;
 	private readonly browseRequestsFirst: boolean;
 	private readonly gotoError: Error | undefined;
+	private readonly gotoHangs: boolean;
+	private readonly hangBrowserDate: boolean;
 	private readonly browseRequestsOnScroll: BrowseRequestSpec[];
 	private readonly pageLogHangOnScroll: number;
 	private readonly historyResponseOnReadListEnd:
@@ -1963,6 +1966,10 @@ class DocumentPage {
 			/** Browse requests the page starts on scroll; "hang" never settles. */
 			browseRequestsOnScroll?: BrowseRequestSpec[];
 			gotoError?: Error;
+			/** Navigation to the history page never settles. */
+			gotoHangs?: boolean;
+			/** The browser-date evaluation never settles. */
+			hangBrowserDate?: boolean;
 			/** The nth page-log drain, and every one after it, never resolves. */
 			hangDrainFrom?: number;
 			/** The nth readListEnd evaluate, and every one after it, never resolves. */
@@ -1992,6 +1999,8 @@ class DocumentPage {
 		this.pageLogHangOnScroll = options.pageLogHangOnScroll ?? 0;
 		this.browseRequestsOnScroll = options.browseRequestsOnScroll ?? [];
 		this.gotoError = options.gotoError;
+		this.gotoHangs = options.gotoHangs ?? false;
+		this.hangBrowserDate = options.hangBrowserDate ?? false;
 		this.hangDrainFrom = options.hangDrainFrom;
 		this.setupStall = options.setupStall;
 		this.hangDrainWait = options.hangDrainWait ?? false;
@@ -2041,6 +2050,8 @@ class DocumentPage {
 	}
 	async goto(url: string) {
 		if (this.gotoError && url.includes("/feed/history")) throw this.gotoError;
+		if (this.gotoHangs && url.includes("/feed/history"))
+			await new Promise<never>(() => undefined);
 		this.url = url;
 		for (const { requested, next, ...options } of this.historyResponsesOnGoto.splice(0))
 			this.emitHistoryResponse(requested, next, options);
@@ -2206,6 +2217,8 @@ class DocumentPage {
 		};
 	}
 	async evaluate(fn: Function, arg?: unknown) {
+		if (this.hangBrowserDate && fn.name === "readBrowserDate")
+			await new Promise<never>(() => undefined);
 		if (
 			this.scrollGate &&
 			fn.toString().includes("scrollable=Array.from(document.querySelectorAll")
@@ -2284,6 +2297,8 @@ class DocumentPage {
 
 /** When set, the downstream record callback never settles. */
 let recordCallbackHangs = false;
+/** When set, the downstream sink never acknowledges a STATE. */
+let stateSinkHangs = false;
 
 async function collectFromDocuments(
 	pageFor: (url: string) => string,
@@ -2318,6 +2333,8 @@ async function collectFromDocuments(
 				records.set(stream, [...(records.get(stream) ?? []), data]);
 			},
 			emit: async (message) => {
+				if (stateSinkHangs && (message as { type?: string }).type === "STATE")
+					await new Promise<never>(() => undefined);
 				messages.push(message as Record<string, unknown>);
 			},
 			reportStreamFailure: failureReporter(messages),
@@ -4076,5 +4093,51 @@ test("a stalled setup step fails the walk closed with nothing emitted", { timeou
 		}
 	} finally {
 		setHistoryLoopCallDeadlineMsForTest(previous);
+	}
+});
+
+async function collectUnderOuterDeadline(pageOptions: ConstructorParameters<typeof DocumentPage>[2]) {
+	const previous = setHistoryOuterDeadlineMsForTest(300);
+	try {
+		return await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			pageOptions,
+		);
+	} finally {
+		setHistoryOuterDeadlineMsForTest(previous);
+	}
+}
+
+test("the outer deadline ends a history path whose browser-date evaluation or navigation never settles", { timeout: 20_000 }, async () => {
+	for (const pageOptions of [{ hangBrowserDate: true }, { gotoHangs: true }]) {
+		const { records, messages, outcome } = await collectUnderOuterDeadline(pageOptions);
+		const label = JSON.stringify(pageOptions);
+		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"], label);
+		assert.equal(
+			messages.find((message) => message.stream === "watch_history")?.message,
+			"youtube_history_outer_timeout",
+			label,
+		);
+		assert.equal(records.get("watch_history")?.length ?? 0, 0, label);
+		assert.equal(messages.some((message) => message.type === "STATE"), false, label);
+	}
+});
+
+test("a STATE sink that never acknowledges is reported as an unknown outcome, not success", { timeout: 20_000 }, async () => {
+	stateSinkHangs = true;
+	try {
+		const { messages, outcome } = await collectUnderOuterDeadline({});
+		assert.ok(outcome("watch_history").includes("stream_collection_failed"));
+		const failure = messages.find(
+			(message) => message.message === "youtube_history_state_unacknowledged",
+		);
+		assert.ok(failure);
+		assert.equal((failure?.diagnostics as Record<string, unknown>)?.outcome, "unknown");
+		assert.equal(messages.some((message) => message.type === "STATE"), false);
+	} finally {
+		stateSinkHangs = false;
 	}
 });
