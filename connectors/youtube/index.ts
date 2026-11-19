@@ -872,27 +872,46 @@ async function scroll(
 const EMPTY_STATE =
 	"ytd-message-renderer, yt-message-renderer, ytd-background-promo-renderer";
 
+/**
+ * The readiness wait, its handle read and its dispose all sit under one fixed
+ * deadline (the walk's call deadline). The caller stops waiting at the deadline,
+ * so a dispose that hangs cannot block the failure report; it keeps running in
+ * the background. "timeout" means the sequence did not settle in time.
+ */
+async function waitForContentBounded(
+	page: BrowserCollectContext["page"],
+	selector: string,
+	options: { playlistIndex?: boolean; timeoutMs?: number } = {},
+): Promise<"content" | "empty" | "unreadable" | "timeout"> {
+	const sequence = (async (): Promise<"content" | "empty" | "unreadable"> => {
+		try {
+			const handle = await page.waitForFunction(
+				readPageReadiness,
+				{
+					content: selector,
+					empty: EMPTY_STATE,
+					playlistIndex: options.playlistIndex ?? false,
+				},
+				{ timeout: options.timeoutMs ?? 10_000 },
+			);
+			const state = (await handle.jsonValue()) as "content" | "empty";
+			await handle.dispose();
+			return state;
+		} catch {
+			return "unreadable";
+		}
+	})();
+	const settled = await withinDeadline(sequence, historyLoopCallDeadlineMs);
+	return settled ?? "timeout";
+}
+
 async function waitForContent(
 	page: BrowserCollectContext["page"],
 	selector: string,
 	options: { playlistIndex?: boolean; timeoutMs?: number } = {},
 ): Promise<"content" | "empty" | "unreadable"> {
-	try {
-		const handle = await page.waitForFunction(
-			readPageReadiness,
-			{
-				content: selector,
-				empty: EMPTY_STATE,
-				playlistIndex: options.playlistIndex ?? false,
-			},
-			{ timeout: options.timeoutMs ?? 10_000 },
-		);
-		const state = (await handle.jsonValue()) as "content" | "empty";
-		await handle.dispose();
-		return state;
-	} catch {
-		return "unreadable";
-	}
+	const state = await waitForContentBounded(page, selector, options);
+	return state === "timeout" ? "unreadable" : state;
 }
 
 async function readSwitchAccountEmail(
@@ -1424,13 +1443,26 @@ async function readHistoryVideoList(
 		responseTracker.dispose();
 		throw new Error("youtube_history_page_unreadable");
 	}
-	await page.waitForTimeout(Math.min(PAGE_HYDRATION_WAIT_MS, remainingMs));
+	// Setup runs before any record is emitted, so a stall here fails closed
+	// with nothing emitted and no checkpoint.
+	const hydrated = await withinDeadline(
+		page.waitForTimeout(Math.min(PAGE_HYDRATION_WAIT_MS, remainingMs)),
+		historyLoopCallDeadlineMs,
+	);
+	if (hydrated === null) {
+		responseTracker.dispose();
+		throw new Error("youtube_history_setup_timeout");
+	}
 	remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
-	const state = await waitForContent(
+	const state = await waitForContentBounded(
 		page,
 		"ytd-item-section-renderer yt-lockup-view-model, ytd-item-section-renderer ytd-video-renderer",
 		{ timeoutMs: Math.max(1, Math.min(10_000, remainingMs)) },
 	);
+	if (state === "timeout") {
+		responseTracker.dispose();
+		throw new Error("youtube_history_setup_timeout");
+	}
 	if (state === "unreadable") {
 		responseTracker.dispose();
 		throw new Error("youtube_history_page_unreadable");
@@ -2034,7 +2066,7 @@ async function readableVideos(
 	} catch (error) {
 		const preciseReason =
 			error instanceof Error &&
-			/^youtube_(?:history|playlist)_page_unreadable$/.test(error.message)
+			/^youtube_(?:history_setup_timeout|(?:history|playlist)_page_unreadable)$/.test(error.message)
 				? error.message
 				: undefined;
 		await streams.fail(
