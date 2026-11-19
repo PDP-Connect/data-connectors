@@ -3343,24 +3343,26 @@ test("a response with a list key but no readable rows or continuation cannot pro
 	assert.equal(completeCursorEmitted(messages), false);
 });
 
-test("a request carrying both browseId and a continuation stays correlated", async () => {
-	const { messages } = await collectFromDocuments(
-		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1),
+test("a request carrying both browseId and a continuation is correlated by its token: a known token correlates, an unknown one vetoes", async () => {
+	const run = (continuation: string) => collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
 		["watch_history"],
 		undefined,
 		{ watch_history: { complete: false } },
 		{
-			historyResponsesOnGoto: [
+			historyResponsesOnScroll: [
 				{
-					requested: "unseen",
+					requested: continuation,
 					next: null,
 					itemCount: 1,
-					requestBody: { browseId: "FEhistory", continuation: "unseen" },
+					requestBody: { browseId: "FEhistory", continuation },
 				},
 			],
 		},
 	);
-	assert.equal(completeCursorEmitted(messages), true);
+	const [known, unknown] = await Promise.all([run("bootstrap-C"), run("unseen")]);
+	assert.equal(completeCursorEmitted(known.messages), true);
+	assert.equal(completeCursorEmitted(unknown.messages), false);
 });
 
 test("a content-encoding that merely contains gzip is not a gzip body", async () => {
