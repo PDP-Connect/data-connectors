@@ -51,6 +51,7 @@ import {
 import {
 	AMAZON_CHALLENGE_SELECTOR,
 	AMAZON_CHALLENGE_TEXT_PATTERN,
+	AMAZON_MID_WALK_STOP_RE,
 	AMAZON_NO_ORDERS_TEXT_PATTERN,
 	type AmazonRecoveryClass,
 	applyYearCompletionState,
@@ -78,6 +79,7 @@ import {
 	recoverPendingOrderItemDetailGaps,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	redactAmazonListPageDiagnostics,
+	safeUrlPath,
 	scrapeListPage,
 	shouldEmitTrailingOrdersState,
 	type YearsCursor,
@@ -658,6 +660,45 @@ test("empty-year page whose Buy it again carousel names a Robot product is not a
 		),
 		{ action: "terminal", reason: "no_orders_text" },
 	);
+});
+
+test("a stop part way through the order walk keeps the orders already read", () => {
+	// Live 2026-11-19 (amazon.ca), twice: 32 orders read, then a list page came
+	// back as sign-in or challenge and the run failed with none of them.
+	for (const code of [
+		"amazon_empty_list_page_source_auth_or_challenge",
+		"amazon_empty_list_page_empty_first_page_without_terminal_signal",
+		"amazon_empty_list_page_selector_drift",
+		"amazon_list_page_navigation_failed",
+		"amazon_list_page_readiness_timeout",
+	]) {
+		assert.match(code, AMAZON_MID_WALK_STOP_RE, code);
+	}
+	// A contradiction with stored history is still a hard failure.
+	assert.doesNotMatch(
+		"amazon_empty_list_page_amazon_empty_history_after_prior_orders",
+		AMAZON_MID_WALK_STOP_RE,
+	);
+	assert.doesNotMatch(
+		"amazon_empty_list_page_renderer_diagnostics_failed",
+		AMAZON_MID_WALK_STOP_RE,
+	);
+});
+
+test("stop diagnostics keep the URL path only, ids masked", () => {
+	assert.equal(
+		safeUrlPath(
+			"https://www.amazon.ca/ap/signin?openid.return_to=x&email=a%40b.c",
+		),
+		"/ap/signin",
+	);
+	assert.equal(
+		safeUrlPath(
+			"https://www.amazon.ca/gp/your-account/order-details/702-1234567-1234567",
+		),
+		"/gp/your-account/order-details/:id",
+	);
+	assert.equal(safeUrlPath("not a url"), "");
 });
 
 test("Amazon's own challenge pages still read as a challenge", () => {
