@@ -3777,8 +3777,10 @@ for (const kind of ["login-wall", "consent-wall", "evidence-mid-read", "session-
 				assert.equal(proofs[0]?.pageBlocked, false);
 				assert.equal(batches.length, 1);
 				assert.equal(batches[0].totalRows, 0);
-				assert.equal(proofs.length, 2);
-				assert.equal(proofs[1].verifiedEmpty, false);
+				// The shared traversal re-reads the end evidence before and after the
+				// row read and in its final refresh; the invalidation must reach the last.
+				assert.ok(proofs.length >= 2);
+				assert.equal(proofs.at(-1).verifiedEmpty, false);
 			}
 		}
 	});
