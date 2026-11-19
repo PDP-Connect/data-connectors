@@ -6223,7 +6223,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2902,
+			line: 2958,
 			column: 7,
 			category: "shared_mutable_accumulator",
 			note: "closeBrowserContextPagesExcept(): loop body mutates a shared closed accumulator the next iteration reads",
@@ -6349,21 +6349,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 1626,
+			line: 1656,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "run(): report each unsupported bounded stream's SKIP_RESULT before collection starts",
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2076,
+			line: 2106,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "createOutputChannel pump(): transport writes run one at a time, in order, so DONE is the last frame",
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2361,
+			line: 2417,
 			column: 21,
 			category: "shared_mutable_accumulator",
 			note: "makeEmitRecord settle(): re-read the in-flight emission set until no admitted emission remains",

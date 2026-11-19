@@ -123,3 +123,23 @@ test("a rejected write reaches the caller as fixed text, whatever the frame", as
 		(e: unknown) => !String((e as Error).message).includes("ACME-4417"),
 	);
 });
+
+test("a frame mutated after emit is sent as it was admitted", async () => {
+	const calls: EmittedMessage[] = [];
+	const channel = createOutputChannel((message) => {
+		calls.push(message);
+		return calls.length === 1
+			? new Promise<void>((resolve) => setTimeout(resolve, 40))
+			: Promise.resolve();
+	});
+	const first = channel.write({
+		type: "PROGRESS",
+		message: "first",
+	} as EmittedMessage);
+	const queued = { type: "PROGRESS", message: "second" } as EmittedMessage;
+	const second = channel.write(queued);
+	(queued as { type: string }).type = "DONE";
+	(queued as { message: string }).message = "changed";
+	await Promise.all([first, second]);
+	assert.deepEqual(calls[1], { type: "PROGRESS", message: "second" });
+});

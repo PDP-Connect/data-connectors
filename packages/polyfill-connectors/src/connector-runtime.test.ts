@@ -2803,3 +2803,49 @@ for (const hook of ["onFailure", "normalizer", "hostile error"] as const) {
 		await assertDoneIsLast(calls);
 	});
 }
+
+test("a beforeDone that never settles is bounded: exactly one failed DONE", async () => {
+	const calls: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{ name: "synthetic_hung_before_done", collect: async () => undefined },
+		{
+			...recordingTransport(calls, undefined, { inflightSettleTimeoutMs: 30 }),
+			beforeDone: () => new Promise<void>(() => undefined),
+		},
+	);
+	assert.equal(result.exitCode, 1);
+	const done = calls.filter((m) => m.type === "DONE");
+	assert.equal(done.length, 1);
+	assert.equal(
+		(done[0] as { error?: { code?: string } }).error?.code,
+		"record_settlement_timeout",
+	);
+	await assertDoneIsLast(calls);
+});
+
+for (const status of ["succeeded", "failed"] as const) {
+	test(`a DONE write that never settles is attempted once and the run still returns: ${status}`, async () => {
+		const calls: EmittedMessage[] = [];
+		const result = await runConnectorLifecycle(
+			{
+				name: "synthetic_hung_done",
+				collect: async () => {
+					if (status === "failed") throw new Error("boom");
+				},
+			},
+			{
+				...recordingTransport(
+					calls,
+					(message) =>
+						message.type === "DONE"
+							? new Promise<void>(() => undefined)
+							: Promise.resolve(),
+					{ inflightSettleTimeoutMs: 30 },
+				),
+				doneAckTimeoutMs: 30,
+			},
+		);
+		assert.equal(result.exitCode, 1);
+		await assertDoneIsLast(calls);
+	});
+}

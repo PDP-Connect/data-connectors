@@ -1251,6 +1251,14 @@ export interface ConnectorLifecycleTransport {
 	 * discard any frame that arrives after DONE.
 	 */
 	inflightSettleTimeoutMs?: number;
+	/**
+	 * How long the lifecycle waits for the transport to acknowledge the DONE
+	 * write. Default 30 000 ms. DONE is attempted exactly once; on expiry the
+	 * run resolves as failed and no second DONE is written. Delivery of that
+	 * frame is then the host's contract: it must not treat a missing
+	 * acknowledgement as a reason to expect another DONE.
+	 */
+	doneAckTimeoutMs?: number;
 	readStart: () => Promise<StartMessage>;
 	emit: (message: EmittedMessage) => Promise<void>;
 	sendInteraction: BaseCollectContext["sendInteraction"];
@@ -1512,8 +1520,15 @@ export async function runConnectorLifecycle(
 		if ((await channel.drain(remaining())) === "expired" && live)
 			replace(new FixedFailure("record_settlement_timeout"));
 		if (live) {
+			// Bounded by what is left of the settlement budget: a beforeDone that
+			// never settles must still end in one failed DONE.
 			try {
-				await transport.beforeDone?.(withheldAtOrAfterUntil);
+				const settled = await boundedWait(
+					transport.beforeDone?.(withheldAtOrAfterUntil),
+					remaining(),
+				);
+				if (settled === "expired")
+					replace(new FixedFailure("record_settlement_timeout"));
 			} catch (error) {
 				replace(error);
 			}
@@ -1523,21 +1538,19 @@ export async function runConnectorLifecycle(
 			if (failure) replace(failure);
 		}
 		if (verdict.status === "succeeded") {
-			await channel.writeDone({
+			const acknowledged = await deliverDone({
 				type: "DONE",
 				status: "succeeded",
 				records_emitted: observedCounters?.totalEmitted ?? 0,
 			});
-			return 0;
+			if (acknowledged) return 0;
+			markFailure();
+			return 1;
 		}
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
 		// failed terminal status if Node exits before the explicit callback.
-		try {
-			transport.onFailure?.();
-		} catch {
-			// A throwing hook must not stop the attempt at DONE.
-		}
+		markFailure();
 		let failedDone: EmittedMessage;
 		try {
 			failedDone = buildFailedDone(verdict);
@@ -1554,9 +1567,26 @@ export async function runConnectorLifecycle(
 				},
 			};
 		}
-		await channel.writeDone(failedDone);
+		await deliverDone(failedDone);
 		return 1;
 	};
+	const markFailure = (): void => {
+		try {
+			transport.onFailure?.();
+		} catch {
+			// A throwing hook must not stop the attempt at DONE.
+		}
+	};
+	/**
+	 * Attempt DONE exactly once and wait for its acknowledgement, bounded. A
+	 * write that hangs past the deadline is not retried: false means the frame
+	 * was attempted but never acknowledged.
+	 */
+	const deliverDone = async (message: EmittedMessage): Promise<boolean> =>
+		(await boundedWait(
+			channel.writeDone(message),
+			transport.doneAckTimeoutMs ?? 30_000,
+		)) === "settled";
 	const stateHasFailure = (): boolean =>
 		flagFailure() !== null || reportedStreamFailures.size > 0;
 	/** The first failure the flags record: a timeout, a late write, then a rejection. */
@@ -2088,19 +2118,26 @@ export function createOutputChannel(
 			queue.push({ message, resolve, reject });
 			void pump();
 		});
+	// Freeze the frame at admission: what was checked is what is sent, even if
+	// the producer mutates its object while the frame waits in the queue.
+	const admit = (
+		message: EmittedMessage,
+		open: () => boolean,
+	): Promise<void> => {
+		let snapshot: EmittedMessage;
+		try {
+			snapshot = structuredClone(message);
+		} catch {
+			// Not plain data (the transport's serializer reports that, with its
+			// own fixed class). The frame envelope is still pinned.
+			snapshot = { ...message };
+		}
+		if (snapshot.type === "DONE") return refuseDone();
+		return open() ? enqueue(snapshot) : refuse();
+	};
 	return {
-		offer: (message) =>
-			message.type === "DONE"
-				? refuseDone()
-				: admissionOpen && !sealed
-					? enqueue(message)
-					: refuse(),
-		write: (message) =>
-			message.type === "DONE"
-				? refuseDone()
-				: sealed
-					? refuse()
-					: enqueue(message),
+		offer: (message) => admit(message, () => admissionOpen && !sealed),
+		write: (message) => admit(message, () => !sealed),
 		closeAdmission: () => {
 			admissionOpen = false;
 		},
@@ -2144,6 +2181,25 @@ export function createOutputChannel(
 		},
 		flags: () => ({ writeFailed, late, expired: abandoned, violation }),
 	};
+}
+
+/** Wait for a promise up to `ms`; a rejection propagates, a hang is "expired". */
+async function boundedWait(
+	work: Promise<unknown> | undefined,
+	ms: number,
+): Promise<"settled" | "expired"> {
+	if (work === undefined) return "settled";
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work.then(() => "settled" as const),
+			new Promise<"expired">((resolve) => {
+				timer = setTimeout(() => resolve("expired"), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
