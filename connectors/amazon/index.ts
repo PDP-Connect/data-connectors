@@ -205,16 +205,28 @@ const LIST_PAGE_WAIT_MS = 10_000;
 const PAGE_LIMIT = 50;
 const START_INDEX_STEP = 10;
 const POLITE_DELAY_MS = 800;
+/** Pause after each order-detail page: 2 to 4 seconds, a person's pace. */
+const DETAIL_PACE_MIN_MS = 2000;
+const DETAIL_PACE_SPREAD_MS = 2000;
+export function detailPaceMs(random: () => number = Math.random): number {
+	return DETAIL_PACE_MIN_MS + Math.floor(random() * DETAIL_PACE_SPREAD_MS);
+}
 const RETRY_MIN_TIMEOUT_MS = 1500;
 const RETRY_FACTOR = 2;
 const RETRY_COUNT = 2;
 // Keep optional detail enrichment comfortably below the controller watchdog;
 // recovery-only runs can drain the durable gaps without re-walking the list.
-const MAX_DETAIL_ATTEMPTS_PER_RUN = 200;
+// With the 2-4 s pace after each detail page, 100 pages fit well inside the
+// host's run deadline; older orders are read from the list and their detail
+// is deferred to later runs.
+const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
 const MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN = 3;
 // Module-scoped regexes (Biome useTopLevelRegex)
 const RETRYABLE_ERROR_RE = /timeout|ECONN|ETIMEDOUT|net::|5\d\d/i;
 const SIGNIN_URL_RE = /\/ap\/(signin|challenge|mfa)/;
+/** Stops part way through the order walk where the orders already read are kept. */
+export const AMAZON_MID_WALK_STOP_RE =
+	/^amazon_(empty_list_page_(source_auth_or_challenge|empty_first_page_without_terminal_signal|selector_drift)|list_page_navigation_failed|list_page_readiness_timeout)$/;
 /** Amazon's own challenge forms: the character image, CVF and puzzle pages. */
 export const AMAZON_CHALLENGE_SELECTOR =
 	'form[action*="validateCaptcha"], input#captchacharacters, input[name="cvf_captcha_input"], form.cvf-widget-form-captcha, input#auth-captcha-guess, img#auth-captcha-image, awswaf-captcha, #cvf-aamation-challenge-iframe, [id^="aacb-captcha"]';
@@ -1580,6 +1592,21 @@ async function reportEmptyPageDiagnostics(
 		startIndex,
 		priorOrdersEvidence,
 	);
+	// Structural facts only (no page text, title or query): which signal made
+	// this page empty, so a stop in production says what Amazon showed.
+	connectorDiagnostic("amazon", "empty_list_page", {
+		reason: classification.reason,
+		action: classification.action,
+		year,
+		start_index: startIndex,
+		captcha: diag.captcha,
+		sign_in_form: diag.sign_in_form,
+		signin_url: SIGNIN_URL_RE.test(diag.url),
+		url_path: safeUrlPath(diag.url),
+		order_cards: diag.order_cards,
+		any_card: diag.any_card,
+		no_orders_text: diag.no_orders_text,
+	});
 	if (classification.action === "terminal") {
 		return;
 	}
@@ -1621,6 +1648,21 @@ async function reportEmptyPageDiagnostics(
 		});
 	}
 	throw new Error(`amazon_empty_list_page_${classification.reason}`);
+}
+
+/** The path of a URL with ids masked, never its query or host. */
+export function safeUrlPath(url: string): string {
+	try {
+		return new URL(url).pathname
+			.split("/")
+			.slice(0, 5)
+			.map((segment) =>
+				/\d/.test(segment) || segment.length >= 16 ? ":id" : segment,
+			)
+			.join("/");
+	} catch {
+		return "";
+	}
 }
 
 /** Browser text, titles, and URLs are useful for local classification but are
@@ -2170,7 +2212,13 @@ async function runYear(
 					`Amazon year ${year}: processing order ${index + 1}/${orders.length} on page ${pageCount + 1}`,
 					{ stream: "orders" },
 				);
+				const detailAttemptsBefore = flags.detailAttempts;
 				const processed = await processListOrder(page, deps, flags, o);
+				// Pace the order-detail pages: back to back they read as a bot, and
+				// live runs were stopped by Amazon after about 32 of them in 2 minutes.
+				if (flags.detailAttempts > detailAttemptsBefore) {
+					await politeDelay(detailPaceMs());
+				}
 				if (!processed) {
 					// biome-ignore lint/style/noIncrementDecrement: integration.test.ts asserts this literal `unparseableDateCount++` source text (source-regex oracle); switching to += would fail that pre-existing test for a purely cosmetic change.
 					unparseableDateCount++;
@@ -2563,6 +2611,18 @@ if (isMainModule(import.meta.url)) {
 			// `continue`s before reaching the STATE emit.
 			let ordersStateEmitted = false;
 			let ordersSeen = 0;
+			// Orders handed to the host this run, counted at the emit call. When
+			// Amazon stops the walk part way (sign-in again, a challenge, a page
+			// that will not load), the orders already read are kept and the run
+			// ends with them, rather than failing and losing every one.
+			let ordersEmittedThisRun = 0;
+			const yearDeps: EmitDeps = {
+				...deps,
+				emitRecord: async (stream, record, options) => {
+					if (stream === "orders") ordersEmittedThisRun += 1;
+					return deps.emitRecord(stream, record, options);
+				},
+			};
 
 			for (const year of years) {
 				const prior = yearsState[String(year)];
@@ -2578,17 +2638,53 @@ if (isMainModule(import.meta.url)) {
 				// before. It is what makes a later "no orders in <year>" page a
 				// contradiction to escalate rather than a result to trust. Read here,
 				// next to the year cursor it derives from, and passed down explicitly.
+				let yearResult: Awaited<ReturnType<typeof runYear>>;
+				try {
+					yearResult = await runYear(
+						page,
+						yearDeps,
+						flags,
+						year,
+						priorOrdersEvidenceForYear(yearsState, year),
+					);
+				} catch (error) {
+					const code = error instanceof Error ? error.message : "";
+					if (
+						ordersEmittedThisRun === 0 ||
+						!AMAZON_MID_WALK_STOP_RE.test(code)
+					) {
+						throw error;
+					}
+					// Not frozen and no STATE for this year: the next run reads it again.
+					connectorDiagnostic("amazon", "stopped_early_kept_orders", {
+						code,
+						year,
+						orders_kept: ordersEmittedThisRun,
+					});
+					await emit({
+						type: "SKIP_RESULT",
+						stream: "orders",
+						reason: "amazon_stopped_early",
+						message: `Amazon stopped the order history at ${year}; kept the ${ordersEmittedThisRun} orders read before it.`,
+						diagnostics: { code, year, orders_kept: ordersEmittedThisRun },
+					});
+					// The orders read are real: never follow with "no orders on this store".
+					ordersSeen += ordersEmittedThisRun;
+					// Save fingerprints and hydration for the orders read; the stopped
+					// year has no entry in newYearsState, so nothing is frozen or advanced.
+					await emit({
+						type: "STATE",
+						stream: "orders",
+						cursor: buildOrdersStateCursor(),
+					});
+					ordersStateEmitted = true;
+					break;
+				}
 				const {
 					orderCount: yearOrderCount,
 					truncated,
 					unparseableDateCount,
-				} = await runYear(
-					page,
-					deps,
-					flags,
-					year,
-					priorOrdersEvidenceForYear(yearsState, year),
-				);
+				} = yearResult;
 
 				ordersSeen += yearOrderCount;
 				await applyYearCompletionState({
