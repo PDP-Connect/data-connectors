@@ -136,7 +136,7 @@ for (const streamRecords of [false, true]) {
 		const terminals = run.connectorMessages.filter(message => message.type === "DONE");
 		assert.equal(terminals.length, 1);
 		assert.equal(terminals[0].status, "failed");
-		assert.match(String(run.data.error), /after settlement/);
+		assert.match(String(run.data.error), /could not be delivered/);
 		assert.equal(run.streamResult?.completed === true, false);
 	});
 }
@@ -187,9 +187,40 @@ for (const streamRecords of [false, true]) {
 		const terminals = run.connectorMessages.filter(message => message.type === "DONE");
 		assert.equal(terminals.length, 1);
 		assert.equal(terminals[0].status, "failed");
-		assert.match(String(run.data.error), /timed out/);
+		assert.equal(run.data.error, "bridge_timeout (TimeoutError)");
 		assert.equal(run.streamResult?.completed === true, false);
 	});
+}
+
+for (const [kind, expected] of [["serialize", "serialize_failed (Error)"], ["bridge", "bridge_rejected (Error)"]]) {
+	for (const streamRecords of [false, true]) {
+		test(`a ${kind} failure reports a fixed class and never row content: records=${streamRecords}`, { timeout: 60_000 }, async () => {
+			await mkdir(root, { recursive: true });
+			const bundle = join(root, `row-content-${kind}-${streamRecords}.js`);
+			await buildPageshim({ connector: "chatgpt", outfile: bundle,
+				entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+				extraDefines: {
+					PAGESHIM_COVERAGE_MESSAGES: "[]", PAGESHIM_COVERAGE_THROW: "false",
+					PAGESHIM_COVERAGE_RECORD: "true", PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+					PAGESHIM_COVERAGE_BAD_ROW: String(kind === "serialize"),
+				},
+			});
+			const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], fixtureReady: true,
+				resultStreaming: true, connectorEndEvidence: true,
+				resultSpoolDirectory: join(root, `row-content-spool-${kind}-${streamRecords}`),
+				observeBridge: (method, args) => {
+					if (kind === "bridge" && method === "setData" && args[0] === "connector:message" && args[1].type === "RECORD")
+						throw new Error("host rejected row value ACME-4417");
+				},
+			});
+			assertCleanRun(run);
+			const done = run.connectorMessages.filter(message => message.type === "DONE");
+			assert.equal(done.length, 1);
+			assert.equal(done[0].status, "failed");
+			assert.equal(run.data.error, expected);
+			assert.equal(JSON.stringify([run.data, run.connectorMessages, run.log]).includes("ACME-4417"), false);
+		});
+	}
 }
 
 for (const [label, setup, failed] of [
@@ -269,7 +300,7 @@ test("a swallowed evidence acknowledgement failure cannot produce succeeded DONE
 	const terminals = run.connectorMessages.filter(message => message.type === "DONE");
 	assert.equal(terminals.length, 1);
 	assert.equal(terminals[0].status, "failed");
-	assert.equal(run.data.error, "synthetic evidence acknowledgement failed");
+	assert.equal(run.data.error, "bridge_rejected (Error)");
 	// Every record's delivery was rejected, so none counts as emitted.
 	assert.equal(terminals[0].records_emitted, 0);
 	assert.equal(run.streamResult?.completed === true, false);
@@ -422,7 +453,7 @@ for (const failure of [{ failStateWriteAt: 1 }, { failStateWriteAt: 2 }, { failF
 		assert.deepEqual(run.result["chatgpt.conversations"], { records: [{ id: "one" }] });
 		assert.deepEqual(run.result["chatgpt.memories"], { records: [{ id: "sibling" }] });
 		assert.deepEqual(run.result.errors, []);
-		assert.equal(run.data.error, failure.failFinalStatusWrite ? "synthetic final status write failed" : "synthetic STATE write failed");
+		assert.equal(run.data.error, "bridge_rejected (Error)");
 		const acknowledged = failure.failStateWriteAt ? failure.failStateWriteAt - 1 : 2;
 		assert.equal(run.stateMessages.length, acknowledged);
 		assert.deepEqual(run.states[scopes[0]], { checkpoint: acknowledged ? "next" : "previous" });
@@ -547,7 +578,7 @@ test("a rejected result completion after STATE ack leaves the prior cursor uncom
 		assert.equal(run.streamResult.completed, false);
 		assert.equal(run.streamDone, null);
 		assert.equal(run.result, null);
-		assert.equal(run.data.error, "simulated result protocol rejection");
+		assert.equal(run.data.error, "bridge_rejected (Error)");
 		assert.deepEqual(run.states, initialState);
 		assertCleanRun(run);
 	} finally {
@@ -753,7 +784,7 @@ test("a shell that never acknowledges a result call fails with a timeout", {
 		resultStreamNeverAck: true,
 		resultSpoolDirectory: join(root, "spool-never-ack"),
 	});
-	assert.equal(run.data.error, "PageShim bridge call setData timed out after 50ms");
+	assert.equal(run.data.error, "bridge_timeout (TimeoutError)");
 	assert.ok(run.elapsedMs < 5_000, `run took ${run.elapsedMs}ms`);
 	assertCleanRun(run);
 });
@@ -967,7 +998,7 @@ test("a rejected stream chunk is terminal and is not retried", {
 			resultStreamFailure: { key: "result:chunk", sequence: 0 },
 		});
 		assert.equal(run.result, null);
-		assert.equal(run.data.error, "simulated result protocol rejection");
+		assert.equal(run.data.error, "bridge_rejected (Error)");
 		assert.equal(run.streamResult.completed, false);
 		assert.equal(run.streamResult.rejectedMessages, 1);
 		assert.equal(run.streamResult.messageCount, 2);
@@ -991,7 +1022,7 @@ test("a collector cannot swallow a rejected chunk and complete a partial scope",
 			resultSpoolDirectory: spoolDirectory,
 			resultStreamFailure: { key: "result:chunk", sequence: 0 },
 		});
-		assert.equal(run.data.error, "simulated result protocol rejection");
+		assert.equal(run.data.error, "bridge_rejected (Error)");
 		assert.equal(run.streamResult.completed, false);
 		assert.equal(run.streamResult.rejectedMessages, 1);
 		assert.equal(run.streamResult.messageCount, 2);
@@ -1013,7 +1044,7 @@ test("a collector cannot swallow a record serialization error and complete inval
 			resultStreaming: true,
 			resultSpoolDirectory: spoolDirectory,
 		});
-		assert.equal(run.data.error, "Do not know how to serialize a BigInt");
+		assert.equal(run.data.error, "serialize_failed (TypeError)");
 		assert.equal(run.streamResult.completed, false);
 		assert.ok(run.streamResult.totalCodeUnits > 100_000);
 		const partial = await readFile(

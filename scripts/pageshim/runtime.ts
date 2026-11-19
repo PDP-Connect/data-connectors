@@ -90,6 +90,32 @@ declare const PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: number;
 
 // Calls that wait for a person, not for the host. The host bounds them with
 // its own login wait, so the per-call bridge timeout does not apply.
+// A serializer or bridge rejection can carry row content in its message
+// (a JSON error quoting a value, a host echoing a payload). Diagnostics get a
+// fixed class and an error name from a fixed vocabulary, never the message.
+const SAFE_ERROR_NAMES = new Set([
+	"Error", "TypeError", "RangeError", "SyntaxError", "TimeoutError", "AbortError",
+]);
+type FailureClass = "serialize_failed" | "bridge_rejected" | "bridge_timeout";
+function safeErrorName(error: unknown): string {
+	const name = error instanceof Error ? error.name : "";
+	return SAFE_ERROR_NAMES.has(name) ? name : "other";
+}
+class ClassifiedFailure extends Error {
+	constructor(readonly failureClass: FailureClass, cause: unknown) {
+		super(`${failureClass} (${safeErrorName(cause)})`);
+	}
+}
+const BRIDGE_TIMEOUT_MARK = Symbol("pageshim.bridgeTimeout");
+function classifyBridgeFailure(error: unknown): ClassifiedFailure {
+	if (error instanceof ClassifiedFailure) return error;
+	return new ClassifiedFailure(
+		(error as { [BRIDGE_TIMEOUT_MARK]?: true } | null)?.[BRIDGE_TIMEOUT_MARK]
+			? "bridge_timeout" : "bridge_rejected",
+		error,
+	);
+}
+
 const USER_WAIT_CALLS = new Set<PropertyKey>(["promptUser"]);
 
 function withBridgeCallTimeout(
@@ -126,8 +152,11 @@ function withBridgeCallTimeout(
 							timer = setTimeout(
 								() =>
 									reject(
-										new Error(
-											`PageShim bridge call ${String(property)} timed out after ${timeoutMs}ms`,
+										Object.assign(
+											new Error(
+												`PageShim bridge call ${String(property)} timed out after ${timeoutMs}ms`,
+											),
+											{ name: "TimeoutError", [BRIDGE_TIMEOUT_MARK]: true as const },
 										),
 									),
 								timeoutMs,
@@ -135,6 +164,11 @@ function withBridgeCallTimeout(
 						}),
 					]);
 					return result;
+				} catch (error) {
+					// setData carries result rows and checkpoints; its failures
+					// are reported by class only.
+					if (property === "setData") throw classifyBridgeFailure(error);
+					throw error;
 				} finally {
 					if (timer) clearTimeout(timer);
 					try {
@@ -450,6 +484,15 @@ function capturedConnectorPolicy(): Partial<RunConnectorConfig> | undefined {
 	return policy as Partial<RunConnectorConfig>;
 }
 
+/** JSON.stringify whose failure reports a class, never the row-bearing message. */
+function stringifyRow(value: unknown): string | undefined {
+	try {
+		return JSON.stringify(value);
+	} catch (error) {
+		throw new ClassifiedFailure("serialize_failed", error);
+	}
+}
+
 export async function runOnPageShim(
 	pageShim: ShimPage,
 	connector: PageshimConnector,
@@ -667,7 +710,7 @@ export async function runOnPageShim(
 			await shim.setData(key, value);
 		} catch (error) {
 			streamSendFailed = true;
-			streamFailure = error instanceof Error ? error : new Error(String(error));
+			streamFailure = classifyBridgeFailure(error);
 			throw streamFailure;
 		}
 	};
@@ -779,7 +822,10 @@ export async function runOnPageShim(
 			if (pendingStreamText.length >= RESULT_CHUNK_MAX_UNITS)
 				await flushStreamText(false);
 		} catch (error) {
-			streamFailure = error instanceof Error ? error : new Error(String(error));
+			streamFailure =
+				error instanceof ClassifiedFailure
+					? error
+					: new ClassifiedFailure("serialize_failed", error);
 			throw streamFailure;
 		}
 	};
@@ -827,9 +873,11 @@ export async function runOnPageShim(
 		const done = lifecycle.done;
 		if (!done) return;
 		lifecycle.done = undefined;
-		// Contract: DONE reaches connector:message before result:done and a later
-		// result:done failure cannot retract it. The host must therefore refuse a
-		// spool that lacks the result:done terminator, whatever DONE said.
+		// Contract: DONE reaches connector:message before result:done, and a
+		// later result:done rejection or missing acknowledgement cannot retract
+		// it. The host MUST refuse a spool that lacks result:done, even after it
+		// has seen a succeeded DONE. Every scope's result:scope-done is awaited
+		// (and so acknowledged) before this DONE is published.
 		await shim.setData("connector:message", done);
 	};
 	const emitMessage = async (msg: Msg): Promise<void> => {
@@ -1102,7 +1150,7 @@ export async function runOnPageShim(
 			if (scopeEntries.length === 0)
 				throw new Error(errors[0]?.reason ?? "no records collected");
 			for (const [scope, value] of scopeEntries) {
-				const text = JSON.stringify(value);
+				const text = stringifyRow(value);
 				if (text === undefined)
 					throw new Error(`PageShim scope ${scope} could not be serialized`);
 				streamProtocolUsed = true;
@@ -1127,7 +1175,7 @@ export async function runOnPageShim(
 			return;
 		}
 		const done = result(scopes, errors);
-		const serialized = JSON.stringify(done);
+		const serialized = stringifyRow(done);
 		if (serialized.length > RESULT_CHUNK_MAX_UNITS) {
 			throw new Error(
 				`PageShim result exceeds the ${RESULT_CHUNK_MAX_UNITS}-unit legacy bridge limit; this host does not accept streamed results`,

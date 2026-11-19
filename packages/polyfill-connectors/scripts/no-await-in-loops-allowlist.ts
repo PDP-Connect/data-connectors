@@ -6223,7 +6223,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2415,
+			line: 2500,
 			column: 7,
 			category: "shared_mutable_accumulator",
 			note: "closeBrowserContextPagesExcept(): loop body mutates a shared closed accumulator the next iteration reads",
@@ -6342,10 +6342,17 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 1455,
+			line: 1461,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "run(): report each unsupported bounded stream's SKIP_RESULT before collection starts",
+		},
+		{
+			path: "src/connector-runtime.ts",
+			line: 1970,
+			column: 21,
+			category: "shared_mutable_accumulator",
+			note: "makeEmitRecord settle(): re-read the in-flight emission set until no admitted emission remains",
 		},
 		{
 			path: "src/__fixtures__/manifest-consent-time.ts",

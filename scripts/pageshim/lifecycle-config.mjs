@@ -5,10 +5,11 @@ import { parse } from "@babel/parser";
 
 const UNSUPPORTED = "PageShim requires one guarded runConnector(config) declaration";
 
-/** Strip type-only wrappers (`x satisfies T`, `x as T`) that do not change the value. */
+/** Strip type-only wrappers (`x satisfies T`, `x as T`, `x!`) that do not change the value. */
 function unwrapTypeOnly(node) {
 	let current = node;
-	while (current && (current.type === "TSSatisfiesExpression" || current.type === "TSAsExpression"))
+	while (current && (current.type === "TSSatisfiesExpression" || current.type === "TSAsExpression" ||
+		current.type === "TSNonNullExpression"))
 		current = current.expression;
 	return current;
 }

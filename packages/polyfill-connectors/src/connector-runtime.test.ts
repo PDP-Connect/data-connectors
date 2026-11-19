@@ -2046,3 +2046,123 @@ test("makeEmitRecord counters stay exact when a rejected emit is retried", async
 	await gate.emit("items", { id: "a" });
 	assert.equal(gate.counters.totalEmitted, 1);
 });
+
+function lifecycleTransport(
+	messages: EmittedMessage[],
+	rejectKey?: string,
+	extra: { inflightSettleTimeoutMs?: number } = {},
+) {
+	return {
+		readStart: async () =>
+			({
+				type: "START",
+				scope: { streams: [{ name: "items" }] },
+			}) as const,
+		emit: async (message: EmittedMessage) => {
+			if (
+				rejectKey !== undefined &&
+				message.type === "RECORD" &&
+				(message as { key?: unknown }).key === rejectKey
+			)
+				throw new Error("synthetic output rejection");
+			messages.push(message);
+		},
+		sendInteraction: async () => {
+			throw new Error("Unexpected interaction");
+		},
+		requestDetailGapPage: async () => [],
+		...extra,
+	};
+}
+
+for (const gate of ["output", "beforeEmit"] as const) {
+	test(`a caught delivery rejection still ends in a failed DONE: ${gate}`, async () => {
+		const messages: EmittedMessage[] = [];
+		const result = await runConnectorLifecycle(
+			{
+				name: "synthetic_sticky",
+				collect: async ({ emitRecord }) => {
+					await emitRecord("items", { id: "delivered" });
+					// The collector isolates the failure and settles normally.
+					await emitRecord(
+						"items",
+						{ id: "rejected" },
+						gate === "beforeEmit"
+							? {
+									beforeEmit: async () => {
+										throw new Error("synthetic gate rejection");
+									},
+								}
+							: {},
+					).catch(() => undefined);
+				},
+			},
+			lifecycleTransport(messages, "rejected"),
+		);
+		assert.equal(result.exitCode, 1);
+		const done = lastDone(messages);
+		assert.equal(done?.type, "DONE");
+		assert.equal(done?.status, "failed");
+		assert.equal(done?.error?.code, "record_delivery_failed");
+		assert.equal(done?.records_emitted, 1);
+	});
+}
+
+test("settlement joins an unawaited emit still held on its pre-emit gate", async () => {
+	const messages: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_inflight",
+			collect: async ({ emitRecord }) => {
+				void emitRecord(
+					"items",
+					{ id: "held" },
+					{
+						beforeEmit: () =>
+							new Promise<void>((resolve) => setTimeout(resolve, 30)),
+					},
+				);
+			},
+		},
+		lifecycleTransport(messages),
+	);
+	assert.equal(result.exitCode, 0);
+	assert.deepEqual(
+		messages.map((message) => message.type),
+		["RECORD", "DONE"],
+	);
+	assert.equal(lastDone(messages)?.status, "succeeded");
+	assert.equal(lastDone(messages)?.records_emitted, 1);
+});
+
+test("an unawaited emit whose gate never settles ends in a failed DONE", async () => {
+	const messages: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_inflight_timeout",
+			collect: async ({ emitRecord }) => {
+				void emitRecord(
+					"items",
+					{ id: "stuck" },
+					{ beforeEmit: () => new Promise<void>(() => {}) },
+				);
+			},
+		},
+		lifecycleTransport(messages, undefined, { inflightSettleTimeoutMs: 30 }),
+	);
+	assert.equal(result.exitCode, 1);
+	const done = lastDone(messages);
+	assert.equal(done?.status, "failed");
+	assert.equal(done?.error?.code, "record_settlement_timeout");
+	assert.equal(
+		messages.some((message) => message.type === "RECORD"),
+		false,
+	);
+});
+
+function lastDone(messages: EmittedMessage[]) {
+	return messages.findLast(
+		(message): message is Extract<EmittedMessage, { type: "DONE" }> =>
+			message.type === "DONE",
+	);
+}

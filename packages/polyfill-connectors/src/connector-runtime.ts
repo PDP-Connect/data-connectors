@@ -1242,6 +1242,12 @@ export interface ConnectorLifecycleTransport {
 	 * everything this awaits and reject, so the run ends in a failed DONE.
 	 */
 	beforeDone?: (withheldAtOrAfterUntil: ReadonlySet<string>) => Promise<void>;
+	/**
+	 * How long, after collect returns, the lifecycle waits for emissions the
+	 * collector admitted but did not await (a pre-emit gate can still be
+	 * pending). Default 30 000 ms. On expiry the run ends in a failed DONE.
+	 */
+	inflightSettleTimeoutMs?: number;
 	readStart: () => Promise<StartMessage>;
 	emit: (message: EmittedMessage) => Promise<void>;
 	sendInteraction: BaseCollectContext["sendInteraction"];
@@ -1603,7 +1609,11 @@ export async function runConnectorLifecycle(
 			await collect(baseCtx);
 		}
 
+		// Join emissions the collector did not await (a pre-emit gate may still
+		// be pending), so DONE and beforeDone see every admitted record.
+		await emitRecord.settle(transport.inflightSettleTimeoutMs ?? 30_000);
 		await transport.beforeDone?.(withheldAtOrAfterUntil);
+		emitRecord.assertDelivered();
 		const streamFailure = streamFailureDone(reportedStreamFailures);
 		if (streamFailure) {
 			await emitFailed(
@@ -1794,10 +1804,17 @@ export function makeEmitRecord(deps: {
 		totalAnomalous: number;
 	};
 	withheldAtOrAfterUntil: ReadonlySet<string>;
+	/**
+	 * Join every admitted, still-in-flight emission, then fail if any delivery
+	 * ever rejected, whether or not the collector caught that rejection.
+	 */
+	settle: (timeoutMs: number) => Promise<void>;
+	/** Throw if any record's delivery has rejected. */
+	assertDelivered: () => void;
 } {
 	const {
 		requested,
-		emit,
+		emit: emitOutput,
 		emittedAt,
 		validateRecord,
 		isTombstone,
@@ -1901,6 +1918,72 @@ export function makeEmitRecord(deps: {
 		return "record";
 	};
 
+	// Every emission this gate admitted and has not yet seen settle, and the
+	// first delivery failure. The failure is sticky: a collector that catches a
+	// rejected emitRecord cannot turn the run into a succeeded DONE.
+	const inFlight = new Set<Promise<void>>();
+	let deliveryFailure: Error | null = null;
+	const emit = (message: EmittedMessage): Promise<void> => {
+		const tracked = emitOutput(message);
+		const done = (): void => {
+			inFlight.delete(tracked);
+		};
+		inFlight.add(tracked);
+		tracked.then(done, (error: unknown) => {
+			deliveryFailure ??=
+				error instanceof Error ? error : new Error(String(error));
+			done();
+		});
+		return tracked;
+	};
+	const trackGate = <T>(gate: Promise<T>): Promise<T> => {
+		const marker = gate.then(
+			() => undefined,
+			(error: unknown) => {
+				deliveryFailure ??=
+					error instanceof Error ? error : new Error(String(error));
+			},
+		);
+		inFlight.add(marker);
+		void marker.then(() => inFlight.delete(marker));
+		return gate;
+	};
+	const assertDelivered = (): void => {
+		if (deliveryFailure) {
+			throw new TerminalError(
+				"A record could not be delivered; the run is incomplete",
+				{
+					code: "record_delivery_failed",
+					retryable: true,
+					cause: deliveryFailure,
+				},
+			);
+		}
+	};
+	const settle = async (timeoutMs: number): Promise<void> => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const expired = new Promise<"expired">((resolve) => {
+			timer = setTimeout(() => resolve("expired"), timeoutMs);
+		});
+		try {
+			while (inFlight.size > 0) {
+				const outcome = await Promise.race([
+					Promise.allSettled([...inFlight]).then(() => "settled" as const),
+					expired,
+				]);
+				if (outcome === "expired") {
+					throw new TerminalError(
+						"Records still being emitted did not settle before the run ended",
+						{ code: "record_settlement_timeout", retryable: true },
+					);
+				}
+			}
+		} finally {
+			clearTimeout(timer);
+		}
+		assertDelivered();
+	};
+
 	const emitRecord = (
 		stream: string,
 		data: RecordData,
@@ -1946,7 +2029,7 @@ export function makeEmitRecord(deps: {
 		};
 		const deliver = (): Promise<void> =>
 			(options.beforeEmit
-				? options.beforeEmit().then(() => emit(record))
+				? trackGate(options.beforeEmit()).then(() => emit(record))
 				: emit(record)
 			).then(() => {
 				counters.totalEmitted += 1;
@@ -1967,6 +2050,8 @@ export function makeEmitRecord(deps: {
 			selectRecord(stream, data, options) !== "skip",
 		counters,
 		withheldAtOrAfterUntil,
+		settle,
+		assertDelivered,
 	};
 }
 

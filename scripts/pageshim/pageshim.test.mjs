@@ -2895,7 +2895,7 @@ test("strava_browser: every PageShim run delivers the whole activity list, even 
 	detailRequests.length = 0;
 	const failed = await run(first.states, { failResultWrite: true });
 	assert.deepEqual(failed.ret, { ok: true }, failed.log.slice(-20).join("\n"));
-	assert.equal(failed.data.error, "synthetic result write failed");
+	assert.equal(failed.data.error, "bridge_rejected (Error)");
 	assert.deepEqual(failed.stateMessages, []);
 	assert.deepEqual(
 		failed.states,

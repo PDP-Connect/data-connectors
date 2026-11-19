@@ -371,6 +371,9 @@ test("policy capture fails closed unless the configuration shape resolves fully"
 	assert.deepEqual(keysOf(captureLifecycleConfig(guarded("runConnector(CONFIG);", "export const CONFIG = { name: 'a', retryablePattern: /x/ } satisfies Cfg;"))),
 		["name", "retryablePattern"]);
 	assert.deepEqual(keysOf(captureLifecycleConfig(guarded("runConnector(CONFIG);", "const CONFIG = { name: 'a' } as Cfg;"))), ["name"]);
+	assert.deepEqual(keysOf(captureLifecycleConfig(guarded("runConnector(CONFIG!);", "const CONFIG = { name: 'a' }!;"))), ["name"]);
+	assert.deepEqual(keysOf(captureLifecycleConfig(guarded("runConnector({ name: 'a' }!);"))), ["name"]);
+	assert.throws(() => captureLifecycleConfig(guarded("runConnector(CONFIG!);", "const CONFIG = { ...base }!;")), /PageShim requires/);
 	// Refused: nothing may be silently dropped from the captured policy.
 	const refused = [
 		guarded("runConnector({ ...base, name: 'a' });"),

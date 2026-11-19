@@ -14,6 +14,7 @@ declare const PAGESHIM_COVERAGE_STREAM: boolean;
 declare const PAGESHIM_COVERAGE_RANGE_MODE: string;
 declare const PAGESHIM_POLICY_SETUP: string;
 declare const PAGESHIM_COVERAGE_LATE_EMIT: boolean;
+declare const PAGESHIM_COVERAGE_BAD_ROW: boolean;
 // Stand in for the build's captured connector policy (see lifecycle-config.mjs).
 if (typeof PAGESHIM_POLICY_SETUP === "string") {
 	Object.assign(globalThis, JSON.parse(PAGESHIM_POLICY_SETUP) as Record<string, unknown>);
@@ -76,7 +77,13 @@ const rangeMode =
 					});
 					return;
 				}
-				if (PAGESHIM_COVERAGE_RECORD)
+				if (typeof PAGESHIM_COVERAGE_BAD_ROW === "boolean" && PAGESHIM_COVERAGE_BAD_ROW)
+					await emitRecord("conversations", {
+						id: "one",
+						// A serializer error whose message quotes a row value.
+						toJSON() { throw new Error("cannot serialize row value ACME-4417"); },
+					});
+				else if (PAGESHIM_COVERAGE_RECORD)
 					await emitRecord("conversations", { id: "one" });
 				// An unawaited emission that lands only after settlement began.
 				if (typeof PAGESHIM_COVERAGE_LATE_EMIT === "boolean" && PAGESHIM_COVERAGE_LATE_EMIT)
