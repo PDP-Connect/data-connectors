@@ -215,6 +215,13 @@ const MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN = 3;
 // Module-scoped regexes (Biome useTopLevelRegex)
 const RETRYABLE_ERROR_RE = /timeout|ECONN|ETIMEDOUT|net::|5\d\d/i;
 const SIGNIN_URL_RE = /\/ap\/(signin|challenge|mfa)/;
+/** Amazon's own challenge forms: the character image, CVF and puzzle pages. */
+export const AMAZON_CHALLENGE_SELECTOR =
+	'form[action*="validateCaptcha"], input#captchacharacters, input[name="cvf_captcha_input"], form.cvf-widget-form-captcha, input#auth-captcha-guess, img#auth-captcha-image, awswaf-captcha, #cvf-aamation-challenge-iframe, [id^="aacb-captcha"]';
+/** Amazon's exact challenge wording. Bare words such as "robot" or "captcha"
+ * are product names too, so they are not evidence of a challenge. */
+export const AMAZON_CHALLENGE_TEXT_PATTERN =
+	"(enter|type) the characters (you see|shown|as they are given)|not a robot|unusual traffic|solve this puzzle";
 const ORDERS_URL_RE = /\/your-orders|\/order-history/;
 const YEAR_VALUE_RE = /year-(\d{4})/;
 const DETAIL_URL_RE =
@@ -1502,41 +1509,58 @@ async function reportEmptyPageDiagnostics(
 ): Promise<void> {
 	let diag: ListPageDiagnostics;
 	try {
-		diag = await page.evaluate((noOrdersTextPattern): ListPageDiagnostics => {
-			// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-			const CAPTCHA_RE = /captcha|robot|unusual traffic/i;
-			const NO_ORDERS_RE = new RegExp(noOrdersTextPattern, "i");
-			const ZERO_COUNT_RE = /^0(?!\d)/;
-			const WS = /\s+/g;
-			// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
-			return {
-				url: location.href,
-				title: document.title,
-				order_cards: document.querySelectorAll(
-					"div.order-card, div.js-order-card",
-				).length,
-				any_card: document.querySelectorAll(
-					'[class*="order" i][class*="card" i]',
-				).length,
-				any_order_header: document.querySelectorAll(
-					'[class*="order" i][class*="header" i]',
-				).length,
-				sign_in_form: Boolean(document.querySelector('form[name="signIn"]')),
-				captcha: CAPTCHA_RE.test(document.body?.innerText || "").toString(),
-				// The order count Amazon prints above the list ("0 orders placed
-				// in 2019", "0 Bestellungen aufgegeben in") is a terminal signal in
-				// every store's language; the empty-state copy is English only.
-				no_orders_text: (
-					NO_ORDERS_RE.test(document.body?.innerText || "") ||
-					ZERO_COUNT_RE.test(
-						(document.querySelector(".num-orders")?.textContent || "").trim(),
-					)
-				).toString(),
-				body_preview: (document.body?.innerText || "")
-					.replace(WS, " ")
-					.slice(0, 240),
-			};
-		}, AMAZON_NO_ORDERS_TEXT_PATTERN);
+		diag = await page.evaluate(
+			({
+				challengeSelector,
+				challengeTextPattern,
+				noOrdersTextPattern,
+			}): ListPageDiagnostics => {
+				// biome-ignore-start lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+				const CHALLENGE_TEXT_RE = new RegExp(challengeTextPattern, "i");
+				const NO_ORDERS_RE = new RegExp(noOrdersTextPattern, "i");
+				const ZERO_COUNT_RE = /^0(?!\d)/;
+				const WS = /\s+/g;
+				// biome-ignore-end lint/performance/useTopLevelRegex: runs in browser context (page.evaluate); module-scoped regexes in Node cannot cross the bridge.
+				return {
+					url: location.href,
+					title: document.title,
+					order_cards: document.querySelectorAll(
+						"div.order-card, div.js-order-card",
+					).length,
+					any_card: document.querySelectorAll(
+						'[class*="order" i][class*="card" i]',
+					).length,
+					any_order_header: document.querySelectorAll(
+						'[class*="order" i][class*="header" i]',
+					).length,
+					sign_in_form: Boolean(document.querySelector('form[name="signIn"]')),
+					// A challenge is Amazon's own challenge form or its exact wording.
+					// Never a bare word: an empty year's "Buy it again" carousel can
+					// list a product named "Robot ..." or "CAPTCHA ...".
+					captcha: (
+						Boolean(document.querySelector(challengeSelector)) ||
+						CHALLENGE_TEXT_RE.test(document.body?.innerText || "")
+					).toString(),
+					// The order count Amazon prints above the list ("0 orders placed
+					// in 2019", "0 Bestellungen aufgegeben in") is a terminal signal in
+					// every store's language; the empty-state copy is English only.
+					no_orders_text: (
+						NO_ORDERS_RE.test(document.body?.innerText || "") ||
+						ZERO_COUNT_RE.test(
+							(document.querySelector(".num-orders")?.textContent || "").trim(),
+						)
+					).toString(),
+					body_preview: (document.body?.innerText || "")
+						.replace(WS, " ")
+						.slice(0, 240),
+				};
+			},
+			{
+				challengeSelector: AMAZON_CHALLENGE_SELECTOR,
+				challengeTextPattern: AMAZON_CHALLENGE_TEXT_PATTERN,
+				noOrdersTextPattern: AMAZON_NO_ORDERS_TEXT_PATTERN,
+			},
+		);
 	} catch (error) {
 		await emit({
 			type: "SKIP_RESULT",

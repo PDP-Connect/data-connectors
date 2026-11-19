@@ -32,6 +32,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
+import { parseHTML } from "linkedom";
 import type { Page } from "playwright";
 import {
 	assertUserFacingProgress,
@@ -48,6 +49,8 @@ import {
 	makeRecordingEmit,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	AMAZON_CHALLENGE_SELECTOR,
+	AMAZON_CHALLENGE_TEXT_PATTERN,
 	AMAZON_NO_ORDERS_TEXT_PATTERN,
 	type AmazonRecoveryClass,
 	applyYearCompletionState,
@@ -631,6 +634,50 @@ test("classifyEmptyListPageDiagnostics: current empty-year copy is terminal desp
 			reason: "no_orders_text",
 		},
 	);
+});
+
+test("empty-year page whose Buy it again carousel names a Robot product is not a challenge", () => {
+	// Live 2026-11-19 (amazon.ca): the run walked ~33 orders back through the
+	// years, reached a year with no orders, and failed as
+	// source_auth_or_challenge because the old detector matched the bare word
+	// "robot" anywhere on the page. Product names must not read as a challenge.
+	const carousel = readFileSync(AMAZON_EMPTY_YEAR_FIXTURE, "utf8").replace(
+		"</body>",
+		'<div class="a-carousel"><a>iRobot Roomba Combo j5+ Robot Vacuum</a><a>CAPTCHA Card Game</a></div></body>',
+	);
+	const { document } = parseHTML(carousel);
+	const text = document.body?.textContent ?? "";
+	assert.match(text, /robot/i);
+	assert.equal(document.querySelector(AMAZON_CHALLENGE_SELECTOR), null);
+	assert.doesNotMatch(text, new RegExp(AMAZON_CHALLENGE_TEXT_PATTERN, "i"));
+	assert.match(text, new RegExp(AMAZON_NO_ORDERS_TEXT_PATTERN, "i"));
+	assert.deepEqual(
+		classifyEmptyListPageDiagnostics(
+			makeEmptyPageDiagnostics({ captcha: "false", no_orders_text: "true" }),
+			0,
+		),
+		{ action: "terminal", reason: "no_orders_text" },
+	);
+});
+
+test("Amazon's own challenge pages still read as a challenge", () => {
+	const textRe = new RegExp(AMAZON_CHALLENGE_TEXT_PATTERN, "i");
+	const pages = [
+		'<form action="/errors/validateCaptcha"><h4>Enter the characters you see below</h4><p>Sorry, we just need to make sure you\'re not a robot.</p><input id="captchacharacters" name="field-keywords"></form>',
+		'<form class="cvf-widget-form cvf-widget-form-captcha"><input name="cvf_captcha_input"></form>',
+		"<div><awswaf-captcha></awswaf-captcha></div>",
+	];
+	for (const html of pages) {
+		const { document } = parseHTML(`<html><body>${html}</body></html>`);
+		assert.notEqual(
+			document.querySelector(AMAZON_CHALLENGE_SELECTOR),
+			null,
+			html,
+		);
+	}
+	assert.match("Enter the characters you see below", textRe);
+	assert.match("We have detected unusual traffic from your network", textRe);
+	assert.match("Sorry, we just need to make sure you're not a robot.", textRe);
 });
 
 test("Amazon empty-page diagnostics retain structural facts but redact page text, title, and URL", () => {
