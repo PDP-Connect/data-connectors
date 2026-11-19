@@ -53,6 +53,7 @@ import {
 	AMAZON_CHALLENGE_TEXT_PATTERN,
 	AMAZON_MID_WALK_STOP_RE,
 	AMAZON_NO_ORDERS_TEXT_PATTERN,
+	AMAZON_WALK_BUDGET_MS,
 	type AmazonRecoveryClass,
 	applyYearCompletionState,
 	buildOrderDetailGap,
@@ -83,6 +84,7 @@ import {
 	safeUrlPath,
 	scrapeListPage,
 	shouldEmitTrailingOrdersState,
+	walkTimeSpent,
 	type YearsCursor,
 } from "./index.ts";
 import { buildOrderRecord, parseOrderDate } from "./parsers.ts";
@@ -686,15 +688,27 @@ test("a stop part way through the order walk keeps the orders already read", () 
 	);
 });
 
-test("order-detail pages are paced 2 to 4 seconds apart", () => {
+test("order-detail pages are paced 1.5 to 3 seconds apart", () => {
 	assert.equal(
 		detailPaceMs(() => 0),
-		2000,
+		1500,
 	);
 	assert.equal(
 		detailPaceMs(() => 0.999),
-		3998,
+		2998,
 	);
+});
+
+test("the walk stops at its own time budget, detail pages earlier, and keeps the orders read", () => {
+	const flags = { walkDeadlineAt: 1_000_000 };
+	assert.equal(walkTimeSpent(flags, 0, 999_999), false);
+	assert.equal(walkTimeSpent(flags, 0, 1_000_000), true);
+	assert.equal(walkTimeSpent(flags, 60_000, 940_000), true);
+	assert.equal(walkTimeSpent(flags, 60_000, 939_999), false);
+	assert.equal(walkTimeSpent({}, 0, Number.MAX_SAFE_INTEGER), false);
+	assert.match("amazon_walk_time_budget", AMAZON_MID_WALK_STOP_RE);
+	// Sign-in (several minutes for a code) plus the walk stays under the host's 14 minute ceiling.
+	assert(AMAZON_WALK_BUDGET_MS <= 2 * 60_000);
 });
 
 test("stop diagnostics keep the URL path only, ids masked", () => {
@@ -2994,7 +3008,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: zero-budget legacy stop
 	});
 });
 
-test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustion suppresses forward walk", async () => {
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a spent detail budget still walks the order list (only recovery-only skips it)", async () => {
 	const { deps } = makeRecordingDeps();
 	const orderId = "111-1234567-8901234";
 	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -3025,7 +3039,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustio
 	assert.deepEqual(result, {
 		recovered: 0,
 		stoppedWithPending: true,
-		suppressForward: true,
+		suppressForward: false,
 	});
 });
 

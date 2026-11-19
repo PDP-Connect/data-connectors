@@ -204,10 +204,10 @@ const PAGE_CONTENT_TIMEOUT_MS = 10_000;
 const LIST_PAGE_WAIT_MS = 10_000;
 const PAGE_LIMIT = 50;
 const START_INDEX_STEP = 10;
-const POLITE_DELAY_MS = 800;
-/** Pause after each order-detail page: 2 to 4 seconds, a person's pace. */
-const DETAIL_PACE_MIN_MS = 2000;
-const DETAIL_PACE_SPREAD_MS = 2000;
+const POLITE_DELAY_MS = 300;
+/** Pause after each order-detail page: 1.5 to 3 seconds, a person's pace. */
+const DETAIL_PACE_MIN_MS = 1500;
+const DETAIL_PACE_SPREAD_MS = 1500;
 export function detailPaceMs(random: () => number = Math.random): number {
 	return DETAIL_PACE_MIN_MS + Math.floor(random() * DETAIL_PACE_SPREAD_MS);
 }
@@ -216,17 +216,40 @@ const RETRY_FACTOR = 2;
 const RETRY_COUNT = 2;
 // Keep optional detail enrichment comfortably below the controller watchdog;
 // recovery-only runs can drain the durable gaps without re-walking the list.
-// With the 2-4 s pace after each detail page, 100 pages fit well inside the
-// host's run deadline; older orders are read from the list and their detail
-// is deferred to later runs.
-const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
+// Live runs open one detail page: the most recent order's, for the shipping address
+// and zip code. Every other order comes from the list pages, which is what
+// makes a full read fast (live 2026-11-19: a buyer demo needs the order list
+// and a current zip in about a minute, not item-level detail per order).
+const AMAZON_DETAIL_PAGES_PER_RUN = 1;
+/** Upper bound when a caller sets no per-run limit (tests, other hosts). */
+const MAX_DETAIL_ATTEMPTS_PER_RUN = 60;
+/**
+ * The order walk's own time budget. The host cuts a run off at 14 minutes,
+ * sign-in included (a code by SMS can take several), and a cut-off run loses
+ * every record. Live 2026-11-19 (amazon.ca): sign-in 2 min, then the walk
+ * reached 2022 and the run was killed at 14 min with nothing kept. A demo
+ * also wants the order list in about 30 seconds. The walk stops opening detail
+ * pages 10 s before this and list pages at it, and the run ends with the
+ * orders read.
+ */
+export const AMAZON_WALK_BUDGET_MS = 30_000;
+const DETAIL_STOP_BEFORE_DEADLINE_MS = 10_000;
+export function walkTimeSpent(
+	flags: Pick<RunFlags, "walkDeadlineAt">,
+	marginMs = 0,
+	now: number = Date.now(),
+): boolean {
+	return (
+		flags.walkDeadlineAt !== undefined && now >= flags.walkDeadlineAt - marginMs
+	);
+}
 const MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN = 3;
 // Module-scoped regexes (Biome useTopLevelRegex)
 const RETRYABLE_ERROR_RE = /timeout|ECONN|ETIMEDOUT|net::|5\d\d/i;
 const SIGNIN_URL_RE = /\/ap\/(signin|challenge|mfa)/;
 /** Stops part way through the order walk where the orders already read are kept. */
 export const AMAZON_MID_WALK_STOP_RE =
-	/^amazon_(empty_list_page_(source_auth_or_challenge|empty_first_page_without_terminal_signal|selector_drift)|list_page_navigation_failed|list_page_readiness_timeout)$/;
+	/^amazon_(empty_list_page_(source_auth_or_challenge|empty_first_page_without_terminal_signal|selector_drift)|list_page_navigation_failed|list_page_readiness_timeout|walk_time_budget)$/;
 /** Amazon's own challenge forms: the character image, CVF and puzzle pages. */
 export const AMAZON_CHALLENGE_SELECTOR =
 	'form[action*="validateCaptcha"], input#captchacharacters, input[name="cvf_captcha_input"], form.cvf-widget-form-captcha, input#auth-captcha-guess, img#auth-captcha-image, awswaf-captcha, #cvf-aamation-challenge-iframe, [id^="aacb-captcha"]';
@@ -594,6 +617,12 @@ export type CaptureDep = BrowserCollectContext["capture"];
 /** Ephemeral per-run flags that cross year boundaries. */
 export interface RunFlags {
 	detailAttempts: number;
+	/** Epoch ms after which the walk opens no more detail pages and no more
+	 *  list pages, so the run ends with what it read before the host's run
+	 *  deadline cuts it off (and every record with it). Absent: no limit. */
+	walkDeadlineAt?: number;
+	/** Detail pages this run may open; absent: MAX_DETAIL_ATTEMPTS_PER_RUN. */
+	maxDetailAttempts?: number;
 	detailCaptured: boolean;
 	failedDetailCaptured: boolean;
 	/** One-shot budget: at most one mid-run automated session-repair attempt
@@ -884,7 +913,11 @@ async function resolveOrderDetail(
 			status: "deferred",
 		});
 	}
-	if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
+	if (
+		flags.detailAttempts >=
+			(flags.maxDetailAttempts ?? MAX_DETAIL_ATTEMPTS_PER_RUN) ||
+		walkTimeSpent(flags, DETAIL_STOP_BEFORE_DEADLINE_MS)
+	) {
 		return Promise.resolve({
 			failureKind: "deferred_budget",
 			reason: reasonForDetailFailure("deferred_budget"),
@@ -1102,13 +1135,12 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 			suppressForward: options.recoveryOnly === true,
 		};
 	}
+	// A spent detail budget never skips the list walk: the order list comes
+	// from list pages, and only a recovery-only run skips it.
 	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
-	const detailBudgetExhausted =
-		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN ||
-		flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN;
 	return {
 		...recovery,
-		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
+		suppressForward: options.recoveryOnly === true,
 	};
 }
 
@@ -2197,6 +2229,9 @@ async function runYear(
 	const walk = await walkPagesWithCeiling({
 		maxPages: PAGE_LIMIT,
 		fetchPage: async () => {
+			if (walkTimeSpent(flags)) {
+				throw new Error("amazon_walk_time_budget");
+			}
 			await deps.progress(
 				`Amazon year ${year}: scanning page ${pageCount + 1}`,
 				{ stream: "orders" },
@@ -2484,6 +2519,8 @@ if (isMainModule(import.meta.url)) {
 			);
 			const flags: RunFlags = {
 				detailAttempts: 0,
+				walkDeadlineAt: Date.now() + AMAZON_WALK_BUDGET_MS,
+				maxDetailAttempts: AMAZON_DETAIL_PAGES_PER_RUN,
 				detailCaptured: false,
 				failedDetailCaptured: false,
 				repairAttempted: false,
@@ -2503,10 +2540,13 @@ if (isMainModule(import.meta.url)) {
 						capture,
 						context,
 						credentials,
-						detailGaps: ctx.detailGaps,
+						// A live run's one detail page goes to the newest order (the zip);
+						// pending gaps stay for a recovery-only run.
+						detailGaps: ctx.recoveryOnly === true ? ctx.detailGaps : [],
 						emit,
 						emitRecord,
-						requestDetailGapPage: ctx.requestDetailGapPage,
+						requestDetailGapPage:
+							ctx.recoveryOnly === true ? ctx.requestDetailGapPage : undefined,
 						sendInteraction,
 						store,
 					},
