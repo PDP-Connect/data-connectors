@@ -973,8 +973,16 @@ export function resolveLinklessOrderItems(
 	let unnamedTrace = "";
 	if (unnamedItem) {
 		const strings = unnamedItem.unnamed?.strings ?? [];
-		const paths = (keep: (value: string, path: string) => boolean, max: number) =>
-			[...new Set(strings.filter((s) => keep(normalize(s.value), s.path)).map((s) => s.path))].slice(0, max).join("+");
+		// At most `max` paths within `budget` characters; "more" marks any left out.
+		const paths = (keep: (value: string, path: string) => boolean, max: number, budget = 70) => {
+			const shown: string[] = [];
+			let more = false;
+			for (const path of new Set(strings.filter((s) => keep(normalize(s.value), s.path)).map((s) => s.path))) {
+				if (shown.length < max && [...shown, path].join("+").length <= budget) shown.push(path);
+				else more = true;
+			}
+			return [...shown, ...(more ? ["more"] : [])].join("+");
+		};
 		const hit = paths((value) => remainingNames.has(value), 3);
 		const partial = hit ? "" : paths((value) => value.length >= 4 &&
 			[...remainingNames].some((name) => name.length >= 4 && (name.includes(value) || value.includes(name))), 3);

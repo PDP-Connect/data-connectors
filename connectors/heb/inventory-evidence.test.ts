@@ -1084,6 +1084,26 @@ test("an unnamed left-over item: the diagnostic says how the name is missing and
 	assert.doesNotMatch(`${inField.linklessTrace}${nowhere.linklessTrace}${blank.linklessTrace}`, /Invented|Bakery|Kitchen|Sliced|500|501|999/);
 });
 
+test("the unnamed-item paths print only lower camelCase letter keys, and each field stays within its budget", async () => {
+	const longKey = "a".repeat(20);
+	const [dataKeys, long] = await Promise.all([
+		resolveLinkless(
+			[ssrItem("500"), { product: { id: "501", fullDisplayName: null, OrganicLoaf: "Invented Bakery Loaf", item4417: { label: "x" } }, quantity: 1 }],
+			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
+		),
+		resolveLinkless(
+			[ssrItem("500"), { product: { id: "501", fullDisplayName: null,
+				[`${longKey}b`]: { [`${longKey}Name`]: "x" }, [`${longKey}c`]: { [`${longKey}Name`]: "x" }, [`${longKey}d`]: { [`${longKey}Name`]: "x" } }, quantity: 1 }],
+			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
+		),
+	]);
+	assert.match(dataKeys.linklessTrace ?? "", /;un=null;un_hit=product\.\?;un_keys=product\.\?\.label;why=/);
+	assert.doesNotMatch(dataKeys.linklessTrace ?? "", /Organic|4417/);
+	const keys = /;un_keys=([^;]*);/.exec(long.linklessTrace ?? "")?.[1] ?? "";
+	assert.ok(keys.length <= 75, keys);
+	assert.match(keys, /\+?more$/);
+});
+
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {
 	const results = await Promise.all([
 		resolveLinkless([ssrItem("500"), { product: { id: 501, fullDisplayName: "SSR 501" }, quantity: 1 }], itemRow(0) + unrelatedLine()),

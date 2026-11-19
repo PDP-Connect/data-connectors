@@ -156,8 +156,9 @@ export interface SourceOrderItem {
 
 export interface UnnamedSourceItem {
 	state: "absent" | "null" | "blank";
-	/** `path` joins key names with dots, `#` for an array index and `?` for a
-	 * key that is not a plain identifier. At most 64, at most 4 levels deep. */
+	/** `path` joins key names with dots, `#` for an array index and `?` for any
+	 * key that is not a lower camelCase word of letters, so a key that carries an
+	 * id or a name is never printed. At most 64, at most 4 levels deep. */
 	strings: { path: string; value: string }[];
 }
 
@@ -173,7 +174,7 @@ function stringLeaves(value: unknown, path: string, depth: number, out: UnnamedS
 		return;
 	}
 	for (const [key, element] of Object.entries(value))
-		stringLeaves(element, `${path}.${/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(key) ? key : "?"}`, depth + 1, out);
+		stringLeaves(element, `${path}.${/^[a-z][A-Za-z]{0,31}$/.test(key) ? key : "?"}`, depth + 1, out);
 }
 
 function unnamedSourceItem(raw: unknown): UnnamedSourceItem {
