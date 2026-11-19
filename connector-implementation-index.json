@@ -380,7 +380,8 @@
 					"selector_drift": "The page layout changed and we couldn't find what we needed",
 					"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
 					"unparseable_order_date": "We skipped some orders because their dates couldn't be read",
-					"amazon_no_orders_on_store": "This Amazon account shows no orders on the store we read. If you shop on another Amazon store, pick that store and connect again"
+					"amazon_no_orders_on_store": "This Amazon account shows no orders on the store we read. If you shop on another Amazon store, pick that store and connect again",
+					"amazon_stopped_early": "Amazon stopped showing older orders part way. We kept the orders read so far; connect again later to read the rest"
 				}
 			}
 		},
