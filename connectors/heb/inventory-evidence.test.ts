@@ -1055,8 +1055,33 @@ test("the diagnostic names why elimination refused: a line naming a claimed item
 	assert.equal(claimedText.evidence.linklessLines, 1);
 	assert.match(claimedText.linklessTrace ?? "", /elim:0;stop=unsafe;why=txt_claimed:1;ll_img=heb_image\/hebgrocery_id\/jpg(;|$)/);
 	assert.equal(unnamed.evidence.linklessLines, 1);
-	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;why=none:1;/);
+	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;un=absent;un_hit=-;un_keys=-;why=none:1;/);
 	assert.doesNotMatch(`${claimedText.linklessTrace}${unnamed.linklessTrace}`, /500|501|999|SSR/);
+});
+
+test("an unnamed left-over item: the diagnostic says how the name is missing and which of its fields hold the line's text, never their values", async () => {
+	const [inField, nowhere, blank] = await Promise.all([
+		resolveLinkless(
+			[ssrItem("500"), {
+				product: { id: "501", fullDisplayName: null, displayName: "Invented Bakery Loaf", brand: { name: "Invented Kitchen" }, tags: ["Invented Bakery Loaf"] },
+				quantity: 1,
+			}],
+			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
+		),
+		resolveLinkless(
+			[ssrItem("500"), { product: { id: "501", fullDisplayName: null, productLabel: "Invented Other Thing" }, quantity: 1 }],
+			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
+		),
+		resolveLinkless(
+			[ssrItem("500"), { product: { id: "501", fullDisplayName: "  ", longName: "Invented Bakery Loaf, Sliced" }, quantity: 1 }],
+			itemRow(0) + linklessLine("999", "Invented Bakery Loaf"),
+		),
+	]);
+	for (const r of [inField, nowhere, blank]) assert.equal(r.evidence.linklessLines, 1);
+	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
+	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
+	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
+	assert.doesNotMatch(`${inField.linklessTrace}${nowhere.linklessTrace}${blank.linklessTrace}`, /Invented|Bakery|Kitchen|Sliced|500|501|999/);
 });
 
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {

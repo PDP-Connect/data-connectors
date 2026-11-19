@@ -149,6 +149,39 @@ export interface SourceOrderItem {
 	productUrl: string | null;
 	/** Null when H-E-B leaves it out or writes it as anything but a number. */
 	quantity: number | null;
+	/** Only when fullDisplayName is null, for diagnostics: how H-E-B left the
+	 * name out, and the item's non-blank strings by key path. */
+	unnamed?: UnnamedSourceItem;
+}
+
+export interface UnnamedSourceItem {
+	state: "absent" | "null" | "blank";
+	/** `path` joins key names with dots, `#` for an array index and `?` for a
+	 * key that is not a plain identifier. At most 64, at most 4 levels deep. */
+	strings: { path: string; value: string }[];
+}
+
+function stringLeaves(value: unknown, path: string, depth: number, out: UnnamedSourceItem["strings"]): void {
+	if (out.length >= 64) return;
+	if (typeof value === "string") {
+		if (value.trim()) out.push({ path: path.slice(1), value });
+		return;
+	}
+	if (depth >= 4 || value === null || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const element of value.slice(0, 8)) stringLeaves(element, `${path}.#`, depth + 1, out);
+		return;
+	}
+	for (const [key, element] of Object.entries(value))
+		stringLeaves(element, `${path}.${/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(key) ? key : "?"}`, depth + 1, out);
+}
+
+function unnamedSourceItem(raw: unknown): UnnamedSourceItem {
+	const product = (raw as { product?: Record<string, unknown> }).product ?? {};
+	const name = product.fullDisplayName;
+	const strings: UnnamedSourceItem["strings"] = [];
+	stringLeaves(raw, "", 0, strings);
+	return { state: name === undefined ? "absent" : name === null ? "null" : "blank", strings };
 }
 
 
@@ -182,6 +215,7 @@ export function readSourceOrderItems(
 	html: string,
 	orderId: string,
 ): { items: SourceOrderItem[]; shape: string } {
+	const props = accountPageProps(html, "/my-account/order-history/[orderId]");
 	const result = z.object({ order: z.object({
 		orderId: text,
 		orderItems: z.array(z.object({
@@ -193,14 +227,15 @@ export function readSourceOrderItems(
 			quantity: z.unknown().optional(),
 			subbedProducts: z.array(z.unknown()).nullish(),
 		})),
-	}) }).safeParse(accountPageProps(html, "/my-account/order-history/[orderId]"));
+	}) }).safeParse(props);
 	if (!result.success) {
 		const issue = result.error.issues[0];
 		const path = issue?.path.map((part) => (typeof part === "number" ? "#" : String(part))).join(".");
 		return { items: [], shape: issue ? `unread:${path}:${issue.code}` : "unread" };
 	}
 	if (result.data.order.orderId !== orderId) return { items: [], shape: "unread:other_order" };
-	const items = result.data.order.orderItems.map((item) => ({
+	const rawItems = (props as { order: { orderItems: unknown[] } }).order.orderItems;
+	const items = result.data.order.orderItems.map((item, index) => ({
 		productId: item.product.id,
 		substituteIds: (item.subbedProducts ?? []).flatMap((sub) => {
 			const id = substituteId.safeParse(sub);
@@ -212,6 +247,7 @@ export function readSourceOrderItems(
 			typeof item.quantity === "number" && Number.isFinite(item.quantity) && item.quantity >= 0
 				? item.quantity
 				: null,
+		...(item.product.fullDisplayName ? {} : { unnamed: unnamedSourceItem(rawItems[index]) }),
 	}));
 	const quantityTypes = [...new Set(result.data.order.orderItems.map((item) => typeof item.quantity))].sort();
 	return { items, shape: `${items.length},qty:${quantityTypes.join("|") || "none"}` };

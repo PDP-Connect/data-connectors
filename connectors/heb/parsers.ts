@@ -771,6 +771,7 @@ export function resolveLinklessOrderItems(
 		substituteIds: string[];
 		fullDisplayName: string | null;
 		productUrl: string | null;
+		unnamed?: { state: string; strings: readonly { path: string; value: string }[] };
 	}[],
 ): { detail: OrderDetail | null; unresolved: number; trace: string } {
 	const { document } = parseHTML(html);
@@ -903,6 +904,8 @@ export function resolveLinklessOrderItems(
 	// Why each unresolved linkless line stayed unresolved, as fixed classes.
 	const why = new Map<string, number>();
 	let linklessImage: string | null = null;
+	// The displayed texts of the linkless lines left unresolved.
+	const remainingNames = new Set<string>();
 	const resolveLine = (line: Element, index: number, unordered = false) => {
 		const item = items[index]!;
 		claimed.add(index);
@@ -938,6 +941,7 @@ export function resolveLinklessOrderItems(
 		if (refusal !== null || index === undefined) {
 			why.set(refusal ?? "none", (why.get(refusal ?? "none") ?? 0) + 1);
 			linklessImage ??= imageShape(own);
+			for (const name of names) if (name) remainingNames.add(name);
 			remaining.push(line);
 			// Even a key naming an already claimed item forbids elimination.
 			if (imageMatches.length || textMatches.length) eliminationSafe = false;
@@ -958,6 +962,25 @@ export function resolveLinklessOrderItems(
 		// is not. Never attach a line's quantity/price/department to that guess.
 		for (const [i, line] of remaining.entries()) resolveLine(line, unclaimed[i]!, remaining.length > 1);
 		eliminated = remaining.length;
+	}
+	// For the first unclaimed item with no name: how H-E-B left the name out,
+	// and key paths only (never values) of its strings that equal a remaining
+	// line's text (un_hit), else contain or sit inside one (un_sub), and of its
+	// name-like keys (un_keys).
+	const unnamedItem = ledgerComplete
+		? unclaimed.map((i) => items[i]!).find((item) => item.fullDisplayName === null)
+		: undefined;
+	let unnamedTrace = "";
+	if (unnamedItem) {
+		const strings = unnamedItem.unnamed?.strings ?? [];
+		const paths = (keep: (value: string, path: string) => boolean, max: number) =>
+			[...new Set(strings.filter((s) => keep(normalize(s.value), s.path)).map((s) => s.path))].slice(0, max).join("+");
+		const hit = paths((value) => remainingNames.has(value), 3);
+		const partial = hit ? "" : paths((value) => value.length >= 4 &&
+			[...remainingNames].some((name) => name.length >= 4 && (name.includes(value) || value.includes(name))), 3);
+		const keys = paths((_, path) => /(?:^|\.)[^.]*(?:name|title|desc|label)[^.]*$/i.test(path), 4);
+		unnamedTrace = `;un=${unnamedItem.unnamed?.state ?? "-"};un_hit=${hit || "-"}` +
+			(partial ? `;un_sub=${partial}` : "") + `;un_keys=${keys || "-"}`;
 	}
 	const resolvedHtml = document.toString();
 	const detail = parseOrderDetailDom(resolvedHtml);
@@ -989,6 +1012,7 @@ export function resolveLinklessOrderItems(
 		`elim:${eliminated}`,
 	].join(",") +
 		`;stop=${stop}` +
+		unnamedTrace +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
 		`;ll_img=${linklessImage ?? "-"}` +
 		(unfitImage ? `;unfit_img=${unfitImage}` : "");
