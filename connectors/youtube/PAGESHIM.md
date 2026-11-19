@@ -30,6 +30,17 @@ the log each round, waits a bounded time for calls still in flight, and feeds
 the same transport-free tracker step Desktop uses. The page scan and the host
 evidence are one implementation (`HISTORY_RESPONSE_SCAN_SOURCE`).
 
+The proof rules are strict. A response counts as recognized only when it carries
+readable rows or an explicit continuation item; a list key alone proves nothing.
+Any correlated non-2xx answer, and any browse call the run cannot attribute
+(XHR, an undecodable body, an unknown token) after the last terminal response,
+vetoes STATE for the run. On this path the terminal logged response must also
+account for the page: if the page shows more rows than the bootstrap plus the
+logged responses carried, or still shows a continuation, the log is blind (a
+fetch captured before the wrapper, or a replaced `fetch`) and the run fails
+closed with `history-log-blind`. A request that carries both `browseId` and a
+continuation keeps both; `content-encoding` is read as a token list.
+
 The run still ends failed (`stream_collection_failed`, retry_by_runtime, no STATE)
 when the wrapper cannot be installed or is lost to a navigation, the log
 overflows, a call stays unfinished, a body cannot be decoded, or the correlated

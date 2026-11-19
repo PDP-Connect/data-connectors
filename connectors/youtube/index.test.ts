@@ -1865,20 +1865,54 @@ type HistoryResponseAfterReadListEnd = {
 	jsonDelayMs?: number;
 };
 
+/** One scripted browse response; the options shape the request and the answer. */
+type HistoryResponseSpec = {
+	requested: string;
+	next: string | null;
+	/** Rows the response carries; a response without rows has no readable list. */
+	itemCount?: number;
+	status?: number;
+	initialRequest?: boolean;
+	/** The decoded request body, when it is not just the continuation. */
+	requestBody?: Record<string, unknown>;
+	/** The content-encoding header value; the body is gzip only with gzipRequestBodies. */
+	contentEncoding?: string;
+};
+
+/** A page-log entry the way the page-side wrapper reports it. */
+type LoggedEntry = {
+	requestBody: Record<string, unknown> | null;
+	status: number;
+	summary: Record<string, unknown> | null;
+};
+const loggedResponse = (
+	requested: string,
+	itemCount: number,
+	next: string | null = null,
+	status = 200,
+): LoggedEntry => ({
+	requestBody: { continuation: requested },
+	status,
+	summary: {
+		recognized: true,
+		hasContinuation: next !== null,
+		itemCount,
+		nextContinuation: next,
+	},
+});
+const loggedUncorrelated = (): LoggedEntry => ({ requestBody: null, status: 0, summary: null });
+
 /** Runs the connector's real page functions against parsed HTML, one page per URL. */
 class DocumentPage {
 	url = "";
 	private readonly responseListeners = new Set<(response: never) => void>();
 	private readonly pageFor: (url: string) => string;
 	private readonly forcedReadiness: "content" | "empty" | undefined;
-	private readonly historyResponsesOnScroll: Array<{
-		requested: string;
-		next: string | null;
-	}>;
-	private readonly historyResponsesOnGoto: Array<{
-		requested: string;
-		next: string | null;
-	}>;
+	private readonly historyResponsesOnScroll: HistoryResponseSpec[];
+	private readonly historyResponsesOnGoto: HistoryResponseSpec[];
+	private readonly pageLogOnScroll: LoggedEntry[][] | undefined;
+	private pageLogPending: LoggedEntry[] = [];
+	private pageLogSent = 0;
 	private readonly historyResponseOnReadListEnd:
 		| { readNumber: number; requested: string; next: string | null }
 		| undefined;
@@ -1890,14 +1924,13 @@ class DocumentPage {
 		pageFor: (url: string) => string,
 		forcedReadiness?: "content" | "empty",
 		options: {
-			historyResponsesOnScroll?: Array<{
-				requested: string;
-				next: string | null;
-			}>;
-			historyResponsesOnGoto?: Array<{
-				requested: string;
-				next: string | null;
-			}>;
+			historyResponsesOnScroll?: HistoryResponseSpec[];
+			historyResponsesOnGoto?: HistoryResponseSpec[];
+			/**
+			 * Observe history through a page-side log, as PageShim does: the page has
+			 * no response events and each scroll appends these logged entries.
+			 */
+			pageLogOnScroll?: LoggedEntry[][];
 			historyResponseOnReadListEnd?: {
 				readNumber: number;
 				requested: string;
@@ -1911,6 +1944,9 @@ class DocumentPage {
 		this.pageFor = pageFor;
 		this.forcedReadiness = forcedReadiness;
 		this.gzipRequestBodies = options.gzipRequestBodies ?? false;
+		this.pageLogOnScroll = options.pageLogOnScroll;
+		if (this.pageLogOnScroll)
+			Object.defineProperty(this, "on", { value: undefined });
 		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
 		this.historyResponsesOnGoto = options.historyResponsesOnGoto ?? [];
 		this.historyResponseOnReadListEnd = options.historyResponseOnReadListEnd;
@@ -1927,8 +1963,8 @@ class DocumentPage {
 	}
 	async goto(url: string) {
 		this.url = url;
-		for (const response of this.historyResponsesOnGoto.splice(0))
-			this.emitHistoryResponse(response.requested, response.next);
+		for (const { requested, next, ...options } of this.historyResponsesOnGoto.splice(0))
+			this.emitHistoryResponse(requested, next, options);
 	}
 	private emitHistoryResponse(
 		requested: string,
@@ -1936,6 +1972,10 @@ class DocumentPage {
 		options: {
 			jsonDelayMs?: number;
 			initialRequest?: boolean;
+			itemCount?: number;
+			status?: number;
+			requestBody?: Record<string, unknown>;
+			contentEncoding?: string;
 			duringJson?: {
 				requested: string;
 				next: string | null;
@@ -1944,6 +1984,9 @@ class DocumentPage {
 			};
 		} = {},
 	): void {
+		const rows = Array.from({ length: options.itemCount ?? 0 }, () => ({
+			lockupViewModel: {},
+		}));
 		const continuationItems = next
 			? [
 					{
@@ -1956,20 +1999,30 @@ class DocumentPage {
 		const response = {
 			url: () => "https://www.youtube.com/youtubei/v1/browse",
 			request: () => {
-				const body = options.initialRequest
-					? { browseId: "FEhistory" }
-					: { continuation: requested };
-				return this.gzipRequestBodies
-					? {
-							postDataJSON: () => {
-								throw new Error("gzip body is not JSON");
-							},
-							postDataBuffer: () => gzipSync(JSON.stringify(body)),
-							headers: () => ({ "content-encoding": "gzip" }),
-						}
-					: { postDataJSON: () => body };
+				const body =
+					options.requestBody ??
+					(options.initialRequest
+						? { browseId: "FEhistory" }
+						: { continuation: requested });
+				if (this.gzipRequestBodies)
+					return {
+						postDataJSON: () => {
+							throw new Error("gzip body is not JSON");
+						},
+						postDataBuffer: () => gzipSync(JSON.stringify(body)),
+						headers: () => ({
+							"content-encoding": options.contentEncoding ?? "gzip",
+						}),
+					};
+				if (options.contentEncoding !== undefined)
+					return {
+						postDataJSON: () => body,
+						postDataBuffer: () => Buffer.from(JSON.stringify(body)),
+						headers: () => ({ "content-encoding": options.contentEncoding }),
+					};
+				return { postDataJSON: () => body };
 			},
-			status: () => 200,
+			status: () => options.status ?? 200,
 			json: async () => {
 				if (options.jsonDelayMs)
 					await new Promise((resolve) =>
@@ -1994,7 +2047,7 @@ class DocumentPage {
 				}
 				return {
 					onResponseReceivedActions: [
-						{ appendContinuationItemsAction: { continuationItems } },
+						{ appendContinuationItemsAction: { continuationItems: [...rows, ...continuationItems] } },
 					],
 				};
 			},
@@ -2012,7 +2065,15 @@ class DocumentPage {
 		if (!this.pendingHistoryScroll) return;
 		this.pendingHistoryScroll = false;
 		const response = this.historyResponsesOnScroll.shift();
-		if (response) this.emitHistoryResponse(response.requested, response.next);
+		if (response) {
+			const { requested, next, ...options } = response;
+			this.emitHistoryResponse(requested, next, options);
+		}
+		const logged = this.pageLogOnScroll?.shift();
+		if (logged) {
+			this.pageLogSent += logged.length;
+			this.pageLogPending.push(...logged);
+		}
 	}
 	private inPage<T>(run: () => T): T {
 		const { document, window } = parseHTML(this.pageFor(this.url));
@@ -2038,6 +2099,14 @@ class DocumentPage {
 		return { jsonValue: async () => value, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function, arg?: unknown) {
+		if (fn.name === "installHistoryBrowseLog") return true;
+		if (fn.name === "drainHistoryBrowseLog")
+			return {
+				entries: this.pageLogPending.splice(0),
+				overflow: false,
+				sent: this.pageLogSent,
+				completed: this.pageLogSent,
+			};
 		if (fn.name === "readListEnd") {
 			this.readListEndCount += 1;
 			if (
@@ -2256,7 +2325,9 @@ test("latest history response can prove end despite stale bootstrap row counts",
 			undefined,
 			{},
 			{
-				historyResponsesOnScroll: [{ requested: "bootstrap-C", next: null }],
+				historyResponsesOnScroll: [
+					{ requested: "bootstrap-C", next: null, itemCount: 30 },
+				],
 			},
 		);
 		assert.equal(records.get("watch_history")?.length, 60);
@@ -2316,15 +2387,16 @@ test("HTML history bootstrap accounts for legacy videoRenderer rows", async () =
 });
 
 test("HTML history continuation chain is correlated and terminal response beats stale bootstrap token", async () => {
-	const videoIds = ["aaaaaaaaaaa"];
+	const videoIds = ["aaaaaaaaaaa", "bbbbbbbbbbb"];
 	const { records, messages, outcome } = await collectFromDocuments(
-		() =>
-			`${historyCards(videoIds)}${historyBootstrap(videoIds, "bootstrap-C")}`,
+		() => grownHistory(videoIds, 1, "bootstrap-C"),
 		["watch_history"],
 		undefined,
 		{},
 		{
-			historyResponsesOnScroll: [{ requested: "bootstrap-C", next: null }],
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1 },
+			],
 		},
 	);
 	assert.equal(records.get("watch_history")?.length, videoIds.length);
@@ -2341,10 +2413,9 @@ test("HTML history continuation chain is correlated and terminal response beats 
 });
 
 test("history responses received during navigation are replayed after HTML tokens seed", async () => {
-	const videoIds = ["aaaaaaaaaaa"];
+	const videoIds = ["aaaaaaaaaaa", "bbbbbbbbbbb"];
 	const { records, messages, outcome } = await collectFromDocuments(
-		() =>
-			`${historyCards(videoIds)}${historyBootstrap(videoIds, "bootstrap-C")}`,
+		() => grownHistory(videoIds, 1, "bootstrap-C"),
 		["watch_history"],
 		undefined,
 		{},
@@ -2353,7 +2424,7 @@ test("history responses received during navigation are replayed after HTML token
 				{ requested: "bootstrap-C", next: "continuation-D" },
 			],
 			historyResponsesOnScroll: [
-				{ requested: "continuation-D", next: null },
+				{ requested: "continuation-D", next: null, itemCount: 1 },
 			],
 		},
 	);
@@ -2519,17 +2590,16 @@ test("history end remains unproven when responses invalidate all final refresh r
 });
 
 test("second unchanged scroll rechecks newly arrived terminal continuation evidence", async () => {
-	const videoIds = ["aaaaaaaaaaa"];
+	const videoIds = ["aaaaaaaaaaa", "bbbbbbbbbbb"];
 	const { records, messages, outcome } = await collectFromDocuments(
-		() =>
-			`${historyCards(videoIds)}${historyBootstrap(videoIds, "bootstrap-C")}`,
+		() => grownHistory(videoIds, 1, "bootstrap-C"),
 		["watch_history"],
 		undefined,
 		{},
 		{
 			historyResponsesOnScroll: [
 				{ requested: "bootstrap-C", next: "continuation-D" },
-				{ requested: "continuation-D", next: null },
+				{ requested: "continuation-D", next: null, itemCount: 1 },
 			],
 		},
 	);
@@ -3047,17 +3117,19 @@ test("playlist items prove empty only after every owned playlist and the index e
 });
 
 test("a gzip request body carrying a 5000-character token correlates the history response", async () => {
-	const videoIds = ["aaaaaaaaaaa"];
+	const videoIds = ["aaaaaaaaaaa", "bbbbbbbbbbb"];
 	const token = "T".repeat(5000);
 	for (const gzipRequestBodies of [true, false]) {
 		const { records, messages, outcome } = await collectFromDocuments(
-			() => `${historyCards(videoIds)}${historyBootstrap(videoIds, token)}`,
+			() => grownHistory(videoIds, 1, token),
 			["watch_history"],
 			undefined,
 			{},
 			{
 				gzipRequestBodies,
-				historyResponsesOnScroll: [{ requested: token, next: null }],
+				historyResponsesOnScroll: [
+					{ requested: token, next: null, itemCount: 1 },
+				],
 			},
 		);
 		assert.equal(records.get("watch_history")?.length, videoIds.length);
@@ -3111,4 +3183,218 @@ test("a failed history read carries bounded diagnostics and no row values", asyn
 	const text = JSON.stringify(diagnostics);
 	for (const secret of [token, ...videoIds, "youtube.com", "Seen"])
 		assert.equal(text.includes(secret), false, secret);
+});
+
+// --- history proof rules: blind logs, vetoes, readable scans, request keys ---
+
+/** The page shows `ids`; the first rows came from the bootstrap, the rest from responses. */
+const grownHistory = (ids: string[], fromResponses: number, token?: string) =>
+	`${historyCards(ids)}${historyBootstrap(ids.slice(0, ids.length - fromResponses), token)}`;
+
+const historyStateMessages = (messages: Record<string, unknown>[]) =>
+	messages.filter(
+		(message) => message.type === "STATE" && message.stream === "watch_history",
+	);
+
+const historyStopReason = (diagnostics: string[]): unknown => {
+	const line = diagnostics.find(
+		(entry) =>
+			entry.startsWith("[youtube-diagnostic] coverage ") &&
+			entry.includes('"stream":"watch_history"'),
+	);
+	return line
+		? (
+				JSON.parse(line.slice("[youtube-diagnostic] coverage ".length)) as Record<
+					string,
+					unknown
+				>
+			).stop_reason
+		: undefined;
+};
+
+const completeCursorEmitted = (messages: Record<string, unknown>[]) =>
+	historyStateMessages(messages).some(
+		(message) => (message.cursor as Record<string, unknown>)?.complete === true,
+	);
+
+test("page log: a terminal logged response with rows the log never saw is blind and emits no STATE", async () => {
+	// The bootstrap holds 1 row and the logged response carries 1, but the page
+	// shows 3: a fetch captured before the wrapper delivered a row unseen.
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"], 2, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{ pageLogOnScroll: [[loggedResponse("bootstrap-C", 1, null)]] },
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-log-blind");
+});
+
+test("page log: a terminal logged response that accounts for every row still proves the end", async () => {
+	const { messages } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{ pageLogOnScroll: [[loggedResponse("bootstrap-C", 1, null)]] },
+	);
+	assert.equal(completeCursorEmitted(messages), true);
+});
+
+test("page log: a continuation still shown after the terminal logged response is blind", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() =>
+			`${grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C")}<ytd-item-section-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer>`,
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{ pageLogOnScroll: [[loggedResponse("bootstrap-C", 1, null)]] },
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-log-blind");
+});
+
+test("page log: an uncorrelated browse call after the terminal response vetoes STATE", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			pageLogOnScroll: [
+				[loggedResponse("bootstrap-C", 1, null), loggedUncorrelated()],
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+});
+
+test("an uncorrelated browse call arriving after the terminal response vetoes STATE on Desktop", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1 },
+			],
+			historyResponsesAfterReadListEnd: [
+				{ readNumber: 4, requested: "stray-token", next: null },
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+});
+
+test("a correlated non-2xx history response falls back to no DOM or bootstrap proof", async () => {
+	const ids = ["aaaaaaaaaaa"];
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => `${historyCards(ids)}${historyBootstrap(ids)}`,
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnGoto: [
+				{ requested: "initial", next: null, initialRequest: true, status: 500 },
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-browse-non-2xx");
+});
+
+test("a correlated non-2xx response stays a veto after a later terminal response", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnGoto: [
+				{ requested: "initial", next: null, initialRequest: true, status: 500 },
+			],
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1 },
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-browse-non-2xx");
+});
+
+test("a response with a list key but no readable rows or continuation cannot prove the end", async () => {
+	const ids = ["aaaaaaaaaaa"];
+	const { messages } = await collectFromDocuments(
+		() => `${historyCards(ids)}${historyBootstrap(ids, "bootstrap-C")}`,
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{ historyResponsesOnScroll: [{ requested: "bootstrap-C", next: null }] },
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+});
+
+test("a request carrying both browseId and a continuation stays correlated", async () => {
+	const { messages } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnGoto: [
+				{
+					requested: "unseen",
+					next: null,
+					itemCount: 1,
+					requestBody: { browseId: "FEhistory", continuation: "unseen" },
+				},
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), true);
+});
+
+test("a content-encoding that merely contains gzip is not a gzip body", async () => {
+	const { messages } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{
+					requested: "bootstrap-C",
+					next: null,
+					itemCount: 1,
+					contentEncoding: "x-not-gzip",
+				},
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), true);
+});
+
+test("a gzip token in a content-encoding list still decodes the body", async () => {
+	const { messages } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			gzipRequestBodies: true,
+			historyResponsesOnScroll: [
+				{
+					requested: "bootstrap-C",
+					next: null,
+					itemCount: 1,
+					contentEncoding: "identity, GZIP",
+				},
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), true);
 });
