@@ -77,6 +77,8 @@ export interface HistoryResponseScan {
 	readonly recognized: boolean;
 	readonly hasContinuation: boolean;
 	readonly itemCount: number;
+	/** Identities of the outermost rows, bounded; rows without a readable id are left out. */
+	readonly itemIds?: readonly string[];
 	readonly nextContinuation: string | null;
 }
 
@@ -96,6 +98,7 @@ const HISTORY_RESPONSE_SCAN_SOURCE = String.raw`(value) => {
 	let recognized = false;
 	let hasContinuation = false;
 	let itemCount = 0;
+	const itemIds = [];
 	let bounded = true;
 	let visited = 0;
 	// Only the outermost row counts: a row nested inside another row is the same row.
@@ -110,7 +113,16 @@ const HISTORY_RESPONSE_SCAN_SOURCE = String.raw`(value) => {
 		if (!object) return;
 		for (const [key, child] of Object.entries(object)) {
 			const isItem = ITEMS.includes(key);
-			if (isItem && !inItem) itemCount += 1;
+			if (isItem && !inItem) {
+				itemCount += 1;
+				const row = asObject(child);
+				const inner = row && asObject(row.content);
+				const nested = inner && asObject(Object.values(inner)[0]);
+				const id = row && (typeof row.videoId === "string" ? row.videoId
+					: typeof row.contentId === "string" ? row.contentId
+					: nested && typeof nested.videoId === "string" ? nested.videoId : null);
+				if (id && id.length <= 64 && itemIds.length < 1000) itemIds.push(id);
+			}
 			if (key === "appendContinuationItemsAction" || key === "reloadContinuationItemsCommand" ||
 				key === "twoColumnBrowseResultsRenderer" || key === "singleColumnBrowseResultsRenderer") recognized = true;
 			if (key === "continuationItemRenderer" && asObject(child)) {
@@ -143,6 +155,7 @@ const HISTORY_RESPONSE_SCAN_SOURCE = String.raw`(value) => {
 		recognized: recognized && bounded && (itemCount > 0 || hasContinuation),
 		hasContinuation,
 		itemCount,
+		itemIds,
 		nextContinuation: tokens.values().next().value ?? null,
 	};
 }`;

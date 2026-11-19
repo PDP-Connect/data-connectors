@@ -14,6 +14,9 @@ import {
 	readPageReadiness,
 	resolveWatchedDate,
 	setHistoryLoopCallDeadlineMsForTest,
+	HistoryRunProgress,
+	raceNoProgress,
+	setHistoryExpirySinkDeadlineMsForTest,
 	setHistoryOuterDeadlineMsForTest,
 } from "./index.ts";
 import { readSubscriptions } from "./browser-dom.ts";
@@ -2301,6 +2304,10 @@ let recordCallbackHangs = false;
 let recordCallbackDelayMs = 0;
 /** When set, the downstream sink never acknowledges a STATE. */
 let stateSinkHangs = false;
+/** When set, the failure sink never answers. */
+let failureSinkHangs = false;
+/** When set, the progress (coverage) sink never answers. */
+let progressSinkHangs = false;
 
 async function collectFromDocuments(
 	pageFor: (url: string) => string,
@@ -2341,8 +2348,12 @@ async function collectFromDocuments(
 					await new Promise<never>(() => undefined);
 				messages.push(message as Record<string, unknown>);
 			},
-			reportStreamFailure: failureReporter(messages),
-			progress: async () => undefined,
+			reportStreamFailure: failureSinkHangs
+				? () => new Promise<never>(() => undefined)
+				: failureReporter(messages),
+			progress: async () => {
+				if (progressSinkHangs) await new Promise<never>(() => undefined);
+			},
 		});
 	} finally {
 		setConnectorDiagnosticSink(undefined);
@@ -4168,4 +4179,144 @@ test("a slow walk that keeps progressing for longer than the window still comple
 		recordCallbackDelayMs = 0;
 		setHistoryOuterDeadlineMsForTest(previous);
 	}
+});
+
+test("a stalled failure sink or a stalled coverage sink still lets collection settle after an expiry", { timeout: 20_000 }, async () => {
+	const previous = setHistoryExpirySinkDeadlineMsForTest(100);
+	try {
+		for (const stall of ["failure", "progress"] as const) {
+			failureSinkHangs = stall === "failure";
+			progressSinkHangs = stall === "progress";
+			const { messages, diagnostics } = await collectUnderOuterDeadline({ hangBrowserDate: true });
+			assert.equal(messages.some((message) => message.type === "STATE"), false, stall);
+			assert.ok(
+				diagnostics.some(
+					(line) =>
+						line.includes("history_expiry_sink") &&
+						line.includes(stall === "failure" ? "failure-report" : "coverage-progress") &&
+						line.includes('"outcome":"unknown"'),
+				),
+				stall,
+			);
+		}
+	} finally {
+		failureSinkHangs = false;
+		progressSinkHangs = false;
+		setHistoryExpirySinkDeadlineMsForTest(previous);
+	}
+});
+
+test("a scan that keeps returning the same rows lets the no-progress watchdog expire", { timeout: 20_000 }, async () => {
+	const previous = setHistoryOuterDeadlineMsForTest(300);
+	try {
+		const progress = new HistoryRunProgress();
+		const ticker = setInterval(() => progress.rows(["aaaaaaaaaaa", "bbbbbbbbbbb"]), 50);
+		try {
+			assert.equal(
+				await raceNoProgress(new Promise<void>(() => undefined), progress),
+				"expired",
+			);
+		} finally {
+			clearInterval(ticker);
+		}
+		// New identities on every scan keep the same window open until the work ends.
+		const moving = new HistoryRunProgress();
+		let next = 0;
+		const mover = setInterval(() => moving.rows([`row${next++}`]), 50);
+		try {
+			assert.equal(
+				await raceNoProgress(new Promise<void>((resolve) => setTimeout(resolve, 900)), moving),
+				"done",
+			);
+		} finally {
+			clearInterval(mover);
+		}
+	} finally {
+		setHistoryOuterDeadlineMsForTest(previous);
+	}
+});
+
+test("a second run on the same page does not see the first run's progress hook", { timeout: 20_000 }, async () => {
+	const previous = setHistoryOuterDeadlineMsForTest(300);
+	try {
+		const first = new HistoryRunProgress();
+		assert.equal(await raceNoProgress(Promise.resolve(), first), "done");
+		const second = new HistoryRunProgress();
+		// A late event from the finished first run must not re-arm the second.
+		const late = setInterval(() => first.rows([`late${Math.random()}`]), 50);
+		try {
+			assert.equal(
+				await raceNoProgress(new Promise<void>(() => undefined), second),
+				"expired",
+			);
+		} finally {
+			clearInterval(late);
+		}
+		// A run that fails still closes its channel.
+		const failing = new HistoryRunProgress();
+		await assert.rejects(raceNoProgress(Promise.reject(new Error("boom")), failing));
+		let rearmed = false;
+		failing.open(() => {
+			rearmed = true;
+		});
+		failing.close();
+		failing.rows(["x"]);
+		assert.equal(rearmed, false);
+	} finally {
+		setHistoryOuterDeadlineMsForTest(previous);
+	}
+});
+
+test("a walk stopped at the time budget and resumed equals one full walk", { timeout: 30_000 }, async () => {
+	const videos = Array.from({ length: 110 }, (_, i) => ({
+		...VIDEO,
+		video_id: `video${i}`,
+		video_url: `https://www.youtube.com/watch?v=video${i}`,
+	}));
+	const run = async (state: Record<string, unknown>, jumpAfter?: number) => {
+		const records: Record<string, unknown>[] = [];
+		const messages: Record<string, unknown>[] = [];
+		const failures: string[] = [];
+		const realNow = performance.now.bind(performance);
+		let jumped = false;
+		performance.now = () => realNow() + (jumped ? 400_000 : 0);
+		try {
+			await collectYoutubeBrowser({
+				page: historyFixturePage(videos) as never,
+				requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+				state,
+				emitRecord: async (_stream, data) => {
+					records.push(data);
+					if (jumpAfter !== undefined && records.length === jumpAfter) jumped = true;
+				},
+				emit: async (message) => {
+					messages.push(message as Record<string, unknown>);
+				},
+				reportStreamFailure: async (_stream, message) => {
+					failures.push(message);
+				},
+				progress: async () => undefined,
+			});
+		} finally {
+			performance.now = realNow;
+		}
+		return { ids: records.map((record) => record.video_id as string), messages, failures };
+	};
+	const full = await run({});
+	const stopped = await run({}, 50);
+	assert.ok(stopped.ids.length < full.ids.length, "the first run must stop early");
+	assert.equal(completeCursorEmitted(stopped.messages), false);
+	const cursor = historyStateMessages(stopped.messages).at(-1)?.cursor;
+	assert.ok(cursor, "the stopped run checkpoints");
+	const resumed = await run({ watch_history: cursor });
+	// The resumed run replays the accounted prefix as idempotent upserts (the
+	// walk never trusts a position above the saved identity). So "no duplicate"
+	// holds per run, and the rows keyed by id equal one full walk: no gap.
+	for (const ids of [full.ids, stopped.ids, resumed.ids])
+		assert.equal(new Set(ids).size, ids.length);
+	const merged = new Map<string, number>();
+	for (const id of [...stopped.ids, ...resumed.ids]) merged.set(id, (merged.get(id) ?? 0) + 1);
+	assert.deepEqual([...merged.keys()].sort(), [...full.ids].sort());
+	assert.ok(resumed.ids.length >= full.ids.length - stopped.ids.length);
+	assert.equal(completeCursorEmitted(resumed.messages), true);
 });

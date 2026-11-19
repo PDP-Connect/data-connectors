@@ -247,23 +247,55 @@ export function setHistoryOuterDeadlineMsForTest(ms: number): number {
 	return previous;
 }
 
-/** Progress hooks by page, so the walk and the tracker can re-arm the watchdog. */
-const historyProgressHooks = new WeakMap<object, () => void>();
-function noteHistoryProgress(page: object): void {
-	historyProgressHooks.get(page)?.();
+/**
+ * The progress channel of ONE history run. The walk and the tracker receive it
+ * as an argument, so a second run on the same page never sees this run's hook,
+ * and the run closes it on every exit path: a late event from an abandoned run
+ * finds it closed and does nothing.
+ *
+ * Row progress re-arms the watchdog only when it names a row identity this run
+ * has not seen before. A page that rescans the same rows forever is not moving.
+ */
+export class HistoryRunProgress {
+	private rearm: (() => void) | undefined;
+	private readonly seen = new Set<string>();
+
+	open(rearm: () => void): void {
+		this.rearm = rearm;
+	}
+
+	close(): void {
+		this.rearm = undefined;
+	}
+
+	/** An acknowledged emit: always real progress. */
+	acknowledged(): void {
+		this.rearm?.();
+	}
+
+	/** Re-arms only when some identity is new in this run. */
+	rows(identities: Iterable<string>): void {
+		let fresh = false;
+		for (const identity of identities) {
+			if (this.seen.has(identity)) continue;
+			this.seen.add(identity);
+			fresh = true;
+		}
+		if (fresh) this.rearm?.();
+	}
 }
 
 /**
  * "done" when the work settled (its rejection propagates); "expired" when the
- * window passed with no call to `touch`. `onTouch` receives the re-arm function.
+ * window passed with no re-arm. The progress channel is closed on every path.
  */
-async function raceNoProgress(
+export async function raceNoProgress(
 	work: Promise<void>,
-	register: (touch: () => void) => void,
+	progress: HistoryRunProgress,
 ): Promise<"done" | "expired"> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let deadlineAt = performance.now() + historyOuterDeadlineMs;
-	register(() => {
+	progress.open(() => {
 		deadlineAt = performance.now() + historyOuterDeadlineMs;
 	});
 	try {
@@ -279,8 +311,37 @@ async function raceNoProgress(
 			}),
 		]);
 	} finally {
+		progress.close();
 		clearTimeout(timer);
 	}
+}
+
+/** How long each sink write after an expiry may take before the run settles anyway. */
+export const HISTORY_EXPIRY_SINK_DEADLINE_MS = 15_000;
+let historyExpirySinkDeadlineMs = HISTORY_EXPIRY_SINK_DEADLINE_MS;
+/** Test seam: a short sink deadline. Returns the previous value. */
+export function setHistoryExpirySinkDeadlineMsForTest(ms: number): number {
+	const previous = historyExpirySinkDeadlineMs;
+	historyExpirySinkDeadlineMs = ms;
+	return previous;
+}
+
+/**
+ * Wait for a sink write after the history path expired. A write that stalls or
+ * rejects is logged as outcome unknown and the run settles; it is never retried.
+ */
+async function settleSink(work: Promise<unknown>, sink: string): Promise<void> {
+	let settled = false;
+	try {
+		settled = await settlesWithin(work, historyExpirySinkDeadlineMs);
+	} catch {
+		// A rejection is an unknown outcome too.
+	}
+	if (!settled)
+		connectorDiagnostic("youtube", "history_expiry_sink", {
+			sink,
+			outcome: "unknown",
+		});
 }
 
 class HistoryLoopTimeout extends Error {
@@ -440,8 +501,14 @@ class HistoryResponseTracker {
 		this.enqueue({ response }, version);
 	};
 
-	constructor(page: BrowserCollectContext["page"]) {
+	private readonly progress: HistoryRunProgress | undefined;
+
+	constructor(
+		page: BrowserCollectContext["page"],
+		progress?: HistoryRunProgress,
+	) {
 		this.page = page;
+		this.progress = progress;
 		this.pageLog = typeof (page as { on?: unknown }).on !== "function";
 		if (!this.pageLog) {
 			page.on("request", this.onRequest);
@@ -735,8 +802,8 @@ class HistoryResponseTracker {
 			return;
 		}
 		const scan = await observation.readScan();
-		// A browse response that adds rows is real progress.
-		if (scan && scan.itemCount > 0) noteHistoryProgress(this.page);
+		// A browse response that names rows this run has not seen is real progress.
+		if (scan?.itemIds) this.progress?.rows(scan.itemIds);
 		if (!scan) {
 			this.unrecognizedResponseCount += 1;
 			this.unreadableSeen = true;
@@ -1516,9 +1583,10 @@ async function readHistoryVideoList(
 	collectionMode: BrowserCollectContext["collectionMode"],
 	emitRecord: HistoryStreamRecord,
 	identityForVideo: (video: BrowserVideo) => string,
+	progress?: HistoryRunProgress,
 ): Promise<VideoReadResult> {
 	const startedAt = performance.now();
-	const responseTracker = new HistoryResponseTracker(page);
+	const responseTracker = new HistoryResponseTracker(page, progress);
 	// The bridge's own goto timeout is not trusted: stop waiting a little after it.
 	const navigated = await settlesWithin(
 		page.goto(url, {
@@ -1820,7 +1888,7 @@ async function readHistoryVideoList(
 				// to head reconciliation. Upsert the full prefix; never infer delivery
 				// from its position above that identity.
 				lastAccounted = video;
-				noteHistoryProgress(page);
+				progress?.rows([key]);
 				parsedCount += 1;
 				scannedCount += 1;
 				offset += 1;
@@ -2068,6 +2136,7 @@ function readWatchHistoryList(
 	collectionMode?: BrowserCollectContext["collectionMode"],
 	emitRecord?: HistoryStreamRecord,
 	identityForVideo?: (video: BrowserVideo) => string,
+	progress?: HistoryRunProgress,
 ): Promise<VideoReadResult> {
 	return readHistoryVideoList(
 		page,
@@ -2077,6 +2146,7 @@ function readWatchHistoryList(
 		collectionMode,
 		emitRecord ?? (async () => undefined),
 		identityForVideo ?? videoIdentity,
+		progress,
 	);
 }
 
@@ -2131,6 +2201,7 @@ async function readableVideos(
 	historyCursor?: HistoryCursor,
 	historyRecord?: HistoryStreamRecord,
 	historyIdentityForVideo?: (video: BrowserVideo) => string,
+	historyProgress?: HistoryRunProgress,
 ): Promise<VideoReadResult | null> {
 	try {
 		const result =
@@ -2143,6 +2214,7 @@ async function readableVideos(
 						ctx.collectionMode,
 						historyRecord,
 						historyIdentityForVideo,
+						historyProgress,
 					)
 				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
 		if (
@@ -2586,7 +2658,7 @@ export async function collectYoutubeBrowser(
 		// path is abandoned: its late emits are dropped, so no STATE can follow.
 		let historyAbandoned = false;
 		let stateInFlight = false;
-		let touchHistory: () => void = () => undefined;
+		const progress = new HistoryRunProgress();
 		const gate = <A extends unknown[]>(send: (...args: A) => Promise<void>) =>
 			async (...args: A): Promise<void> => {
 				if (!historyAbandoned) await send(...args);
@@ -2600,12 +2672,12 @@ export async function collectYoutubeBrowser(
 				if (isState) stateInFlight = true;
 				await gatedEmit(message);
 				if (isState) stateInFlight = false;
-				touchHistory();
+				progress.acknowledged();
 			},
 			emitRecord: async (stream, record) => {
 				if (historyAbandoned) return;
 				await ctx.emitRecord(stream, record);
-				touchHistory();
+				progress.acknowledged();
 			},
 			...(ctx.reportStreamFailure
 				? { reportStreamFailure: gate(ctx.reportStreamFailure.bind(ctx)) }
@@ -2663,6 +2735,7 @@ export async function collectYoutubeBrowser(
 					});
 				},
 				(video) => historyIdentity(video, dateReference),
+				progress,
 			);
 			if (result) {
 				const fact = coverage.get("watch_history");
@@ -2722,26 +2795,33 @@ export async function collectYoutubeBrowser(
 				}
 			}
 		};
-		if ((await raceNoProgress(runHistory(), (touch) => {
-			historyProgressHooks.set(page, touch);
-			touchHistory = touch;
-		})) === "expired") {
+		if ((await raceNoProgress(runHistory(), progress)) === "expired") {
 			historyAbandoned = true;
 			// A STATE that was sent but never acknowledged has an unknown outcome:
 			// it is reported as such, never as success.
 			const unacknowledged = stateInFlight;
-			await streams.fail(
-				"watch_history",
-				unacknowledged
-					? "youtube_history_state_unacknowledged"
-					: "youtube_history_outer_timeout",
-				{
-					stop_reason: unacknowledged
-						? "history-state-unacknowledged"
-						: "history-outer-timeout",
-					outcome: unacknowledged ? "unknown" : "failed",
-				},
+			// Neither sink is trusted: each gets its own fixed deadline, and a sink
+			// that does not answer leaves the outcome unknown instead of hanging.
+			await settleSink(
+				streams.fail(
+					"watch_history",
+					unacknowledged
+						? "youtube_history_state_unacknowledged"
+						: "youtube_history_outer_timeout",
+					{
+						stop_reason: unacknowledged
+							? "history-state-unacknowledged"
+							: "history-outer-timeout",
+						outcome: unacknowledged ? "unknown" : "failed",
+					},
+				),
+				"failure-report",
 			);
+			await settleSink(
+				emitCoverageProgress(ctx, "youtube", coverage.values()),
+				"coverage-progress",
+			);
+			return;
 		}
 	}
 	await emitCoverageProgress(ctx, "youtube", coverage.values());
