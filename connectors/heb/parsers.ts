@@ -914,22 +914,28 @@ function hebGroceryImageId(pathname: string): string | undefined {
 	return /^\/is\/image\/HEBGrocery\/(?:[\w-]*[a-z_][\w-]*\/)?(\d+)(?:[-.][^/]*)?$/i.exec(pathname)?.[1];
 }
 
+/** The most edge visits the ledger may spend on one order: the matching, then
+ * the walk over swaps, drawing on one counter. A real order has a few dozen
+ * rows that each fit one or two items (a few thousand visits at most); only a
+ * large order whose rows all overlap reaches the cap, and it must end with the
+ * gap kept, not with a search that grows with rows x rows x items. */
+const LEDGER_WORK_BUDGET = 50_000;
+
 /** One-to-one matching of rows to items by augmenting paths, found with an
  * explicit stack: no recursion, one stamp array per run instead of a set per
  * row. `owner[item]` is the row holding it, or -1. With `stopAtFailure` it ends
  * at the first row that cannot be placed; otherwise it skips such rows and
  * returns them. `budget` caps the edge visits (null: no cap); past it the
- * result is `exhausted` and not a matching. */
+ * result is `exhausted` and not a matching. The counter is shared by reference. */
 function matchRows(
 	candidates: readonly (readonly number[])[],
 	itemCount: number,
 	stopAtFailure: boolean,
-	budget: number | null,
+	budget: { left: number } | null,
 ): { owner: Int32Array; unplaced: number[]; exhausted: boolean } {
 	const owner = new Int32Array(itemCount).fill(-1);
 	const seen = new Int32Array(itemCount).fill(-1);
 	const unplaced: number[] = [];
-	let visits = 0;
 	for (let root = 0; root < candidates.length; root++) {
 		const rows = [root];
 		const next = [0];
@@ -944,7 +950,7 @@ function matchRows(
 				continue;
 			}
 			const item = options[next[top]!++]!;
-			if (budget !== null && ++visits > budget) return { owner, unplaced, exhausted: true };
+			if (budget !== null && --budget.left < 0) return { owner, unplaced, exhausted: true };
 			if (seen[item] === root) continue;
 			seen[item] = root;
 			via[top] = item;
@@ -1064,33 +1070,50 @@ export function resolveLinklessOrderItems(
 			else unfitImage ??= imageShape(own);
 			return byImage;
 		});
-	const placement = matchRows(candidates, items.length, true, null);
+	const budget = { left: LEDGER_WORK_BUDGET };
+	const placement = matchRows(candidates, items.length, true, budget);
 	const lineOf = new Map<number, number>();
-	placement.owner.forEach((row, item) => {
-		if (row !== -1) lineOf.set(item, row);
-	});
-	let ledgerComplete = placement.unplaced.length === 0;
-	let ledger = ledgerComplete ? "complete" : "unplaced";
+	let budgetSpent = placement.exhausted;
+	if (!budgetSpent) {
+		placement.owner.forEach((row, item) => {
+			if (row !== -1) lineOf.set(item, row);
+		});
+	}
+	let ledgerComplete = !budgetSpent && placement.unplaced.length === 0;
+	let ledger = budgetSpent ? "budget" : ledgerComplete ? "complete" : "unplaced";
 	if (ledgerComplete) {
 		// An item could be left over instead of a matched one when some line
-		// that fits the free item holds the matched one: walk those swaps.
+		// that fits the free item holds the matched one: walk those swaps. A
+		// line holds one item, so its held item is looked up, not searched.
+		const itemOfLine = new Map<number, number>();
+		for (const [held, holder] of lineOf) itemOfLine.set(holder, held);
 		const free = items.map((_, i) => i).filter((i) => !lineOf.has(i));
 		const couldBeFree = new Set(free);
 		const queue = [...free];
-		while (queue.length > 0) {
+		walk: while (queue.length > 0) {
 			const item = queue.pop()!;
 			for (const [line, fitting] of candidates.entries()) {
+				if ((budget.left -= fitting.length) < 0) {
+					budgetSpent = true;
+					break walk;
+				}
 				if (!fitting.includes(item)) continue;
-				for (const [held, holder] of lineOf) {
-					if (holder === line && !couldBeFree.has(held)) {
-						couldBeFree.add(held);
-						queue.push(held);
-					}
+				const held = itemOfLine.get(line);
+				if (held !== undefined && !couldBeFree.has(held)) {
+					couldBeFree.add(held);
+					queue.push(held);
 				}
 			}
 		}
-		ledgerComplete = couldBeFree.size === free.length;
-		if (!ledgerComplete) ledger = "ambiguous";
+		if (budgetSpent) {
+			// Never a partial assignment: nothing is claimed.
+			lineOf.clear();
+			ledgerComplete = false;
+			ledger = "budget";
+		} else {
+			ledgerComplete = couldBeFree.size === free.length;
+			if (!ledgerComplete) ledger = "ambiguous";
+		}
 	}
 	for (const item of lineOf.keys()) claimed.add(item);
 	const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
@@ -1209,8 +1232,10 @@ export function resolveLinklessOrderItems(
 			: counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1), new Map<string, number>()).values()]
 			.filter((n) => n > 1).length;
 		const tail = `,ssr:${subItems}/${repeatedSsr}`;
-		const matching = matchRows(candidates, items.length, false, 50_000);
-		if (matching.exhausted) return `lg=mx:?/${candidates.length}/${items.length}${tail}`;
+		const exhaustedHead = `lg=mx:?/${candidates.length}/${items.length},x:budget${tail}`;
+		if (budgetSpent) return exhaustedHead;
+		const matching = matchRows(candidates, items.length, false, { left: LEDGER_WORK_BUDGET });
+		if (matching.exhausted) return exhaustedHead;
 		const unplaced = matching.unplaced;
 		const namedLines = outerLines.filter((line) => ownCopy(line).querySelector(nameSelector));
 		const ownIds = (line: Element) => [...ownCopy(line).querySelectorAll(nameSelector)].map(

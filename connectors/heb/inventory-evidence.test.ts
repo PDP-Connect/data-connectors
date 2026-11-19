@@ -1472,7 +1472,7 @@ test("a dense order past the work budget reports mx:? with the SSR counts and fi
 	const started = Date.now();
 	const r = resolveLinklessOrderItems(ids.map(bareRow).join(""), items);
 	assert.ok(Date.now() - started < 20_000);
-	assert.match(r.trace, /;stop=ledger;lg=mx:\?\/400\/399,ssr:399\/0;why=/);
+	assert.match(r.trace, /;stop=ledger;lg=mx:\?\/400\/399,x:budget,ssr:399\/0;why=/);
 });
 
 test("a long chain of forced shifts stays within the stack and is matched exactly", () => {
@@ -1507,4 +1507,33 @@ test("an error inside the ledger diagnostic becomes lg=err and changes nothing e
 	assert.equal(hurt.unresolved, base.unresolved);
 	assert.deepEqual(hurt.nameless, base.nameless);
 	assert.equal(JSON.stringify(hurt.detail), JSON.stringify(base.detail));
+});
+
+test("a large dense order with many duplicate candidates keeps the gap with the budget code, quickly", () => {
+	// Every row and every item carries the same product id: all 1000 rows fit
+	// all 1500 items.
+	const items = Array.from({ length: 1500 }, () => bareItem("X"));
+	const started = Date.now();
+	const r = resolveLinklessOrderItems(Array.from({ length: 1000 }, () => bareRow("X")).join(""), items);
+	assert.ok(Date.now() - started < 4000, `took ${Date.now() - started} ms`);
+	assert.match(r.trace, /ledger:budget,/);
+	assert.match(r.trace, /;stop=ledger;lg=mx:\?\/1000\/1500,x:budget,ssr:0\/1;why=/);
+	assert.equal(r.unresolved, 0);
+});
+
+test("the ambiguity pass draws on the same budget and fails closed when it runs out", () => {
+	// 30 rows, 400 items, all one product: the matching fits the budget, the
+	// walk over swaps for the 370 free items does not.
+	const items = Array.from({ length: 400 }, () => bareItem("X"));
+	const r = resolveLinklessOrderItems(Array.from({ length: 30 }, () => bareRow("X")).join(""), items);
+	assert.match(r.trace, /ledger:budget,/);
+	assert.match(r.trace, /;stop=ledger;lg=mx:\?\/30\/400,x:budget,/);
+	assert.match(r.trace, /unclaimed:-,/);
+});
+
+test("an order inside the budget keeps its ledger result", () => {
+	const r = resolveLinklessOrderItems(bareRow("K0") + bareRow("K1"), [bareItem("K0"), bareItem("K1")]);
+	assert.match(r.trace, /ledger:complete,/);
+	const amb = resolveLinklessOrderItems(bareRow("K0") + bareRow("K0"), [bareItem("K0"), bareItem("K0"), bareItem("K0")]);
+	assert.match(amb.trace, /ledger:ambiguous,/);
 });
