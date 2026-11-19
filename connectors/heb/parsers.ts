@@ -752,9 +752,7 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 	};
 }
 
-/** SSR key paths that could hold a name, link or image of the item. */
-const NAMING_KEY_RE = /image|img|photo|picture|url|href|name|title|label|desc/i;
-const MASK_TOKEN_RE = /\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?|[A-Za-z]+/g;
+const MASK_TOKEN_RE = /\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?|\p{L}+|[.,:/-]|\s+|[\s\S]/gu;
 /** The only words a line with no name may show. */
 const NAMELESS_VOCABULARY = new Set([
 	"lb", "lbs", "oz", "kg", "g", "ct", "each", "ea", "avg", "est", "per", "of",
@@ -763,35 +761,49 @@ const NAMELESS_VOCABULARY = new Set([
 const NAMELESS_ORDERED_RE = /Quantity:\s*(\d+(?:\.\d+)?)/i;
 const NAMELESS_SENTENCE_PRICE_RE = /Price:\s*(\$\d[\d,]*\.\d{2})/i;
 const NAMELESS_ACTUAL_RE = /^Qty:?\s*(\d+(?:\.\d+)?)/i;
+const NAMELESS_ATTRIBUTES = ["aria-label", "title", "alt", "aria-labelledby"];
 
-/** A text's shape: vocabulary words kept (lower case), a number as d, a price
- * as $d.d, any other word as w. Never the text itself. */
-function maskText(text: string): string {
-	return text.replace(MASK_TOKEN_RE, (token) =>
-		token.startsWith("$") ? "$d.d"
-		: /^\d/.test(token) ? "d"
-		: NAMELESS_VOCABULARY.has(token.toLowerCase()) ? token.toLowerCase() : "w");
+/** A text's shape, built only from a fixed alphabet: vocabulary words (lower
+ * case), d for a number, $d.d for a price, w for any other word (Unicode
+ * letters), the punctuation . , : / - and a space; any other character is ?.
+ * `unknown` is true when any word is outside the vocabulary. Never the text. */
+function maskText(text: string): { mask: string; unknown: boolean } {
+	let unknown = false;
+	const mask = text.replace(MASK_TOKEN_RE, (token) => {
+		if (token.startsWith("$")) return "$d.d";
+		if (/^[0-9]/.test(token)) return "d";
+		if (/^\p{L}/u.test(token)) {
+			const word = /^[A-Za-z]+$/.test(token) ? token.toLowerCase() : "";
+			if (NAMELESS_VOCABULARY.has(word)) return word;
+			unknown = true;
+			return "w";
+		}
+		return /^\s/.test(token) ? " " : /^[.,:/-]$/.test(token) ? token : "?";
+	});
+	return { mask, unknown };
 }
 
 type NamelessLine =
-	| { ok: true; total: string | null; actual: number | null; ordered: number | null }
+	| { ok: true; total: string; actual: number; ordered: number | null }
 	| { ok: false; reason: string };
 
 /** What a linkless line states, only when it carries no naming evidence: no
- * link, no image with alt text or a H-E-B product image id, and no text whose
- * mask holds a word outside the fixed vocabulary. `actual` is the first number
- * of the quantity span (the charged amount, as the named path reads it);
- * `ordered` is the accessible sentence's quantity. A refusal names its cause
- * as a fixed class or a mask, never text. */
+ * link, no image with a H-E-B product image id, no accessible attribute
+ * (aria-label, title, alt, aria-labelledby) and no text whose mask holds a word
+ * outside the fixed vocabulary. `actual` is the quantity span's one first
+ * number (the charged amount, as the named path reads it); `ordered` is the
+ * accessible sentence's quantity. A refusal is a fixed code, never text. */
 function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine {
-	if (own.querySelector("a")) return { ok: false, reason: "text:link" };
-	if (hasProductImage || [...own.querySelectorAll("img")].some((img) => /[a-z0-9]/i.test(img.getAttribute("alt") ?? "")))
-		return { ok: false, reason: "text:img" };
+	if (own.querySelector("a") || hasProductImage) return { ok: false, reason: "text" };
+	const elements = [own, ...own.querySelectorAll("*")];
+	for (const element of elements)
+		for (const attribute of NAMELESS_ATTRIBUTES)
+			if (maskText(element.getAttribute(attribute) ?? "").unknown) return { ok: false, reason: "naming_attr" };
 	const totals = new Set<string>();
 	const structuredTotal = normText(own.querySelector('[data-qe-id="checkoutItemPrice"]'));
 	if (structuredTotal) totals.add(structuredTotal);
 	let ordered: number | null = null;
-	for (const element of [own, ...own.querySelectorAll("*")]) {
+	for (const element of elements) {
 		const text = [...element.childNodes]
 			.filter((node) => node.nodeType === 3)
 			.map((node) => node.textContent ?? "")
@@ -799,26 +811,32 @@ function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine
 			.replace(/\s+/g, " ")
 			.trim();
 		if (!text) continue;
-		const mask = maskText(text);
-		if (/(?:^|[^A-Za-z])w(?![A-Za-z])/.test(mask)) return { ok: false, reason: `text:${mask.slice(0, 40)}` };
+		const { mask, unknown } = maskText(text);
+		if (unknown) return { ok: false, reason: `text:${mask.slice(0, 40)}` };
 		const sentenceQty = NAMELESS_ORDERED_RE.exec(text)?.[1];
 		if (sentenceQty) ordered = Number(sentenceQty);
 		const sentencePrice = NAMELESS_SENTENCE_PRICE_RE.exec(text)?.[1];
 		if (sentencePrice) totals.add(sentencePrice);
 	}
 	if (totals.size !== 1) return { ok: false, reason: "total" };
-	const span = normText(own.querySelector('[data-qe-id="orderItemQty"]'));
-	const actual = NAMELESS_ACTUAL_RE.exec(span)?.[1];
-	return { ok: true, total: [...totals][0]!, actual: actual ? Number(actual) : null, ordered };
+	const charged = new Set<number | null>(
+		[...own.querySelectorAll('[data-qe-id="orderItemQty"]')].map((span) => {
+			const first = NAMELESS_ACTUAL_RE.exec(normText(span))?.[1];
+			return first ? Number(first) : null;
+		}),
+	);
+	const [actual] = [...charged];
+	if (charged.size !== 1 || actual === null || actual === undefined) return { ok: false, reason: "qty" };
+	return { ok: true, total: [...totals][0]!, actual, ordered };
 }
 
 /** Records for source items that H-E-B serves with no name, when each pairs
  * with one linkless line by exact line total, in both directions. A tie is
  * accepted only among items with the same total and quantity, and lines that
- * state the same amounts. The record's quantity is the line's charged amount
- * (else its ordered amount, else the item's); the item's quantity, when it has
- * one, must equal the line's charged or ordered amount. Otherwise the reason
- * the order was held, as a fixed class. */
+ * state the same amounts. The record's quantity is the line's charged amount;
+ * the item's quantity, when it has one, must equal the line's charged or
+ * ordered amount. A product id is not naming evidence: the record keeps it.
+ * Otherwise the reason the order was held, as a fixed code. */
 function namelessRecords(
 	lines: readonly { own: Element; hasProductImage: boolean }[],
 	items: readonly {
@@ -827,17 +845,16 @@ function namelessRecords(
 		fullDisplayName: string | null;
 		quantity: number | null;
 		lineTotal: string | null;
-		unnamed?: { strings: readonly { path: string }[] };
+		naming?: "none" | "found" | "incomplete";
 	}[],
 	itemIndexes: readonly number[],
 ): { records: DetailItem[] } | { held: string } {
 	if (lines.length === 0 || lines.length !== itemIndexes.length) return { held: "count" };
 	const left = itemIndexes.map((i) => ({ i, item: items[i]! }));
 	for (const { item } of left) {
-		const key = (item.unnamed?.strings ?? []).find((leaf) => NAMING_KEY_RE.test(leaf.path));
-		if (key) return { held: `naming_key:${key.path}` };
-		if (item.fullDisplayName !== null || item.productId !== null || item.productUrl !== null)
-			return { held: "naming_key:id" };
+		if (item.naming === "incomplete") return { held: "scan_incomplete" };
+		if (item.naming !== "none" || item.fullDisplayName !== null || item.productUrl !== null)
+			return { held: "naming_key" };
 		if (item.lineTotal === null) return { held: "total" };
 	}
 	const facts: Extract<NamelessLine, { ok: true }>[] = [];
@@ -846,19 +863,17 @@ function namelessRecords(
 		if (!fact.ok) return { held: fact.reason };
 		facts.push(fact);
 	}
-	const quantityOf = new Map<number, number | null>();
+	const quantityOf = new Map<number, number>();
 	for (const total of new Set(left.map(({ item }) => item.lineTotal))) {
 		const group = left.filter(({ item }) => item.lineTotal === total);
 		const matching = facts.filter((fact) => fact.total === total);
 		if (matching.length !== group.length) return { held: "pairing" };
-		const [first] = matching;
-		const same = (a: typeof first, b: typeof first) => a!.actual === b!.actual && a!.ordered === b!.ordered;
-		if (matching.some((fact) => !same(fact, first))) return { held: "pairing" };
+		const first = matching[0]!;
+		if (matching.some((fact) => fact.actual !== first.actual || fact.ordered !== first.ordered)) return { held: "pairing" };
 		const ssr = group[0]!.item.quantity;
 		if (group.some(({ item }) => item.quantity !== ssr)) return { held: "pairing" };
-		if (ssr !== null && ssr !== first!.actual && ssr !== first!.ordered) return { held: "qty" };
-		const effective = first!.actual ?? first!.ordered ?? ssr;
-		for (const { i } of group) quantityOf.set(i, effective);
+		if (ssr !== null && ssr !== first.actual && ssr !== first.ordered) return { held: "qty" };
+		for (const { i } of group) quantityOf.set(i, first.actual);
 	}
 	if (facts.some((fact) => !left.some(({ item }) => item.lineTotal === fact.total))) return { held: "pairing" };
 	return {
@@ -868,9 +883,9 @@ function namelessRecords(
 			lineTotal: item.lineTotal,
 			name: null,
 			nameUnavailableReason: "source_omits_name" as const,
-			productId: null,
+			productId: item.productId,
 			productUrl: null,
-			quantity: quantityOf.get(i) ?? null,
+			quantity: quantityOf.get(i)!,
 			sourcePosition: i,
 		})),
 	};
@@ -897,6 +912,7 @@ export function resolveLinklessOrderItems(
 		productUrl: string | null;
 		lineTotal: string | null;
 		unnamed?: { state: string; strings: readonly { path: string; value: string }[] };
+		naming?: "none" | "found" | "incomplete";
 	}[],
 ): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[] } {
 	const { document } = parseHTML(html);
@@ -1464,18 +1480,21 @@ function nameKey(name: string | null): string {
 
 export function orderItemId(
 	orderId: string,
-	item: Pick<DetailItem, "productId" | "name" | "sourcePosition">,
+	item: Pick<DetailItem, "productId" | "name" | "sourcePosition"> & Partial<Pick<DetailItem, "lineTotal" | "quantity">>,
 	itemIndex: number,
-	siblingItems: readonly Pick<
-		DetailItem,
-		"productId" | "name" | "sourcePosition"
-	>[] = [item],
+	siblingItems: readonly (Pick<DetailItem, "productId" | "name" | "sourcePosition"> &
+		Partial<Pick<DetailItem, "lineTotal" | "quantity">>)[] = [item],
 ): string {
-	// A line with no name and no product id has no identity of its own: its
-	// position (the SSR orderItems index) is the id, always, so a second such
-	// line in a later read cannot move the first one's id.
-	if (item.name === null && !item.productId)
-		return `${orderId}|unknown|${item.sourcePosition ?? itemIndex}`;
+	// A line with neither name nor product id has no identity of its own: its
+	// id comes from what it states (line total and charged quantity) and its
+	// occurrence among this order's identical such lines, in source order, so a
+	// reordered or inserted line cannot move it to a different purchase.
+	if (item.name === null && !item.productId) {
+		const same = (other: (typeof siblingItems)[number]) =>
+			other.name === null && !other.productId && other.lineTotal === item.lineTotal && other.quantity === item.quantity;
+		const k = siblingItems.slice(0, itemIndex).filter(same).length;
+		return `${orderId}|nameless|${parseCurrencyCents(item.lineTotal ?? null)}|${item.quantity}|${k}`;
+	}
 	const key = item.productId || nameKey(item.name);
 	const duplicate = siblingItems.some((sibling, siblingIndex) => {
 		if (siblingIndex === itemIndex) {

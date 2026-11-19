@@ -157,6 +157,34 @@ export interface SourceOrderItem {
 	/** Only when fullDisplayName is null, for diagnostics: how H-E-B left the
 	 * name out, and the item's non-blank strings by key path. */
 	unnamed?: UnnamedSourceItem;
+	/** Only when fullDisplayName is null: whether any non-blank string sits
+	 * under a key that could carry a name, link or image, at any depth. */
+	naming?: "none" | "found" | "incomplete";
+}
+
+/** Keys that could carry a name, link or image of an item. */
+const NAMING_KEY_RE = /image|img|photo|picture|url|href|name|title|label|desc/i;
+const NAMING_SCAN_MAX_NODES = 200_000;
+const NAMING_SCAN_MAX_DEPTH = 256;
+
+/** A complete walk of one raw item, with no leaf cap: "found" at the first
+ * non-blank string under a naming key (the key itself or any ancestor key),
+ * "incomplete" when the walk exceeds its node or depth bound. */
+function namingScan(raw: unknown): "none" | "found" | "incomplete" {
+	const stack: [unknown, boolean, number][] = [[raw, false, 0]];
+	let nodes = 0;
+	while (stack.length > 0) {
+		const [value, under, depth] = stack.pop()!;
+		if (++nodes > NAMING_SCAN_MAX_NODES || depth > NAMING_SCAN_MAX_DEPTH) return "incomplete";
+		if (typeof value === "string") {
+			if (under && value.trim()) return "found";
+		} else if (Array.isArray(value)) {
+			for (const element of value) stack.push([element, under, depth + 1]);
+		} else if (value !== null && typeof value === "object") {
+			for (const [key, element] of Object.entries(value)) stack.push([element, under || NAMING_KEY_RE.test(key), depth + 1]);
+		}
+	}
+	return "none";
 }
 
 export interface UnnamedSourceItem {
@@ -267,7 +295,7 @@ export function readSourceOrderItems(
 				? item.quantity
 				: null,
 		lineTotal: namedAmount(item.totalLineItemPricePaid?.formattedAmount),
-		...(item.product?.fullDisplayName ? {} : { unnamed: unnamedSourceItem(rawItems[index]) }),
+		...(item.product?.fullDisplayName ? {} : { unnamed: unnamedSourceItem(rawItems[index]), naming: namingScan(rawItems[index]) }),
 	}));
 	const quantityTypes = [...new Set(result.data.order.orderItems.map((item) => typeof item.quantity))].sort();
 	return { items, shape: `${items.length},qty:${quantityTypes.join("|") || "none"}` };

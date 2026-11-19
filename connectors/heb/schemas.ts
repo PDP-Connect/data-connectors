@@ -104,8 +104,8 @@ export const orderItemsSchema = z
 			.min(1)
 			.max(1024)
 			.refine((s) => !NAME_CRUFT_RE.test(s), { message: "contains UI cruft" })
-			.nullable(),
-		name_unavailable_reason: z.enum(["source_omits_name"]).nullable(),
+			.nullish(),
+		name_unavailable_reason: z.enum(["source_omits_name"]).nullish(),
 		department: z.string().min(1).max(100).nullable(),
 		product_id: z.string().min(1).max(64).nullable(),
 		product_url: z.string().nullable(),
@@ -115,8 +115,10 @@ export const orderItemsSchema = z
 		line_total_cents: centsSchema,
 		order_date: z.string().regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD"),
 	})
-	.refine((r) => (r.name === null) === (r.name_unavailable_reason !== null), {
-		message: "name is null exactly when name_unavailable_reason is set",
+	// The manifest leaves name optional; this is its invariant: a name is a
+	// non-empty string with no reason, or it is null or absent with a reason.
+	.refine((r) => (r.name == null) === (r.name_unavailable_reason != null), {
+		message: "name is absent exactly when name_unavailable_reason is set",
 		path: ["name_unavailable_reason"],
 	});
 

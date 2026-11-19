@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.49",
+	"version": "0.6.50",
 	"display_name": "H-E-B",
 	"brand": {
 		"icon": "icon.svg",
@@ -239,12 +239,13 @@
 					},
 					"name": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"description": "The product name. Null (or absent) only when H-E-B serves the line without one, and then name_unavailable_reason is set."
 					},
 					"name_unavailable_reason": {
 						"type": ["string", "null"],
 						"enum": ["source_omits_name", null],
-						"description": "Why name is null: source_omits_name means H-E-B served the line with no name. Null whenever name is a string."
+						"description": "Why name is null: source_omits_name means H-E-B served the line with no name. Set exactly when name is null or absent, and null whenever name is a string."
 					},
 					"department": {
 						"type": ["string", "null"],

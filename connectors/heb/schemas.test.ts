@@ -459,6 +459,12 @@ test("order_items schema keeps a nameless line only with its stated reason, and 
 	assert.equal(orderItemsSchema.safeParse({ ...nameless, name_unavailable_reason: null }).success, false);
 	assert.equal(orderItemsSchema.safeParse({ ...ORDER_ITEM_RECORD, name_unavailable_reason: "source_omits_name" }).success, false);
 	assert.equal(orderItemsSchema.safeParse({ ...nameless, name_unavailable_reason: "other" }).success, false);
+	// The manifest leaves name optional; an absent name is valid with a reason, never without.
+	const { name: _name, ...absent } = nameless;
+	assert.equal(orderItemsSchema.safeParse(absent).success, true);
+	assert.equal(orderItemsSchema.safeParse({ ...absent, name_unavailable_reason: null }).success, false);
+	const { name_unavailable_reason: _reason, ...noReason } = ORDER_ITEM_RECORD;
+	assert.equal(orderItemsSchema.safeParse(noReason).success, true);
 	assert.equal(orderItemsSchema.safeParse({ ...ORDER_ITEM_RECORD, name: "" }).success, false);
 	assert.equal(orderItemsSchema.safeParse({ ...ORDER_ITEM_RECORD, name: "Quantity: 2." }).success, false);
 });
