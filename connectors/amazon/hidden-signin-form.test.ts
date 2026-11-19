@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /**
  * Live 2026-11-19, amazon.ca: every run stopped after the last page of 2026.
  * That page said "0 orders" and carried Amazon's hidden header sign-in form, and
