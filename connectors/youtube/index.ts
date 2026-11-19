@@ -258,12 +258,15 @@ export function setHistoryOuterDeadlineMsForTest(ms: number): number {
  * and the run closes it on every exit path: a late event from an abandoned run
  * finds it closed and does nothing.
  *
- * Row progress re-arms the watchdog only when it names a row identity this run
- * has not seen before. A page that rescans the same rows forever is not moving.
+ * Progress means a new identity, on both re-arm paths: a scan or the walk naming
+ * a row not seen before in this run, and the first acknowledgement of a record
+ * identity in this run. A duplicate may still be upserted and acknowledged; it is
+ * not progress. No loop over rows already seen can keep the walk alive.
  */
 export class HistoryRunProgress {
 	private rearm: (() => void) | undefined;
 	private readonly seen = new Set<string>();
+	private readonly acknowledgedRecords = new Set<string>();
 
 	open(rearm: () => void): void {
 		this.rearm = rearm;
@@ -273,8 +276,15 @@ export class HistoryRunProgress {
 		this.rearm = undefined;
 	}
 
-	/** An acknowledged emit: always real progress. */
+	/** An acknowledged STATE: the one write that always counts as progress. */
 	acknowledged(): void {
+		this.rearm?.();
+	}
+
+	/** An acknowledged record: progress only the first time its identity is acknowledged. */
+	acknowledgedRecord(identity: string): void {
+		if (this.acknowledgedRecords.has(identity)) return;
+		this.acknowledgedRecords.add(identity);
 		this.rearm?.();
 	}
 
@@ -2658,7 +2668,9 @@ export async function collectYoutubeBrowser(
 			emitRecord: async (stream, record) => {
 				if (historyAbandoned) return;
 				await ctx.emitRecord(stream, record);
-				progress.acknowledged();
+				const id = (record as { id?: unknown }).id;
+				// A record without an identity cannot be shown new, so it is not progress.
+				if (typeof id === "string") progress.acknowledgedRecord(`${stream}|${id}`);
 			},
 			...(ctx.reportStreamFailure
 				? { reportStreamFailure: gate(ctx.reportStreamFailure.bind(ctx)) }
