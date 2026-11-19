@@ -1143,9 +1143,11 @@ export async function fetchOrderDetail(
 		sourceItemTotal,
 		// Counts and shapes only: how far linkless-line resolution got. A gap
 		// leads with it because a stored gap message keeps only 300 characters.
-		linklessTrace:
-			`ssr=${source.shape};${resolved.trace}` +
-			(resolved.nameless.length > 0 && namelessKept.length === 0 ? ";nameless_held=unproven_count" : ""),
+		linklessTrace: `ssr=${source.shape};${
+			resolved.nameless.length > 0 && namelessKept.length === 0
+				? resolved.trace.replace(/;stop=nameless;nameless=\d+/, ";stop=unnamed;nameless_held=count")
+				: resolved.trace
+		}`,
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
 		...metrics(),
 		status: "hydrated",

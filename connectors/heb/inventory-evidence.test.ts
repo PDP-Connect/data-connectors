@@ -1057,7 +1057,7 @@ test("the diagnostic names why elimination refused: a line naming a claimed item
 	assert.equal(claimedText.evidence.linklessLines, 1);
 	assert.match(claimedText.linklessTrace ?? "", /elim:0;stop=unsafe;why=txt_claimed:1;ll_img=heb_image\/hebgrocery_id\/jpg(;|$)/);
 	assert.equal(unnamed.evidence.linklessLines, 1);
-	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
+	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
 	assert.doesNotMatch(`${claimedText.linklessTrace}${unnamed.linklessTrace}`, /500|501|999|SSR/);
 });
 
@@ -1080,9 +1080,9 @@ test("an unnamed left-over item: the diagnostic says how the name is missing and
 		),
 	]);
 	for (const r of [inField, nowhere, blank]) assert.equal(r.evidence.linklessLines, 1);
-	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
-	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
-	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
+	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
+	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
+	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
 	assert.doesNotMatch(`${inField.linklessTrace}${nowhere.linklessTrace}${blank.linklessTrace}`, /Invented|Bakery|Kitchen|Sliced|500|501|999/);
 });
 
@@ -1114,7 +1114,7 @@ test("the linkless line's element shape leads the unnamed diagnostic: tags, lett
 		itemRow(0) + line,
 	);
 	assert.equal(r.evidence.linklessLines, 1);
-	assert.match(r.linklessTrace ?? "", /;stop=unnamed;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
+	assert.match(r.linklessTrace ?? "", /;stop=unnamed;nameless_held=[^;]*;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
 	assert.doesNotMatch(r.linklessTrace ?? "", /Invented|Bakery|4417|6\.00/);
 });
 
@@ -1243,6 +1243,7 @@ test("nameless lines stay unresolved, with today's trace, unless every check pas
 	for (const [i, r] of fails.entries()) {
 		assert.equal((r.evidence.linklessLines ?? 0) >= 1, true, `case ${i}`);
 		assert.doesNotMatch(r.linklessTrace ?? "", /stop=nameless/, `case ${i}`);
+		assert.match(r.linklessTrace ?? "", /;stop=unnamed;nameless_held=(?:naming_key:[A-Za-z.?#]+|naming_key:id|text:[^;]*|qty|total|pairing|count);/, `case ${i}`);
 		assert.equal(inventoryMatchesSourceTotal({ ...r.evidence, acceptedIds: [...r.evidence.sourceIds] }, r.sourceItemTotal), false, `case ${i}`);
 		assert.ok(r.detail.items.every((item) => item.name !== null), `case ${i}`);
 	}
@@ -1251,4 +1252,80 @@ test("nameless lines stay unresolved, with today's trace, unless every check pas
 test("an SSR item that names itself but has no product id still fails the whole SSR read", async () => {
 	const r = await resolveLinkless([{ product: { fullDisplayName: "Named, no id" }, quantity: 1 }], itemRow(0));
 	assert.match(r.linklessTrace ?? "", /ssr=unread:/);
+});
+
+// The real line shape (0.6.44 ll_dom): sentence span, empty-alt img, price span,
+// one more text span, quantity span; one order adds a price span after the price.
+const realLine = (o: { ordered: number; actualText: string; total: string; second?: string; extraPrice?: string }) =>
+	`<li><span class="visuallyHidden">Item, . Quantity: ${o.ordered} lb. Price: ${o.total}.</span><img src="https://www.heb.com/static/invented.svg" alt=""><span data-qe-id="checkoutItemPrice">${o.total}</span>` +
+	`${o.extraPrice ? `<span>${o.extraPrice}</span>` : ""}<span>${o.second ?? "Avg. 1.2 lb"}</span><span data-qe-id="orderItemQty">${o.actualText}</span></li>`;
+const heldOf = (r: { linklessTrace?: string }) => /;stop=unnamed;nameless_held=([^;]*);/.exec(r.linklessTrace ?? "")?.[1];
+
+test("the real nameless line shape is kept: extra text span, Qty N of M unit, a sentence quantity that differs from the charged amount", async () => {
+	const ssr = (quantity: number | null) => [ssrItem("500"), nlSsr("$3.17", quantity), nlSsr("$8.40", quantity === null ? null : 2.1)];
+	const rows = itemRow(0) +
+		realLine({ ordered: 1.2, actualText: "Qty: 1.27 of 1.2 lb", total: "$3.17", second: "Avg. 1.2 lb" }) +
+		realLine({ ordered: 2.0, actualText: "Qty: 2.1 lb", total: "$8.40", second: "$4.00 / lb", extraPrice: "$8.40" });
+	for (const quantity of [1.2, 1.27, null]) {
+		const r = await resolveLinkless(ssr(quantity), rows);
+		assert.equal(r.evidence.linklessLines, 0, `ssr quantity ${quantity}`);
+		const [, a, b] = asRecords(r);
+		assert.equal(a?.quantity, 1.27, "the charged amount, as the named path reads it");
+		assert.equal(b?.quantity, 2.1);
+		assert.deepEqual([a?.name, a?.name_unavailable_reason, a?.line_total], [null, "source_omits_name", "$3.17"]);
+		assert.match(r.linklessTrace ?? "", /;stop=nameless;nameless=2;/);
+	}
+	// With an empty quantity span, the sentence's ordered amount is the quantity.
+	const sentenceOnly = await resolveLinkless(
+		[ssrItem("500"), nlSsr("$3.17", null)],
+		itemRow(0) + realLine({ ordered: 1.2, actualText: "", total: "$3.17" }),
+	);
+	assert.equal(asRecords(sentenceOnly)[1]?.quantity, 1.2);
+});
+
+test("a held nameless order says why in one fixed class, never a text value", async () => {
+	const line = (second: string) => realLine({ ordered: 1.2, actualText: "Qty: 1.2 lb", total: "$3.17", second });
+	const [word, noMatch, key, itemId, totalGap, lineGap] = await Promise.all([
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + line("Organic Bananas, 4417")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 2)], itemRow(0) + line("Avg. 1.2 lb")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, { fullDisplayName: "", brandLabel: "Invented Brand" })], itemRow(0) + line("Avg. 1.2 lb")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, { id: "501", fullDisplayName: "" })], itemRow(0) + line("Avg. 1.2 lb")),
+		resolveLinkless([ssrItem("500"), { product: { fullDisplayName: "" }, quantity: 1.2 }], itemRow(0) + line("Avg. 1.2 lb")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.18", 1.2)], itemRow(0) + line("Avg. 1.2 lb")),
+	]);
+	assert.equal(heldOf(word), "text:w w, d");
+	assert.equal(heldOf(noMatch), "qty");
+	assert.equal(heldOf(key), "naming_key:product.brandLabel");
+	assert.equal(heldOf(itemId), "naming_key:id");
+	assert.equal(heldOf(totalGap), "total");
+	assert.equal(heldOf(lineGap), "pairing");
+	for (const r of [word, noMatch, key, itemId, totalGap, lineGap]) {
+		assert.equal(r.evidence.linklessLines, 1);
+		assert.doesNotMatch(r.linklessTrace ?? "", /Organic|Bananas|4417|Invented|Brand|3\.17|3\.18/);
+	}
+});
+
+test("the held reason leads the trace, ahead of the 300 characters a stored gap keeps", async () => {
+	const r = await resolveLinkless([ssrItem("500"), nlSsr("$3.17", 2)],
+		itemRow(0) + realLine({ ordered: 1.2, actualText: "Qty: 1.2 lb", total: "$3.17" }));
+	assert.ok((r.linklessTrace ?? "").indexOf(";stop=unnamed;nameless_held=qty;") < 200);
+});
+
+test("nameless lines are held, not emitted, when the line count is not proven", async () => {
+	const items = [ssrItem("500"), nlSsr("$3.17", 1.2)];
+	const withOrderItems = (n: number) => JSON.stringify({ page: "/my-account/order-history/[orderId]", gssp: true, props: { __N_SSP: true, pageProps: { order: { orderId: order.orderId, orderItems: [...items, ...Array.from({ length: n }, () => ssrItem("900"))] } } } });
+	const rows = itemRow(0) + nlLine(1.2, "$3.17") + '<section data-qe-id="orderSummaryCard"></section>';
+	const page = pageFor(rows + `<script id="__NEXT_DATA__">${withOrderItems(0)}</script>`);
+	// The first read states a different item total than the one parsed later.
+	const first = rows + `<script id="__NEXT_DATA__">${withOrderItems(1)}</script>`;
+	const later = page.content;
+	let calls = 0;
+	(page as unknown as { content: () => Promise<string> }).content = async () => (calls++ === 0 ? first : later());
+	const r = await fetchOrderDetail(page, order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50 });
+	assert.equal(r.status, "hydrated");
+	if (r.status !== "hydrated") return;
+	assert.equal(r.evidence.lineCountProven, false);
+	assert.equal(r.evidence.linklessLines, 1);
+	assert.ok(r.detail.items.every((item) => item.name !== null));
+	assert.match(r.linklessTrace ?? "", /;stop=unnamed;nameless_held=count;/);
 });

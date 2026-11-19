@@ -752,29 +752,45 @@ export function inspectOrderDetailLines(html: string): OrderDetailLineShape {
 	};
 }
 
-const NAMELESS_SENTENCE_RE =
-	/^Item\b[^A-Za-z]*Quantity:\s*(\d+(?:\.\d+)?)?(?:\s*[a-z]+)?\.?(?:\s*Price:\s*(\$\d[\d,]*\.\d{2})\.?)?$/i;
-const NAMELESS_QTY_RE = /^qty:?\s*(\d+(?:\.\d+)?)(?:\s*[a-z]+)?$/i;
-const NAMELESS_PRICE_RE = /^\$\s?\d[\d,]*(?:\.\d{2})?(?:\s*\/\s*[a-z]+)?$/i;
 /** SSR key paths that could hold a name, link or image of the item. */
 const NAMING_KEY_RE = /image|img|photo|picture|url|href|name|title|label|desc/i;
+const MASK_TOKEN_RE = /\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?|[A-Za-z]+/g;
+/** The only words a line with no name may show. */
+const NAMELESS_VOCABULARY = new Set([
+	"lb", "lbs", "oz", "kg", "g", "ct", "each", "ea", "avg", "est", "per", "of",
+	"qty", "quantity", "price", "item", "weighted", "weight", "approx",
+]);
+const NAMELESS_ORDERED_RE = /Quantity:\s*(\d+(?:\.\d+)?)/i;
+const NAMELESS_SENTENCE_PRICE_RE = /Price:\s*(\$\d[\d,]*\.\d{2})/i;
+const NAMELESS_ACTUAL_RE = /^Qty:?\s*(\d+(?:\.\d+)?)/i;
+
+/** A text's shape: vocabulary words kept (lower case), a number as d, a price
+ * as $d.d, any other word as w. Never the text itself. */
+function maskText(text: string): string {
+	return text.replace(MASK_TOKEN_RE, (token) =>
+		token.startsWith("$") ? "$d.d"
+		: /^\d/.test(token) ? "d"
+		: NAMELESS_VOCABULARY.has(token.toLowerCase()) ? token.toLowerCase() : "w");
+}
+
+type NamelessLine =
+	| { ok: true; total: string | null; actual: number | null; ordered: number | null }
+	| { ok: false; reason: string };
 
 /** What a linkless line states, only when it carries no naming evidence: no
- * link, no image with alt text or a H-E-B product image id, and no text but a
- * quantity, a price and the accessible sentence with an empty name slot. Null
- * when it has any other text, or when its own sources disagree on its total or
- * quantity. */
-function namelessLineFacts(
-	own: Element,
-	hasProductImage: boolean,
-): { total: string | null; quantity: number | null } | null {
-	if (hasProductImage || own.querySelector("a")) return null;
-	for (const img of own.querySelectorAll("img"))
-		if (/[a-z0-9]/i.test(img.getAttribute("alt") ?? "")) return null;
-	const totals: string[] = [];
-	const quantities: number[] = [];
+ * link, no image with alt text or a H-E-B product image id, and no text whose
+ * mask holds a word outside the fixed vocabulary. `actual` is the first number
+ * of the quantity span (the charged amount, as the named path reads it);
+ * `ordered` is the accessible sentence's quantity. A refusal names its cause
+ * as a fixed class or a mask, never text. */
+function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine {
+	if (own.querySelector("a")) return { ok: false, reason: "text:link" };
+	if (hasProductImage || [...own.querySelectorAll("img")].some((img) => /[a-z0-9]/i.test(img.getAttribute("alt") ?? "")))
+		return { ok: false, reason: "text:img" };
+	const totals = new Set<string>();
 	const structuredTotal = normText(own.querySelector('[data-qe-id="checkoutItemPrice"]'));
-	if (structuredTotal) totals.push(structuredTotal);
+	if (structuredTotal) totals.add(structuredTotal);
+	let ordered: number | null = null;
 	for (const element of [own, ...own.querySelectorAll("*")]) {
 		const text = [...element.childNodes]
 			.filter((node) => node.nodeType === 3)
@@ -783,23 +799,26 @@ function namelessLineFacts(
 			.replace(/\s+/g, " ")
 			.trim();
 		if (!text) continue;
-		const sentence = NAMELESS_SENTENCE_RE.exec(text);
-		const qty = NAMELESS_QTY_RE.exec(text);
-		if (sentence) {
-			if (sentence[1]) quantities.push(Number(sentence[1]));
-			if (sentence[2]) totals.push(sentence[2]);
-		} else if (qty) quantities.push(Number(qty[1]));
-		else if (!NAMELESS_PRICE_RE.test(text)) return null;
+		const mask = maskText(text);
+		if (/(?:^|[^A-Za-z])w(?![A-Za-z])/.test(mask)) return { ok: false, reason: `text:${mask.slice(0, 40)}` };
+		const sentenceQty = NAMELESS_ORDERED_RE.exec(text)?.[1];
+		if (sentenceQty) ordered = Number(sentenceQty);
+		const sentencePrice = NAMELESS_SENTENCE_PRICE_RE.exec(text)?.[1];
+		if (sentencePrice) totals.add(sentencePrice);
 	}
-	if (new Set(totals).size > 1 || new Set(quantities).size > 1) return null;
-	return { total: totals[0] ?? null, quantity: quantities[0] ?? null };
+	if (totals.size !== 1) return { ok: false, reason: "total" };
+	const span = normText(own.querySelector('[data-qe-id="orderItemQty"]'));
+	const actual = NAMELESS_ACTUAL_RE.exec(span)?.[1];
+	return { ok: true, total: [...totals][0]!, actual: actual ? Number(actual) : null, ordered };
 }
 
 /** Records for source items that H-E-B serves with no name, when each pairs
  * with one linkless line by exact line total, in both directions. A tie is
- * accepted only among items with the same total and quantity, since the records
- * come from the items and any pairing gives the same ones. Null when any item
- * or line has naming evidence, or any pairing is unproven or contradicted. */
+ * accepted only among items with the same total and quantity, and lines that
+ * state the same amounts. The record's quantity is the line's charged amount
+ * (else its ordered amount, else the item's); the item's quantity, when it has
+ * one, must equal the line's charged or ordered amount. Otherwise the reason
+ * the order was held, as a fixed class. */
 function namelessRecords(
 	lines: readonly { own: Element; hasProductImage: boolean }[],
 	items: readonly {
@@ -811,36 +830,50 @@ function namelessRecords(
 		unnamed?: { strings: readonly { path: string }[] };
 	}[],
 	itemIndexes: readonly number[],
-): DetailItem[] | null {
-	if (lines.length === 0 || lines.length !== itemIndexes.length) return null;
+): { records: DetailItem[] } | { held: string } {
+	if (lines.length === 0 || lines.length !== itemIndexes.length) return { held: "count" };
 	const left = itemIndexes.map((i) => ({ i, item: items[i]! }));
-	if (left.some(({ item }) =>
-		item.fullDisplayName !== null || item.productId !== null || item.productUrl !== null ||
-		item.lineTotal === null ||
-		(item.unnamed?.strings ?? []).some((leaf) => NAMING_KEY_RE.test(leaf.path))))
-		return null;
-	const facts = lines.map((line) => namelessLineFacts(line.own, line.hasProductImage));
-	if (facts.some((fact) => !fact || fact.total === null)) return null;
+	for (const { item } of left) {
+		const key = (item.unnamed?.strings ?? []).find((leaf) => NAMING_KEY_RE.test(leaf.path));
+		if (key) return { held: `naming_key:${key.path}` };
+		if (item.fullDisplayName !== null || item.productId !== null || item.productUrl !== null)
+			return { held: "naming_key:id" };
+		if (item.lineTotal === null) return { held: "total" };
+	}
+	const facts: Extract<NamelessLine, { ok: true }>[] = [];
+	for (const line of lines) {
+		const fact = namelessLineFacts(line.own, line.hasProductImage);
+		if (!fact.ok) return { held: fact.reason };
+		facts.push(fact);
+	}
+	const quantityOf = new Map<number, number | null>();
 	for (const total of new Set(left.map(({ item }) => item.lineTotal))) {
 		const group = left.filter(({ item }) => item.lineTotal === total);
-		const matching = facts.filter((fact) => fact!.total === total);
-		if (matching.length !== group.length) return null;
-		const quantity = group[0]!.item.quantity;
-		if (group.some(({ item }) => item.quantity !== quantity)) return null;
-		if (matching.some((fact) => fact!.quantity !== null && fact!.quantity !== quantity)) return null;
+		const matching = facts.filter((fact) => fact.total === total);
+		if (matching.length !== group.length) return { held: "pairing" };
+		const [first] = matching;
+		const same = (a: typeof first, b: typeof first) => a!.actual === b!.actual && a!.ordered === b!.ordered;
+		if (matching.some((fact) => !same(fact, first))) return { held: "pairing" };
+		const ssr = group[0]!.item.quantity;
+		if (group.some(({ item }) => item.quantity !== ssr)) return { held: "pairing" };
+		if (ssr !== null && ssr !== first!.actual && ssr !== first!.ordered) return { held: "qty" };
+		const effective = first!.actual ?? first!.ordered ?? ssr;
+		for (const { i } of group) quantityOf.set(i, effective);
 	}
-	if (facts.some((fact) => !left.some(({ item }) => item.lineTotal === fact!.total))) return null;
-	return left.map(({ i, item }) => ({
-		department: null,
-		imageUrl: null,
-		lineTotal: item.lineTotal,
-		name: null,
-		nameUnavailableReason: "source_omits_name" as const,
-		productId: null,
-		productUrl: null,
-		quantity: item.quantity,
-		sourcePosition: i,
-	}));
+	if (facts.some((fact) => !left.some(({ item }) => item.lineTotal === fact.total))) return { held: "pairing" };
+	return {
+		records: left.map(({ i, item }) => ({
+			department: null,
+			imageUrl: null,
+			lineTotal: item.lineTotal,
+			name: null,
+			nameUnavailableReason: "source_omits_name" as const,
+			productId: null,
+			productUrl: null,
+			quantity: quantityOf.get(i) ?? null,
+			sourcePosition: i,
+		})),
+	};
 }
 
 /** Resolve only outer purchased lines, then use the existing DOM parser.
@@ -1093,7 +1126,7 @@ export function resolveLinklessOrderItems(
 	// Left-overs H-E-B serves with no name at all, each paired by exact line
 	// total with a linkless line that names nothing either. The caller adds
 	// these records only when the line count is proven.
-	const namelessItems = stop === "unnamed"
+	const namelessResult = stop === "unnamed"
 		? namelessRecords(
 			remaining.map((line) => {
 				const own = ownCopy(line);
@@ -1103,6 +1136,8 @@ export function resolveLinklessOrderItems(
 			unclaimed,
 		)
 		: null;
+	const namelessItems = namelessResult && "records" in namelessResult ? namelessResult.records : null;
+	const namelessHeld = namelessResult && "held" in namelessResult ? namelessResult.held : null;
 	if (stop === "ok") {
 		// The inventory is known; with multiple rows, the DOM-to-item pairing
 		// is not. Never attach a line's quantity/price/department to that guess.
@@ -1168,7 +1203,9 @@ export function resolveLinklessOrderItems(
 		`unclaimed:${ledgerComplete ? unclaimed.length : "-"}`,
 		`elim:${eliminated}`,
 	].join(",") +
-		(namelessItems ? `;stop=nameless;nameless=${namelessItems.length}` : `;stop=${stop}`) +
+		(namelessItems
+			? `;stop=nameless;nameless=${namelessItems.length}`
+			: `;stop=${stop}` + (namelessHeld ? `;nameless_held=${namelessHeld}` : "")) +
 		(stop === "unnamed" && !namelessItems ? `;ll_dom=${linklessDom ?? "-"}` : "") +
 		unnamedTrace +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
