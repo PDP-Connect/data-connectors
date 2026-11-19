@@ -721,7 +721,8 @@ const HISTORY_BROWSE_LOG_INSTALL_FUNCTION = `(request) => {
 					: Promise.resolve(null);
 				return Promise.all([requestPromise, bodyPromise]).then(([requestBody, summary]) => finish({ requestBody, status, summary }));
 			},
-			() => requestPromise.then(() => finish(failed)),
+			// A failed fetch keeps its request body, so the tracker can tell a failed history call from a foreign one.
+			() => requestPromise.then((requestBody) => finish({ requestBody, status: 0, summary: null })),
 		).catch(() => finish(failed));
 		return result;
 	};

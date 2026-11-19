@@ -177,6 +177,25 @@ async function decodeBrowseRequestBody(
 
 const PAGE_LOG_DRAIN_ATTEMPTS = 20;
 const PAGE_LOG_DRAIN_WAIT_MS = 250;
+/** One response body read gets this long; a stalled body must not stall the chain. */
+const HISTORY_BODY_READ_DEADLINE_MS = 5000;
+
+/** The value, or null when it does not settle in time or rejects. */
+async function withinDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work,
+			new Promise<null>((resolve) => {
+				timer = setTimeout(() => resolve(null), ms);
+			}),
+		]);
+	} catch {
+		return null;
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 class HistoryResponseTracker {
 	private static readonly MAX_TRACKED_TOKENS = HISTORY_MAX_SCROLL_ROUNDS + 8;
@@ -192,6 +211,8 @@ class HistoryResponseTracker {
 	private pageLogConsumed = 0;
 	/** A correlated non-2xx answer: the run can no longer claim it saw the whole source. */
 	private non2xxSeen = false;
+	/** A correlated 2xx response whose body could not be read in time or at all. */
+	private unreadableSeen = false;
 	/** A browse call the run cannot attribute came after the last terminal evidence. */
 	private uncorrelatedSinceTerminal = false;
 	/** Browse requests the page started that have neither answered nor failed. */
@@ -201,7 +222,8 @@ class HistoryResponseTracker {
 	private readonly tokens = new Set<string>();
 	private readonly requestedTokens = new Set<string>();
 	private readonly preSeedResponses: Array<{
-		response: Response;
+		response?: Response;
+		failedRequest?: Request;
 		version: number;
 	}> = [];
 	private seeded = false;
@@ -230,7 +252,21 @@ class HistoryResponseTracker {
 		this.startedRequests += 1;
 	};
 	private readonly onRequestFailed = (request: Request): void => {
+		if (!request.url().includes("/youtubei/v1/browse")) return;
 		this.openRequests.delete(request);
+		// A transport failure is classified like a non-2xx answer: its body says
+		// whether it was a history call, and no body means no positive evidence.
+		const version = ++this.evidenceVersion;
+		if (!this.seeded) {
+			if (
+				this.preSeedResponses.length <
+				HistoryResponseTracker.MAX_PRESEED_RESPONSES
+			)
+				this.preSeedResponses.push({ failedRequest: request, version });
+			else this.preSeedOverflow = true;
+			return;
+		}
+		this.enqueue({ failedRequest: request }, version);
 	};
 	private readonly onResponse = (response: Response): void => {
 		if (!response.url().includes("/youtubei/v1/browse")) return;
@@ -245,7 +281,7 @@ class HistoryResponseTracker {
 			else this.preSeedOverflow = true;
 			return;
 		}
-		this.enqueue(response, version);
+		this.enqueue({ response }, version);
 	};
 
 	constructor(page: BrowserCollectContext["page"]) {
@@ -280,7 +316,14 @@ class HistoryResponseTracker {
 		this.bootstrapTokenCount = this.tokens.size;
 		this.seeded = true;
 		for (const queued of this.preSeedResponses.splice(0))
-			this.enqueue(queued.response, queued.version);
+			this.enqueue(
+				queued.response
+					? { response: queued.response }
+					: queued.failedRequest
+						? { failedRequest: queued.failedRequest }
+						: {},
+				queued.version,
+			);
 	}
 
 	get diagnostics() {
@@ -331,6 +374,7 @@ class HistoryResponseTracker {
 	 */
 	stateVeto(end: ListEnd): string | null {
 		if (this.non2xxSeen) return "history-browse-non-2xx";
+		if (this.unreadableSeen) return "history-response-unreadable";
 		if (this.uncorrelatedSinceTerminal) return "history-browse-uncorrelated";
 		const latest = this.latestResponse;
 		if (this.pageLog && latest?.recognized && !latest.hasContinuation) {
@@ -401,11 +445,15 @@ class HistoryResponseTracker {
 		}
 	}
 
-	private enqueue(response: Response, version: number): void {
+	private enqueue(
+		item: { response?: Response; failedRequest?: Request },
+		version: number,
+	): void {
 		this.pending = this.pending
 			.then(async () => {
 				try {
-					await this.inspect(response);
+					if (item.failedRequest) await this.inspectFailure(item.failedRequest);
+					else if (item.response) await this.inspect(item.response);
 				} catch {
 					// Keep the response chain alive when one body cannot be inspected.
 				} finally {
@@ -414,18 +462,24 @@ class HistoryResponseTracker {
 			});
 	}
 
+	private async inspectFailure(request: Request): Promise<void> {
+		await this.observe({
+			requestBody: await decodeBrowseRequestBody(request),
+			status: 0,
+			readScan: async () => null,
+		});
+	}
+
 	private async inspect(response: Response): Promise<void> {
 		if (!response.url().includes("/youtubei/v1/browse")) return;
 		await this.observe({
 			requestBody: await decodeBrowseRequestBody(response.request()),
 			status: response.status(),
-			readScan: async () => {
-				try {
-					return scanHistoryResponse(await response.json());
-				} catch {
-					return null;
-				}
-			},
+			readScan: async () =>
+				withinDeadline(
+					response.json().then(scanHistoryResponse),
+					HISTORY_BODY_READ_DEADLINE_MS,
+				),
 		});
 	}
 
@@ -499,6 +553,7 @@ class HistoryResponseTracker {
 		const scan = await observation.readScan();
 		if (!scan) {
 			this.unrecognizedResponseCount += 1;
+			this.unreadableSeen = true;
 			this.latestResponse = {
 				recognized: false,
 				hasContinuation: false,

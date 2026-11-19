@@ -1868,6 +1868,9 @@ type HistoryResponseAfterReadListEnd = {
 	jsonDelayMs?: number;
 };
 
+/** A browse request the page starts: it never settles, or it fails with this body (null: none). */
+type BrowseRequestSpec = "hang" | "fail" | { failBody: Record<string, unknown> | null };
+
 /** One scripted browse response; the options shape the request and the answer. */
 type HistoryResponseSpec = {
 	requested: string;
@@ -1882,6 +1885,8 @@ type HistoryResponseSpec = {
 	contentEncoding?: string;
 	/** Wrap each row in an outer row, as a grid item wraps its video. */
 	nested?: boolean;
+	/** The body never resolves after the headers arrive. */
+	jsonHangs?: boolean;
 };
 
 /** A page-log entry the way the page-side wrapper reports it. */
@@ -1920,7 +1925,7 @@ class DocumentPage {
 	private pageLogSent = 0;
 	private pageLogHanging = 0;
 	private readonly gotoError: Error | undefined;
-	private readonly browseRequestsOnScroll: Array<"hang" | "fail">;
+	private readonly browseRequestsOnScroll: BrowseRequestSpec[];
 	private readonly pageLogHangOnScroll: number;
 	private readonly historyResponseOnReadListEnd:
 		| { readNumber: number; requested: string; next: string | null }
@@ -1943,7 +1948,7 @@ class DocumentPage {
 			/** Page-log browse calls the page starts on scroll and never finishes. */
 			pageLogHangOnScroll?: number;
 			/** Browse requests the page starts on scroll; "hang" never settles. */
-			browseRequestsOnScroll?: Array<"hang" | "fail">;
+			browseRequestsOnScroll?: BrowseRequestSpec[];
 			gotoError?: Error;
 			historyResponseOnReadListEnd?: {
 				readNumber: number;
@@ -1989,10 +1994,18 @@ class DocumentPage {
 		this.listenersFor(event).delete(listener);
 		return this;
 	}
-	private emitBrowseRequest(settle: "hang" | "fail" | "none"): void {
-		const request = { url: () => "https://www.youtube.com/youtubei/v1/browse" };
+	private emitBrowseRequest(settle: BrowseRequestSpec): void {
+		const body =
+			typeof settle === "object" ? settle.failBody : null;
+		const request = {
+			url: () => "https://www.youtube.com/youtubei/v1/browse",
+			postDataJSON: () => {
+				if (body === null) throw new Error("no body");
+				return body;
+			},
+		};
 		for (const listener of this.requestListeners) listener(request as never);
-		if (settle === "fail")
+		if (settle !== "hang")
 			for (const listener of this.requestFailedListeners) listener(request as never);
 	}
 	async goto(url: string) {
@@ -2012,6 +2025,7 @@ class DocumentPage {
 			requestBody?: Record<string, unknown>;
 			contentEncoding?: string;
 			nested?: boolean;
+			jsonHangs?: boolean;
 			duringJson?: {
 				requested: string;
 				next: string | null;
@@ -2062,6 +2076,7 @@ class DocumentPage {
 			},
 			status: () => options.status ?? 200,
 			json: async () => {
+				if (options.jsonHangs) await new Promise<never>(() => undefined);
 				if (options.jsonDelayMs)
 					await new Promise((resolve) =>
 						setTimeout(resolve, options.jsonDelayMs),
@@ -3593,8 +3608,8 @@ test("a history browse still in flight during the final refresh leaves the run n
 	assert.equal(historyStopReason(diagnostics), "history-browse-in-flight");
 });
 
-test("a history browse that failed is no longer in flight", async () => {
-	const { messages } = await collectFromDocuments(
+test("a history browse that failed is no longer in flight, but it vetoes completion", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
 		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
 		["watch_history"],
 		undefined,
@@ -3606,7 +3621,9 @@ test("a history browse that failed is no longer in flight", async () => {
 			browseRequestsOnScroll: ["fail"],
 		},
 	);
-	assert.equal(completeCursorEmitted(messages), true);
+	assert.equal(completeCursorEmitted(messages), false);
+	// Settled, so not the in-flight reason; a failure with no body is unattributed.
+	assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
 });
 
 test("page log: a history browse the page started and never finished leaves the run not complete", async () => {
@@ -3704,4 +3721,92 @@ test("an exception names only a fixed error vocabulary", async () => {
 		const diagnostics = failure?.diagnostics as Record<string, unknown> | undefined;
 		assert.equal(diagnostics?.error_name, expected);
 	}
+});
+
+// --- failed requests and stalled bodies ---
+
+test("a failed history browse request vetoes completion, whatever it looked like", async () => {
+	const bodies: Array<Record<string, unknown> | null> = [
+		{ continuation: "bootstrap-C" },
+		{ browseId: "FEhistory" },
+		null,
+		{ browseId: "FEsubscriptions" },
+	];
+	for (const failBody of bodies) {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				historyResponsesOnScroll: [
+					{ requested: "bootstrap-C", next: null, itemCount: 1 },
+				],
+				browseRequestsOnScroll: [{ failBody }],
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), false, JSON.stringify(failBody));
+		assert.match(
+			String(historyStopReason(diagnostics)),
+			/^history-browse-(non-2xx|uncorrelated)$/,
+			JSON.stringify(failBody),
+		);
+	}
+});
+
+test("a failed history browse request keeps the partial checkpoint", async () => {
+	const ids = Array.from({ length: 50 }, (_, n) => `vid${String(n).padStart(8, "0")}`);
+	const rows = ids
+		.map((id, n) => `<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>V${n}</h3></yt-lockup-view-model>`)
+		.join("");
+	const { outcome, messages } = await collectFromDocuments(
+		() =>
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...ids.map((contentId) => ({ lockupViewModel: { contentId } })), { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }] } }))}`,
+		["watch_history"],
+		undefined,
+		{},
+		{ browseRequestsOnScroll: [{ failBody: { continuation: "next" } }] },
+	);
+	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.equal(completeCursorEmitted(messages), false);
+});
+
+test("page log: a fetch that failed is recorded and vetoes completion", async () => {
+	for (const requestBody of [{ continuation: "bootstrap-C" }, null]) {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				pageLogOnScroll: [
+					[
+						loggedResponse("bootstrap-C", 1, null),
+						{ requestBody, status: 0, summary: null },
+					],
+				],
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), false);
+		assert.match(
+			String(historyStopReason(diagnostics)),
+			/^history-browse-(non-2xx|uncorrelated)$/,
+		);
+	}
+});
+
+test("a response body that stalls after its headers ends the run unproven, not hung", { timeout: 30_000 }, async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1, jsonHangs: true },
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-response-unreadable");
 });
