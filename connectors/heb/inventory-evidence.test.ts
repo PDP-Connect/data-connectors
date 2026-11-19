@@ -1055,7 +1055,7 @@ test("the diagnostic names why elimination refused: a line naming a claimed item
 	assert.equal(claimedText.evidence.linklessLines, 1);
 	assert.match(claimedText.linklessTrace ?? "", /elim:0;stop=unsafe;why=txt_claimed:1;ll_img=heb_image\/hebgrocery_id\/jpg(;|$)/);
 	assert.equal(unnamed.evidence.linklessLines, 1);
-	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;un=absent;un_hit=-;un_keys=-;why=none:1;/);
+	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
 	assert.doesNotMatch(`${claimedText.linklessTrace}${unnamed.linklessTrace}`, /500|501|999|SSR/);
 });
 
@@ -1078,9 +1078,9 @@ test("an unnamed left-over item: the diagnostic says how the name is missing and
 		),
 	]);
 	for (const r of [inField, nowhere, blank]) assert.equal(r.evidence.linklessLines, 1);
-	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
-	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
-	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
+	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
+	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
+	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
 	assert.doesNotMatch(`${inField.linklessTrace}${nowhere.linklessTrace}${blank.linklessTrace}`, /Invented|Bakery|Kitchen|Sliced|500|501|999/);
 });
 
@@ -1102,6 +1102,18 @@ test("the unnamed-item paths print only lower camelCase letter keys, and each fi
 	const keys = /;un_keys=([^;]*);/.exec(long.linklessTrace ?? "")?.[1] ?? "";
 	assert.ok(keys.length <= 75, keys);
 	assert.match(keys, /\+?more$/);
+});
+
+test("the linkless line's element shape leads the unnamed diagnostic: tags, letter-only qe ids and text classes, never text", async () => {
+	const line = '<li><img src="https://www.heb.com/static/invented.svg" alt="Invented Bakery Loaf"><div><span data-qe-id="itemRowDetailsName">Invented Bakery Loaf</span><p></p></div>' +
+		'<span data-qe-id="orderItemQty">Qty: 2</span><span data-qe-id="checkoutItemPrice">$6.00</span><span data-qe-id="item4417">12</span></li>';
+	const r = await resolveLinkless(
+		[ssrItem("500"), { product: { id: "501", fullDisplayName: "" }, quantity: 2, totalLineItemPricePaid: { formattedAmount: "$6.00" } }],
+		itemRow(0) + line,
+	);
+	assert.equal(r.evidence.linklessLines, 1);
+	assert.match(r.linklessTrace ?? "", /;stop=unnamed;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
+	assert.doesNotMatch(r.linklessTrace ?? "", /Invented|Bakery|4417|6\.00/);
 });
 
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {

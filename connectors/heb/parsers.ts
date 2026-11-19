@@ -906,6 +906,44 @@ export function resolveLinklessOrderItems(
 	let linklessImage: string | null = null;
 	// The displayed texts of the linkless lines left unresolved.
 	const remainingNames = new Set<string>();
+	// The first unresolved linkless line's elements, in document order: each
+	// element with its own text as tag, letter-only data-qe-id and a fixed text
+	// class, and each image by whether its alt text is a word. Never text.
+	const domShape = (own: Element) => {
+		const parts: string[] = [];
+		for (const element of own.querySelectorAll("*")) {
+			const tag = element.tagName.toLowerCase();
+			let part: string | null = null;
+			if (tag === "img") {
+				const alt = element.getAttribute("alt");
+				part = `img:alt_${alt === null ? "none" : !alt.trim() ? "empty" : /[a-z]/i.test(alt) ? "word" : "other"}`;
+			} else {
+				const ownText = [...element.childNodes]
+					.filter((node) => node.nodeType === 3)
+					.map((node) => node.textContent ?? "")
+					.join(" ")
+					.replace(/\s+/g, " ")
+					.trim();
+				if (ownText) {
+					const qe = element.getAttribute("data-qe-id");
+					const id = qe === null ? "" : `.${/^[A-Za-z]{1,32}$/.test(qe) ? qe : "?"}`;
+					const kind = /^\$\s?\d[\d,]*(?:\.\d{2})?$/.test(ownText) ? "price"
+						: /^qty\b/i.test(ownText) ? "qty"
+						: /^\d+$/.test(ownText) ? "num"
+						: /[a-z]/i.test(ownText) ? "word" : "other";
+					part = `${tag}${id}:${kind}`;
+				}
+			}
+			if (part === null) continue;
+			if (parts.length >= 8 || [...parts, part].join(",").length > 110) {
+				parts.push("more");
+				break;
+			}
+			parts.push(part);
+		}
+		return parts.join(",") || "none";
+	};
+	let linklessDom: string | null = null;
 	const resolveLine = (line: Element, index: number, unordered = false) => {
 		const item = items[index]!;
 		claimed.add(index);
@@ -941,6 +979,7 @@ export function resolveLinklessOrderItems(
 		if (refusal !== null || index === undefined) {
 			why.set(refusal ?? "none", (why.get(refusal ?? "none") ?? 0) + 1);
 			linklessImage ??= imageShape(own);
+			linklessDom ??= domShape(own);
 			for (const name of names) if (name) remainingNames.add(name);
 			remaining.push(line);
 			// Even a key naming an already claimed item forbids elimination.
@@ -1020,6 +1059,7 @@ export function resolveLinklessOrderItems(
 		`elim:${eliminated}`,
 	].join(",") +
 		`;stop=${stop}` +
+		(stop === "unnamed" ? `;ll_dom=${linklessDom ?? "-"}` : "") +
 		unnamedTrace +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
 		`;ll_img=${linklessImage ?? "-"}` +
