@@ -185,6 +185,10 @@ interface DetailSurfaceResult {
 	/** One complete snapshot mounted exactly the source's line total, and the
 	 * collection holds that snapshot's lines and nothing else. */
 	lineCountMatches: boolean;
+	/** Whether the last snapshot mounted exactly `total` lines and the
+	 * collection holds those lines and nothing else: the count test behind
+	 * lineCountMatches, for a total other than the source's own. */
+	declaredCountAt: (total: number) => boolean;
 	/** Rows in the last settled snapshot. */
 	snapshotRows: number;
 	diagnostics: DetailSurfaceDiagnostics;
@@ -760,6 +764,9 @@ async function collectDetailSurface(
 			latest.staticListEvidence === "declared_count" &&
 			collected.size === sourceLineTotal &&
 			latest.rows.length === sourceLineTotal,
+		// staticListEvidence is `lines.length === sourceLineTotal` on the
+		// snapshot, so the same test at another total is rows.length === total.
+		declaredCountAt: (total) => collected.size === total && latest.rows.length === total,
 	};
 }
 
@@ -1099,13 +1106,17 @@ export async function fetchOrderDetail(
 	const source = readSourceOrderItems(html, orderId);
 	// One product drawn twice is collapsed only on SSR's own count (see
 	// collapseDuplicateRenderings); every later check runs on the collapsed set.
-	const collapse = collapseDuplicateRenderings(surface.html, source.items, surface.sourceIds);
+	const collapse = collapseDuplicateRenderings(surface.html, source.items, surface.sourceIds, deps.expectedItemCount ?? null);
 	const surfaceHtml = collapse?.html ?? surface.html;
 	const surfaceIds = collapse?.sourceIds ?? surface.sourceIds;
+	// A collapsed set keeps the 0.6.60 declared-count check on the raw rows
+	// (the snapshot mounted every raw row and the collection holds only those),
+	// now against the raw total the collapse implies, and adds the collapsed
+	// count on top. Matching lengths alone never pass.
 	const lineCountMatches = collapse
 		? initialSourceItemTotal !== null &&
-			surfaceIds.length === initialSourceItemTotal &&
-			surface.snapshotRows === surface.sourceIds.length
+			surface.declaredCountAt(initialSourceItemTotal + collapse.collapsed) &&
+			surfaceIds.length === initialSourceItemTotal
 		: surface.lineCountMatches;
 	const resolved = resolveLinklessOrderItems(surfaceHtml, source.items);
 	const detail = resolved.detail;
@@ -1158,7 +1169,7 @@ export async function fetchOrderDetail(
 		sourceItemTotal,
 		// Counts and shapes only: how far linkless-line resolution got. A gap
 		// leads with it because a stored gap message keeps only 300 characters.
-		linklessTrace: `ssr=${source.shape};${collapse ? `dup_render=${collapse.collapsed};` : ""}${
+		linklessTrace: `ssr=${source.shape};${collapse ? `dup_render=${collapse.collapsed},raw=${surface.sourceIds.length},kept=${surfaceIds.length};` : ""}${
 			resolved.nameless.length > 0 && namelessKept.length === 0
 				? resolved.trace.replace(/;stop=nameless;nameless=\d+/, ";stop=unnamed;nameless_held=count")
 				: resolved.trace

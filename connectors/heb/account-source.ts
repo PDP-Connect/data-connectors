@@ -151,6 +151,8 @@ export interface SourceOrderItem {
 	productUrl: string | null;
 	/** Null when H-E-B leaves it out or writes it as anything but a number. */
 	quantity: number | null;
+	/** The units H-E-B states it fulfilled; null unless a non-negative whole number. */
+	fulfilledQuantity: number | null;
 	/** The item's `totalLineItemPricePaid.formattedAmount` when it is a
 	 * non-blank string; the key that pairs a nameless item with its line. */
 	lineTotal: string | null;
@@ -278,6 +280,7 @@ export function readSourceOrderItems(
 				productPageURL: z.string().nullish(),
 			}).nullish(),
 			quantity: z.unknown().optional(),
+			fulfilledQuantity: z.unknown().optional(),
 			subbedProducts: z.array(z.unknown()).nullish(),
 			totalLineItemPricePaid: z.object({ formattedAmount: z.unknown().optional() }).nullish(),
 		})),
@@ -307,6 +310,10 @@ export function readSourceOrderItems(
 		quantity:
 			typeof item.quantity === "number" && Number.isFinite(item.quantity) && item.quantity >= 0
 				? item.quantity
+				: null,
+		fulfilledQuantity:
+			typeof item.fulfilledQuantity === "number" && Number.isInteger(item.fulfilledQuantity) && item.fulfilledQuantity >= 0
+				? item.fulfilledQuantity
 				: null,
 		lineTotal: namedAmount(item.totalLineItemPricePaid?.formattedAmount),
 		...(item.product?.fullDisplayName ? {} : namingFacts(rawItems[index])),

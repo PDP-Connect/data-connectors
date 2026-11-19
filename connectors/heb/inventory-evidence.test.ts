@@ -23,6 +23,7 @@ import {
 	buildOrderItemRecord,
 	orderItemId,
 	inspectOrderListParsing,
+	parseCurrencyCents,
 	parseNutritionDom,
 	parseOrderDetailDom,
 	parseProfileDom,
@@ -850,10 +851,10 @@ for (const [label, image, name, copies, expected] of [
 	});
 }
 
-async function resolveLinkless(items: unknown[], rows: string) {
+async function resolveLinkless(items: unknown[], rows: string, expectedItemCount?: number) {
 	const data = { page: "/my-account/order-history/[orderId]", gssp: true, props: { __N_SSP: true, pageProps: { order: { orderId: order.orderId, orderItems: items } } } };
 	const html = rows + '<section data-qe-id="orderSummaryCard"></section>' + `<script id="__NEXT_DATA__">${JSON.stringify(data)}</script>`;
-	const result = await fetchOrderDetail(pageFor(html), order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50 });
+	const result = await fetchOrderDetail(pageFor(html), order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50, ...(expectedItemCount === undefined ? {} : { expectedItemCount }) });
 	assert.equal(result.status, "hydrated");
 	if (result.status !== "hydrated") throw new Error("not hydrated");
 	return result;
@@ -1542,22 +1543,28 @@ test("an order inside the budget keeps its ledger result", () => {
 // Invented order: SSR holds P once, Q twice (real repeat, different prices), R
 // once and O once (a removed original whose substitute S is nested in its row).
 // The DOM draws P a second time, identical, at the top of the list.
-const dupRow = (id: string, o: { cents?: string; qty?: string; nested?: string } = {}) =>
-	`<li><a aria-hidden="true" href="/product-detail/x/${id}"><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${id.padStart(9, "0")}.jpg"></a>` +
-	`<a data-qe-id="itemRowDetailsName" href="/product-detail/x/${id}">Item ${id}</a>` +
-	`<span data-qe-id="checkoutItemPrice">${o.cents ?? "$5.00"}</span><span data-qe-id="orderItemQty">${o.qty ?? "Qty: 1"}</span>${o.nested ?? ""}</li>`;
+const dupRow = (id: string, o: { cents?: string; qty?: string; nested?: string; name?: string; dept?: string } = {}) => {
+	const row =
+		`<li><a aria-hidden="true" href="/product-detail/x/${id}"><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${id.padStart(9, "0")}.jpg"></a>` +
+		`<a data-qe-id="itemRowDetailsName" href="/product-detail/x/${id}">${o.name ?? `Item ${id}`}</a>` +
+		`<span data-qe-id="checkoutItemPrice">${o.cents ?? "$5.00"}</span><span data-qe-id="orderItemQty">${o.qty ?? "Qty: 1"}</span>${o.nested ?? ""}</li>`;
+	return o.dept ? `<section><h2 data-qe-id="orderDetailsGroupTitle">${o.dept}</h2>${row}</section>` : row;
+};
 const nestedSub = (id: string) => `<ul>${dupRow(id, { cents: "$2.00" })}</ul>`;
+// Each SSR item states what was fulfilled; the list card's item_count (6) is
+// the sum of those (5) plus the nested substitute's quantity (1).
 const dupSsr = [
 	ssrItem("900"), ssrItem("901"), ssrItem("901"), ssrItem("902"),
 	{ product: { id: "903", fullDisplayName: "SSR 903" }, quantity: 1, subbedProducts: [{ product: { id: "904" } }] },
-];
+].map((item) => ({ ...item, fulfilledQuantity: 1 }));
+const DUP_COUNT = 6;
 const dupPage = (top: string, bottom: string) =>
 	top + dupRow("902") + dupRow("901", { cents: "$3.00" }) + dupRow("901", { cents: "$4.00" }) + dupRow("903", { nested: nestedSub("904") }) + bottom;
 const matchesTotal = (r: Awaited<ReturnType<typeof resolveLinkless>>, total: number) =>
 	inventoryMatchesSourceTotal({ ...r.evidence, acceptedIds: r.evidence.sourceIds }, total);
 
 test("an identical extra rendering of a product SSR holds once collapses; a real repeat and a substitute stay", async () => {
-	const r = await resolveLinkless(dupSsr, dupPage(dupRow("900"), dupRow("900")));
+	const r = await resolveLinkless(dupSsr, dupPage(dupRow("900"), dupRow("900")), DUP_COUNT);
 	assert.match(r.linklessTrace ?? "", /;dup_render=1/);
 	assert.equal(matchesTotal(r, 5), true);
 	assert.equal(r.evidence.sourceIds.length, 5);
@@ -1568,8 +1575,8 @@ test("an identical extra rendering of a product SSR holds once collapses; a real
 });
 
 test("nothing collapses when the two renderings differ in line cents or in qty text", async () => {
-	const cents = await resolveLinkless(dupSsr, dupPage(dupRow("900", { cents: "$6.00" }), dupRow("900")));
-	const qty = await resolveLinkless(dupSsr, dupPage(dupRow("900", { qty: "Qty: 2" }), dupRow("900")));
+	const cents = await resolveLinkless(dupSsr, dupPage(dupRow("900", { cents: "$6.00" }), dupRow("900")), DUP_COUNT);
+	const qty = await resolveLinkless(dupSsr, dupPage(dupRow("900", { qty: "Qty: 2" }), dupRow("900")), DUP_COUNT);
 	for (const r of [cents, qty]) {
 		assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
 		assert.equal(matchesTotal(r, 5), false);
@@ -1578,17 +1585,75 @@ test("nothing collapses when the two renderings differ in line cents or in qty t
 });
 
 test("nothing collapses when SSR holds the product as many times as the DOM draws it", async () => {
-	const twice = [...dupSsr, ssrItem("900")];
-	const r = await resolveLinkless(twice, dupPage(dupRow("900"), dupRow("900")));
+	const twice = [...dupSsr, { ...ssrItem("900"), fulfilledQuantity: 1 }];
+	const r = await resolveLinkless(twice, dupPage(dupRow("900"), dupRow("900")), DUP_COUNT + 1);
 	assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
 	assert.equal(matchesTotal(r, 6), true);
 });
 
 test("nothing collapses when the product is also a substitute id, or a rendering holds a nested row", async () => {
 	const asSubstitute = dupSsr.map((item, i) => (i === 3 ? { ...item, subbedProducts: [{ product: { id: "900" } }] } : item));
-	const sub = await resolveLinkless(asSubstitute, dupPage(dupRow("900"), dupRow("900")));
-	const nested = await resolveLinkless(dupSsr, dupPage(dupRow("900", { nested: nestedSub("905") }), dupRow("900", { nested: nestedSub("905") })));
+	const sub = await resolveLinkless(asSubstitute, dupPage(dupRow("900"), dupRow("900")), DUP_COUNT);
+	const nested = await resolveLinkless(dupSsr, dupPage(dupRow("900", { nested: nestedSub("905") }), dupRow("900", { nested: nestedSub("905") })), DUP_COUNT + 2);
 	for (const r of [sub, nested]) assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+});
+
+// Round 16: the proof needs more than SSR's own count.
+const twoSame = () => dupPage(dupRow("900"), dupRow("900"));
+test("SSR undercounting a real second purchase: item_count shows the extra unit, so nothing collapses and the gap stays", async () => {
+	const counts = [DUP_COUNT + 1, undefined, DUP_COUNT - 1];
+	const results = await Promise.all(counts.map((count) => resolveLinkless(dupSsr, twoSame(), count)));
+	for (const [i, r] of results.entries()) {
+		assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/, String(counts[i]));
+		assert.equal(r.evidence.sourceIds.length, 6);
+		assert.equal(matchesTotal(r, 5), false);
+	}
+});
+
+test("an SSR item with no fulfilled quantity blocks the collapse", async () => {
+	const noFq = dupSsr.map((item, i) => (i === 1 ? { ...item, fulfilledQuantity: undefined } : item));
+	const r = await resolveLinkless(noFq, twoSame(), DUP_COUNT);
+	assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+});
+
+test("a blank qty, a blank price, a differing name and a differing department each block the collapse", async () => {
+	const variants = [
+		dupPage(dupRow("900", { qty: "" }), dupRow("900", { qty: "" })),
+		dupPage(dupRow("900", { cents: "" }), dupRow("900", { cents: "" })),
+		dupPage(dupRow("900", { name: "Other name" }), dupRow("900")),
+		dupPage(dupRow("900", { dept: "Dairy" }), dupRow("900", { dept: "Bakery" })),
+		dupPage(dupRow("900", { dept: "Dairy" }), dupRow("900")),
+	];
+	const results = await Promise.all(variants.map((html) => resolveLinkless(dupSsr, html, DUP_COUNT)));
+	for (const [i, r] of results.entries()) {
+		assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/, `variant ${i}`);
+		assert.equal(r.evidence.sourceIds.length, 6, `variant ${i}`);
+	}
+	const same = await resolveLinkless(dupSsr, dupPage(dupRow("900", { dept: "Dairy" }), dupRow("900", { dept: "Dairy" })), DUP_COUNT);
+	assert.match(same.linklessTrace ?? "", /;dup_render=1/);
+});
+
+test("collapsing keeps every other row's own position: another duplicate's id is the same as without the extra rendering", async () => {
+	const withExtra = await resolveLinkless(dupSsr, dupPage(dupRow("900"), dupRow("900")), DUP_COUNT);
+	assert.match(withExtra.linklessTrace ?? "", /;dup_render=1/);
+	const ids = asRecords(withExtra).map((record) => record.id).filter((id) => id.includes("|901"));
+	// Document order was 900, 902, 901, 901, 903, 900: the 901 rows sit at 2 and 3.
+	assert.deepEqual(ids.sort(), [`${order.orderId}|901|2`, `${order.orderId}|901|3`]);
+});
+
+test("a virtualized snapshot whose rows do not match the collected ids stays open after the collapse", async () => {
+	const html = dupPage(dupRow("900"), dupRow("900"));
+	const data = { page: "/my-account/order-history/[orderId]", gssp: true, props: { __N_SSP: true, pageProps: { order: { orderId: order.orderId, orderItems: dupSsr } } } };
+	const full = html + '<section data-qe-id="orderSummaryCard"></section>' + `<script id="__NEXT_DATA__">${JSON.stringify(data)}</script>`;
+	const base = pageFor(full) as any;
+	const all = await base.evaluate();
+	let call = 0;
+	// Early snapshots mount every row; the settled one has lost an unrelated row.
+	base.evaluate = async () => (call++ < 2 ? all : { ...all, rows: all.rows.filter((_: unknown, i: number) => i !== 1) });
+	const result = await fetchOrderDetail(base, order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50, expectedItemCount: DUP_COUNT });
+	assert.equal(result.status, "hydrated");
+	if (result.status !== "hydrated") return;
+	assert.equal(matchesTotal(result, 5), false);
 });
 
 // ─── ledger exhaustion is a value, and building candidates is bounded ─────
@@ -1617,7 +1682,69 @@ test("budget exhaustion keeps the gap even when every row is named and the count
 });
 
 test("an order inside the budget is not flagged exhausted, the collapse case included", async () => {
-	const r = await resolveLinkless(dupSsr, dupPage(dupRow("900"), dupRow("900")));
+	const r = await resolveLinkless(dupSsr, dupPage(dupRow("900"), dupRow("900")), DUP_COUNT);
 	assert.notEqual(r.evidence.ledgerExhausted, true);
 	assert.equal(matchesTotal(r, 5), true);
+});
+
+// ─── round 16: diagnostic exhaustion and linear id counting ───────────────
+// The 0.6.62 orderItemId, copied verbatim as the reference for identical ids.
+function legacyOrderItemId(orderId: string, item: any, itemIndex: number, siblingItems: readonly any[]): string {
+	const nameKey = (name: string | null) => name?.replace(/\s+/g, " ").trim().toLowerCase() || "unknown";
+	const cents = (v: string | null | undefined) => parseCurrencyCents(v ?? null);
+	if (item.name === null && !item.productId) {
+		const same = (other: any) =>
+			other.name === null && !other.productId && cents(other.lineTotal) === cents(item.lineTotal) && other.quantity === item.quantity;
+		const k = siblingItems.slice(0, itemIndex).filter(same).length;
+		return `${orderId}|nameless|${cents(item.lineTotal)}|${item.quantity}|${k}`;
+	}
+	const key = item.productId || nameKey(item.name);
+	const duplicate = siblingItems.some((sibling, siblingIndex) =>
+		siblingIndex !== itemIndex && (sibling.productId || nameKey(sibling.name)) === key);
+	return duplicate ? `${orderId}|${key}|${item.sourcePosition ?? itemIndex}` : `${orderId}|${key}`;
+}
+
+test("ids from the per-order counts equal the 0.6.62 ids on an order with repeated products", () => {
+	const make = (productId: string | null, name: string | null, sourcePosition: number | null, lineTotal: string | null = "$1.00", quantity: number | null = 1) =>
+		({ productId, name, sourcePosition, lineTotal, quantity });
+	const items = [
+		make("P1", "A", 0), make("P1", "A", 3), make("P2", "B", null), make("P3", "C", 7), make("P3", "C", null),
+		make(null, null, null, "$2.00", 1), make(null, null, null, "$2.00", 1), make(null, null, null, "$3.00", 2),
+		make(null, "Loose Name", null), make(null, "loose  name", 5), make(null, null, null, "$2.00", 1),
+	];
+	for (const [i, item] of items.entries()) {
+		assert.equal(orderItemId("O1", item, i, items), legacyOrderItemId("O1", item, i, items), `row ${i}`);
+	}
+	// A lone call with the default siblings keeps its old answer too.
+	assert.equal(orderItemId("O1", items[0]!, 2), legacyOrderItemId("O1", items[0], 2, [items[0]]));
+	// The counts follow the array when it grows.
+	items.push(make("P2", "B", 9));
+	assert.equal(orderItemId("O1", items[2]!, 2, items), legacyOrderItemId("O1", items[2], 2, items));
+	// And the work is linear: a large order is cheap.
+	const big = Array.from({ length: 30000 }, (_, i) => make(`Q${i % 5000}`, "N", i));
+	const started = Date.now();
+	for (const [i, item] of big.entries()) orderItemId("O1", item, i, big);
+	assert.ok(Date.now() - started < 2000);
+});
+
+test("the diagnostic search running out of budget keeps the gap, though every row is named and the counts pass", async () => {
+	// Row 0 fits no item, so the main search stops at once; rows 1..n form a
+	// staircase (row i fits items 1..i) that the diagnostic's full search must
+	// walk. The extra item no row reaches keeps the counts equal.
+	const n = 100;
+	const key = (i: number) => `T${i}`;
+	const items = [
+		{ ...ssrItem("Q0"), fulfilledQuantity: 1 },
+		...Array.from({ length: n }, (_, j) => ({
+			...ssrItem(key(j + 1)), fulfilledQuantity: 1,
+			subbedProducts: Array.from({ length: n - j }, (_, d) => ({ product: { id: key(j + 1 + d) } })),
+		})),
+	];
+	const rows = bareRow("ZZ") + Array.from({ length: n }, (_, i) => bareRow(key(i + 1))).join("");
+	const r = await resolveLinkless(items, rows);
+	assert.match(r.linklessTrace ?? "", /;stop=ledger;lg=mx:\?\//);
+	assert.equal(r.evidence.ledgerExhausted, true);
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.equal(matchesTotal(r, n + 1), false);
+	assert.equal(r.inventoryComplete, false);
 });

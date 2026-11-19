@@ -991,54 +991,101 @@ function matchRows(
 
 /** One product drawn twice: H-E-B's page can render the same purchased line a
  * second time (for instance pinned at the top of the list). When the order's own
- * SSR count proves it, drop the extra renderings so the ledger sees one row per
- * SSR item. For a product id P with D outer rows and S SSR items: only when
- * D > S >= 1, every one of the D rows has the same own link id, own image ids
- * (at least one: the picture corroborates the link), quantity text and line
- * cents, P is no SSR item's substitute id, and no row
- * holds a nested row. The first D-S rows go and the last S stay: a pinned or promoted rendering comes before the line's normal place.
+ * counts prove it, drop the extra renderings so the ledger sees one row per
+ * SSR item. For a product id P with D outer rows and S SSR items, a collapse
+ * needs all of:
+ *  - D > S >= 1, P is no SSR item's substitute id, no row holds a nested row;
+ *  - the D rows agree on own link id, own image ids (at least one: the picture
+ *    corroborates the link), normalized name text, department, quantity text
+ *    and line cents, and each row's quantity text and line cents are present
+ *    and parse (two blank rows prove nothing);
+ *  - one count from neither the rows nor SSR's item list: the list card's
+ *    `item_count` equals the sum of every SSR item's `fulfilledQuantity` plus
+ *    the quantities of the nested substitute rows. A second real purchase
+ *    raises item_count, and a missing or unequal count blocks the collapse.
+ * The first D-S rows go and the last S stay: a pinned or promoted rendering
+ * comes before the line's normal place. Every kept row keeps its original DOM
+ * position (stamped as `data-index` when it has none), so no other duplicate's
+ * positional id shifts. The kept P row takes the product-only id because SSR
+ * holds P once; that matches the oldest stored key. Stale `|<position>` rows an
+ * older run stored for P are part of the owner's legacy cleanup, not migrated.
  * Returns null, changing nothing, when no product qualifies or the rows and the
  * collected source ids do not pair one to one. */
 export function collapseDuplicateRenderings(
 	html: string,
-	items: readonly { productId: string | null; substituteIds: string[] }[],
+	items: readonly { productId: string | null; substituteIds: string[]; fulfilledQuantity?: number | null }[],
 	sourceIds: readonly string[],
+	itemCount: number | null,
 ): { html: string; sourceIds: string[]; collapsed: number } | null {
+	if (itemCount === null) return null;
 	const { document } = parseHTML(html);
 	const outer = [...document.querySelectorAll("li")].filter((li) => !li.parentElement?.closest("li"));
 	if (outer.length === 0 || outer.length !== sourceIds.length) return null;
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
+	const qtyOf = (text: string) => /^\s*Qty:\s*(\d+)/i.exec(text)?.[1];
 	const facts = outer.map((line) => {
 		const own = line.cloneNode(true) as Element;
 		for (const nested of own.querySelectorAll("li")) nested.remove();
 		const ids = [...own.querySelectorAll(nameSelector)].map(
 			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "");
 		const price = normText(own.querySelector('[data-qe-id="checkoutItemPrice"]'));
+		const qtyText = normText(own.querySelector('[data-qe-id="orderItemQty"]'));
+		const cents = parseCurrencyCents(price);
 		return {
 			line,
 			id: ids.length === 1 && ids[0] ? ids[0] : null,
 			holdsNested: line.querySelector("li") !== null,
 			hasImage: ownImageIds(own).size > 0,
+			stated: qtyOf(qtyText) !== undefined && cents !== null,
 			same: JSON.stringify([
 				ids,
 				[...ownImageIds(own)].sort(),
-				normText(own.querySelector('[data-qe-id="orderItemQty"]')),
-				parseCurrencyCents(price) ?? price,
+				[...own.querySelectorAll(nameSelector)].map((link) => normText(link)),
+				departmentFor(line),
+				qtyText,
+				cents,
 			]),
 		};
 	});
 	const substituteIds = new Set(items.flatMap((item) => item.substituteIds));
 	const rowsOf = new Map<string, typeof facts>();
-	for (const fact of facts) if (fact.id !== null) rowsOf.set(fact.id, [...(rowsOf.get(fact.id) ?? []), fact]);
-	const removed = new Set<Element>();
+	for (const fact of facts) {
+		if (fact.id === null) continue;
+		const group = rowsOf.get(fact.id);
+		if (group === undefined) rowsOf.set(fact.id, [fact]);
+		else group.push(fact);
+	}
+	const supplyOf = new Map<string, number>();
+	for (const item of items) if (item.productId !== null) supplyOf.set(item.productId, (supplyOf.get(item.productId) ?? 0) + 1);
+	const candidates: { rows: typeof facts; supply: number }[] = [];
 	for (const [id, rows] of rowsOf) {
-		const supply = items.filter((item) => item.productId === id).length;
+		const supply = supplyOf.get(id) ?? 0;
 		if (rows.length <= supply || supply < 1 || substituteIds.has(id)) continue;
-		if (rows.some((row) => row.holdsNested || !row.hasImage || row.same !== rows[0]!.same)) continue;
+		if (rows.some((row) => row.holdsNested || !row.hasImage || !row.stated || row.same !== rows[0]!.same)) continue;
+		candidates.push({ rows, supply });
+	}
+	if (candidates.length === 0) return null;
+	// The independent count: SSR's fulfilled units plus the nested substitutes' units.
+	let units = 0;
+	for (const item of items) {
+		if (typeof item.fulfilledQuantity !== "number" || !Number.isInteger(item.fulfilledQuantity)) return null;
+		units += item.fulfilledQuantity;
+	}
+	for (const nested of outer.flatMap((line) => [...line.querySelectorAll("li")])) {
+		const qty = qtyOf(normText(nested.querySelector('[data-qe-id="orderItemQty"]')));
+		if (qty === undefined) return null;
+		units += Number(qty);
+	}
+	if (units !== itemCount) return null;
+	const removed = new Set<Element>();
+	for (const { rows, supply } of candidates) {
 		for (const row of rows.slice(0, rows.length - supply)) removed.add(row.line);
 	}
-	if (removed.size === 0) return null;
 	const kept = sourceIds.filter((_, i) => !removed.has(outer[i]!));
+	outer.forEach((line, position) => {
+		if (!removed.has(line) && !line.hasAttribute("data-index") && !line.hasAttribute("aria-posinset"))
+			line.setAttribute("data-index", String(position));
+	});
 	for (const line of removed) line.remove();
 	return { html: document.toString(), sourceIds: kept, collapsed: removed.size };
 }
@@ -1244,6 +1291,19 @@ export function resolveLinklessOrderItems(
 		if (unordered) inventoryOnly.set(anchor, item);
 		line.insertBefore(anchor, line.firstChild);
 	};
+	// Indexes built once, so a linkless line looks up its keys instead of
+	// scanning every item. itemsByImage is complete here: the ledger only
+	// completes when no construction budget ran out.
+	const itemsByName = new Map<string, number[]>();
+	for (const [i, item] of items.entries()) {
+		if (item.fullDisplayName === null) continue;
+		const key = normalize(item.fullDisplayName);
+		const list = itemsByName.get(key);
+		if (list === undefined) itemsByName.set(key, [i]);
+		else list.push(i);
+	}
+	const lookup = (index: Map<string, number[]>, keys: Iterable<string>) =>
+		[...new Set([...keys].flatMap((key) => index.get(key) ?? []))].sort((a, b) => a - b);
 	for (const line of ledgerComplete ? outerLines : []) {
 		const own = ownCopy(line);
 		if (own.querySelector(nameSelector) || !own.querySelector(qtySelector)) continue;
@@ -1251,12 +1311,8 @@ export function resolveLinklessOrderItems(
 		const names = new Set([...own.querySelectorAll("p, span, div")].map((el) => normalize(normText(el))));
 		// Both keys are matched against every SSR item, claimed or not, so a key
 		// that names a claimed item still counts as contradicting evidence.
-		const imageMatches = items.map((_, i) => i).filter((i) =>
-			itemIds(items[i]!).some((id) => imageIds.has(numericId(id))));
-		const textMatches = items.map((_, i) => i).filter((i) => {
-			const name = items[i]!.fullDisplayName;
-			return name !== null && names.has(normalize(name));
-		});
+		const imageMatches = lookup(itemsByImage, imageIds);
+		const textMatches = lookup(itemsByName, names);
 		const index = imageMatches[0] ?? textMatches[0];
 		const refusal = imageMatches.length > 1 ? "img_multi"
 			: textMatches.length > 1 ? "txt_multi"
@@ -1333,6 +1389,9 @@ export function resolveLinklessOrderItems(
 			return "lg=err";
 		}
 	};
+	// The diagnostic's own full search can run out where the main one did not;
+	// that is exhaustion too, and the caller must keep the gap open.
+	let diagnosticSpent = false;
 	const ledgerConflictTrace = (): string => {
 		// The full maximum matching, within a fixed work budget.
 		const subItems = items.filter((item) => item.substituteIds.length > 0).length;
@@ -1343,7 +1402,10 @@ export function resolveLinklessOrderItems(
 		const exhaustedHead = `lg=mx:?/${namedLines.length}/${items.length},x:budget${tail}`;
 		if (budgetSpent) return exhaustedHead;
 		const matching = matchRows(candidates, items.length, false, { left: LEDGER_WORK_BUDGET });
-		if (matching.exhausted) return exhaustedHead;
+		if (matching.exhausted) {
+			diagnosticSpent = true;
+			return exhaustedHead;
+		}
 		const unplaced = matching.unplaced;
 		const ownIds = (line: Element) => [...ownCopy(line).querySelectorAll(nameSelector)].map(
 			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "");
@@ -1400,7 +1462,7 @@ export function resolveLinklessOrderItems(
 		unresolved: inspectOrderDetailLines(resolvedHtml).linkless,
 		trace,
 		nameless: namelessItems ?? [],
-		ledgerExhausted: budgetSpent,
+		ledgerExhausted: budgetSpent || diagnosticSpent,
 	};
 }
 
@@ -1647,13 +1709,52 @@ function nameKey(name: string | null): string {
 	return name?.replace(WHITESPACE_RE, " ").trim().toLowerCase() || "unknown";
 }
 
+type IdFacts = Pick<DetailItem, "productId" | "name" | "sourcePosition"> & Partial<Pick<DetailItem, "lineTotal" | "quantity">>;
+const namelessSignature = (item: IdFacts) => `${parseCurrencyCents(item.lineTotal ?? null)}|${item.quantity}`;
+const isNameless = (item: IdFacts) => item.name === null && !item.productId;
+const idKeyOf = (item: IdFacts) => item.productId || nameKey(item.name);
+
+/** What the sibling-based ids need, counted once per order: how many rows share
+ * each key, and each nameless row's place among its identical predecessors.
+ * Cached on the siblings array and rebuilt if its length changes. */
+const idContexts = new WeakMap<readonly IdFacts[], { length: number; keyCount: Map<string, number>; ordinal: number[] }>();
+function idContextFor(siblings: readonly IdFacts[]) {
+	const cached = idContexts.get(siblings);
+	if (cached?.length === siblings.length) return cached;
+	const keyCount = new Map<string, number>();
+	const seen = new Map<string, number>();
+	const ordinal = siblings.map((sibling) => {
+		const key = idKeyOf(sibling);
+		keyCount.set(key, (keyCount.get(key) ?? 0) + 1);
+		if (!isNameless(sibling)) return 0;
+		const signature = namelessSignature(sibling);
+		const before = seen.get(signature) ?? 0;
+		seen.set(signature, before + 1);
+		return before;
+	});
+	const context = { length: siblings.length, keyCount, ordinal };
+	idContexts.set(siblings, context);
+	return context;
+}
+
 export function orderItemId(
 	orderId: string,
-	item: Pick<DetailItem, "productId" | "name" | "sourcePosition"> & Partial<Pick<DetailItem, "lineTotal" | "quantity">>,
+	item: IdFacts,
 	itemIndex: number,
-	siblingItems: readonly (Pick<DetailItem, "productId" | "name" | "sourcePosition"> &
-		Partial<Pick<DetailItem, "lineTotal" | "quantity">>)[] = [item],
+	siblingItems: readonly IdFacts[] = [item],
 ): string {
+	// Linear per order: when the item sits at its own index among its siblings,
+	// the counts come from one pass over them (same ids as the scans below).
+	if (siblingItems[itemIndex] === item) {
+		const context = idContextFor(siblingItems);
+		if (isNameless(item)) {
+			return `${orderId}|nameless|${parseCurrencyCents(item.lineTotal ?? null)}|${item.quantity}|${context.ordinal[itemIndex]}`;
+		}
+		const key = idKeyOf(item);
+		return context.keyCount.get(key)! > 1
+			? `${orderId}|${key}|${item.sourcePosition ?? itemIndex}`
+			: `${orderId}|${key}`;
+	}
 	// A line with neither name nor product id has no identity of its own: its
 	// id comes from what it states (line total and charged quantity) and its
 	// occurrence among this order's identical such lines, in source order, so a
