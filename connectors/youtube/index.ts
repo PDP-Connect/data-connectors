@@ -146,6 +146,14 @@ async function gunzipText(bytes: Uint8Array): Promise<string> {
 async function decodeBrowseRequestBody(
 	request: Request,
 ): Promise<HistoryBrowseLogEntry["requestBody"]> {
+	// Bytes, decode and parse all sit under one deadline; a stalled decode
+	// leaves the request unattributable, which vetoes completion.
+	return withinDeadline(readBrowseRequestBody(request), HISTORY_BODY_READ_DEADLINE_MS);
+}
+
+async function readBrowseRequestBody(
+	request: Request,
+): Promise<HistoryBrowseLogEntry["requestBody"]> {
 	try {
 		const buffer = request.postDataBuffer?.() ?? null;
 		const gzipHeader = (request.headers?.()["content-encoding"] ?? "")
@@ -180,6 +188,27 @@ const PAGE_LOG_DRAIN_WAIT_MS = 250;
 /** One response body read gets this long; a stalled body must not stall the chain. */
 const HISTORY_BODY_READ_DEADLINE_MS = 5000;
 
+/** One PageShim or renderer evaluate in the drain or final proof gets this long. */
+const HISTORY_EVALUATE_DEADLINE_MS = HISTORY_BODY_READ_DEADLINE_MS;
+
+/**
+ * The evaluate result, or null when it does not settle in time. A rejection
+ * still propagates so callers keep their own handling of it.
+ */
+async function evaluateWithinDeadline<T>(work: Promise<T>): Promise<{ value: T } | null> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			work.then((value) => ({ value })),
+			new Promise<null>((resolve) => {
+				timer = setTimeout(() => resolve(null), HISTORY_EVALUATE_DEADLINE_MS);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 /** The value, or null when it does not settle in time or rejects. */
 async function withinDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -211,6 +240,10 @@ class HistoryResponseTracker {
 	private pageLogConsumed = 0;
 	/** A correlated non-2xx answer: the run can no longer claim it saw the whole source. */
 	private non2xxSeen = false;
+	/** Sticky: a browse request failed in transport and no later reply undoes that. */
+	private transportFailureSeen = false;
+	/** Sticky: an evaluate in the drain or final proof did not settle in time. */
+	private evidenceTimedOut = false;
 	/** A correlated 2xx response whose body could not be read in time or at all. */
 	private unreadableSeen = false;
 	/** A browse call the run cannot attribute came after the last terminal evidence. */
@@ -294,12 +327,19 @@ class HistoryResponseTracker {
 		}
 	}
 
+	/** Called when a proof-time evaluate did not settle: the evidence is incomplete. */
+	markEvidenceTimeout(): void {
+		this.evidenceTimedOut = true;
+	}
+
 	/** Install the page-side log after navigation; a no-op where events exist. */
 	async attach(): Promise<void> {
 		if (!this.pageLog) return;
 		try {
-			const installed = await this.page.evaluate(installHistoryBrowseLog as never);
-			if (installed !== true) this.pageLogBroken = true;
+			const result = await evaluateWithinDeadline(
+				this.page.evaluate(installHistoryBrowseLog as never),
+			);
+			if (!result || result.value !== true) this.pageLogBroken = true;
 		} catch {
 			this.pageLogBroken = true;
 		}
@@ -375,6 +415,8 @@ class HistoryResponseTracker {
 	stateVeto(end: ListEnd): string | null {
 		if (this.non2xxSeen) return "history-browse-non-2xx";
 		if (this.unreadableSeen) return "history-response-unreadable";
+		if (this.transportFailureSeen) return "history-browse-failed";
+		if (this.evidenceTimedOut) return "history-evidence-timeout";
 		if (this.uncorrelatedSinceTerminal) return "history-browse-uncorrelated";
 		const latest = this.latestResponse;
 		if (this.pageLog && latest?.recognized && !latest.hasContinuation) {
@@ -413,9 +455,15 @@ class HistoryResponseTracker {
 		for (let attempt = 0; attempt < PAGE_LOG_DRAIN_ATTEMPTS; attempt += 1) {
 			let drained: ReturnType<typeof drainHistoryBrowseLog>;
 			try {
-				drained = (await this.page.evaluate(
-					drainHistoryBrowseLog as never,
-				)) as ReturnType<typeof drainHistoryBrowseLog>;
+				const result = await evaluateWithinDeadline(
+					this.page.evaluate(drainHistoryBrowseLog as never),
+				);
+				if (!result) {
+					this.evidenceTimedOut = true;
+					this.pageLogBroken = true;
+					return;
+				}
+				drained = result.value as ReturnType<typeof drainHistoryBrowseLog>;
 			} catch {
 				drained = null;
 			}
@@ -487,6 +535,7 @@ class HistoryResponseTracker {
 	private async observe(observation: BrowseObservation): Promise<void> {
 		this.browseResponseCount += 1;
 		const { requestBody, status } = observation;
+		if (status === 0) this.transportFailureSeen = true;
 		if (!requestBody) {
 			this.uncorrelatedResponseCount += 1;
 			this.uncorrelatedSinceTerminal = true;
@@ -1586,11 +1635,19 @@ async function readHistoryVideoList(
 			version: responseTracker.version,
 			latest: responseTracker.latest,
 		};
-		currentEnd = await page.evaluate(readListEndInBrowser, {
-			kind: "history" as const,
-			sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
-			latestHistoryResponse: snapshot.latest,
-		});
+		const refreshed = await evaluateWithinDeadline(
+			(async () =>
+				page.evaluate(readListEndInBrowser, {
+					kind: "history" as const,
+					sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+					latestHistoryResponse: snapshot.latest,
+				}))(),
+		);
+		if (!refreshed) {
+			responseTracker.markEvidenceTimeout();
+			break;
+		}
+		currentEnd = refreshed.value;
 		await responseTracker.flush();
 		if (
 			responseTracker.inFlight === 0 &&

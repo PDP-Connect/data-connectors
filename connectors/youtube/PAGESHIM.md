@@ -23,8 +23,9 @@ replaced by a page-side log. After the history page loads, `installHistoryBrowse
 call it clones the Request before the original fetch runs (afterwards the body is
 used), decodes the gzip body with `DecompressionStream`, and keeps the request
 continuation token or browseId, the status, and a compact scan of the response
-(recognized, has continuation, item count, next token). XHR browse sends are
-counted as uncorrelated. Response bodies (about 450 KB) never cross to the
+(recognized, has continuation, item count, next token). An XHR browse is logged
+the same way when the call ends (`loadend`), with its request body and status;
+a failed or aborted XHR logs status 0. Response bodies (about 450 KB) never cross to the
 host; the log holds at most 32 entries and flags overflow. The traversal drains
 the log each round, waits a bounded time for calls still in flight, and feeds
 the same transport-free tracker step Desktop uses. The page scan and the host
@@ -39,10 +40,16 @@ page (a browseId other than history, no continuation) is counted as foreign and
 ignored only when its response is 2xx, reads, and shows no rows and no
 continuation; otherwise it counts as uncorrelated. A request that failed at the
 transport is classified like a non-2xx answer: a failed history call (the initial
-request, or a known token) vetoes the run, and a failure with no body or a
-foreign body is unattributed and vetoes as uncorrelated. A response body gets
-one bounded read (five seconds); a body that stalls counts as unreadable and
-vetoes completion without stalling the chain. A history browse still in
+request, or a known token) vetoes the run. Any transport failure also sets a
+sticky veto (`history-browse-failed`) that no later reply, terminal or not,
+clears within the run, so a failure the run cannot attribute (no body, or a
+foreign body) cannot be hidden by a recognized terminal response. The whole
+body read (bytes, decode, parse) gets one bounded deadline (five seconds): a
+response body that stalls counts as unreadable, and a request body whose decode
+stalls counts as unattributable; both veto completion without stalling the
+chain. Every `page.evaluate` in the page-log drain and in the final refresh gets
+the same deadline; a timeout is incomplete evidence (`history-evidence-timeout`)
+and vetoes completion. A history browse still in
 flight (started, not yet answered or failed) keeps the final refresh from being
 stable, bounded by the three refreshes and the page-log drain wait. A veto blocks the complete STATE only; the partial checkpoint rests on
 rows already read and is kept. On this path the terminal logged response must also

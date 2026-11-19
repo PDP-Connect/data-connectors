@@ -1924,6 +1924,10 @@ class DocumentPage {
 	private pageLogPending: LoggedEntry[] = [];
 	private pageLogSent = 0;
 	private pageLogHanging = 0;
+	private drainCount = 0;
+	private readonly hangDrainFrom: number | undefined;
+	private readonly hangReadListEndFrom: number | undefined;
+	private readonly browseRequestsFirst: boolean;
 	private readonly gotoError: Error | undefined;
 	private readonly browseRequestsOnScroll: BrowseRequestSpec[];
 	private readonly pageLogHangOnScroll: number;
@@ -1950,6 +1954,12 @@ class DocumentPage {
 			/** Browse requests the page starts on scroll; "hang" never settles. */
 			browseRequestsOnScroll?: BrowseRequestSpec[];
 			gotoError?: Error;
+			/** The nth page-log drain, and every one after it, never resolves. */
+			hangDrainFrom?: number;
+			/** The nth readListEnd evaluate, and every one after it, never resolves. */
+			hangReadListEndFrom?: number;
+			/** Start the scroll's browse requests before its response arrives. */
+			browseRequestsFirst?: boolean;
 			historyResponseOnReadListEnd?: {
 				readNumber: number;
 				requested: string;
@@ -1967,6 +1977,9 @@ class DocumentPage {
 		this.pageLogHangOnScroll = options.pageLogHangOnScroll ?? 0;
 		this.browseRequestsOnScroll = options.browseRequestsOnScroll ?? [];
 		this.gotoError = options.gotoError;
+		this.hangDrainFrom = options.hangDrainFrom;
+		this.hangReadListEndFrom = options.hangReadListEndFrom;
+		this.browseRequestsFirst = options.browseRequestsFirst ?? false;
 		if (this.pageLogOnScroll)
 			Object.defineProperty(this, "on", { value: undefined });
 		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
@@ -2117,6 +2130,9 @@ class DocumentPage {
 	async waitForTimeout() {
 		if (!this.pendingHistoryScroll) return;
 		this.pendingHistoryScroll = false;
+		if (this.browseRequestsFirst)
+			for (const settle of this.browseRequestsOnScroll.splice(0))
+				this.emitBrowseRequest(settle);
 		const response = this.historyResponsesOnScroll.shift();
 		if (response) {
 			const { requested, next, ...options } = response;
@@ -2159,15 +2175,24 @@ class DocumentPage {
 	}
 	async evaluate(fn: Function, arg?: unknown) {
 		if (fn.name === "installHistoryBrowseLog") return true;
-		if (fn.name === "drainHistoryBrowseLog")
+		if (fn.name === "drainHistoryBrowseLog") {
+			this.drainCount += 1;
+			if (this.hangDrainFrom !== undefined && this.drainCount >= this.hangDrainFrom)
+				await new Promise<never>(() => undefined);
 			return {
 				entries: this.pageLogPending.splice(0),
 				overflow: false,
 				sent: this.pageLogSent,
 				completed: this.pageLogSent - this.pageLogHanging,
 			};
+		}
 		if (fn.name === "readListEnd") {
 			this.readListEndCount += 1;
+			if (
+				this.hangReadListEndFrom !== undefined &&
+				this.readListEndCount >= this.hangReadListEndFrom
+			)
+				await new Promise<never>(() => undefined);
 			if (
 				this.readListEndCount ===
 				this.historyResponseOnReadListEnd?.readNumber
@@ -3337,7 +3362,7 @@ test("page log: an uncorrelated browse call after the terminal response vetoes S
 		},
 	);
 	assert.equal(completeCursorEmitted(messages), false);
-	assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+	assert.equal(historyStopReason(diagnostics), "history-browse-failed");
 });
 
 test("an uncorrelated browse call arriving after the terminal response vetoes STATE on Desktop", async () => {
@@ -3622,8 +3647,8 @@ test("a history browse that failed is no longer in flight, but it vetoes complet
 		},
 	);
 	assert.equal(completeCursorEmitted(messages), false);
-	// Settled, so not the in-flight reason; a failure with no body is unattributed.
-	assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+	// Settled, so not the in-flight reason; a transport failure is its own sticky veto.
+	assert.equal(historyStopReason(diagnostics), "history-browse-failed");
 });
 
 test("page log: a history browse the page started and never finished leaves the run not complete", async () => {
@@ -3748,7 +3773,7 @@ test("a failed history browse request vetoes completion, whatever it looked like
 		assert.equal(completeCursorEmitted(messages), false, JSON.stringify(failBody));
 		assert.match(
 			String(historyStopReason(diagnostics)),
-			/^history-browse-(non-2xx|uncorrelated)$/,
+			/^history-browse-(non-2xx|uncorrelated|failed)$/,
 			JSON.stringify(failBody),
 		);
 	}
@@ -3790,7 +3815,7 @@ test("page log: a fetch that failed is recorded and vetoes completion", async ()
 		assert.equal(completeCursorEmitted(messages), false);
 		assert.match(
 			String(historyStopReason(diagnostics)),
-			/^history-browse-(non-2xx|uncorrelated)$/,
+			/^history-browse-(non-2xx|uncorrelated|failed)$/,
 		);
 	}
 });
@@ -3809,4 +3834,91 @@ test("a response body that stalls after its headers ends the run unproven, not h
 	);
 	assert.equal(completeCursorEmitted(messages), false);
 	assert.equal(historyStopReason(diagnostics), "history-response-unreadable");
+});
+
+// --- unresolved failures, bounded reads, XHR ---
+
+test("a failed browse queued before the terminal reply still vetoes completion", async () => {
+	for (const failBody of [null, { browseId: "FEsubscriptions" }]) {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				browseRequestsFirst: true,
+				browseRequestsOnScroll: [{ failBody }],
+				historyResponsesOnScroll: [
+					{ requested: "bootstrap-C", next: null, itemCount: 1 },
+				],
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), false, JSON.stringify(failBody));
+		assert.equal(historyStopReason(diagnostics), "history-browse-failed");
+	}
+});
+
+test("a gzip request decode that never resolves ends the run unproven, not hung", { timeout: 40_000 }, async () => {
+	const Real = globalThis.DecompressionStream;
+	(globalThis as Record<string, unknown>).DecompressionStream = class {
+		readonly readable: ReadableStream;
+		readonly writable: WritableStream;
+		constructor() {
+			const stream = new TransformStream({
+				flush: () => new Promise<void>(() => undefined),
+			});
+			this.readable = stream.readable;
+			this.writable = stream.writable;
+		}
+	};
+	try {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				gzipRequestBodies: true,
+				historyResponsesOnScroll: [
+					{ requested: "bootstrap-C", next: null, itemCount: 1 },
+				],
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), false);
+		assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+	} finally {
+		(globalThis as Record<string, unknown>).DecompressionStream = Real;
+	}
+});
+
+test("a final-refresh evaluate that never resolves ends the run unproven, not hung", { timeout: 40_000 }, async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1 },
+			],
+			hangReadListEndFrom: 5,
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-evidence-timeout");
+});
+
+test("page log: a drain evaluate that never resolves ends the run unproven, not hung", { timeout: 40_000 }, async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			pageLogOnScroll: [[loggedResponse("bootstrap-C", 1, null)]],
+			hangDrainFrom: 3,
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-evidence-timeout");
 });
