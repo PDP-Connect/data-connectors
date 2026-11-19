@@ -975,7 +975,8 @@ export function inspectInventoryPage(
 			url.searchParams.get("tab") === current.searchParams.get("tab") &&
 			url.hash === "" && url.searchParams.getAll("before").length === 1 &&
 			(url.searchParams.get("before") ?? "").trim() !== "" &&
-			Array.from(url.searchParams.keys()).every(key => key === "before" || key === "tab" || key === "page") &&
+			Array.from(url.searchParams.keys()).every(key => (key === "before" || key === "tab" || key === "page") &&
+				url.searchParams.getAll(key).length === 1) &&
 			echoesPage(url, current);
 	};
 	const nextUrl = cursorNext !== null ? null : next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
@@ -1214,7 +1215,10 @@ export function buildContributionSnapshot(
 
 /** The compact pull-request reference the Events API serves: ids, API url and refs, no title or body. */
 function isCompactPullRequestReference(pr: Record<string, unknown>, repo: string): boolean {
-	const ref = (side: unknown) => typeof objectValue(side).ref === "string" && objectValue(side).ref !== "";
+	const ref = (side: unknown) => {
+		const value = objectValue(side).ref;
+		return typeof value === "string" && value.trim() !== "";
+	};
 	return pr.title === undefined && pr.body === undefined &&
 		typeof pr.id === "number" && Number.isSafeInteger(pr.id) && pr.id > 0 &&
 		typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0 &&
@@ -1298,14 +1302,22 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 			requireField("branch", nullableText(objectValue(pr.head).ref));
 			break;
 		}
-		case "PullRequestReviewEvent":
+		case "PullRequestReviewEvent": {
 			requireField("action", typeof review.state === "string");
 			// The Events API sends a review's pull request as a compact reference: no title
 			// by source contract, so the title stays null. A present non-string title vetoes.
-			requireField("title", isCompactPullRequestReference(pr, value.repo) || nullableText(pr.title));
+			const compact = isCompactPullRequestReference(pr, value.repo);
+			// The review's own URLs must name that same pull request: its number and repository.
+			const pullUrl = `https://github.com/${value.repo}/pull/${pr.number}`;
+			const boundReview = compact &&
+				(review.pull_request_url === undefined || review.pull_request_url === pr.url) &&
+				(review.html_url === undefined || review.html_url === null ||
+					(typeof review.html_url === "string" && (review.html_url === pullUrl || review.html_url.startsWith(`${pullUrl}#`))));
+			requireField("title", boundReview || nullableText(pr.title));
 			requireField("body", nullableText(review.body));
-			requireField("url", nullableText(review.html_url));
+			requireField("url", nullableText(review.html_url) && (!compact || boundReview));
 			break;
+		}
 		case "PullRequestReviewCommentEvent":
 		case "CommitCommentEvent":
 			requireField("body", nullableText(comment.body));

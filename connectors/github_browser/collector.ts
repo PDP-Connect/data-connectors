@@ -32,6 +32,17 @@ import type { BrowserServices, LegacyContributionDay } from "./types.ts";
 const GITHUB = "https://github.com";
 const API = "https://api.github.com";
 const INVENTORY_PAGE_LIMIT = 60;
+// Keys for the unreadable-field diagnostic come from these lists only; any other
+// source text is counted under "other".
+const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
+	"CommitCommentEvent", "CreateEvent", "DeleteEvent", "DiscussionEvent", "ForkEvent", "GollumEvent",
+	"IssueCommentEvent", "IssuesEvent", "MemberEvent", "PublicEvent", "PullRequestEvent",
+	"PullRequestReviewEvent", "PullRequestReviewCommentEvent", "PullRequestReviewThreadEvent",
+	"PushEvent", "ReleaseEvent", "SponsorshipEvent", "WatchEvent",
+]);
+const KNOWN_EVENT_FIELDS: ReadonlySet<string> = new Set([
+	"identity", "public", "payload", "action", "title", "body", "url", "branch", "commits", "pages",
+]);
 const EVENTS_WINDOW = { window: "github_public_events", window_limit: 300, window_days: 30 } as const;
 const HISTORY_PAGE_SIZE = 100;
 const HISTORY_PAGE_LIMIT = 10;
@@ -320,8 +331,12 @@ export async function collectGitHubBrowser(
 				const events = response.data.map(raw => parseLegacyEventPageItem(raw));
 				for (const parsed of events) {
 					if (parsed.unreadableFields.length === 0) continue;
-					const byField = (unreadable[parsed.row?.type ?? "unknown"] ??= {});
-					for (const field of parsed.unreadableFields) byField[field] = (byField[field] ?? 0) + 1;
+					const type = parsed.row?.type;
+					const byField = (unreadable[type !== undefined && KNOWN_EVENT_TYPES.has(type) ? type : "other"] ??= {});
+					for (const field of parsed.unreadableFields) {
+						const key = KNOWN_EVENT_FIELDS.has(field) ? field : "other";
+						byField[key] = (byField[key] ?? 0) + 1;
+					}
 				}
 				const rows = events.flatMap(parsed => parsed.row === null ? [] : [parsed.row]);
 				const added = evidence.observePage({ ids: rows.map(row => row.id), rowsComplete: events.every(parsed => parsed.complete),
@@ -329,6 +344,11 @@ export async function collectGitHubBrowser(
 					...inspectApiWindow(response.link, request.url, response.data.length) });
 				for (const event of rows) {
 					if (added.delete(event.id) && await emitEntity("events", event)) covered += 1;
+				}
+				// The source serves at most 300 events; more distinct rows contradict that window.
+				if (evidence.identities.size > EVENTS_WINDOW.window_limit) {
+					evidence.fail("events_window_exceeded");
+					break;
 				}
 			}
 			// Neither a short page nor our loop limit establishes the source end.

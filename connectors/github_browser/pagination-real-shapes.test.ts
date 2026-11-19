@@ -185,6 +185,8 @@ for (const [label, next, previous, guard] of [
 	["a foreign path", starsHref("after=cursor-one&page=1&tab=stars", "other-user"), goodPrevious, "cursor_path_mismatch"],
 	["a different page value on Previous", goodNext, starsHref("before=cursor-zero&page=2&tab=stars"), undefined],
 	["a repeated page key on Previous", goodNext, starsHref("before=cursor-zero&page=1&page=1&tab=stars"), undefined],
+	["a repeated tab on Previous", goodNext, starsHref("before=cursor-zero&page=1&tab=stars&tab=stars"), "foreign_link"],
+	["a repeated before on Previous", goodNext, starsHref("before=cursor-zero&before=cursor-zero&page=1&tab=stars"), "foreign_link"],
 ] as const) {
 	test(`a starred cursor link with ${label} still withholds the walk`, async () => {
 		const result = await walkStars(next, previous);
