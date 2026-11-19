@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
@@ -59,13 +60,24 @@ function withBrowserGlobals(
 }
 
 /** Mirrors the runtime's reportStreamFailure: one stream_collection_failed SKIP_RESULT. */
+/** History failures also carry diagnostics; their content has its own test. */
+function withoutDiagnostics(options: unknown): unknown {
+	const { diagnostics: _diagnostics, ...rest } = (options ?? {}) as Record<string, unknown>;
+	return rest;
+}
+
 function failureReporter(messages: Record<string, unknown>[]) {
-	return async (stream: string, message: string) => {
+	return async (
+		stream: string,
+		message: string,
+		options?: { diagnostics?: Record<string, unknown> },
+	) => {
 		messages.push({
 			type: "SKIP_RESULT",
 			stream,
 			reason: "stream_collection_failed",
 			message,
+			...(options?.diagnostics ? { diagnostics: options.diagnostics } : {}),
 		});
 	};
 }
@@ -1462,7 +1474,7 @@ test("unreadable enumeration calls reportStreamFailure with retryable true", asy
 			messages.push(message);
 		},
 		reportStreamFailure: async (stream, _message, options) => {
-			failures.push([stream, options]);
+			failures.push([stream, withoutDiagnostics(options)]);
 		},
 		progress: async () => undefined,
 	});
@@ -1480,7 +1492,7 @@ test("parse mismatch fails instead of completing a zero-row list", async () => {
 		emitRecord: async () => undefined,
 		emit: async () => undefined,
 		reportStreamFailure: async (stream, _message, options) => {
-			failures.push([stream, options]);
+			failures.push([stream, withoutDiagnostics(options)]);
 		},
 		progress: async () => undefined,
 	});
@@ -1511,7 +1523,7 @@ test("each requested enumeration reports timeout and parse mismatch as retryable
 							messages.push(message);
 						},
 						reportStreamFailure: async (name, _message, options) => {
-							failures.push([name, options]);
+							failures.push([name, withoutDiagnostics(options)]);
 						},
 						progress: async () => undefined,
 					});
@@ -1624,7 +1636,7 @@ test("browser navigation failures report each requested enumeration as retryable
 				emitRecord: async () => undefined,
 				emit: async () => undefined,
 				reportStreamFailure: async (name, _message, options) => {
-					failures.push([name, options]);
+					failures.push([name, withoutDiagnostics(options)]);
 				},
 				progress: async () => undefined,
 			});
@@ -1703,7 +1715,7 @@ test("a stream failure is reported once across several playlists", async () => {
 			messages.push(message as Record<string, unknown>);
 		},
 		reportStreamFailure: async (stream, _message, options) => {
-			failures.push([stream, options]);
+			failures.push([stream, withoutDiagnostics(options)]);
 		},
 		progress: async () => undefined,
 	});
@@ -1873,6 +1885,7 @@ class DocumentPage {
 	private readonly historyResponsesAfterReadListEnd: HistoryResponseAfterReadListEnd[];
 	private readListEndCount = 0;
 	private pendingHistoryScroll = false;
+	private readonly gzipRequestBodies: boolean;
 	constructor(
 		pageFor: (url: string) => string,
 		forcedReadiness?: "content" | "empty",
@@ -1891,10 +1904,13 @@ class DocumentPage {
 				next: string | null;
 			};
 		historyResponsesAfterReadListEnd?: HistoryResponseAfterReadListEnd[];
+			/** Send request bodies gzip-encoded, as YouTube does; postDataJSON cannot read them. */
+			gzipRequestBodies?: boolean;
 		} = {},
 	) {
 		this.pageFor = pageFor;
 		this.forcedReadiness = forcedReadiness;
+		this.gzipRequestBodies = options.gzipRequestBodies ?? false;
 		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
 		this.historyResponsesOnGoto = options.historyResponsesOnGoto ?? [];
 		this.historyResponseOnReadListEnd = options.historyResponseOnReadListEnd;
@@ -1939,11 +1955,20 @@ class DocumentPage {
 			: [];
 		const response = {
 			url: () => "https://www.youtube.com/youtubei/v1/browse",
-			request: () => ({
-				postDataJSON: () => options.initialRequest
+			request: () => {
+				const body = options.initialRequest
 					? { browseId: "FEhistory" }
-					: { continuation: requested },
-			}),
+					: { continuation: requested };
+				return this.gzipRequestBodies
+					? {
+							postDataJSON: () => {
+								throw new Error("gzip body is not JSON");
+							},
+							postDataBuffer: () => gzipSync(JSON.stringify(body)),
+							headers: () => ({ "content-encoding": "gzip" }),
+						}
+					: { postDataJSON: () => body };
+			},
 			status: () => 200,
 			json: async () => {
 				if (options.jsonDelayMs)
@@ -3019,4 +3044,71 @@ test("playlist items prove empty only after every owned playlist and the index e
   assert.equal(Boolean(proof), !unreadable);
   if (proof) assert.equal(proof.considered, 0);
  }
+});
+
+test("a gzip request body carrying a 5000-character token correlates the history response", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const token = "T".repeat(5000);
+	for (const gzipRequestBodies of [true, false]) {
+		const { records, messages, outcome } = await collectFromDocuments(
+			() => `${historyCards(videoIds)}${historyBootstrap(videoIds, token)}`,
+			["watch_history"],
+			undefined,
+			{},
+			{
+				gzipRequestBodies,
+				historyResponsesOnScroll: [{ requested: token, next: null }],
+			},
+		);
+		assert.equal(records.get("watch_history")?.length, videoIds.length);
+		// Uncorrelated, the terminal response would not prove the end and no
+		// complete STATE would follow.
+		assert.deepEqual(outcome("watch_history"), ["STATE"], `gzip=${gzipRequestBodies}`);
+		const cursor = messages.find((message) => message.type === "STATE")
+			?.cursor as Record<string, unknown>;
+		assert.equal(cursor.complete, true);
+		assert.equal(cursor.evidence, "latest-history-response");
+	}
+});
+
+test("a failed history read carries bounded diagnostics and no row values", async () => {
+	const token = "SECRET-TOKEN-" + "z".repeat(40);
+	const videoIds = ["secretVid001", "secretVid002"];
+	const { messages } = await collectFromDocuments(
+		() => `${historyCards(videoIds)}${historyBootstrap(videoIds, token)}`,
+		["watch_history"],
+	);
+	const failure = messages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "watch_history",
+	);
+	assert.ok(failure, "history must end failed with no response proof");
+	const diagnostics = failure.diagnostics as Record<string, unknown>;
+	assert.deepEqual(Object.keys(diagnostics).sort(), [
+		"blocked",
+		"browse_total",
+		"correlated",
+		"deduped_count",
+		"non_2xx",
+		"parsed_count",
+		"phase",
+		"proof_kind",
+		"safe_prefix",
+		"scanned_count",
+		"stop_reason",
+		"tracking_complete",
+		"uncorrelated",
+		"unrecognized",
+	]);
+	assert.equal(diagnostics.stop_reason, "stalled");
+	assert.equal(diagnostics.parsed_count, 2);
+	assert.equal(diagnostics.safe_prefix, true);
+	assert.equal(diagnostics.blocked, false);
+	assert.equal(diagnostics.proof_kind, "unproven");
+	assert.equal(diagnostics.correlated, 0);
+	assert.equal(diagnostics.tracking_complete, true);
+	for (const value of Object.values(diagnostics))
+		assert.ok(["string", "number", "boolean"].includes(typeof value) || value === null);
+	const text = JSON.stringify(diagnostics);
+	for (const secret of [token, ...videoIds, "youtube.com", "Seen"])
+		assert.equal(text.includes(secret), false, secret);
 });

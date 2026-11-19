@@ -29,7 +29,12 @@ import {
 } from "./browser-dom.ts";
 import {
 	enumerationEnded,
-	readHistoryResponseEvidence,
+	drainHistoryBrowseLog,
+	historyEvidenceFromScan,
+	installHistoryBrowseLog,
+	scanHistoryResponse,
+	type HistoryBrowseLogEntry,
+	type HistoryResponseScan,
 	type ListEnd,
 	type ListKind,
 	type ListEndRequest,
@@ -116,10 +121,73 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 		: null;
 }
 
+/** One browse call, reduced to what the end proof needs, whichever transport saw it. */
+type BrowseObservation = {
+	/** Decoded request body; null when it could not be decoded. */
+	readonly requestBody: HistoryBrowseLogEntry["requestBody"];
+	readonly status: number;
+	/** Read lazily: uncorrelated and non-2xx calls never pay for their body. */
+	readonly readScan: () => Promise<HistoryResponseScan | null>;
+};
+
+const GZIP_MAGIC = [0x1f, 0x8b];
+
+async function gunzipText(bytes: Uint8Array): Promise<string> {
+	return new Response(
+		new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream("gzip")),
+	).text();
+}
+
+/**
+ * Decode a browse request body without node:zlib (this file is bundled for
+ * PageShim). YouTube sends a gzip body that postDataJSON cannot parse.
+ * Returns null when it cannot be decoded.
+ */
+async function decodeBrowseRequestBody(
+	request: Request,
+): Promise<HistoryBrowseLogEntry["requestBody"]> {
+	try {
+		const buffer = request.postDataBuffer?.() ?? null;
+		const gzipHeader = /gzip/i.test(
+			request.headers?.()["content-encoding"] ?? "",
+		);
+		const gzipBody =
+			buffer !== null &&
+			buffer.length > 2 &&
+			buffer[0] === GZIP_MAGIC[0] &&
+			buffer[1] === GZIP_MAGIC[1];
+		const parsed =
+			buffer !== null && (gzipBody || gzipHeader)
+				? JSON.parse(await gunzipText(new Uint8Array(buffer)))
+				: request.postDataJSON();
+		const body = recordValue(parsed);
+		if (!body) return null;
+		if (typeof body.continuation === "string")
+			return body.continuation.length <= 16384
+				? { continuation: body.continuation }
+				: { continuationTooLong: true };
+		if (typeof body.browseId === "string") return { browseId: body.browseId };
+		return {};
+	} catch {
+		return null;
+	}
+}
+
+const PAGE_LOG_DRAIN_ATTEMPTS = 20;
+const PAGE_LOG_DRAIN_WAIT_MS = 250;
+
 class HistoryResponseTracker {
 	private static readonly MAX_TRACKED_TOKENS = HISTORY_MAX_SCROLL_ROUNDS + 8;
 	private static readonly MAX_PRESEED_RESPONSES = 32;
 	private readonly page: BrowserCollectContext["page"];
+	/**
+	 * A page without response events (PageShim) is observed through a wrapper the
+	 * page installs around fetch; its log is drained instead of listened to.
+	 */
+	private readonly pageLog: boolean;
+	private pageLogBroken = false;
+	private pageLogOverflow = false;
+	private pageLogConsumed = 0;
 	private readonly tokens = new Set<string>();
 	private readonly requestedTokens = new Set<string>();
 	private readonly preSeedResponses: Array<{
@@ -161,7 +229,19 @@ class HistoryResponseTracker {
 
 	constructor(page: BrowserCollectContext["page"]) {
 		this.page = page;
-		page.on("response", this.onResponse);
+		this.pageLog = typeof (page as { on?: unknown }).on !== "function";
+		if (!this.pageLog) page.on("response", this.onResponse);
+	}
+
+	/** Install the page-side log after navigation; a no-op where events exist. */
+	async attach(): Promise<void> {
+		if (!this.pageLog) return;
+		try {
+			const installed = await this.page.evaluate(installHistoryBrowseLog as never);
+			if (installed !== true) this.pageLogBroken = true;
+		} catch {
+			this.pageLogBroken = true;
+		}
 	}
 
 	seed(tokens: readonly string[], page: ListEnd): void {
@@ -190,6 +270,7 @@ class HistoryResponseTracker {
 			uncorrelatedResponseCount: this.uncorrelatedResponseCount,
 			non2xxResponseCount: this.non2xxResponseCount,
 			unrecognizedResponseCount: this.unrecognizedResponseCount,
+			trackingComplete: this.trackingComplete,
 			latestStatus: this.latestStatus,
 			latestRecognized: this.latestResponse?.recognized ?? null,
 			latestHasContinuation: this.latestResponse?.hasContinuation ?? null,
@@ -206,7 +287,7 @@ class HistoryResponseTracker {
 	}
 
 	get trackingComplete(): boolean {
-		return !this.preSeedOverflow;
+		return !this.preSeedOverflow && !this.pageLogBroken && !this.pageLogOverflow;
 	}
 
 	get allArrivalsProcessed(): boolean {
@@ -215,10 +296,52 @@ class HistoryResponseTracker {
 
 	async flush(): Promise<void> {
 		await this.pending;
+		await this.drainPageLog();
 	}
 
 	dispose(): void {
-		this.page.off("response", this.onResponse);
+		if (!this.pageLog) this.page.off("response", this.onResponse);
+	}
+
+	/**
+	 * Take the page's logged browse calls. Waits a bounded time for calls the
+	 * page started but has not finished; any left over keep arrivals unprocessed,
+	 * so the final proof fails closed.
+	 */
+	private async drainPageLog(): Promise<void> {
+		if (!this.pageLog || !this.seeded || this.pageLogBroken) return;
+		for (let attempt = 0; attempt < PAGE_LOG_DRAIN_ATTEMPTS; attempt += 1) {
+			let drained: ReturnType<typeof drainHistoryBrowseLog>;
+			try {
+				drained = (await this.page.evaluate(
+					drainHistoryBrowseLog as never,
+				)) as ReturnType<typeof drainHistoryBrowseLog>;
+			} catch {
+				drained = null;
+			}
+			if (!drained) {
+				// The page lost the wrapper (navigation or reload): calls are unaccounted.
+				this.pageLogBroken = true;
+				return;
+			}
+			if (drained.overflow) this.pageLogOverflow = true;
+			for (const entry of drained.entries) {
+				this.pageLogConsumed += 1;
+				try {
+					await this.observe({
+						requestBody: entry.requestBody,
+						status: entry.status,
+						readScan: async () => entry.summary,
+					});
+				} catch {
+					// Keep draining when one entry cannot be inspected.
+				}
+			}
+			this.evidenceVersion = drained.sent;
+			this.processedVersion = this.pageLogConsumed;
+			if (drained.completed >= drained.sent) return;
+			await this.page.waitForTimeout(PAGE_LOG_DRAIN_WAIT_MS);
+		}
 	}
 
 	private enqueue(response: Response, version: number): void {
@@ -236,21 +359,30 @@ class HistoryResponseTracker {
 
 	private async inspect(response: Response): Promise<void> {
 		if (!response.url().includes("/youtubei/v1/browse")) return;
+		await this.observe({
+			requestBody: await decodeBrowseRequestBody(response.request()),
+			status: response.status(),
+			readScan: async () => {
+				try {
+					return scanHistoryResponse(await response.json());
+				} catch {
+					return null;
+				}
+			},
+		});
+	}
+
+	/** The transport-free step: Desktop events and the page log both end here. */
+	private async observe(observation: BrowseObservation): Promise<void> {
 		this.browseResponseCount += 1;
-		let requestBody: Record<string, unknown> | null = null;
-		const request: Request = response.request();
-		try {
-			requestBody = recordValue(request.postDataJSON());
-		} catch {
+		const { requestBody, status } = observation;
+		if (!requestBody) {
 			this.uncorrelatedResponseCount += 1;
 			return;
 		}
-		const requestedContinuation =
-			typeof requestBody?.continuation === "string"
-				? requestBody.continuation
-				: null;
-		if (requestedContinuation && requestedContinuation.length > 16384) return;
-		const initialHistoryRequest = requestBody?.browseId === "FEhistory";
+		if (requestBody.continuationTooLong) return;
+		const requestedContinuation = requestBody.continuation ?? null;
+		const initialHistoryRequest = requestBody.browseId === "FEhistory";
 		if (
 			!initialHistoryRequest &&
 			(!requestedContinuation || !this.tokens.has(requestedContinuation))
@@ -259,7 +391,7 @@ class HistoryResponseTracker {
 			return;
 		}
 		this.correlatedResponseCount += 1;
-		this.latestStatus = response.status();
+		this.latestStatus = status;
 		const repeatedRequest =
 			requestedContinuation !== null &&
 			this.requestedTokens.has(requestedContinuation);
@@ -268,7 +400,7 @@ class HistoryResponseTracker {
 			this.requestedTokens.size < HistoryResponseTracker.MAX_TRACKED_TOKENS
 		)
 			this.requestedTokens.add(requestedContinuation);
-		if (response.status() < 200 || response.status() >= 300) {
+		if (status < 200 || status >= 300) {
 			this.non2xxResponseCount += 1;
 			this.latestResponse = {
 				recognized: false,
@@ -279,10 +411,8 @@ class HistoryResponseTracker {
 			};
 			return;
 		}
-		let responseBody: unknown;
-		try {
-			responseBody = await response.json();
-		} catch {
+		const scan = await observation.readScan();
+		if (!scan) {
 			this.unrecognizedResponseCount += 1;
 			this.latestResponse = {
 				recognized: false,
@@ -293,8 +423,8 @@ class HistoryResponseTracker {
 			};
 			return;
 		}
-		const evidence = readHistoryResponseEvidence(
-			responseBody,
+		const evidence = historyEvidenceFromScan(
+			scan,
 			requestedContinuation,
 			this.requestedTokens,
 		);
@@ -641,7 +771,11 @@ interface StreamReporter {
 	 * per stream. Records already read are still emitted, and no finishing
 	 * `STATE` follows.
 	 */
-	fail(stream: string, message?: string): Promise<void>;
+	fail(
+		stream: string,
+		message?: string,
+		diagnostics?: Record<string, unknown>,
+	): Promise<void>;
 }
 
 const END_NOT_OBSERVED_MESSAGE =
@@ -650,13 +784,16 @@ const END_NOT_OBSERVED_MESSAGE =
 function createStreamReporter(ctx: BrowserContext): StreamReporter {
 	const failed = new Set<string>();
 	return {
-		async fail(stream, message = END_NOT_OBSERVED_MESSAGE) {
+		async fail(stream, message = END_NOT_OBSERVED_MESSAGE, diagnostics) {
 			if (failed.has(stream)) return;
 			if (!ctx.reportStreamFailure)
 				throw new Error(
 					"reportStreamFailure is required to report a failed stream",
 				);
-			await ctx.reportStreamFailure(stream, message, { retryable: true });
+			await ctx.reportStreamFailure(stream, message, {
+				retryable: true,
+				...(diagnostics ? { diagnostics } : {}),
+			});
 			failed.add(stream);
 		},
 	};
@@ -834,6 +971,7 @@ interface VideoReadResult extends ListRead<BrowserVideo> {
 		uncorrelatedResponseCount: number;
 		non2xxResponseCount: number;
 		unrecognizedResponseCount: number;
+		trackingComplete: boolean;
 		latestStatus: number | null;
 		latestRecognized: boolean | null;
 		latestHasContinuation: boolean | null;
@@ -1039,6 +1177,7 @@ async function readHistoryVideoList(
 		responseTracker.dispose();
 		throw new Error("youtube_history_page_unreadable");
 	}
+	await responseTracker.attach();
 	await capture?.captureDom(page, "youtube-watch-history");
 	let currentEnd = await page.evaluate(readListEndInBrowser, {
 		kind: "history" as const,
@@ -1486,6 +1625,32 @@ function readWatchHistoryList(
 	);
 }
 
+/**
+ * Why a history read ended failed or incomplete, as numbers, flags and fixed
+ * vocabulary only. It never holds a video id, title, date, URL or token.
+ */
+function historyFailureDiagnostics(
+	result: VideoReadResult,
+): Record<string, unknown> {
+	const history = result.historyDiagnostics;
+	return {
+		stop_reason: result.stopReason ?? null,
+		phase: result.phase ?? null,
+		scanned_count: result.scannedCount ?? 0,
+		parsed_count: result.parsedCount ?? 0,
+		deduped_count: result.dedupedCount ?? 0,
+		safe_prefix: Boolean(result.lastAccounted),
+		blocked: result.blocked === true,
+		proof_kind: result.evidence.kind,
+		browse_total: history?.browseResponseCount ?? null,
+		correlated: history?.correlatedResponseCount ?? null,
+		uncorrelated: history?.uncorrelatedResponseCount ?? null,
+		non_2xx: history?.non2xxResponseCount ?? null,
+		unrecognized: history?.unrecognizedResponseCount ?? null,
+		tracking_complete: history?.trackingComplete ?? null,
+	};
+}
+
 async function readableVideos(
 	ctx: BrowserContext,
 	streams: StreamReporter,
@@ -1513,7 +1678,13 @@ async function readableVideos(
 			!result.exhausted &&
 			(stream !== "watch_history" || !result.partialCheckpointAllowed)
 		)
-			await streams.fail(stream);
+			await streams.fail(
+				stream,
+				undefined,
+				stream === "watch_history"
+					? historyFailureDiagnostics(result)
+					: undefined,
+			);
 		return result;
 	} catch (error) {
 		const preciseReason =
@@ -1521,7 +1692,17 @@ async function readableVideos(
 			/^youtube_(?:history|playlist)_page_unreadable$/.test(error.message)
 				? error.message
 				: undefined;
-		await streams.fail(stream, preciseReason);
+		await streams.fail(
+			stream,
+			preciseReason,
+			stream === "watch_history"
+				? {
+						stop_reason: "exception",
+						error_name:
+							error instanceof Error ? error.name.slice(0, 40) : "non-error",
+					}
+				: undefined,
+		);
 		return null;
 	}
 }

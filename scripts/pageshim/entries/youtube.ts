@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { collectYoutubeBrowser, hasYoutubeSession } from "../../../connectors/youtube/index.ts";
-import { youtubePageShimAdapter, collectYoutubeHistoryPageShim } from "../../../connectors/youtube/pageshim.ts";
+import { youtubePageShimAdapter } from "../../../connectors/youtube/pageshim.ts";
 import { validateRecord } from "../../../connectors/youtube/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import { applyRequestedScopeEntries } from "../requested-scope-entries.ts";
@@ -25,13 +25,9 @@ function scopeEntries(page: ShimPage): unknown {
 	probe: (facade) => hasYoutubeSession(youtubePageShimAdapter(facade as never)),
 	validateRecord,
 	prepareRequested: (requested) => applyRequestedScopeEntries(requested, scopeEntries(page), "youtube"),
-	collect: async (raw) => {
+	collect: (raw) => {
 		const ctx = raw as unknown as Parameters<typeof collectYoutubeBrowser>[0];
-		const requested = new Map(ctx.requested);
-		requested.delete("watch_history");
-		const adapted = youtubePageShimAdapter(ctx.page);
-		await collectYoutubeBrowser({ ...ctx, page: adapted, requested });
-		if (ctx.requested.has("watch_history")) await collectYoutubeHistoryPageShim({ ...ctx, page: adapted });
+		return collectYoutubeBrowser({ ...ctx, page: youtubePageShimAdapter(ctx.page) });
 	},
 	toScope: (_stream, records) => ({ records }),
 	emptyScopeFromCheckpoint: true,

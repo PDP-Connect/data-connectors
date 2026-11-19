@@ -10,22 +10,46 @@ Record IDs use WebCrypto SHA-256 with the same 24-hex-character IDs as Desktop.
 Timing uses the browser/global performance clock. Desktop response correlation,
 history traversal limits, and completeness checks are unchanged.
 
-## History limitation
+## History
 
-Mobile currently reads at most 50 already-rendered history rows, only after the
-target page's authenticated session and page-wall checks. A selected,
-source-proven empty history can acknowledge an empty checkpoint. A nonempty
-prefix emits inventory_not_proven_complete with retry_by_runtime and no STATE,
-even if a saved cursor claims a prior complete inventory. Full continuation
-traversal is not supported by this adapter: the facade lacks response events,
-and a direct in-page browse fetch needs equivalent owner-bound response parsing
-and row accounting before it can replace Desktop's correlated response/DOM proof.
+Watch history runs Desktop's own traversal (`readHistoryVideoList`) through the
+adapter: scroll rounds, row reading in 50-row batches, stop reasons, the
+resumable checkpoint, the partial-budget rules and the STATE it emits. There is
+no row cap on this port.
 
-The shared PageShim runtime classifies inventory_not_proven_complete as Partial.
-Regression coverage checks the 50-row cap, Partial status and absence of STATE
-on both one-message and streaming hosts, including a saved complete cursor.
-No stream_collection_failed companion is needed for an ordinary incomplete
-inventory. Owner-bound, source-verified empty history retains its empty STATE.
+The facade has no response events, so Desktop's `page.on("response")` feed is
+replaced by a page-side log. After the history page loads, `installHistoryBrowseLog`
+(page-evidence.ts) wraps `window.fetch` once. For each `/youtubei/v1/browse`
+call it clones the Request before the original fetch runs (afterwards the body is
+used), decodes the gzip body with `DecompressionStream`, and keeps the request
+continuation token or browseId, the status, and a compact scan of the response
+(recognized, has continuation, item count, next token). XHR browse sends are
+counted as uncorrelated. Response bodies (about 450 KB) never cross to the
+host; the log holds at most 32 entries and flags overflow. The traversal drains
+the log each round, waits a bounded time for calls still in flight, and feeds
+the same transport-free tracker step Desktop uses. The page scan and the host
+evidence are one implementation (`HISTORY_RESPONSE_SCAN_SOURCE`).
+
+The run still ends failed (`stream_collection_failed`, retry_by_runtime, no STATE)
+when the wrapper cannot be installed or is lost to a navigation, the log
+overflows, a call stays unfinished, a body cannot be decoded, or the correlated
+responses do not prove the end. A failed history read passes bounded diagnostics
+(stop reason, counts, proof kind, correlation counts; never ids, titles, dates,
+URLs or tokens) to the stream failure.
+
+What stays unproven on a device: that the mobile WebView lets the page wrap
+`fetch` before YouTube's player code runs, supports `DecompressionStream`,
+sends the browse calls through `fetch` (not XHR or a service worker), and keeps
+the page alive through a long scroll under the 30-second evaluate limit. The
+wrapper and gzip decode were checked in headless Chromium only. Until a device
+run shows a complete history, treat a phone history as read-through-proof, not
+as a verified full export.
+
+The shared PageShim runtime classifies the failed stream as Partial. Regression
+coverage runs a multi-batch gzip continuation walk to the source end (with STATE)
+and a page whose calls the wrapper cannot see (incomplete, no STATE) on both
+one-message and streaming hosts. Owner-bound, source-verified empty history
+retains its empty STATE.
 
 ## Device validation still required
 
@@ -38,4 +62,4 @@ Verify mobile WebView DOM/layout parity (especially m.youtube.com redirects),
 account-menu click behavior, login/consent walls and session loss, WebCrypto
 availability, evaluate size/30-second call limits under slow networks, real
 playlist/subscription continuation and exhaustion evidence, and accepted STATE
-persistence on supported hosts. Do not claim a full history export from this port.
+persistence on supported hosts. Do not claim a verified full history export from this port until a device run shows one.
