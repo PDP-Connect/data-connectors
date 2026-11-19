@@ -10792,7 +10792,7 @@
 				},
 				"connector_key": "github",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-				"version": "0.7.7",
+				"version": "0.7.8",
 				"display_name": "GitHub",
 				"brand": {
 					"icon": "icon.svg",
@@ -11617,10 +11617,10 @@
 					{
 						"name": "events",
 						"required": true,
-						"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector.",
+						"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API serves at most 300 events from the last 30 days; older activity is not available from GitHub to any caller and is not a gap in this connector.",
 						"display": {
 							"label": "Your recent activity",
-							"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window."
+							"detail": "Event type, timestamp, and repository for each public activity event, limited to the 300 events from the last 30 days that GitHub serves."
 						},
 						"semantics": "append_only",
 						"schema": {
