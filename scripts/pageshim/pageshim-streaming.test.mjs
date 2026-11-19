@@ -194,7 +194,7 @@ for (const streamRecords of [false, true]) {
 	});
 }
 
-for (const [kind, expected] of [["serialize", "serialize_failed (Error)"], ["bridge", "bridge_rejected (Error)"]]) {
+for (const [kind, expected] of [["serialize", "A message held a value that cannot be serialized; the run is incomplete"], ["bridge", "bridge_rejected (Error)"]]) {
 	for (const streamRecords of [false, true]) {
 		test(`a ${kind} failure reports a fixed class and never row content: records=${streamRecords}`, { timeout: 60_000 }, async () => {
 			await mkdir(root, { recursive: true });
@@ -219,7 +219,7 @@ for (const [kind, expected] of [["serialize", "serialize_failed (Error)"], ["bri
 			const done = run.connectorMessages.filter(message => message.type === "DONE");
 			assert.equal(done.length, 1);
 			assert.equal(done[0].status, "failed");
-			assert.equal(run.data.error, kind === "serialize" && !streamRecords ? expected : DELIVERY_FAILED);
+			assert.equal(run.data.error, kind === "serialize" ? expected : DELIVERY_FAILED);
 			assert.equal(JSON.stringify([run.data, run.connectorMessages, run.log]).includes("ACME-4417"), false);
 		});
 	}

@@ -1237,9 +1237,10 @@ export function runConnector(config: RunConnectorConfig): void {
 export interface ConnectorLifecycleTransport {
 	/**
 	 * Await durable record/checkpoint output before the lifecycle emits DONE.
-	 * The lifecycle imposes no deadline: a promise that never settles leaves the
-	 * run pending with no DONE. The transport must enforce its own deadline on
-	 * everything this awaits and reject, so the run ends in a failed DONE.
+	 * Bounded by the settlement budget (`inflightSettleTimeoutMs`, shared with
+	 * the drain): a promise that never settles ends the run in one failed DONE
+	 * with `record_settlement_timeout`. A rejection also ends in a failed DONE.
+	 * The transport may enforce a shorter deadline of its own.
 	 */
 	beforeDone?: (withheldAtOrAfterUntil: ReadonlySet<string>) => Promise<void>;
 	/**
@@ -1593,6 +1594,7 @@ export async function runConnectorLifecycle(
 	const flagFailure = (): TerminalError | null => {
 		const flags = channel.flags();
 		if (flags.violation) return new FixedFailure("lifecycle_violation");
+		if (flags.unserializable) return new FixedFailure("frame_not_serializable");
 		if (flags.expired) return new FixedFailure("record_settlement_timeout");
 		if (flags.late) return new FixedFailure("late_emission");
 		const recordFailure = emitRecordGate?.failure() ?? null;
@@ -1995,6 +1997,8 @@ const FIXED_FAILURE = {
 		"An emission arrived after the run closed; the run is incomplete",
 	lifecycle_violation:
 		"A connector wrote a terminal message itself; the run is incomplete",
+	frame_not_serializable:
+		"A message held a value that cannot be serialized; the run is incomplete",
 	terminal_report_failed:
 		"The run failed and its error could not be reported in full",
 } as const;
@@ -2038,6 +2042,7 @@ export interface OutputChannel {
 		late: boolean;
 		expired: boolean;
 		violation: boolean;
+		unserializable: boolean;
 	};
 }
 
@@ -2065,6 +2070,7 @@ export function createOutputChannel(
 	let writeFailed = false;
 	let late = false;
 	let violation = false;
+	let unserializable = false;
 	let idleWaiters: (() => void)[] = [];
 	const call = (message: EmittedMessage): Promise<void> => {
 		try {
@@ -2128,9 +2134,10 @@ export function createOutputChannel(
 		try {
 			snapshot = structuredClone(message);
 		} catch {
-			// Not plain data (the transport's serializer reports that, with its
-			// own fixed class). The frame envelope is still pinned.
-			snapshot = { ...message };
+			// Not plain data: no full snapshot is possible, so the frame is
+			// refused here and never queued. The run ends in one failed DONE.
+			unserializable = true;
+			return Promise.reject(new FixedFailure("frame_not_serializable"));
 		}
 		if (snapshot.type === "DONE") return refuseDone();
 		return open() ? enqueue(snapshot) : refuse();
@@ -2179,7 +2186,13 @@ export function createOutputChannel(
 		noteLate: () => {
 			late = true;
 		},
-		flags: () => ({ writeFailed, late, expired: abandoned, violation }),
+		flags: () => ({
+			writeFailed,
+			late,
+			expired: abandoned,
+			violation,
+			unserializable,
+		}),
 	};
 }
 

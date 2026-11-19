@@ -2849,3 +2849,28 @@ for (const status of ["succeeded", "failed"] as const) {
 		await assertDoneIsLast(calls);
 	});
 }
+
+test("a record with a nested function is refused at admission: one failed DONE, no record frame", async () => {
+	const calls: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_unserializable",
+			collect: async ({ emitRecord }) => {
+				await emitRecord("items", {
+					id: "a",
+					inner: { fn: () => LEAK },
+				}).catch(() => undefined);
+			},
+		},
+		recordingTransport(calls),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(
+		calls.some((m) => m.type === "RECORD"),
+		false,
+	);
+	const done = calls.filter((m) => m.type === "DONE");
+	assert.equal(done.length, 1);
+	assert.equal(JSON.stringify(done).includes(LEAK), false);
+	await assertDoneIsLast(calls);
+});

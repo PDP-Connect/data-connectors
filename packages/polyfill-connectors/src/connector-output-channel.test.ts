@@ -143,3 +143,34 @@ test("a frame mutated after emit is sent as it was admitted", async () => {
 	await Promise.all([first, second]);
 	assert.deepEqual(calls[1], { type: "PROGRESS", message: "second" });
 });
+
+for (const [label, nested] of [
+	["function", () => "ACME-4417"],
+	["symbol", Symbol("ACME-4417")],
+] as const) {
+	test(`a frame with a nested ${label} is refused at admission and never sent`, async () => {
+		const sent: EmittedMessage[] = [];
+		const channel = createOutputChannel(async (message) => {
+			sent.push(message);
+		});
+		const frame = {
+			type: "RECORD",
+			stream: "s",
+			key: "k",
+			data: { inner: { nested } },
+		} as unknown as EmittedMessage;
+		await assert.rejects(
+			channel.write(frame),
+			(e: unknown) => !String((e as Error).message).includes("ACME-4417"),
+		);
+		(frame as unknown as { data: { inner: object } }).data.inner = {
+			changed: true,
+		};
+		await sleep(20);
+		assert.equal(sent.length, 0);
+		assert.equal(
+			channel.flags().writeFailed || channel.flags().unserializable,
+			true,
+		);
+	});
+}
