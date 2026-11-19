@@ -851,10 +851,16 @@ for (const [label, image, name, copies, expected] of [
 	});
 }
 
-async function resolveLinkless(items: unknown[], rows: string, expectedItemCount?: number) {
+async function resolveLinkless(items: unknown[], rows: string, expectedItemCount?: number, virtualized = false) {
 	const data = { page: "/my-account/order-history/[orderId]", gssp: true, props: { __N_SSP: true, pageProps: { order: { orderId: order.orderId, orderItems: items } } } };
 	const html = rows + '<section data-qe-id="orderSummaryCard"></section>' + `<script id="__NEXT_DATA__">${JSON.stringify(data)}</script>`;
-	const result = await fetchOrderDetail(pageFor(html), order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50, ...(expectedItemCount === undefined ? {} : { expectedItemCount }) });
+	const page = pageFor(html) as any;
+	if (virtualized) {
+		// A page whose mounted count is not the declared count: no static evidence.
+		const evaluate = page.evaluate;
+		page.evaluate = async () => ({ ...(await evaluate()), staticListEvidence: null });
+	}
+	const result = await fetchOrderDetail(page, order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50, ...(expectedItemCount === undefined ? {} : { expectedItemCount }) });
 	assert.equal(result.status, "hydrated");
 	if (result.status !== "hydrated") throw new Error("not hydrated");
 	return result;
@@ -1653,7 +1659,9 @@ test("a virtualized snapshot whose rows do not match the collected ids stays ope
 	const result = await fetchOrderDetail(base, order.orderId, { waitForHydration: async () => {}, detailSurfaceTimeoutMs: 50, expectedItemCount: DUP_COUNT });
 	assert.equal(result.status, "hydrated");
 	if (result.status !== "hydrated") return;
-	assert.equal(matchesTotal(result, 5), false);
+	// The collapse is dropped: the rows are read as drawn, as in 0.6.60.
+	assert.doesNotMatch(result.linklessTrace ?? "", /dup_render/);
+	assert.equal(result.evidence.sourceIds.length, 5);
 });
 
 // ─── ledger exhaustion is a value, and building candidates is bounded ─────
@@ -1788,4 +1796,32 @@ test("a nested row blocks the collapse unless its qty is exactly 'Qty: N' and it
 	];
 	const results = await Promise.all(bad.map((html) => resolveLinkless(dupSsr, html, DUP_COUNT)));
 	for (const [i, r] of results.entries()) assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/, `form ${i}`);
+});
+
+// ─── round 17b: the mounting proof, on virtualized snapshots ──────────────
+// Rows carry data-index as H-E-B's virtualizer writes it, and the snapshot has
+// no static (declared-count) evidence. A collapse may recover the gap only
+// when the ledger places every SSR item on a distinct kept row, kept rows equal
+// the SSR count, mounted raw rows equal SSR + collapsed, and item_count equals
+// the fulfilled-units sum.
+const indexed = (html: string) => { let n = 0; return html.replace(/<li>/g, () => `<li data-index="${n++}">`); };
+const virtual = (rows: string) => resolveLinkless(dupSsr, indexed(rows), DUP_COUNT, true);
+
+test("virtualized: one real row unmounted, a duplicate rendering and a stray extra row make the lengths match; the gap stays open", async () => {
+	// 901 (second) is unmounted. 900 is drawn twice (collapses) and 902 has an
+	// unmatched extra rendering with other cents, so raw rows = SSR + 1.
+	const r = await virtual(dupRow("900") + dupRow("902") + dupRow("902", { cents: "$9.00" }) + dupRow("901", { cents: "$3.00" }) + dupRow("903", { nested: nestedSub("904") }) + dupRow("900"));
+	assert.equal(matchesTotal(r, 5), false);
+});
+
+test("virtualized: two real rows unmounted, two duplicate renderings and two stray rows make the lengths match; the gap stays open", async () => {
+	const r = await virtual(dupRow("900") + dupRow("900") + dupRow("902") + dupRow("902", { cents: "$9.00" }) + dupRow("902", { cents: "$8.00" }) + dupRow("903", { nested: nestedSub("904") }) + dupRow("900"));
+	assert.equal(matchesTotal(r, 5), false);
+});
+
+test("virtualized: the live-shaped case recovers with every SSR line", async () => {
+	const r = await virtual(dupPage(dupRow("900"), dupRow("900")));
+	assert.match(r.linklessTrace ?? "", /;dup_render=1/);
+	assert.equal(r.evidence.sourceIds.length, 5);
+	assert.equal(matchesTotal(r, 5), true);
 });

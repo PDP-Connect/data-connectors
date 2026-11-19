@@ -1106,19 +1106,39 @@ export async function fetchOrderDetail(
 	const source = readSourceOrderItems(html, orderId);
 	// One product drawn twice is collapsed only on SSR's own count (see
 	// collapseDuplicateRenderings); every later check runs on the collapsed set.
-	const collapse = collapseDuplicateRenderings(surface.html, source.items, surface.sourceIds, deps.expectedItemCount ?? null);
-	const surfaceHtml = collapse?.html ?? surface.html;
-	const surfaceIds = collapse?.sourceIds ?? surface.sourceIds;
-	// A collapsed set keeps the 0.6.60 declared-count check on the raw rows
-	// (the snapshot mounted every raw row and the collection holds only those),
-	// now against the raw total the collapse implies, and adds the collapsed
-	// count on top. Matching lengths alone never pass.
-	const lineCountMatches = collapse
-		? initialSourceItemTotal !== null &&
-			surface.declaredCountAt(initialSourceItemTotal + collapse.collapsed) &&
-			surfaceIds.length === initialSourceItemTotal
-		: surface.lineCountMatches;
-	const resolved = resolveLinklessOrderItems(surfaceHtml, source.items);
+	let collapse = collapseDuplicateRenderings(surface.html, source.items, surface.sourceIds, deps.expectedItemCount ?? null);
+	let surfaceHtml = collapse?.html ?? surface.html;
+	let surfaceIds = collapse?.sourceIds ?? surface.sourceIds;
+	let resolved = resolveLinklessOrderItems(surfaceHtml, source.items);
+	// Mounting proof for a collapsed set. A snapshot with fewer mounted rows
+	// than the order has can still show matching lengths: an unmounted real row
+	// offset by a stray extra row. So the lengths are not the evidence. The
+	// collapse recovers the gap only when all of these hold on this run:
+	//  (a) the matcher places every SSR item on a distinct kept row (ledger
+	//      complete), so a stray row that fits no item fails here;
+	//  (b) kept rows equal the SSR item count;
+	//  (c) mounted raw rows equal SSR count + collapsed, exactly;
+	//  (d) item_count equals the fulfilled-units sum (checked in
+	//      collapseDuplicateRenderings; it returns no collapse otherwise).
+	// (a) and (d) are the independent proof: every purchased SSR item is
+	// mounted, and SSR is not undercounting. Any miss drops the collapse and
+	// reads the rows as drawn, exactly as 0.6.60 did.
+	if (
+		collapse &&
+		!(
+			initialSourceItemTotal !== null &&
+			resolved.allItemsPlaced &&
+			surfaceIds.length === source.items.length &&
+			surfaceIds.length === initialSourceItemTotal &&
+			surface.declaredCountAt(source.items.length + collapse.collapsed)
+		)
+	) {
+		collapse = null;
+		surfaceHtml = surface.html;
+		surfaceIds = surface.sourceIds;
+		resolved = resolveLinklessOrderItems(surfaceHtml, source.items);
+	}
+	const lineCountMatches = collapse ? true : surface.lineCountMatches;
 	const detail = resolved.detail;
 	if (!detail) {
 		return failed(

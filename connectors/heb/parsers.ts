@@ -1127,7 +1127,7 @@ export function resolveLinklessOrderItems(
 		naming?: "none" | "found" | "incomplete";
 		namingPath?: string;
 	}[],
-): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[]; ledgerExhausted: boolean } {
+): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[]; ledgerExhausted: boolean; allItemsPlaced: boolean } {
 	const { document } = parseHTML(html);
 	const claimed = new Set<number>();
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
@@ -1504,6 +1504,11 @@ export function resolveLinklessOrderItems(
 		trace,
 		nameless: namelessItems ?? [],
 		ledgerExhausted: budgetSpent || diagnosticSpent,
+		// The ledger is complete (every linked row sits on its own SSR item) and
+		// every SSR item ended on a distinct row: claimed, or paired as nameless.
+		allItemsPlaced: ledgerComplete && (
+			items.every((_, i) => claimed.has(i)) ||
+			(namelessItems !== null && namelessItems.length === items.filter((_, i) => !claimed.has(i)).length)),
 	};
 }
 
