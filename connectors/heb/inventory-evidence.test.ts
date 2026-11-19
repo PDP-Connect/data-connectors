@@ -1241,7 +1241,7 @@ test("nameless lines stay unresolved, with today's trace, unless every check pas
 		resolveLinkless([ssrItem("500"), { product: { fullDisplayName: "" }, quantity: 1.2 }], itemRow(0) + nlLine(1.2, "$3.17")),
 	]);
 	for (const [i, r] of fails.entries()) {
-		assert.equal(r.evidence.linklessLines >= 1, true, `case ${i}`);
+		assert.equal((r.evidence.linklessLines ?? 0) >= 1, true, `case ${i}`);
 		assert.doesNotMatch(r.linklessTrace ?? "", /stop=nameless/, `case ${i}`);
 		assert.equal(inventoryMatchesSourceTotal({ ...r.evidence, acceptedIds: [...r.evidence.sourceIds] }, r.sourceItemTotal), false, `case ${i}`);
 		assert.ok(r.detail.items.every((item) => item.name !== null), `case ${i}`);
