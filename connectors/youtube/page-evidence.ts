@@ -733,8 +733,25 @@ const HISTORY_BROWSE_LOG_INSTALL_FUNCTION = `(request) => {
 			try { this.__pdpBrowse = isBrowse(String(url)); } catch {}
 			return open.apply(this, arguments);
 		};
-		XMLHttpRequest.prototype.send = function () {
-			if (this.__pdpBrowse) { log.sent += 1; finish(failed); }
+		XMLHttpRequest.prototype.send = function (body) {
+			if (this.__pdpBrowse) {
+				log.sent += 1;
+				// Like the fetch path: the outcome is logged when the call ends, with its status and request body.
+				const xhr = this;
+				const requestPromise = readRequest(null, { body });
+				const readResponse = () => {
+					const text = typeof xhr.response === "string" && xhr.response !== "" ? xhr.response : xhr.responseText;
+					return scan(JSON.parse(text));
+				};
+				xhr.addEventListener("loadend", () => {
+					const status = xhr.status;
+					requestPromise.then((requestBody) => {
+						let summary = null;
+						if (status >= 200 && status < 300) { try { summary = readResponse(); } catch {} }
+						finish({ requestBody, status, summary });
+					}, () => finish(failed));
+				});
+			}
 			return send.apply(this, arguments);
 		};
 	}

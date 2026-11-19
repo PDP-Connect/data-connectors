@@ -850,7 +850,13 @@ test("the page browse log counts XHR browse sends without a body", async () => {
 	const previous = globals.XMLHttpRequest;
 	class FakeXhr {
 		open(_method: string, _url: string) {}
-		send() {}
+		private loadend: Array<() => void> = [];
+		send() {
+			queueMicrotask(() => this.loadend.forEach((listener) => listener()));
+		}
+		addEventListener(event: string, listener: () => void) {
+			if (event === "loadend") this.loadend.push(listener);
+		}
 	}
 	globals.XMLHttpRequest = FakeXhr;
 	try {
@@ -968,4 +974,74 @@ test("the page browse log keeps the request body of a fetch that failed", async 
 			assert.equal(drained.entries[0]?.status, 0);
 		},
 	);
+});
+
+/** A minimal XHR whose outcome the test settles by hand. */
+function installFakeXhr() {
+	const listeners = new Map<string, Array<() => void>>();
+	class FakeXhr {
+		status = 0;
+		responseType = "";
+		responseText = "";
+		response: unknown = null;
+		open(_method: string, _url: string): void {}
+		send(_body?: unknown): void {}
+		addEventListener(event: string, listener: () => void): void {
+			listeners.set(event, [...(listeners.get(event) ?? []), listener]);
+		}
+	}
+	const globals = globalThis as Record<string, unknown>;
+	const previous = globals.XMLHttpRequest;
+	globals.XMLHttpRequest = FakeXhr;
+	return {
+		FakeXhr,
+		loadend: () => (listeners.get("loadend") ?? []).forEach((listener) => listener()),
+		restore: () => {
+			globals.XMLHttpRequest = previous;
+		},
+	};
+}
+
+test("the page browse log records an XHR browse outcome on loadend", async () => {
+	const xhr = installFakeXhr();
+	try {
+		await withFakeWindow(async () => new Response("{}"), async () => {
+			assert.equal(installHistoryBrowseLog(), true);
+			const body = continuationBody("next-token");
+			const call = new xhr.FakeXhr();
+			call.open("POST", BROWSE_URL);
+			call.send(JSON.stringify({ continuation: "asked" }));
+			const early = drainHistoryBrowseLog();
+			assert.equal(early?.sent, 1);
+			assert.equal(early?.completed, 0, "in flight until loadend");
+			call.status = 200;
+			call.responseText = JSON.stringify(body);
+			xhr.loadend();
+			const drained = await drainAll();
+			assert.deepEqual(drained.entries[0]?.requestBody, { continuation: "asked" });
+			assert.equal(drained.entries[0]?.status, 200);
+			assert.deepEqual(drained.entries[0]?.summary, scanHistoryResponse(body));
+		});
+	} finally {
+		xhr.restore();
+	}
+});
+
+test("a failed XHR browse is logged with its body and status 0", async () => {
+	const xhr = installFakeXhr();
+	try {
+		await withFakeWindow(async () => new Response("{}"), async () => {
+			assert.equal(installHistoryBrowseLog(), true);
+			const call = new xhr.FakeXhr();
+			call.open("POST", BROWSE_URL);
+			call.send(JSON.stringify({ browseId: "FEhistory" }));
+			xhr.loadend();
+			const drained = await drainAll();
+			assert.deepEqual(drained.entries[0]?.requestBody, { browseId: "FEhistory" });
+			assert.equal(drained.entries[0]?.status, 0);
+			assert.equal(drained.entries[0]?.summary, null);
+		});
+	} finally {
+		xhr.restore();
+	}
 });
