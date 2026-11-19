@@ -2139,6 +2139,10 @@ export function createOutputChannel(
 			unserializable = true;
 			return Promise.reject(new FixedFailure("frame_not_serializable"));
 		}
+		if (sharesMemory(snapshot)) {
+			unserializable = true;
+			return Promise.reject(new FixedFailure("frame_not_serializable"));
+		}
 		if (snapshot.type === "DONE") return refuseDone();
 		return open() ? enqueue(snapshot) : refuse();
 	};
@@ -2194,6 +2198,39 @@ export function createOutputChannel(
 			unserializable,
 		}),
 	};
+}
+
+/**
+ * True when a (cloned) frame still aliases shared memory: `structuredClone`
+ * keeps a SharedArrayBuffer, and any view over one, pointing at the original
+ * storage. The transports take objects, not bytes, so the chosen guard is to
+ * refuse such a frame at admission rather than to serialize it.
+ */
+function sharesMemory(root: unknown): boolean {
+	// A browser without cross-origin isolation has no SharedArrayBuffer at all,
+	// and nothing in a frame can alias it.
+	if (typeof SharedArrayBuffer === "undefined") return false;
+	const seen = new Set<object>();
+	const stack: unknown[] = [root];
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (typeof value !== "object" || value === null || seen.has(value))
+			continue;
+		seen.add(value);
+		if (value instanceof SharedArrayBuffer) return true;
+		if (ArrayBuffer.isView(value)) {
+			if (value.buffer instanceof SharedArrayBuffer) return true;
+			continue;
+		}
+		if (value instanceof Map) {
+			for (const [k, v] of value) stack.push(k, v);
+		} else if (value instanceof Set) {
+			for (const v of value) stack.push(v);
+		} else {
+			for (const v of Object.values(value)) stack.push(v);
+		}
+	}
+	return false;
 }
 
 /** Wait for a promise up to `ms`; a rejection propagates, a hang is "expired". */

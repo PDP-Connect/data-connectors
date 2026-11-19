@@ -174,3 +174,38 @@ for (const [label, nested] of [
 		);
 	});
 }
+
+for (const [label, make] of [
+	["SharedArrayBuffer", () => new SharedArrayBuffer(8)],
+	["Uint8Array view", () => new Uint8Array(new SharedArrayBuffer(8))],
+	["DataView", () => new DataView(new SharedArrayBuffer(8))],
+] as const) {
+	test(`a frame holding a shared ${label} is never sent mutated`, async () => {
+		const sent: string[] = [];
+		const channel = createOutputChannel(async (message) => {
+			await sleep(20);
+			sent.push(JSON.stringify(message));
+		});
+		const shared = make();
+		const view =
+			shared instanceof SharedArrayBuffer
+				? new Uint8Array(shared)
+				: new Uint8Array(shared.buffer as SharedArrayBuffer);
+		const first = channel.write(progress("first"));
+		const frame = {
+			type: "RECORD",
+			stream: "s",
+			key: "k",
+			data: { shared },
+		} as unknown as EmittedMessage;
+		const second = channel.write(frame).then(
+			() => "sent",
+			() => "refused",
+		);
+		view[0] = 99;
+		await first;
+		const outcome = await second;
+		assert.equal(outcome, "refused");
+		assert.equal(sent.length, 1);
+	});
+}
