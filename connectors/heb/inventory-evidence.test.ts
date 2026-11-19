@@ -53,7 +53,8 @@ function pageFor(html: string, landed?: string): Page {
 				rowCount: lines.length,
 				rows: lines.map((li, i) => ({
 					key: `position:document-order=${i}`,
-					html: li.outerHTML,
+					// As the browser function wraps a row in its department section.
+					html: ((title) => title ? `<section><h2 data-qe-id="orderDetailsGroupTitle">${title}</h2>${li.outerHTML}</section>` : li.outerHTML)(li.closest("section")?.querySelector('[data-qe-id="orderDetailsGroupTitle"]')?.textContent),
 					unitCount: 1,
 				})),
 				scrollHeight: 100,
@@ -1266,12 +1267,12 @@ test("a held nameless order says why with a fixed code, never a source value", a
 	assert.equal(heldOf(word), "text:w w, d");
 	assert.equal(heldOf(ascii), "text:w w");
 	assert.equal(heldOf(noMatch), "qty");
-	assert.equal(heldOf(key), "naming_key");
-	assert.equal(heldOf(deepKey), "naming_key");
-	assert.equal(heldOf(wideKey), "naming_key");
+	assert.equal(heldOf(key), "naming_key:product.?");
+	assert.equal(heldOf(deepKey), "naming_key:product.?.?.?.?.?.?.displayName");
+	assert.equal(heldOf(wideKey), "naming_key:product.?.?");
 	assert.equal(heldOf(incomplete), "scan_incomplete");
-	assert.equal(heldOf(url), "naming_key");
-	assert.equal(heldOf(mixed), "naming_key");
+	assert.equal(heldOf(url), "naming_key:product.productPageURL");
+	assert.match(heldOf(mixed) ?? "", /^naming_key/);
 	assert.equal(heldOf(totalGap), "total");
 	assert.equal(heldOf(pairGap), "pairing");
 	assert.deepEqual([attr, labelled, title, alt].map(heldOf), ["naming_attr", "naming_attr", "naming_attr", "naming_attr"]);
@@ -1340,4 +1341,43 @@ test("two nameless lines whose cents are written differently still get distinct 
 	assert.deepEqual(ids.slice(1), [`${order.orderId}|nameless|100310|1.2|0`, `${order.orderId}|nameless|100310|1.2|1`]);
 	assert.ok(asRecords(r).every((record) => orderItemsSchema.safeParse(record).success));
 	assert.equal(r.evidence.duplicateRecordIds, 0);
+});
+
+// The left-over shape H-E-B serves live: blank name and link, a product id, a
+// category name, image URLs and SKUs that carry no product name.
+const liveLeftOver = (extra: Record<string, unknown> = {}) => ({
+	id: "7001", fullDisplayName: "", productPageURL: "",
+	__typename: "Product", bestAvailable: true, isEbtSnapProduct: false, maximumOrderQuantity: 50, minimumOrderQuantity: 1,
+	productCategory: { name: "Produce", __typename: "Category" },
+	productImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001", size: "MEDIUM", __typename: "Image" }],
+	thumbnailImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001-t", __typename: "Image" }],
+	shoppingContext: "CURBSIDE_PICKUP", storeId: 92,
+	SKUs: [{ id: "9001", customerFriendlySize: "1 lb", weightSelectionIncrements: [0.5], twelveDigitUPC: "000000000001", contextPrices: [{ isOnSale: false }], __typename: "SKU" }],
+	...extra,
+});
+const inSection = (rows: string) => `<main><section><h2 data-qe-id="orderDetailsGroupTitle">Produce</h2><ul>${rows}</ul></section></main>`;
+
+test("the real left-over shape (category name, image urls, SKUs without names) is kept nameless with its department", async () => {
+	const r = await resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, liveLeftOver())], inSection(itemRow(0) + nlLine(1.2, "$3.17")));
+	assert.equal(r.evidence.linklessLines, 0);
+	const nameless = asRecords(r)[1]!;
+	assert.equal(nameless.name, null);
+	assert.equal(nameless.name_unavailable_reason, "source_omits_name");
+	assert.equal(nameless.department, "Produce");
+	assert.equal(nameless.product_id, "7001");
+	assert.equal(nameless.image_url, null);
+	assert.equal(nameless.product_url, null);
+	assert.equal(orderItemsSchema.safeParse(nameless).success, true);
+});
+
+test("a name under SKUs or an unknown key still holds, and the trace names the path from a fixed alphabet", async () => {
+	const sku = liveLeftOver({ SKUs: [{ id: "9001", displayName: "Zq9x Bread" }] });
+	const unknown = liveLeftOver({ productName: "Zq9x Bread" });
+	const [a, b] = await Promise.all([
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, sku)], inSection(itemRow(0) + nlLine(1.2, "$3.17"))),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, unknown)], inSection(itemRow(0) + nlLine(1.2, "$3.17"))),
+	]);
+	assert.equal(heldOf(a), "naming_key:product.SKUs.#.displayName");
+	assert.equal(heldOf(b), "naming_key:product.?");
+	for (const r of [a, b]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread|productName/);
 });

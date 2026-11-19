@@ -157,31 +157,58 @@ export interface SourceOrderItem {
 	/** Only when fullDisplayName is null: whether any non-blank string sits
 	 * under a key that could carry a name, link or image, at any depth. */
 	naming?: "none" | "found" | "incomplete";
+	/** With naming "found": the leaf's path, written in a fixed alphabet. */
+	namingPath?: string;
 }
 
 /** Keys that could carry a name, link or image of an item. */
 const NAMING_KEY_RE = /image|img|photo|picture|url|href|name|title|label|desc/i;
 const NAMING_SCAN_MAX_NODES = 200_000;
 const NAMING_SCAN_MAX_DEPTH = 256;
+/** Subtrees of `product` that name nothing: a category is not a product name
+ * and an image URL does not name the product it shows. `__typename` is a type
+ * tag at any depth. Every other key, SKUs and unknown ones included, keeps the veto. */
+const NAMING_SKIPPED_PRODUCT_KEYS = new Set(["productCategory", "productImageUrls", "thumbnailImageUrls"]);
+/** The only key text a held trace may print: H-E-B's own known keys. Any other
+ * segment prints as `?`, so source text never reaches the trace. */
+const NAMING_PATH_VOCABULARY = new Set([
+	"SKUs", "__typename", "bestAvailable", "fullDisplayName", "id", "isEbtSnapProduct", "maximumOrderQuantity",
+	"minimumOrderQuantity", "productCategory", "productImageUrls", "productPageURL", "shoppingContext", "storeId",
+	"thumbnailImageUrls", "customerFriendlySize", "weightSelectionIncrements", "twelveDigitUPC", "contextPrices",
+	"product", "url", "name", "displayName", "title", "description",
+]);
+
+function namingPathText(path: readonly (string | number)[]): string {
+	return path.map((part) => (typeof part === "number" ? "#" : NAMING_PATH_VOCABULARY.has(part) ? part : "?")).join(".");
+}
 
 /** A complete walk of one raw item, with no leaf cap: "found" at the first
  * non-blank string under a naming key (the key itself or any ancestor key),
- * "incomplete" when the walk exceeds its node or depth bound. */
-function namingScan(raw: unknown): "none" | "found" | "incomplete" {
-	const stack: [unknown, boolean, number][] = [[raw, false, 0]];
+ * with the leaf's path in the fixed alphabet; "incomplete" when the walk
+ * exceeds its node or depth bound. */
+function namingScan(raw: unknown): { naming: "none" | "incomplete" } | { naming: "found"; path: string } {
+	const stack: [unknown, boolean, (string | number)[]][] = [[raw, false, []]];
 	let nodes = 0;
 	while (stack.length > 0) {
-		const [value, under, depth] = stack.pop()!;
-		if (++nodes > NAMING_SCAN_MAX_NODES || depth > NAMING_SCAN_MAX_DEPTH) return "incomplete";
+		const [value, under, path] = stack.pop()!;
+		if (++nodes > NAMING_SCAN_MAX_NODES || path.length > NAMING_SCAN_MAX_DEPTH) return { naming: "incomplete" };
 		if (typeof value === "string") {
-			if (under && value.trim()) return "found";
+			if (under && value.trim()) return { naming: "found", path: namingPathText(path) };
 		} else if (Array.isArray(value)) {
-			for (const element of value) stack.push([element, under, depth + 1]);
+			value.forEach((element, index) => stack.push([element, under, [...path, index]]));
 		} else if (value !== null && typeof value === "object") {
-			for (const [key, element] of Object.entries(value)) stack.push([element, under || NAMING_KEY_RE.test(key), depth + 1]);
+			for (const [key, element] of Object.entries(value)) {
+				if (key === "__typename" || (path.length === 1 && path[0] === "product" && NAMING_SKIPPED_PRODUCT_KEYS.has(key))) continue;
+				stack.push([element, under || NAMING_KEY_RE.test(key), [...path, key]]);
+			}
 		}
 	}
-	return "none";
+	return { naming: "none" };
+}
+
+function namingFacts(raw: unknown): { naming: "none" | "found" | "incomplete"; namingPath?: string } {
+	const scan = namingScan(raw);
+	return "path" in scan ? { naming: scan.naming, namingPath: scan.path } : { naming: scan.naming };
 }
 
 function productPageUrl(value: string | null | undefined, productId: string): string | null {
@@ -259,7 +286,7 @@ export function readSourceOrderItems(
 				? item.quantity
 				: null,
 		lineTotal: namedAmount(item.totalLineItemPricePaid?.formattedAmount),
-		...(item.product?.fullDisplayName ? {} : { naming: namingScan(rawItems[index]) }),
+		...(item.product?.fullDisplayName ? {} : namingFacts(rawItems[index])),
 	}));
 	const quantityTypes = [...new Set(result.data.order.orderItems.map((item) => typeof item.quantity))].sort();
 	return { items, shape: `${items.length},qty:${quantityTypes.join("|") || "none"}` };

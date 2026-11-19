@@ -841,7 +841,7 @@ function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine
  * ordered amount. A product id is not naming evidence: the record keeps it.
  * Otherwise the reason the order was held, as a fixed code. */
 function namelessRecords(
-	lines: readonly { own: Element; hasProductImage: boolean }[],
+	lines: readonly { own: Element; hasProductImage: boolean; department: string | null }[],
 	items: readonly {
 		productId: string | null;
 		productUrl: string | null;
@@ -849,6 +849,7 @@ function namelessRecords(
 		quantity: number | null;
 		lineTotal: string | null;
 		naming?: "none" | "found" | "incomplete";
+		namingPath?: string;
 	}[],
 	itemIndexes: readonly number[],
 ): { records: DetailItem[] } | { held: string } {
@@ -856,17 +857,19 @@ function namelessRecords(
 	const left = itemIndexes.map((i) => ({ i, item: items[i]! }));
 	for (const { item } of left) {
 		if (item.naming === "incomplete") return { held: "scan_incomplete" };
+		if (item.naming === "found" && item.namingPath) return { held: `naming_key:${item.namingPath}` };
 		if (item.naming !== "none" || item.fullDisplayName !== null || item.productUrl !== null)
 			return { held: "naming_key" };
 		if (item.lineTotal === null) return { held: "total" };
 	}
-	const facts: Extract<NamelessLine, { ok: true }>[] = [];
+	const facts: (Extract<NamelessLine, { ok: true }> & { department: string | null })[] = [];
 	for (const line of lines) {
 		const fact = namelessLineFacts(line.own, line.hasProductImage);
 		if (!fact.ok) return { held: fact.reason };
-		facts.push(fact);
+		facts.push({ ...fact, department: line.department });
 	}
 	const quantityOf = new Map<number, number>();
+	const departmentOf = new Map<number, string | null>();
 	for (const total of new Set(left.map(({ item }) => item.lineTotal))) {
 		const group = left.filter(({ item }) => item.lineTotal === total);
 		const matching = facts.filter((fact) => fact.total === total);
@@ -876,12 +879,18 @@ function namelessRecords(
 		const ssr = group[0]!.item.quantity;
 		if (group.some(({ item }) => item.quantity !== ssr)) return { held: "pairing" };
 		if (ssr !== null && ssr !== first.actual && ssr !== first.ordered) return { held: "qty" };
-		for (const { i } of group) quantityOf.set(i, first.actual);
+		// Lines with the same total are interchangeable, so the department is
+		// kept only when they all sit in the same section.
+		const department = matching.every((fact) => fact.department === first.department) ? first.department : null;
+		for (const { i } of group) {
+			quantityOf.set(i, first.actual);
+			departmentOf.set(i, department);
+		}
 	}
 	if (facts.some((fact) => !left.some(({ item }) => item.lineTotal === fact.total))) return { held: "pairing" };
 	return {
 		records: left.map(({ i, item }) => ({
-			department: null,
+			department: departmentOf.get(i) ?? null,
 			imageUrl: null,
 			lineTotal: item.lineTotal,
 			name: null,
@@ -915,6 +924,7 @@ export function resolveLinklessOrderItems(
 		productUrl: string | null;
 		lineTotal: string | null;
 		naming?: "none" | "found" | "incomplete";
+		namingPath?: string;
 	}[],
 ): { detail: OrderDetail | null; unresolved: number; trace: string; nameless: DetailItem[] } {
 	const { document } = parseHTML(html);
@@ -1106,7 +1116,7 @@ export function resolveLinklessOrderItems(
 		? namelessRecords(
 			remaining.map((line) => {
 				const own = ownCopy(line);
-				return { own, hasProductImage: ownImageIds(own).size > 0 };
+				return { own, hasProductImage: ownImageIds(own).size > 0, department: departmentFor(line) };
 			}),
 			items,
 			unclaimed,
