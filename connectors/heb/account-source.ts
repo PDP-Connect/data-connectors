@@ -149,6 +149,9 @@ export interface SourceOrderItem {
 	productUrl: string | null;
 	/** Null when H-E-B leaves it out or writes it as anything but a number. */
 	quantity: number | null;
+	/** The SSR `totalLineItemPricePaid.formattedAmount` when it reads as a dollar
+	 * amount ("$6.00"); otherwise null. */
+	lineTotal: string | null;
 	/** Only when fullDisplayName is null, for diagnostics: how H-E-B left the
 	 * name out, and the item's non-blank strings by key path. */
 	unnamed?: UnnamedSourceItem;
@@ -186,6 +189,11 @@ function unnamedSourceItem(raw: unknown): UnnamedSourceItem {
 }
 
 
+function formattedLineTotal(raw: unknown): string | null {
+	const paid = (raw as { totalLineItemPricePaid?: { formattedAmount?: unknown } | null })
+		.totalLineItemPricePaid?.formattedAmount;
+	return typeof paid === "string" && /^\$\d[\d,]*\.\d{2}$/.test(paid.trim()) ? paid.trim() : null;
+}
 
 function productPageUrl(value: string | null | undefined, productId: string): string | null {
 	if (!value) return null;
@@ -248,6 +256,7 @@ export function readSourceOrderItems(
 			typeof item.quantity === "number" && Number.isFinite(item.quantity) && item.quantity >= 0
 				? item.quantity
 				: null,
+		lineTotal: formattedLineTotal(rawItems[index]),
 		...(item.product.fullDisplayName ? {} : { unnamed: unnamedSourceItem(rawItems[index]) }),
 	}));
 	const quantityTypes = [...new Set(result.data.order.orderItems.map((item) => typeof item.quantity))].sort();

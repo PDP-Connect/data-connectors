@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Page } from "playwright";
 import { parseHTML } from "linkedom";
@@ -22,6 +23,7 @@ import {
 	inspectOrderListParsing,
 	parseNutritionDom,
 	parseOrderDetailDom,
+	resolveLinklessOrderItems,
 	parseProfileDom,
 } from "./parsers.ts";
 
@@ -1055,7 +1057,7 @@ test("the diagnostic names why elimination refused: a line naming a claimed item
 	assert.equal(claimedText.evidence.linklessLines, 1);
 	assert.match(claimedText.linklessTrace ?? "", /elim:0;stop=unsafe;why=txt_claimed:1;ll_img=heb_image\/hebgrocery_id\/jpg(;|$)/);
 	assert.equal(unnamed.evidence.linklessLines, 1);
-	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
+	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
 	assert.doesNotMatch(`${claimedText.linklessTrace}${unnamed.linklessTrace}`, /500|501|999|SSR/);
 });
 
@@ -1078,9 +1080,9 @@ test("an unnamed left-over item: the diagnostic says how the name is missing and
 		),
 	]);
 	for (const r of [inField, nowhere, blank]) assert.equal(r.evidence.linklessLines, 1);
-	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
-	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
-	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
+	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
+	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
+	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
 	assert.doesNotMatch(`${inField.linklessTrace}${nowhere.linklessTrace}${blank.linklessTrace}`, /Invented|Bakery|Kitchen|Sliced|500|501|999/);
 });
 
@@ -1112,8 +1114,83 @@ test("the linkless line's element shape leads the unnamed diagnostic: tags, lett
 		itemRow(0) + line,
 	);
 	assert.equal(r.evidence.linklessLines, 1);
-	assert.match(r.linklessTrace ?? "", /;stop=unnamed;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
+	assert.match(r.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
 	assert.doesNotMatch(r.linklessTrace ?? "", /Invented|Bakery|4417|6\.00/);
+});
+
+const a11yRow = (id: number, name: string, price: string) =>
+	`<li data-index="${id}"><span class="visuallyHidden">Item, ${name}, 1 ct. Quantity: 1 each. Price: ${price}.</span><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/${500 + id}">${name}</a><span data-qe-id="checkoutItemPrice">${price}</span><span data-qe-id="orderItemQty">Qty: 1</span></li>`;
+const a11yLinkless = (name: string, price: string, sentencePrice = price) =>
+	`<li><span class="visuallyHidden">Item with preference, ${name}, 1 each. Quantity: 2 each. Price: ${sentencePrice}.</span><img src="https://www.heb.com/static/invented.svg" alt=""><span data-qe-id="checkoutItemPrice">${price}</span><span>${price} / ea</span><span data-qe-id="orderItemQty">Qty: 2</span></li>`;
+const unnamedSsr = (id: string, price: string) => ({ product: { id, fullDisplayName: "" }, quantity: 2, totalLineItemPricePaid: { formattedAmount: price } });
+const namedSsr = (id: string, name: string) => ({ product: { id, fullDisplayName: name }, quantity: 1 });
+
+test("an unnamed left-over item pairs with its linkless line by line total and takes the name from the line's accessible sentence", async () => {
+	const r = await resolveLinkless(
+		[namedSsr("500", "Invented Milk"), unnamedSsr("501", "$6.00")],
+		a11yRow(0, "Invented Milk", "$4.29") + a11yLinkless("Invented Bakery Loaf", "$6.00"),
+	);
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.equal(r.detail.items[1]?.productId, "501");
+	assert.equal(r.detail.items[1]?.name, "Invented Bakery Loaf, 1 each");
+	assert.equal(r.detail.items[1]?.quantity, 2);
+	assert.equal(r.detail.items[1]?.lineTotal, "$6.00");
+	assert.match(r.linklessTrace ?? "", /elim:0;stop=price;a11y=ok;why=none:1;/);
+	assert.doesNotMatch(r.linklessTrace ?? "", /Invented|Bakery|6\.00/);
+});
+
+test("two unnamed left-over items pair with their lines by line total, whatever their order", async () => {
+	const r = await resolveLinkless(
+		[namedSsr("500", "Invented Milk"), unnamedSsr("502", "$9.50"), unnamedSsr("501", "$6.00")],
+		a11yRow(0, "Invented Milk", "$4.29") + a11yLinkless("Invented Bakery Loaf", "$6.00") + a11yLinkless("Invented Cake", "$9.50"),
+	);
+	assert.equal(r.evidence.linklessLines, 0);
+	assert.deepEqual(r.detail.items.slice(1).map((item) => [item.productId, item.name, item.lineTotal]), [
+		["501", "Invented Bakery Loaf, 1 each", "$6.00"],
+		["502", "Invented Cake, 1 each", "$9.50"],
+	]);
+});
+
+test("pairing by line total refuses, and says why, on a shared price, an unmatched price, a sentence that disagrees, or a page whose linked rows break the sentence format", async () => {
+	const linked = a11yRow(0, "Invented Milk", "$4.29");
+	const [shared, none, disagree, format] = await Promise.all([
+		resolveLinkless([namedSsr("500", "Invented Milk"), unnamedSsr("501", "$6.00"), unnamedSsr("502", "$6.00")],
+			linked + a11yLinkless("Invented Bakery Loaf", "$6.00") + a11yLinkless("Invented Cake", "$6.00")),
+		resolveLinkless([namedSsr("500", "Invented Milk"), unnamedSsr("501", "$7.00")], linked + a11yLinkless("Invented Bakery Loaf", "$6.00")),
+		resolveLinkless([namedSsr("500", "Invented Milk"), unnamedSsr("501", "$6.00")], linked + a11yLinkless("Invented Bakery Loaf", "$6.00", "$5.00")),
+		resolveLinkless([namedSsr("500", "Invented Milk"), unnamedSsr("501", "$6.00")],
+			linked.replace("Item, Invented Milk", "Item, Other Thing") + a11yLinkless("Invented Bakery Loaf", "$6.00")),
+	]);
+	assert.equal(shared.evidence.linklessLines, 2);
+	assert.match(shared.linklessTrace ?? "", /;stop=unnamed;a11y=price_shared;/);
+	assert.equal(none.evidence.linklessLines, 1);
+	assert.match(none.linklessTrace ?? "", /;stop=unnamed;a11y=price_none;/);
+	assert.equal(disagree.evidence.linklessLines, 1);
+	assert.match(disagree.linklessTrace ?? "", /;stop=unnamed;a11y=price_mismatch;/);
+	assert.equal(format.evidence.linklessLines, 1);
+	assert.match(format.linklessTrace ?? "", /;stop=unnamed;a11y=linked_mismatch;/);
+	assert.doesNotMatch(`${shared.linklessTrace}${none.linklessTrace}${disagree.linklessTrace}${format.linklessTrace}`, /Invented|Bakery|Cake|Other|\$/);
+});
+
+test("on the real order-detail structure, a weighed item that lost its links and image pairs by line total and keeps its sentence name", () => {
+	const fixture = readFileSync(new URL("./__fixtures__/order-detail.html", import.meta.url), "utf8");
+	const bananas = fixture.indexOf('<span class="visuallyHidden">Item, Organic Bananas');
+	const linkless = fixture.slice(0, bananas) + fixture.slice(bananas)
+		.replace(/<a tabindex="-1"[^>]*>\s*<img[^>]*>\s*<\/a>/, '<img src="https://www.heb.com/static/invented.svg" alt="">')
+		.replace(/<a data-qe-id="itemRowDetailsName"[^>]*>Organic Bananas<\/a>/, "");
+	const item = (productId: string, fullDisplayName: string | null, lineTotal: string) =>
+		({ productId, quantity: 1, substituteIds: [], fullDisplayName, productUrl: null, lineTotal });
+	const result = resolveLinklessOrderItems(linkless, [
+		item("123456789", "H-E-B Organic 2% Reduced Fat Milk", "$4.29"),
+		item("300500", "H-E-B Select Ingredients Large Eggs", "$3.98"),
+		item("2001", null, "$1.12"),
+	]);
+	assert.equal(result.unresolved, 0);
+	assert.match(result.trace, /;stop=price;a11y=ok;/);
+	const bananaItem = result.detail?.items.find((entry) => entry.productId === "2001");
+	assert.equal(bananaItem?.name, "Organic Bananas, Avg. 1.2 lbs");
+	assert.equal(bananaItem?.lineTotal, "$1.12");
+	assert.equal(bananaItem?.quantity, 1.2);
 });
 
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {

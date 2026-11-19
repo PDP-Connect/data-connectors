@@ -763,6 +763,10 @@ function hebGroceryImageId(pathname: string): string | undefined {
 	return /^\/is\/image\/HEBGrocery\/(?:[\w-]*[a-z_][\w-]*\/)?(\d+)(?:[-.][^/]*)?$/i.exec(pathname)?.[1];
 }
 
+/** A line's accessible sentence: its name part (the name, often with the size;
+ * the two cannot be split safely), its ordered quantity and its line total. */
+const A11Y_SENTENCE_RE = /^Item(?: with preference)?, (.+)\. Quantity: (.+?)\. Price: (\$\d[\d,]*\.\d{2})\.?$/;
+
 export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
@@ -771,6 +775,7 @@ export function resolveLinklessOrderItems(
 		substituteIds: string[];
 		fullDisplayName: string | null;
 		productUrl: string | null;
+		lineTotal?: string | null;
 		unnamed?: { state: string; strings: readonly { path: string; value: string }[] };
 	}[],
 ): { detail: OrderDetail | null; unresolved: number; trace: string } {
@@ -944,13 +949,13 @@ export function resolveLinklessOrderItems(
 		return parts.join(",") || "none";
 	};
 	let linklessDom: string | null = null;
-	const resolveLine = (line: Element, index: number, unordered = false) => {
+	const resolveLine = (line: Element, index: number, unordered = false, name = items[index]!.fullDisplayName!) => {
 		const item = items[index]!;
 		claimed.add(index);
 		const anchor = document.createElement("a");
 		anchor.setAttribute("data-qe-id", "itemRowDetailsName");
 		anchor.setAttribute("href", "/product-detail/ssr/" + item.productId);
-		anchor.textContent = item.fullDisplayName!;
+		anchor.textContent = name;
 		anchor.setAttribute("data-ssr-resolved", item.productUrl ?? "");
 		if (unordered) inventoryOnly.set(anchor, item);
 		line.insertBefore(anchor, line.firstChild);
@@ -990,7 +995,7 @@ export function resolveLinklessOrderItems(
 		keyed++;
 	}
 	const unclaimed = items.map((_, i) => i).filter((i) => !claimed.has(i));
-	const stop = !ledgerComplete ? "ledger"
+	let stop = !ledgerComplete ? "ledger"
 		: remaining.length === 0 ? "none"
 		: !eliminationSafe ? "unsafe"
 		: remaining.length !== unclaimed.length ? "count"
@@ -1001,6 +1006,46 @@ export function resolveLinklessOrderItems(
 		// is not. Never attach a line's quantity/price/department to that guess.
 		for (const [i, line] of remaining.entries()) resolveLine(line, unclaimed[i]!, remaining.length > 1);
 		eliminated = remaining.length;
+	}
+	// An unclaimed item without a name can still pair with a remaining line by
+	// line total, named from the line's accessible sentence ("Item, <name>.
+	// Quantity: <q>. Price: <total>."). Each step fails closed and a11y= says
+	// which refused: every linked line on this page has one sentence whose
+	// name part starts with its link text (no_linked, linked_format,
+	// linked_mismatch); every remaining line has one sentence whose price is its
+	// displayed line total (format, price_mismatch); line totals pair remaining
+	// lines and unclaimed items one to one (price_none, price_shared); and a
+	// named item's name starts the sentence's name part (name_mismatch).
+	let a11y: string | null = null;
+	if (stop === "unnamed") {
+		const sentence = (own: Element) => {
+			const found = [...own.querySelectorAll("*")].filter((el) => A11Y_SENTENCE_RE.test(normText(el)));
+			const leaves = found.filter((el) => !found.some((other) => other !== el && el.contains(other)));
+			return leaves.length === 1 ? A11Y_SENTENCE_RE.exec(normText(leaves[0]))! : null;
+		};
+		const startsName = (sentenceName: string, name: string) => normalize(sentenceName).startsWith(normalize(name));
+		const linkedOwn = outerLines.map(ownCopy).filter((own) => own.querySelector(nameSelector));
+		const linkedSentences = linkedOwn.map(sentence);
+		const lineSentences = remaining.map((line) => sentence(ownCopy(line)));
+		const lineTotals = remaining.map((line) => normText(ownCopy(line).querySelector('[data-qe-id="checkoutItemPrice"]')));
+		const pairs = remaining.map((_, i) => unclaimed.filter((index) => items[index]!.lineTotal === lineTotals[i]));
+		const paired = pairs.map((fitting) => fitting[0]!);
+		a11y = linkedOwn.length === 0 ? "no_linked"
+			: linkedSentences.some((match) => match === null) ? "linked_format"
+			: linkedOwn.some((own, i) => !startsName(linkedSentences[i]![1]!, normText(own.querySelector(nameSelector))))
+				? "linked_mismatch"
+			: lineSentences.some((match) => match === null) ? "format"
+			: lineSentences.some((match, i) => !lineTotals[i] || match![3] !== lineTotals[i]) ? "price_mismatch"
+			: pairs.some((fitting) => fitting.length === 0) ? "price_none"
+			: pairs.some((fitting) => fitting.length > 1) || new Set(paired).size !== paired.length ? "price_shared"
+			: paired.some((index, i) => items[index]!.fullDisplayName !== null &&
+				!startsName(lineSentences[i]![1]!, items[index]!.fullDisplayName!)) ? "name_mismatch"
+			: "ok";
+		if (a11y === "ok") {
+			for (const [i, line] of remaining.entries())
+				resolveLine(line, paired[i]!, false, items[paired[i]!]!.fullDisplayName ?? lineSentences[i]![1]!);
+			stop = "price";
+		}
 	}
 	// For the first unclaimed item with no name: how H-E-B left the name out,
 	// and key paths only (never values) of its strings that equal a remaining
@@ -1059,8 +1104,9 @@ export function resolveLinklessOrderItems(
 		`elim:${eliminated}`,
 	].join(",") +
 		`;stop=${stop}` +
+		(a11y ? `;a11y=${a11y}` : "") +
 		(stop === "unnamed" ? `;ll_dom=${linklessDom ?? "-"}` : "") +
-		unnamedTrace +
+		(stop === "price" ? "" : unnamedTrace) +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +
 		`;ll_img=${linklessImage ?? "-"}` +
 		(unfitImage ? `;unfit_img=${unfitImage}` : "");
