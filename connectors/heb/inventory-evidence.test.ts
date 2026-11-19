@@ -1413,6 +1413,19 @@ test("a literal dotted key does not pass as the allowed nested leaf, and an obje
 	for (const r of [a, b, c]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread/);
 });
 
+test("an image size passes only as an uppercase enum token", async () => {
+	const sized = (size: string) => liveLeftOver({
+		productImageUrls: [{ url: "https://images.heb.com/x", size, __typename: "Image" }],
+		thumbnailImageUrls: [{ url: "https://images.heb.com/y", size: "LARGE", __typename: "Image" }],
+	});
+	const [ok, loaf, lower] = (await Promise.all(["MEDIUM", "Bakery Loaf", "bakery"].map((size) =>
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, sized(size))], inSection(itemRow(0) + nlLine(1.2, "$3.17")))))) as [Awaited<ReturnType<typeof resolveLinkless>>, Awaited<ReturnType<typeof resolveLinkless>>, Awaited<ReturnType<typeof resolveLinkless>>];
+	assert.equal(ok.evidence.linklessLines, 0);
+	assert.equal(heldOf(loaf), "naming_key:product.productImageUrls.#.size");
+	assert.equal(heldOf(lower), "naming_key:product.productImageUrls.#.size");
+	for (const r of [loaf, lower]) assert.doesNotMatch(r.linklessTrace ?? "", /Bakery|bakery|Loaf/);
+});
+
 test("a named row's department survives a section title with < and &", async () => {
 	const r = await resolveLinkless([ssrItem("500")], `<main><section><h2 data-qe-id="orderDetailsGroupTitle">Fish &amp; &lt;Chips&gt;</h2><ul>${itemRow(0)}</ul></section></main>`);
 	assert.equal(r.detail.items[0]?.department, "Fish & <Chips>");

@@ -170,19 +170,22 @@ const NAMING_SCAN_MAX_DEPTH = 256;
  * key under these same subtrees, keeps the veto. */
 /** Segments are compared one by one: a string is a key, `#` stands for a real
  * array index only (a literal key "#" or "a.b" never matches). */
-const NAMING_ALLOWED_LEAVES: readonly (readonly string[])[] = [
-	["product", "productCategory", "name"],
-	["product", "productImageUrls", "#", "url"],
-	["product", "productImageUrls", "#", "size"],
-	["product", "thumbnailImageUrls", "#", "url"],
-	["product", "thumbnailImageUrls", "#", "size"],
+const NAMING_ALLOWED_LEAVES: readonly { path: readonly string[]; value?: RegExp }[] = [
+	{ path: ["product", "productCategory", "name"] },
+	{ path: ["product", "productImageUrls", "#", "url"] },
+	{ path: ["product", "productImageUrls", "#", "size"], value: /^[A-Z][A-Z0-9_]{0,15}$/ },
+	{ path: ["product", "thumbnailImageUrls", "#", "url"] },
+	{ path: ["product", "thumbnailImageUrls", "#", "size"], value: /^[A-Z][A-Z0-9_]{0,15}$/ },
 ];
 
-function isAllowedNamingLeaf(path: readonly (string | number)[]): boolean {
+/** A size is allowed only as an enum-like token (MEDIUM, LARGE); a product
+ * name is not written that way. */
+function isAllowedNamingLeaf(path: readonly (string | number)[], value: string): boolean {
 	return NAMING_ALLOWED_LEAVES.some(
 		(allowed) =>
-			allowed.length === path.length &&
-			allowed.every((segment, i) => (segment === "#" ? typeof path[i] === "number" : path[i] === segment)),
+			allowed.path.length === path.length &&
+			allowed.path.every((segment, i) => (segment === "#" ? typeof path[i] === "number" : path[i] === segment)) &&
+			(allowed.value === undefined || allowed.value.test(value)),
 	);
 }
 
@@ -211,7 +214,7 @@ function namingScan(raw: unknown): { naming: "none" | "incomplete" } | { naming:
 		if (++nodes > NAMING_SCAN_MAX_NODES || path.length > NAMING_SCAN_MAX_DEPTH) return { naming: "incomplete" };
 		if (typeof value === "string") {
 			if (under && value.trim()) {
-				if (!isAllowedNamingLeaf(path)) return { naming: "found", path: namingPathText(path) };
+				if (!isAllowedNamingLeaf(path, value)) return { naming: "found", path: namingPathText(path) };
 			}
 		} else if (Array.isArray(value)) {
 			value.forEach((element, index) => stack.push([element, under, [...path, index]]));

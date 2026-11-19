@@ -15303,7 +15303,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.56",
+				"version": "0.6.57",
 				"display_name": "H-E-B",
 				"brand": {
 					"icon": "icon.svg",
