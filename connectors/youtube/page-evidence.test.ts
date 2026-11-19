@@ -934,3 +934,20 @@ test("the page browse log keeps both browseId and continuation from one request"
 		},
 	);
 });
+
+test("a row nested in another row counts once", () => {
+	const scan = scanHistoryResponse({
+		onResponseReceivedActions: [
+			{
+				appendContinuationItemsAction: {
+					continuationItems: [
+						{ richItemRenderer: { content: { videoRenderer: {} } } },
+						{ lockupViewModel: {} },
+					],
+				},
+			},
+		],
+	});
+	assert.equal(scan.itemCount, 2);
+	assert.equal(scan.recognized, true);
+});
