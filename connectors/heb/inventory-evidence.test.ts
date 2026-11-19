@@ -1401,6 +1401,18 @@ test("a displayName added to a real image object still holds the line", async ()
 	assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread/);
 });
 
+test("a literal dotted key does not pass as the allowed nested leaf, and an object __typename is walked", async () => {
+	const dotted = liveLeftOver({ "productCategory.name": "Zq9x Bread" });
+	const typed = liveLeftOver({ __typename: { displayName: "Zq9x Bread" } });
+	const hashKey = liveLeftOver({ productImageUrls: [{ "#": "Zq9x Bread" }] });
+	const [a, b, c] = (await Promise.all([dotted, typed, hashKey].map((product) =>
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, product)], inSection(itemRow(0) + nlLine(1.2, "$3.17")))))) as [Awaited<ReturnType<typeof resolveLinkless>>, Awaited<ReturnType<typeof resolveLinkless>>, Awaited<ReturnType<typeof resolveLinkless>>];
+	assert.equal(heldOf(a), "naming_key:product.?");
+	assert.equal(heldOf(b), "naming_key:product.__typename.displayName");
+	assert.equal(heldOf(c), "naming_key:product.productImageUrls.#.?");
+	for (const r of [a, b, c]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread/);
+});
+
 test("a named row's department survives a section title with < and &", async () => {
 	const r = await resolveLinkless([ssrItem("500")], `<main><section><h2 data-qe-id="orderDetailsGroupTitle">Fish &amp; &lt;Chips&gt;</h2><ul>${itemRow(0)}</ul></section></main>`);
 	assert.equal(r.detail.items[0]?.department, "Fish & <Chips>");

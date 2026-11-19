@@ -166,15 +166,25 @@ const NAMING_KEY_RE = /image|img|photo|picture|url|href|name|title|label|desc/i;
 const NAMING_SCAN_MAX_NODES = 200_000;
 const NAMING_SCAN_MAX_DEPTH = 256;
 /** Exact leaves proven not to be names (a category's name, an image's url);
- * `__typename` at any depth is a type tag. Every other leaf, including any other
+ * a string `__typename` at any depth is a type tag. Every other leaf, including any other
  * key under these same subtrees, keeps the veto. */
-const NAMING_ALLOWED_LEAVES = new Set([
-	"product.productCategory.name",
-	"product.productImageUrls.#.url",
-	"product.productImageUrls.#.size",
-	"product.thumbnailImageUrls.#.url",
-	"product.thumbnailImageUrls.#.size",
-]);
+/** Segments are compared one by one: a string is a key, `#` stands for a real
+ * array index only (a literal key "#" or "a.b" never matches). */
+const NAMING_ALLOWED_LEAVES: readonly (readonly string[])[] = [
+	["product", "productCategory", "name"],
+	["product", "productImageUrls", "#", "url"],
+	["product", "productImageUrls", "#", "size"],
+	["product", "thumbnailImageUrls", "#", "url"],
+	["product", "thumbnailImageUrls", "#", "size"],
+];
+
+function isAllowedNamingLeaf(path: readonly (string | number)[]): boolean {
+	return NAMING_ALLOWED_LEAVES.some(
+		(allowed) =>
+			allowed.length === path.length &&
+			allowed.every((segment, i) => (segment === "#" ? typeof path[i] === "number" : path[i] === segment)),
+	);
+}
 
 /** The only key text a held trace may print: H-E-B's own known keys. Any other
  * segment prints as `?`, so source text never reaches the trace. */
@@ -201,14 +211,14 @@ function namingScan(raw: unknown): { naming: "none" | "incomplete" } | { naming:
 		if (++nodes > NAMING_SCAN_MAX_NODES || path.length > NAMING_SCAN_MAX_DEPTH) return { naming: "incomplete" };
 		if (typeof value === "string") {
 			if (under && value.trim()) {
-				const rawPath = path.map((part) => (typeof part === "number" ? "#" : part)).join(".");
-				if (!NAMING_ALLOWED_LEAVES.has(rawPath)) return { naming: "found", path: namingPathText(path) };
+				if (!isAllowedNamingLeaf(path)) return { naming: "found", path: namingPathText(path) };
 			}
 		} else if (Array.isArray(value)) {
 			value.forEach((element, index) => stack.push([element, under, [...path, index]]));
 		} else if (value !== null && typeof value === "object") {
 			for (const [key, element] of Object.entries(value)) {
-				if (key === "__typename") continue;
+				// A type tag is a string; any other __typename value is walked.
+				if (key === "__typename" && typeof element === "string") continue;
 				stack.push([element, under || NAMING_KEY_RE.test(key), [...path, key]]);
 			}
 		}
