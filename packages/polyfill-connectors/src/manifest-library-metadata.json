@@ -19,7 +19,8 @@
 				"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
 				"selector_drift": "The page layout changed and we couldn't find what we needed",
 				"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
-				"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+				"unparseable_order_date": "We skipped some orders because their dates couldn't be read",
+				"amazon_no_orders_on_store": "This Amazon account shows no orders on the store we read. If you shop on another Amazon store, pick that store and connect again"
 			}
 		}
 	},

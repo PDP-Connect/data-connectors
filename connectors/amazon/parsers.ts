@@ -5,6 +5,13 @@
 // I/O so they can be unit-tested in isolation.
 
 import { parseHTML } from "linkedom";
+import {
+	type AmazonStore,
+	absoluteStoreUrl,
+	DEFAULT_AMAZON_STORE,
+	extractPostalCode,
+	matchPostalCode,
+} from "./stores.ts";
 import type {
 	DetailItem,
 	ListPageItem,
@@ -19,8 +26,12 @@ import type {
 const CURRENCY_CENTS_MULTIPLIER = 100;
 // Strip thousands-separators (commas or locale spaces) before the numeric
 // match, otherwise "$1,234.56" was previously misread as "$1.00".
-const CURRENCY_THOUSANDS_RE = /[,_\s](?=\d{3}(?:\D|$))/g;
-const CURRENCY_NUMBER_RE = /-?(\d+(?:\.\d+)?)/;
+// A money amount in any store's format: "$1,234.56", "CDN$ 12.34",
+// "£12.34", "12,34 €", "1.234,56 €", "R$ 1.234,56", "₹1,23,456.00", "￥1,234".
+const CURRENCY_DIGITS_RE = /\d[\d.,\s\u00a0\u202f]*/;
+const CURRENCY_DECIMAL_RE = /[.,](\d{1,2})$/;
+const CURRENCY_SEPARATORS_RE = /[.,\s\u00a0\u202f]/g;
+const CURRENCY_WHOLE_RE = /^\d+$/;
 const CURRENCY_NEGATIVE_SIGN_RE = /^\s*-|^\s*\(/;
 const ITEM_ID_WHITESPACE_RE = /\s+/g;
 
@@ -28,9 +39,16 @@ const ITEM_ID_WHITESPACE_RE = /\s+/g;
 // callback — we now parse in Node via linkedom so module-scoped regexes are
 // fine).
 const ORDER_ID_RE = /^\d{3}-\d{7}-\d{7}$/;
-const HEADER_DATE_RE = /^(ORDER PLACED|ORDER DATE|PLACED)$/i;
-const HEADER_TOTAL_RE = /^TOTAL$/i;
-const TOTAL_VALUE_RE = /^\$[\d,]+\.\d{2}$/;
+// The list card's header labels, in each store's language (the value spans
+// are language-neutral). English first: amazon.com/.ca/.co.uk/.com.au/.in.
+const HEADER_DATE_RE =
+	/^(ORDER PLACED|ORDER DATE|PLACED|BESTELLUNG AUFGEGEBEN|BESTELLT AM|COMMANDE EFFECTU[ÉE]E|COMMANDE PASS[ÉE]E|ORDINE EFFETTUATO|PEDIDO REALIZADO|PEDIDO FEITO|DATA DO PEDIDO|注文日|注文確定日)$/i;
+const HEADER_TOTAL_RE = /^(TOTAL|SUMME|GESAMT|GESAMTSUMME|TOTALE|合計)$/i;
+// A whole money amount: optional currency (symbol and/or code) on either
+// side, digits with any grouping, two decimals; or a whole yen amount.
+export const MONEY_VALUE_RE =
+	/^(?:-?(?:[A-Z]{1,3}\s?)?(?:[$£€₹]|R\$)?\s?\d{1,3}(?:[.,\s\u00a0\u202f]?\d{2,3})*[.,]\d{2}(?:\s?(?:€|EUR|£))?|(?:[￥¥]|JPY)\s?\d{1,3}(?:,?\d{3})*)$/u;
+const TOTAL_VALUE_RE = MONEY_VALUE_RE;
 const ASIN_HREF_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
 const WHITESPACE_RE = /\s+/g;
 
@@ -39,6 +57,7 @@ const WHITESPACE_RE = /\s+/g;
 // link text names actual membership ("your prime"/"prime benefits"), not the
 // "Try Prime" upsell shown to non-members.
 const NAV_GREETING_RE = /Hello,\s*(.+)/;
+const ZERO_WIDTH_RE = /[\u200b-\u200f\u2060\ufeff]/g;
 const NAV_SIGN_IN_RE = /sign in/i;
 const PRIME_MEMBER_TEXT_RE = /your prime|prime benefits/i;
 
@@ -87,7 +106,10 @@ function findOrderId(card: HTMLElement): string | null {
 	return null;
 }
 
-function parseListPageItem(titleEl: HTMLElement): ListPageItem | null {
+function parseListPageItem(
+	titleEl: HTMLElement,
+	store: AmazonStore,
+): ListPageItem | null {
 	const name = textOf(titleEl).replace(WHITESPACE_RE, " ").trim();
 	if (!name) {
 		return null;
@@ -100,20 +122,21 @@ function parseListPageItem(titleEl: HTMLElement): ListPageItem | null {
 			'a[href*="/dp/"], a[href*="/gp/product/"]',
 		) ?? titleEl.querySelector<HTMLAnchorElement>("a");
 	const href = link?.getAttribute("href") ?? "";
-	const url = href.startsWith("/")
-		? `https://www.amazon.com${href}`
-		: href || null;
+	const url = absoluteStoreUrl(store, href);
 	const asin = href.match(ASIN_HREF_RE)?.[1] ?? null;
 	return { name, url, asin };
 }
 
-function collectListPageItems(card: HTMLElement): ListPageItem[] {
+function collectListPageItems(
+	card: HTMLElement,
+	store: AmazonStore,
+): ListPageItem[] {
 	const items: ListPageItem[] = [];
 	const seenAsins = new Set<string>();
 	for (const titleEl of card.querySelectorAll<HTMLElement>(
 		".yohtmlc-product-title",
 	)) {
-		const item = parseListPageItem(titleEl);
+		const item = parseListPageItem(titleEl, store);
 		if (!item) {
 			continue;
 		}
@@ -128,7 +151,10 @@ function collectListPageItems(card: HTMLElement): ListPageItem[] {
 	return items;
 }
 
-function parseOrderCard(card: HTMLElement): ListPageOrder | null {
+function parseOrderCard(
+	card: HTMLElement,
+	store: AmazonStore,
+): ListPageOrder | null {
 	const orderId = findOrderId(card);
 	if (!orderId) {
 		return null;
@@ -151,7 +177,8 @@ function parseOrderCard(card: HTMLElement): ListPageOrder | null {
 		orderDateRaw,
 		orderTotal,
 		deliveryStatus,
-		items: collectListPageItems(card),
+		items: collectListPageItems(card, store),
+		store: store.name,
 	};
 }
 
@@ -165,10 +192,12 @@ const CARD_PATCH_RE =
 const CARD_ONLY_RE =
 	/((?:Visa|Mastercard|Amex|Discover|Diners|Unknown Credit Card|Credit Card|Debit Card) ending in \d{3,5})/i;
 const UNABLE_RE = /Unable to display payment details/i;
-const GRAND_TOTAL_RE = /Grand Total:?\s*\$([\d,]+\.\d{2})/i;
+const GRAND_TOTAL_RE =
+	/Grand Total:?\s*((?:[A-Z]{1,3}\s?)?(?:[$£€₹]|R\$)?\s?\d[\d.,\s\u00a0\u202f]*[.,]\d{2}(?:\s?€)?)/i;
 const ASIN_RE = /\/(?:gp\/product|dp)\/([A-Z0-9]{10})/;
 const SOLD_BY_RE = /^Sold by:?\s*(.+)$/i;
-const DOLLAR_RE = /\$([\d,]+\.\d{2})/;
+const DOLLAR_RE =
+	/((?:[A-Z]{1,3}\s?)?(?:[$£€₹]|R\$)\s?\d[\d.,\s\u00a0\u202f]*[.,]\d{2}|\d[\d.,\s\u00a0\u202f]*[.,]\d{2}\s?€)/;
 const INT_RE = /^\d+$/;
 const FOPO_BR_RE = /<br\s*\/?>/i;
 const FOPO_AT_PRICE_RE = /@\s*(\$[\d,]+\.\d{2})/;
@@ -190,12 +219,16 @@ function normText(el: Element | null | undefined): string {
 	return textOf(el).replace(WHITESPACE_RE, " ").trim();
 }
 
-function parseShippingAddress(shipEl: Element | null): {
+function parseShippingAddress(
+	shipEl: Element | null,
+	store: AmazonStore = DEFAULT_AMAZON_STORE,
+): {
+	postal_code: string | null;
 	recipient_name: string | null;
 	summary: string | null;
 } {
 	if (!shipEl) {
-		return { recipient_name: null, summary: null };
+		return { postal_code: null, recipient_name: null, summary: null };
 	}
 	// Amazon wraps each address line as <li><span class="a-list-item">…</span></li>.
 	// The previous selector "ul li span.a-list-item, ul li" matched BOTH the
@@ -216,7 +249,11 @@ function parseShippingAddress(shipEl: Element | null): {
 	const summary = lines.length
 		? lines.join(", ").slice(0, ADDRESS_MAX_LEN)
 		: null;
-	return { recipient_name, summary };
+	return {
+		postal_code: extractPostalCode(lines, store),
+		recipient_name,
+		summary,
+	};
 }
 
 function parsePaymentMethod(payEl: Element | null): string | null {
@@ -250,12 +287,12 @@ function parseGrandTotal(chargeEl: Element | null): string | null {
 		const t = textOf(r).replace(WHITESPACE_RE, " ");
 		const m = t.match(GRAND_TOTAL_RE);
 		if (m?.[1]) {
-			return `$${m[1]}`;
+			return m[1].trim();
 		}
 	}
 	const m2 = textOf(chargeEl).replace(WHITESPACE_RE, " ").match(GRAND_TOTAL_RE);
 	if (m2?.[1]) {
-		return `$${m2[1]}`;
+		return m2[1].trim();
 	}
 	return null;
 }
@@ -271,7 +308,10 @@ function findRowRoot(rightGrid: Element): Element {
 	return rightGrid;
 }
 
-function parseDetailItem(rightGrid: Element): DetailItem | null {
+function parseDetailItem(
+	rightGrid: Element,
+	store: AmazonStore,
+): DetailItem | null {
 	const scanRoot = findRowRoot(rightGrid);
 
 	const titleEl = rightGrid.querySelector<HTMLElement>(
@@ -284,9 +324,7 @@ function parseDetailItem(rightGrid: Element): DetailItem | null {
 	if (!(asinM?.[1] && name)) {
 		return null;
 	}
-	const absoluteHref = href.startsWith("/")
-		? `https://www.amazon.com${href}`
-		: href || null;
+	const absoluteHref = absoluteStoreUrl(store, href);
 
 	const merchantEl = rightGrid.querySelector<HTMLElement>(
 		'[data-component="orderedMerchant"]',
@@ -307,7 +345,7 @@ function parseDetailItem(rightGrid: Element): DetailItem | null {
 	if (priceEl) {
 		const pt = normText(priceEl);
 		const pm = pt.match(DOLLAR_RE);
-		unit_price = pm?.[1] ? `$${pm[1]}` : null;
+		unit_price = pm?.[1] ? pm[1].trim() : null;
 	}
 
 	const qtyOverlayEl = scanRoot.querySelector<HTMLElement>(
@@ -371,7 +409,10 @@ function parseFopoStoreSummary(destinationEl: Element | null): string | null {
 	return lines.length > 0 ? lines.join(", ").slice(0, ADDRESS_MAX_LEN) : null;
 }
 
-function parseFopoDetailItem(row: Element): DetailItem | null {
+function parseFopoDetailItem(
+	row: Element,
+	store: AmazonStore,
+): DetailItem | null {
 	const img = row.querySelector<HTMLElement>("img.ufpo-itemListWidget-image");
 	const titleLink = row.querySelector<HTMLAnchorElement>(
 		'a[href*="/dp/"], a[href*="/gp/product/"]',
@@ -388,9 +429,7 @@ function parseFopoDetailItem(row: Element): DetailItem | null {
 
 	const href = titleLink?.getAttribute("href") ?? "";
 	const asinM = href.match(ASIN_RE);
-	const absoluteHref = href.startsWith("/")
-		? `https://www.amazon.com${href}`
-		: href || null;
+	const absoluteHref = absoluteStoreUrl(store, href);
 
 	const priceText = [
 		...row.querySelectorAll<HTMLElement>(".a-text-right span.a-size-small"),
@@ -401,9 +440,7 @@ function parseFopoDetailItem(row: Element): DetailItem | null {
 		normText(row).match(FOPO_AT_PRICE_RE) ?? priceText?.match(DOLLAR_RE);
 	let unit_price: string | null = null;
 	if (unitPriceMatch?.[1]) {
-		unit_price = unitPriceMatch[1].startsWith("$")
-			? unitPriceMatch[1]
-			: `$${unitPriceMatch[1]}`;
+		unit_price = unitPriceMatch[1].trim();
 	}
 
 	const qtyMatch = normText(row).match(FOPO_QTY_RE);
@@ -421,7 +458,10 @@ function parseFopoDetailItem(row: Element): DetailItem | null {
 	};
 }
 
-function parseFopoOrderDetailDom(document: Document): OrderDetail | null {
+function parseFopoOrderDetailDom(
+	document: Document,
+	store: AmazonStore,
+): OrderDetail | null {
 	const itemList = document.querySelector("#f3_food_ItemList");
 	const summaryEl = document.querySelector("#f3_food_WfmInStoreOrderSummary");
 	if (!(itemList || summaryEl)) {
@@ -432,7 +472,7 @@ function parseFopoOrderDetailDom(document: Document): OrderDetail | null {
 		? [...itemList.querySelectorAll<HTMLElement>(".a-row.a-spacing-base")]
 		: [];
 	const items = rows
-		.map((row) => parseFopoDetailItem(row))
+		.map((row) => parseFopoDetailItem(row, store))
 		.filter((item): item is DetailItem => Boolean(item));
 	const grandTotal = normText(
 		summaryEl?.querySelector("#wfm-grand-total-amount"),
@@ -455,7 +495,10 @@ function parseFopoOrderDetailDom(document: Document): OrderDetail | null {
 	};
 }
 
-function parseUfpoDetailItem(row: Element): DetailItem | null {
+function parseUfpoDetailItem(
+	row: Element,
+	store: AmazonStore,
+): DetailItem | null {
 	const titleLink = row.querySelector<HTMLAnchorElement>(
 		'a[href*="/dp/"], a[href*="/gp/product/"]',
 	);
@@ -466,9 +509,7 @@ function parseUfpoDetailItem(row: Element): DetailItem | null {
 		return null;
 	}
 
-	const absoluteHref = href.startsWith("/")
-		? `https://www.amazon.com${href}`
-		: href || null;
+	const absoluteHref = absoluteStoreUrl(store, href);
 	const itemRow = titleLink?.closest<HTMLElement>(".a-row") ?? row;
 	const cells = [...itemRow.children].filter(
 		(child) => child.getAttribute("role") === "gridcell",
@@ -483,7 +524,7 @@ function parseUfpoDetailItem(row: Element): DetailItem | null {
 		asin: asinM[1],
 		name: name.slice(0, ITEM_NAME_MAX_LEN),
 		url: absoluteHref,
-		unit_price: quantity === 1 && totalMatch?.[1] ? `$${totalMatch[1]}` : null,
+		unit_price: quantity === 1 && totalMatch?.[1] ? totalMatch[1].trim() : null,
 		quantity,
 		seller: null,
 		item_image_url:
@@ -505,13 +546,16 @@ function parseUfpoGrandTotal(summaryEl: Element | null): string | null {
 		const value = normText(row.querySelector("dd"));
 		const match = value.match(DOLLAR_RE);
 		if (UFPO_TOTAL_LABEL_RE.test(label) && match?.[1]) {
-			total = `$${match[1]}`;
+			total = match[1].trim();
 		}
 	}
 	return total;
 }
 
-function parseUfpoOrderDetailDom(document: Document): OrderDetail | null {
+function parseUfpoOrderDetailDom(
+	document: Document,
+	store: AmazonStore,
+): OrderDetail | null {
 	const itemTable = document.querySelector(".ufpo-item-list-table");
 	const status = [
 		normText(document.querySelector("#ufpo-order-status-primary")),
@@ -527,7 +571,7 @@ function parseUfpoOrderDetailDom(document: Document): OrderDetail | null {
 		? [...itemTable.querySelectorAll<HTMLElement>('[id$="-item-grid-row"]')]
 		: [];
 	const items = rows
-		.map((row) => parseUfpoDetailItem(row))
+		.map((row) => parseUfpoDetailItem(row, store))
 		.filter((item): item is DetailItem => Boolean(item));
 	if (items.length === 0) {
 		return null;
@@ -549,11 +593,14 @@ function parseUfpoOrderDetailDom(document: Document): OrderDetail | null {
 	};
 }
 
-function parseUffOrderDetailDom(document: Document): OrderDetail | null {
+function parseUffOrderDetailDom(
+	document: Document,
+	store: AmazonStore,
+): OrderDetail | null {
 	const card = document.querySelector<HTMLElement>(
 		".order-card, .js-order-card",
 	);
-	const order = card ? parseOrderCard(card) : null;
+	const order = card ? parseOrderCard(card, store) : null;
 	if (!order || order.items.length === 0) {
 		return null;
 	}
@@ -579,14 +626,17 @@ function parseUffOrderDetailDom(document: Document): OrderDetail | null {
 	};
 }
 
-export function parseOrderDetailDom(html: string): OrderDetail | null {
+export function parseOrderDetailDom(
+	html: string,
+	store: AmazonStore = DEFAULT_AMAZON_STORE,
+): OrderDetail | null {
 	const { document } = parseHTML(html);
 	const od = document.querySelector("#orderDetails");
 	if (!od) {
 		return (
-			parseFopoOrderDetailDom(document) ??
-			parseUfpoOrderDetailDom(document) ??
-			parseUffOrderDetailDom(document)
+			parseFopoOrderDetailDom(document, store) ??
+			parseUfpoOrderDetailDom(document, store) ??
+			parseUffOrderDetailDom(document, store)
 		);
 	}
 
@@ -595,8 +645,11 @@ export function parseOrderDetailDom(html: string): OrderDetail | null {
 	const isCancelled = CANCELLED_RE.test(cancelledText);
 
 	const shipEl = od.querySelector('[data-component="shippingAddress"]');
-	const { recipient_name, summary: shipping_address_summary } =
-		parseShippingAddress(shipEl);
+	const {
+		postal_code: shipping_postal_code,
+		recipient_name,
+		summary: shipping_address_summary,
+	} = parseShippingAddress(shipEl, store);
 
 	const payEl = od.querySelector(
 		'[data-component="viewPaymentPlanSummaryWidget"]',
@@ -641,7 +694,7 @@ export function parseOrderDetailDom(html: string): OrderDetail | null {
 	];
 	const items: DetailItem[] = [];
 	for (const rightGrid of itemContainers) {
-		const item = parseDetailItem(rightGrid);
+		const item = parseDetailItem(rightGrid, store);
 		if (item) {
 			items.push(item);
 		}
@@ -651,6 +704,7 @@ export function parseOrderDetailDom(html: string): OrderDetail | null {
 		status_detail,
 		recipient_name,
 		shipping_address_summary,
+		shipping_postal_code,
 		payment_method_summary,
 		grand_total,
 		gift_order,
@@ -659,14 +713,17 @@ export function parseOrderDetailDom(html: string): OrderDetail | null {
 	};
 }
 
-export function parseOrdersListDom(html: string): ListPageOrder[] {
+export function parseOrdersListDom(
+	html: string,
+	store: AmazonStore = DEFAULT_AMAZON_STORE,
+): ListPageOrder[] {
 	const { document } = parseHTML(html);
 	const cards = document.querySelectorAll<HTMLElement>(
 		".order-card, .js-order-card",
 	);
 	const results: ListPageOrder[] = [];
 	for (const card of cards) {
-		const parsed = parseOrderCard(card);
+		const parsed = parseOrderCard(card, store);
 		if (parsed) {
 			results.push(parsed);
 		}
@@ -707,7 +764,10 @@ export function countOrderCardsWithoutOrderId(html: string): number {
  * never guessed). `id` is a stable placeholder ("me") because Amazon's nav
  * bar carries no account id, only a display greeting.
  */
-export function parseAmazonProfileDom(html: string): ProfileRecord {
+export function parseAmazonProfileDom(
+	html: string,
+	store: AmazonStore = DEFAULT_AMAZON_STORE,
+): ProfileRecord {
 	const { document } = parseHTML(html);
 	const greetingEl = document.querySelector(
 		"#nav-link-accountList .nav-line-1",
@@ -727,12 +787,115 @@ export function parseAmazonProfileDom(html: string): ProfileRecord {
 	// defaulting to false.
 	const is_prime = primeEl ? PRIME_MEMBER_TEXT_RE.test(primeText) : null;
 
-	return { id: "me", name, is_prime };
+	// The nav's "Deliver to" location is the account's default delivery
+	// address while signed in: "Deliver to Ada" / "Vancouver V6B 1A1". Only its
+	// postal code is kept, in the store country's shape; never the street.
+	const postal_code = isSignedOut
+		? null
+		: matchPostalCode(
+				normText(document.querySelector("#glow-ingress-line2")).replace(
+					ZERO_WIDTH_RE,
+					"",
+				),
+				store,
+			);
+
+	return { id: "me", name, is_prime, postal_code, store: store.name };
+}
+
+// Month names of every store's language, by their first three letters after
+// accents are removed (French "juin"/"juillet" need four). English, German,
+// French, Italian, Spanish, Portuguese.
+const MONTH_PREFIX: Readonly<Record<string, number>> = {
+	jan: 1,
+	ene: 1,
+	gen: 1,
+	feb: 2,
+	fev: 2,
+	mar: 3,
+	apr: 4,
+	abr: 4,
+	avr: 4,
+	may: 5,
+	mai: 5,
+	mag: 5,
+	jun: 6,
+	giu: 6,
+	juin: 6,
+	jul: 7,
+	lug: 7,
+	juil: 7,
+	aug: 8,
+	ago: 8,
+	aou: 8,
+	sep: 9,
+	set: 9,
+	oct: 10,
+	okt: 10,
+	ott: 10,
+	out: 10,
+	nov: 11,
+	dec: 12,
+	dez: 12,
+	dic: 12,
+};
+const JP_DATE_RE = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/;
+const ACCENTS_RE = /[\u0300-\u036f]/g;
+const DATE_WORD_RE = /[a-z]+|\d+/g;
+const DIGITS_ONLY_RE = /^\d+$/;
+const MIN_ORDER_YEAR = 1994;
+const MAX_ORDER_YEAR = 2100;
+
+function isoDate(year: number, month: number, day: number): string | null {
+	if (year < MIN_ORDER_YEAR || year > MAX_ORDER_YEAR || day < 1) {
+		return null;
+	}
+	const d = new Date(Date.UTC(year, month - 1, day));
+	if (d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
+		return null;
+	}
+	return d.toISOString().slice(0, 10);
+}
+
+/** A day written with a month NAME in any store's language: "15 March 2024", "15. März 2024", "15 de março de 2024", "2024年3月15日". */
+function parseLocalizedDate(raw: string): string | null {
+	const jp = JP_DATE_RE.exec(raw);
+	if (jp) {
+		return isoDate(Number(jp[1]), Number(jp[2]), Number(jp[3]));
+	}
+	const words =
+		raw
+			.normalize("NFD")
+			.replace(ACCENTS_RE, "")
+			.toLowerCase()
+			.match(DATE_WORD_RE) ?? [];
+	let month: number | undefined;
+	let year: number | undefined;
+	let day: number | undefined;
+	for (const word of words) {
+		if (DIGITS_ONLY_RE.test(word)) {
+			if (word.length === 4 && year === undefined) {
+				year = Number(word);
+			} else if (word.length <= 2 && day === undefined) {
+				day = Number(word);
+			}
+		} else if (month === undefined) {
+			month = MONTH_PREFIX[word.slice(0, 4)] ?? MONTH_PREFIX[word.slice(0, 3)];
+		}
+	}
+	if (month === undefined || year === undefined || day === undefined) {
+		return null;
+	}
+	return isoDate(year, month, day);
 }
 
 export function parseOrderDate(raw: string | null | undefined): string | null {
 	if (!raw) {
 		return null;
+	}
+	const localized = parseLocalizedDate(raw);
+	if (localized) {
+		return localized;
 	}
 	const d = new Date(raw);
 	if (Number.isNaN(d.getTime())) {
@@ -749,13 +912,23 @@ export function parseCurrencyCents(
 	}
 	const s = String(raw);
 	const negative = CURRENCY_NEGATIVE_SIGN_RE.test(s);
-	// "$1,234.56" → "$1234.56" so the numeric match captures the full value.
-	const stripped = s.replace(CURRENCY_THOUSANDS_RE, "");
-	const m = stripped.match(CURRENCY_NUMBER_RE);
-	if (!m?.[1]) {
+	const digits = s.match(CURRENCY_DIGITS_RE)?.[0]?.trim();
+	if (!digits) {
 		return null;
 	}
-	const cents = Math.round(Number(m[1]) * CURRENCY_CENTS_MULTIPLIER);
+	// The decimal separator is the LAST "." or "," followed by one or two
+	// digits ("1,234.56", "1.234,56", "12,34"); every other separator groups
+	// thousands ("$1,000,000", "₹1,23,456.00", "￥1,234").
+	const decimal = CURRENCY_DECIMAL_RE.exec(digits);
+	const whole = (decimal ? digits.slice(0, decimal.index) : digits).replace(
+		CURRENCY_SEPARATORS_RE,
+		"",
+	);
+	if (!CURRENCY_WHOLE_RE.test(whole)) {
+		return null;
+	}
+	const fraction = decimal?.[1] ? decimal[1].padEnd(2, "0") : "00";
+	const cents = Number(whole) * CURRENCY_CENTS_MULTIPLIER + Number(fraction);
 	return negative ? -cents : cents;
 }
 
@@ -942,6 +1115,8 @@ export function buildOrderRecord(
 		status_detail: detail?.status_detail || null,
 		recipient_name: detail?.recipient_name || null,
 		shipping_address_summary: detail?.shipping_address_summary || null,
+		shipping_postal_code: detail?.shipping_postal_code || null,
+		store: listOrder.store ?? null,
 		payment_method_summary: detail?.payment_method_summary || null,
 		gift_order: detail?.gift_order ?? false,
 		digital_order: detail?.digital_order ?? false,
