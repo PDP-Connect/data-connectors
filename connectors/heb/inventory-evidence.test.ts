@@ -1537,3 +1537,56 @@ test("an order inside the budget keeps its ledger result", () => {
 	const amb = resolveLinklessOrderItems(bareRow("K0") + bareRow("K0"), [bareItem("K0"), bareItem("K0"), bareItem("K0")]);
 	assert.match(amb.trace, /ledger:ambiguous,/);
 });
+
+// ─── one product drawn twice: collapse an identical extra rendering ───────
+// Invented order: SSR holds P once, Q twice (real repeat, different prices), R
+// once and O once (a removed original whose substitute S is nested in its row).
+// The DOM draws P a second time, identical, at the top of the list.
+const dupRow = (id: string, o: { cents?: string; qty?: string; nested?: string } = {}) =>
+	`<li><a aria-hidden="true" href="/product-detail/x/${id}"><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${id.padStart(9, "0")}.jpg"></a>` +
+	`<a data-qe-id="itemRowDetailsName" href="/product-detail/x/${id}">Item ${id}</a>` +
+	`<span data-qe-id="checkoutItemPrice">${o.cents ?? "$5.00"}</span><span data-qe-id="orderItemQty">${o.qty ?? "Qty: 1"}</span>${o.nested ?? ""}</li>`;
+const nestedSub = (id: string) => `<ul>${dupRow(id, { cents: "$2.00" })}</ul>`;
+const dupSsr = [
+	ssrItem("900"), ssrItem("901"), ssrItem("901"), ssrItem("902"),
+	{ product: { id: "903", fullDisplayName: "SSR 903" }, quantity: 1, subbedProducts: [{ product: { id: "904" } }] },
+];
+const dupPage = (top: string, bottom: string) =>
+	top + dupRow("902") + dupRow("901", { cents: "$3.00" }) + dupRow("901", { cents: "$4.00" }) + dupRow("903", { nested: nestedSub("904") }) + bottom;
+const matchesTotal = (r: Awaited<ReturnType<typeof resolveLinkless>>, total: number) =>
+	inventoryMatchesSourceTotal({ ...r.evidence, acceptedIds: r.evidence.sourceIds }, total);
+
+test("an identical extra rendering of a product SSR holds once collapses; a real repeat and a substitute stay", async () => {
+	const r = await resolveLinkless(dupSsr, dupPage(dupRow("900"), dupRow("900")));
+	assert.match(r.linklessTrace ?? "", /;dup_render=1/);
+	assert.equal(matchesTotal(r, 5), true);
+	assert.equal(r.evidence.sourceIds.length, 5);
+	assert.deepEqual(r.detail.items.map((item) => item.productId).sort(), ["900", "901", "901", "902", "903", "904"]);
+	const ids = asRecords(r).map((record) => record.id);
+	assert.ok(ids.includes(`${order.orderId}|900`));
+	assert.equal(new Set(ids).size, ids.length);
+});
+
+test("nothing collapses when the two renderings differ in line cents or in qty text", async () => {
+	const cents = await resolveLinkless(dupSsr, dupPage(dupRow("900", { cents: "$6.00" }), dupRow("900")));
+	const qty = await resolveLinkless(dupSsr, dupPage(dupRow("900", { qty: "Qty: 2" }), dupRow("900")));
+	for (const r of [cents, qty]) {
+		assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+		assert.equal(matchesTotal(r, 5), false);
+		assert.equal(r.evidence.sourceIds.length, 6);
+	}
+});
+
+test("nothing collapses when SSR holds the product as many times as the DOM draws it", async () => {
+	const twice = [...dupSsr, ssrItem("900")];
+	const r = await resolveLinkless(twice, dupPage(dupRow("900"), dupRow("900")));
+	assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+	assert.equal(matchesTotal(r, 6), true);
+});
+
+test("nothing collapses when the product is also a substitute id, or a rendering holds a nested row", async () => {
+	const asSubstitute = dupSsr.map((item, i) => (i === 3 ? { ...item, subbedProducts: [{ product: { id: "900" } }] } : item));
+	const sub = await resolveLinkless(asSubstitute, dupPage(dupRow("900"), dupRow("900")));
+	const nested = await resolveLinkless(dupSsr, dupPage(dupRow("900", { nested: nestedSub("905") }), dupRow("900", { nested: nestedSub("905") })));
+	for (const r of [sub, nested]) assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+});

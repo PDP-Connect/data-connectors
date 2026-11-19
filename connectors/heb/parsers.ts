@@ -914,6 +914,24 @@ function hebGroceryImageId(pathname: string): string | undefined {
 	return /^\/is\/image\/HEBGrocery\/(?:[\w-]*[a-z_][\w-]*\/)?(\d+)(?:[-.][^/]*)?$/i.exec(pathname)?.[1];
 }
 
+const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
+const ownImageIds = (own: Element) => {
+	const ids = new Set<string>();
+	for (const img of own.querySelectorAll("img")) {
+		for (const value of [img.getAttribute("src") ?? "", img.getAttribute("srcset") ?? ""]) {
+			for (const candidate of value.split(",")) {
+				try {
+					const url = new URL(candidate.trim().split(/\s+/)[0] ?? "");
+					if (url.hostname !== "images.heb.com") continue;
+					const id = hebGroceryImageId(url.pathname);
+					if (id) ids.add(numericId(id));
+				} catch { /* Not an image URL. */ }
+			}
+		}
+	}
+	return ids;
+};
+
 /** The most edge visits the ledger may spend on one order: the matching, then
  * the walk over swaps, drawing on one counter. A real order has a few dozen
  * rows that each fit one or two items (a few thousand visits at most); only a
@@ -971,6 +989,60 @@ function matchRows(
 	return { owner, unplaced, exhausted: false };
 }
 
+/** One product drawn twice: H-E-B's page can render the same purchased line a
+ * second time (for instance pinned at the top of the list). When the order's own
+ * SSR count proves it, drop the extra renderings so the ledger sees one row per
+ * SSR item. For a product id P with D outer rows and S SSR items: only when
+ * D > S >= 1, every one of the D rows has the same own link id, own image ids
+ * (at least one: the picture corroborates the link), quantity text and line
+ * cents, P is no SSR item's substitute id, and no row
+ * holds a nested row. The first D-S rows go and the last S stay: a pinned or promoted rendering comes before the line's normal place.
+ * Returns null, changing nothing, when no product qualifies or the rows and the
+ * collected source ids do not pair one to one. */
+export function collapseDuplicateRenderings(
+	html: string,
+	items: readonly { productId: string | null; substituteIds: string[] }[],
+	sourceIds: readonly string[],
+): { html: string; sourceIds: string[]; collapsed: number } | null {
+	const { document } = parseHTML(html);
+	const outer = [...document.querySelectorAll("li")].filter((li) => !li.parentElement?.closest("li"));
+	if (outer.length === 0 || outer.length !== sourceIds.length) return null;
+	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
+	const facts = outer.map((line) => {
+		const own = line.cloneNode(true) as Element;
+		for (const nested of own.querySelectorAll("li")) nested.remove();
+		const ids = [...own.querySelectorAll(nameSelector)].map(
+			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "");
+		const price = normText(own.querySelector('[data-qe-id="checkoutItemPrice"]'));
+		return {
+			line,
+			id: ids.length === 1 && ids[0] ? ids[0] : null,
+			holdsNested: line.querySelector("li") !== null,
+			hasImage: ownImageIds(own).size > 0,
+			same: JSON.stringify([
+				ids,
+				[...ownImageIds(own)].sort(),
+				normText(own.querySelector('[data-qe-id="orderItemQty"]')),
+				parseCurrencyCents(price) ?? price,
+			]),
+		};
+	});
+	const substituteIds = new Set(items.flatMap((item) => item.substituteIds));
+	const rowsOf = new Map<string, typeof facts>();
+	for (const fact of facts) if (fact.id !== null) rowsOf.set(fact.id, [...(rowsOf.get(fact.id) ?? []), fact]);
+	const removed = new Set<Element>();
+	for (const [id, rows] of rowsOf) {
+		const supply = items.filter((item) => item.productId === id).length;
+		if (rows.length <= supply || supply < 1 || substituteIds.has(id)) continue;
+		if (rows.some((row) => row.holdsNested || !row.hasImage || row.same !== rows[0]!.same)) continue;
+		for (const row of rows.slice(0, rows.length - supply)) removed.add(row.line);
+	}
+	if (removed.size === 0) return null;
+	const kept = sourceIds.filter((_, i) => !removed.has(outer[i]!));
+	for (const line of removed) line.remove();
+	return { html: document.toString(), sourceIds: kept, collapsed: removed.size };
+}
+
 export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
@@ -1002,23 +1074,6 @@ export function resolveLinklessOrderItems(
 		const own = ownCopy(line);
 		return !own.querySelector(nameSelector) && own.querySelector(qtySelector);
 	}).length;
-	const numericId = (value: string) => value.replace(/^0+(?=\d)/, "");
-	const ownImageIds = (own: Element) => {
-		const ids = new Set<string>();
-		for (const img of own.querySelectorAll("img")) {
-			for (const value of [img.getAttribute("src") ?? "", img.getAttribute("srcset") ?? ""]) {
-				for (const candidate of value.split(",")) {
-					try {
-						const url = new URL(candidate.trim().split(/\s+/)[0] ?? "");
-						if (url.hostname !== "images.heb.com") continue;
-						const id = hebGroceryImageId(url.pathname);
-						if (id) ids.add(numericId(id));
-					} catch { /* Not an image URL. */ }
-				}
-			}
-		}
-		return ids;
-	};
 	// Every linked outer line must take exactly one SSR item, and every id the
 	// line names (its own link and its nested substitutes') must belong to that
 	// item, so a shared substitute cannot stand in for a contradictory

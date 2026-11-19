@@ -73,6 +73,7 @@ import {
 	parseOrderDate,
 	inspectOrderDetailLines,
 	orderItemId,
+	collapseDuplicateRenderings,
 	resolveLinklessOrderItems,
 	parseOrdersListDom,
 	parseOrdersListStructured,
@@ -184,6 +185,8 @@ interface DetailSurfaceResult {
 	/** One complete snapshot mounted exactly the source's line total, and the
 	 * collection holds that snapshot's lines and nothing else. */
 	lineCountMatches: boolean;
+	/** Rows in the last settled snapshot. */
+	snapshotRows: number;
 	diagnostics: DetailSurfaceDiagnostics;
 	html: string;
 	coherent: boolean;
@@ -748,6 +751,7 @@ async function collectDetailSurface(
 			: "";
 	return {
 		sourceIds: [...collected.keys()],
+		snapshotRows: latest.rows.length,
 		diagnostics,
 		html,
 		coherent: coherent && !lastError && !latest.loading,
@@ -1093,7 +1097,17 @@ export async function fetchOrderDetail(
 	if (landedUrl !== url)
 		return failed("parse_missing", "detail resource identity mismatch");
 	const source = readSourceOrderItems(html, orderId);
-	const resolved = resolveLinklessOrderItems(surface.html, source.items);
+	// One product drawn twice is collapsed only on SSR's own count (see
+	// collapseDuplicateRenderings); every later check runs on the collapsed set.
+	const collapse = collapseDuplicateRenderings(surface.html, source.items, surface.sourceIds);
+	const surfaceHtml = collapse?.html ?? surface.html;
+	const surfaceIds = collapse?.sourceIds ?? surface.sourceIds;
+	const lineCountMatches = collapse
+		? initialSourceItemTotal !== null &&
+			surfaceIds.length === initialSourceItemTotal &&
+			surface.snapshotRows === surface.sourceIds.length
+		: surface.lineCountMatches;
+	const resolved = resolveLinklessOrderItems(surfaceHtml, source.items);
 	const detail = resolved.detail;
 	if (!detail) {
 		return failed(
@@ -1107,16 +1121,16 @@ export async function fetchOrderDetail(
 		"order_items",
 		url,
 		landedUrl,
-		surface.html,
-		surface.sourceIds,
+		surfaceHtml,
+		surfaceIds,
 	);
 	const sourceItemTotal = sourceOrderItemTotal(html, orderId);
 	evidence.coherent = surface.coherent;
-	const lineShape = inspectOrderDetailLines(surface.html);
+	const lineShape = inspectOrderDetailLines(surfaceHtml);
 	// The browser's count is checked again here on the html actually parsed,
 	// against a server total that did not change while the page was read.
 	evidence.lineCountProven =
-		surface.lineCountMatches &&
+		lineCountMatches &&
 		initialSourceItemTotal !== null &&
 		sourceItemTotal === initialSourceItemTotal &&
 		lineShape.lines === sourceItemTotal;
@@ -1143,7 +1157,7 @@ export async function fetchOrderDetail(
 		sourceItemTotal,
 		// Counts and shapes only: how far linkless-line resolution got. A gap
 		// leads with it because a stored gap message keeps only 300 characters.
-		linklessTrace: `ssr=${source.shape};${
+		linklessTrace: `ssr=${source.shape};${collapse ? `dup_render=${collapse.collapsed};` : ""}${
 			resolved.nameless.length > 0 && namelessKept.length === 0
 				? resolved.trace.replace(/;stop=nameless;nameless=\d+/, ";stop=unnamed;nameless_held=count")
 				: resolved.trace
