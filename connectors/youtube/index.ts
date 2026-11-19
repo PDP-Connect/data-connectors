@@ -215,6 +215,8 @@ class HistoryResponseTracker {
 	private correlatedResponseCount = 0;
 	private uncorrelatedResponseCount = 0;
 	private non2xxResponseCount = 0;
+	/** Requests for another page (a browseId other than history, no continuation). */
+	private foreignResponseCount = 0;
 	private unrecognizedResponseCount = 0;
 	private latestStatus: number | null = null;
 	private pending = Promise.resolve();
@@ -274,6 +276,7 @@ class HistoryResponseTracker {
 			browseResponseCount: this.browseResponseCount,
 			correlatedResponseCount: this.correlatedResponseCount,
 			uncorrelatedResponseCount: this.uncorrelatedResponseCount,
+			foreignResponseCount: this.foreignResponseCount,
 			non2xxResponseCount: this.non2xxResponseCount,
 			unrecognizedResponseCount: this.unrecognizedResponseCount,
 			trackingComplete: this.trackingComplete,
@@ -414,6 +417,15 @@ class HistoryResponseTracker {
 		}
 		const requestedContinuation = requestBody.continuation ?? null;
 		const initialHistoryRequest = requestBody.browseId === "FEhistory";
+		if (
+			requestBody.browseId !== undefined &&
+			!initialHistoryRequest &&
+			requestedContinuation === null
+		) {
+			// A request for another page is not unseen history.
+			this.foreignResponseCount += 1;
+			return;
+		}
 		if (
 			!initialHistoryRequest &&
 			(!requestedContinuation || !this.tokens.has(requestedContinuation))
@@ -1004,6 +1016,7 @@ interface VideoReadResult extends ListRead<BrowserVideo> {
 		browseResponseCount: number;
 		correlatedResponseCount: number;
 		uncorrelatedResponseCount: number;
+		foreignResponseCount: number;
 		non2xxResponseCount: number;
 		unrecognizedResponseCount: number;
 		trackingComplete: boolean;
@@ -1036,6 +1049,7 @@ function reportHistoryTraversal(history: HistoryTraversalDiagnostics): void {
 		total: history.browseResponseCount,
 		correlated: history.correlatedResponseCount,
 		uncorrelated: history.uncorrelatedResponseCount,
+		foreign: history.foreignResponseCount,
 		non_2xx: history.non2xxResponseCount,
 		unrecognized: history.unrecognizedResponseCount,
 	});
@@ -1511,6 +1525,9 @@ async function readHistoryVideoList(
 			? "history-evidence-changed-during-final-refresh"
 			: "history-response-buffer-overflow";
 	}
+	// The veto blocks the end claim only. A checkpoint rests on rows already
+	// read, so the stop reason that decides it is the one before the veto.
+	const endStopReason = stopReason;
 	const stateVeto = responseTracker.stateVeto(currentEnd);
 	if (stateVeto) {
 		sourceEnded = false;
@@ -1521,12 +1538,11 @@ async function readHistoryVideoList(
 	const hasSafePrefix = lastAccounted !== null;
 	const partialCheckpointAllowed =
 		!blocked &&
-		!stateVeto &&
 		((hasSafePrefix &&
 			!sourceEnded &&
 			!parseGap &&
-			["time-budget", "scroll-budget"].includes(stopReason)) ||
-			(headOnly && stopReason === "head-reconciled"));
+			["time-budget", "scroll-budget"].includes(endStopReason)) ||
+			(headOnly && endStopReason === "head-reconciled"));
 	return {
 		items: [],
 		exhausted: sourceEnded && !blocked,
@@ -1540,10 +1556,7 @@ async function readHistoryVideoList(
 		dedupedCount,
 		lastAccounted,
 		checkpointAnchor:
-			stableEnd &&
-			responseTracker.trackingComplete &&
-			!stateVeto &&
-			lastAccounted
+			stableEnd && responseTracker.trackingComplete && lastAccounted
 				? identityForVideo(lastAccounted)
 				: null,
 		phase: headOnly ? "head_reconciliation" : phase,
@@ -1691,6 +1704,7 @@ function historyFailureDiagnostics(
 		browse_total: history?.browseResponseCount ?? null,
 		correlated: history?.correlatedResponseCount ?? null,
 		uncorrelated: history?.uncorrelatedResponseCount ?? null,
+		foreign: history?.foreignResponseCount ?? null,
 		non_2xx: history?.non2xxResponseCount ?? null,
 		unrecognized: history?.unrecognizedResponseCount ?? null,
 		tracking_complete: history?.trackingComplete ?? null,
