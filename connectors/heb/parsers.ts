@@ -765,7 +765,7 @@ function hebGroceryImageId(pathname: string): string | undefined {
 
 /** A line's accessible sentence: its name part (the name, often with the size;
  * the two cannot be split safely), its ordered quantity and its line total. */
-const A11Y_SENTENCE_RE = /^Item(?: with preference)?, (.+)\. Quantity: (.+?)\. Price: (\$\d[\d,]*\.\d{2})\.?$/;
+const A11Y_SENTENCE_RE = /^Item(?: with preference)?, (.*)\. Quantity: (.+?)\. Price: (\$\d[\d,]*\.\d{2})\.?$/;
 
 /** Words an accessible sentence may hold that name no product. */
 const A11Y_WORDS = new Set([
@@ -1133,6 +1133,12 @@ export function resolveLinklessOrderItems(
 		`;stop=${stop}` +
 		(a11y ? `;a11y=${a11y}` : "") +
 		a11yFormat +
+		// Whether the first unnamed item links a product page: a valid
+		// www.heb.com product page for its id, another non-blank value, or none.
+		(unnamedItem && stop !== "price"
+			? `;un_pp=${unnamedItem.productUrl ? "valid"
+				: unnamedItem.unnamed?.strings.some((entry) => entry.path === "product.productPageURL") ? "other" : "none"}`
+			: "") +
 		(stop === "unnamed" ? `;ll_dom=${linklessDom ?? "-"}` : "") +
 		(stop === "price" ? "" : unnamedTrace) +
 		`;why=${[...why].sort(([a], [b]) => a.localeCompare(b)).map(([key, n]) => `${key}:${n}`).join(",") || "-"}` +

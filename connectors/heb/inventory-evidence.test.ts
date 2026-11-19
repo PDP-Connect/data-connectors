@@ -1057,7 +1057,7 @@ test("the diagnostic names why elimination refused: a line naming a claimed item
 	assert.equal(claimedText.evidence.linklessLines, 1);
 	assert.match(claimedText.linklessTrace ?? "", /elim:0;stop=unsafe;why=txt_claimed:1;ll_img=heb_image\/hebgrocery_id\/jpg(;|$)/);
 	assert.equal(unnamed.evidence.linklessLines, 1);
-	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
+	assert.match(unnamed.linklessTrace ?? "", /elim:0;stop=unnamed;a11y=[^;]*;un_pp=[^;]*;ll_dom=[^;]*;un=absent;un_hit=-;un_keys=-;why=none:1;/);
 	assert.doesNotMatch(`${claimedText.linklessTrace}${unnamed.linklessTrace}`, /500|501|999|SSR/);
 });
 
@@ -1080,9 +1080,9 @@ test("an unnamed left-over item: the diagnostic says how the name is missing and
 		),
 	]);
 	for (const r of [inField, nowhere, blank]) assert.equal(r.evidence.linklessLines, 1);
-	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
-	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
-	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
+	assert.match(inField.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;un_pp=[^;]*;ll_dom=[^;]*;un=null;un_hit=product\.displayName\+product\.tags\.#;un_keys=product\.displayName\+product\.brand\.name;why=none:1;/);
+	assert.match(nowhere.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;un_pp=[^;]*;ll_dom=[^;]*;un=null;un_hit=-;un_keys=product\.productLabel;why=none:1;/);
+	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;un_pp=[^;]*;ll_dom=[^;]*;un=blank;un_hit=-;un_sub=product\.longName;un_keys=product\.longName;why=none:1;/);
 	assert.doesNotMatch(`${inField.linklessTrace}${nowhere.linklessTrace}${blank.linklessTrace}`, /Invented|Bakery|Kitchen|Sliced|500|501|999/);
 });
 
@@ -1114,7 +1114,7 @@ test("the linkless line's element shape leads the unnamed diagnostic: tags, lett
 		itemRow(0) + line,
 	);
 	assert.equal(r.evidence.linklessLines, 1);
-	assert.match(r.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
+	assert.match(r.linklessTrace ?? "", /;stop=unnamed;a11y=[^;]*;un_pp=[^;]*;ll_dom=img:alt_word,span\.itemRowDetailsName:word,span\.orderItemQty:qty,span\.checkoutItemPrice:price,span\.\?:num;un=blank;un_hit=totalLineItemPricePaid\.formattedAmount;/);
 	assert.doesNotMatch(r.linklessTrace ?? "", /Invented|Bakery|4417|6\.00/);
 });
 
@@ -1183,10 +1183,16 @@ test("a linkless line whose sentence does not read says so as structure only, an
 		resolveLinkless(items, linked + line("Item, , 1 each. Quantity: 2 each. Price: $6.00.")),
 	]);
 	assert.equal(blank.evidence.linklessLines, 1);
-	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;a11y=format;a11y_fmt=1:Item, \. Quantity: d each\. Price: \$d\.d\.;ll_dom=/);
-	assert.match(noComma.linklessTrace ?? "", /;a11y=format;a11y_fmt=0:w\+ d ct, quantity d, \$d\.d;/);
+	assert.equal(blank.evidence.linklessLines, 1);
+	assert.match(blank.linklessTrace ?? "", /;stop=unnamed;a11y=no_name;un_pp=none;ll_dom=/);
+	assert.match(noComma.linklessTrace ?? "", /;a11y=format;a11y_fmt=0:w\+ d ct, quantity d, \$d\.d;un_pp=none;/);
 	assert.equal(comma.evidence.linklessLines, 1);
-	assert.match(comma.linklessTrace ?? "", /;stop=unnamed;a11y=no_name;ll_dom=/);
+	assert.match(comma.linklessTrace ?? "", /;stop=unnamed;a11y=no_name;un_pp=none;ll_dom=/);
+	const linkedPage = await resolveLinkless(
+		[namedSsr("500", "Invented Milk"), { ...unnamedSsr("501", "$6.00"), product: { id: "501", fullDisplayName: "", productPageURL: "/product-detail/invented/501" } }],
+		linked + line("Item, . Quantity: 2 lb. Price: $6.00."),
+	);
+	assert.match(linkedPage.linklessTrace ?? "", /;a11y=no_name;un_pp=valid;/);
 	assert.doesNotMatch(`${blank.linklessTrace}${noComma.linklessTrace}${comma.linklessTrace}`, /Invented|Bakery|6\.00/);
 });
 
