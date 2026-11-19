@@ -13,6 +13,7 @@ import {
 	collectYoutubeBrowser,
 	readPageReadiness,
 	resolveWatchedDate,
+	setHistoryLoopCallDeadlineMsForTest,
 } from "./index.ts";
 import { readSubscriptions } from "./browser-dom.ts";
 import { enumerationEnded, readListEnd } from "./page-evidence.ts";
@@ -3921,4 +3922,22 @@ test("page log: a drain evaluate that never resolves ends the run unproven, not 
 	);
 	assert.equal(completeCursorEmitted(messages), false);
 	assert.equal(historyStopReason(diagnostics), "history-evidence-timeout");
+});
+
+test("a Desktop evaluate that never resolves inside the walk ends it with a partial checkpoint, not a hang", { timeout: 20_000 }, async () => {
+	const previous = setHistoryLoopCallDeadlineMsForTest(50);
+	try {
+		const { messages, outcome, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{ hangReadListEndFrom: 3 },
+		);
+		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+		assert.equal(completeCursorEmitted(messages), false);
+		assert.equal(historyStopReason(diagnostics), "history-loop-timeout");
+	} finally {
+		setHistoryLoopCallDeadlineMsForTest(previous);
+	}
 });

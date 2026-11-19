@@ -1045,3 +1045,95 @@ test("a failed XHR browse is logged with its body and status 0", async () => {
 		xhr.restore();
 	}
 });
+
+/** An XHR that keeps its listeners per object and honors { once: true }, as a browser does. */
+function installReusableXhr() {
+	class ReusableXhr {
+		status = 0;
+		responseType = "";
+		responseText = "";
+		response: unknown = null;
+		private listeners: Array<{ listener: () => void; once: boolean }> = [];
+		open(_method: string, _url: string): void {}
+		send(_body?: unknown): void {}
+		addEventListener(event: string, listener: () => void, options?: { once?: boolean }): void {
+			if (event === "loadend") this.listeners.push({ listener, once: options?.once === true });
+		}
+		finish(): void {
+			for (const entry of [...this.listeners]) {
+				if (entry.once) this.listeners = this.listeners.filter((other) => other !== entry);
+				entry.listener();
+			}
+		}
+	}
+	const globals = globalThis as Record<string, unknown>;
+	const previous = globals.XMLHttpRequest;
+	globals.XMLHttpRequest = ReusableXhr;
+	return {
+		ReusableXhr,
+		restore: () => {
+			globals.XMLHttpRequest = previous;
+		},
+	};
+}
+
+test("a reused XHR logs each send once, with its own request body", async () => {
+	const xhr = installReusableXhr();
+	try {
+		await withFakeWindow(async () => new Response("{}"), async () => {
+			assert.equal(installHistoryBrowseLog(), true);
+			const call = new xhr.ReusableXhr();
+			call.open("POST", BROWSE_URL);
+			call.send(JSON.stringify({ continuation: "first" }));
+			call.status = 200;
+			call.responseText = JSON.stringify(continuationBody("n1"));
+			call.finish();
+			call.open("POST", BROWSE_URL);
+			call.send(JSON.stringify({ continuation: "second" }));
+			call.responseText = JSON.stringify(continuationBody("n2"));
+			call.finish();
+			const drained = await drainAll();
+			assert.deepEqual(
+				drained.entries.map((entry) => entry.requestBody),
+				[{ continuation: "first" }, { continuation: "second" }],
+			);
+			assert.equal(drained.sent, 2);
+			assert.equal(drained.completed, 2);
+		});
+	} finally {
+		xhr.restore();
+	}
+});
+
+test("a JSON-typed XHR response scans the same as the fetch path; other types are unreadable", async () => {
+	const xhr = installReusableXhr();
+	try {
+		await withFakeWindow(async () => new Response("{}"), async () => {
+			assert.equal(installHistoryBrowseLog(), true);
+			const body = continuationBody("n1");
+			const jsonCall = new xhr.ReusableXhr();
+			jsonCall.open("POST", BROWSE_URL);
+			jsonCall.responseType = "json";
+			Object.defineProperty(jsonCall, "responseText", {
+				get() {
+					throw new Error("InvalidStateError");
+				},
+			});
+			jsonCall.send(JSON.stringify({ continuation: "asked" }));
+			jsonCall.status = 200;
+			jsonCall.response = body;
+			jsonCall.finish();
+			const blobCall = new xhr.ReusableXhr();
+			blobCall.open("POST", BROWSE_URL);
+			blobCall.responseType = "blob";
+			blobCall.send(JSON.stringify({ continuation: "asked" }));
+			blobCall.status = 200;
+			blobCall.finish();
+			const drained = await drainAll();
+			assert.deepEqual(drained.entries[0]?.summary, scanHistoryResponse(body));
+			assert.equal(drained.entries[1]?.summary, null);
+		});
+	} finally {
+		xhr.restore();
+	}
+});
