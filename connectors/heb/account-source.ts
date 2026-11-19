@@ -165,10 +165,15 @@ export interface SourceOrderItem {
 const NAMING_KEY_RE = /image|img|photo|picture|url|href|name|title|label|desc/i;
 const NAMING_SCAN_MAX_NODES = 200_000;
 const NAMING_SCAN_MAX_DEPTH = 256;
-/** Subtrees of `product` that name nothing: a category is not a product name
- * and an image URL does not name the product it shows. `__typename` is a type
- * tag at any depth. Every other key, SKUs and unknown ones included, keeps the veto. */
-const NAMING_SKIPPED_PRODUCT_KEYS = new Set(["productCategory", "productImageUrls", "thumbnailImageUrls"]);
+/** Exact leaves proven not to be names (a category's name, an image's url);
+ * `__typename` at any depth is a type tag. Every other leaf, including any other
+ * key under these same subtrees, keeps the veto. */
+const NAMING_ALLOWED_LEAVES = new Set([
+	"product.productCategory.name",
+	"product.productImageUrls.#.url",
+	"product.thumbnailImageUrls.#.url",
+]);
+
 /** The only key text a held trace may print: H-E-B's own known keys. Any other
  * segment prints as `?`, so source text never reaches the trace. */
 const NAMING_PATH_VOCABULARY = new Set([
@@ -193,12 +198,15 @@ function namingScan(raw: unknown): { naming: "none" | "incomplete" } | { naming:
 		const [value, under, path] = stack.pop()!;
 		if (++nodes > NAMING_SCAN_MAX_NODES || path.length > NAMING_SCAN_MAX_DEPTH) return { naming: "incomplete" };
 		if (typeof value === "string") {
-			if (under && value.trim()) return { naming: "found", path: namingPathText(path) };
+			if (under && value.trim()) {
+				const rawPath = path.map((part) => (typeof part === "number" ? "#" : part)).join(".");
+				if (!NAMING_ALLOWED_LEAVES.has(rawPath)) return { naming: "found", path: namingPathText(path) };
+			}
 		} else if (Array.isArray(value)) {
 			value.forEach((element, index) => stack.push([element, under, [...path, index]]));
 		} else if (value !== null && typeof value === "object") {
 			for (const [key, element] of Object.entries(value)) {
-				if (key === "__typename" || (path.length === 1 && path[0] === "product" && NAMING_SKIPPED_PRODUCT_KEYS.has(key))) continue;
+				if (key === "__typename") continue;
 				stack.push([element, under || NAMING_KEY_RE.test(key), [...path, key]]);
 			}
 		}

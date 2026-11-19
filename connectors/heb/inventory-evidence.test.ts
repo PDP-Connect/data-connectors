@@ -54,7 +54,7 @@ function pageFor(html: string, landed?: string): Page {
 				rows: lines.map((li, i) => ({
 					key: `position:document-order=${i}`,
 					// As the browser function wraps a row in its department section.
-					html: ((title) => title ? `<section><h2 data-qe-id="orderDetailsGroupTitle">${title}</h2>${li.outerHTML}</section>` : li.outerHTML)(li.closest("section")?.querySelector('[data-qe-id="orderDetailsGroupTitle"]')?.textContent),
+					html: ((title) => title ? `<section><h2 data-qe-id="orderDetailsGroupTitle">${title.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</h2>${li.outerHTML}</section>` : li.outerHTML)(li.closest("section")?.querySelector('[data-qe-id="orderDetailsGroupTitle"]')?.textContent),
 					unitCount: 1,
 				})),
 				scrollHeight: 100,
@@ -1349,7 +1349,7 @@ const liveLeftOver = (extra: Record<string, unknown> = {}) => ({
 	id: "7001", fullDisplayName: "", productPageURL: "",
 	__typename: "Product", bestAvailable: true, isEbtSnapProduct: false, maximumOrderQuantity: 50, minimumOrderQuantity: 1,
 	productCategory: { name: "Produce", __typename: "Category" },
-	productImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001", size: "MEDIUM", __typename: "Image" }],
+	productImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001", __typename: "Image" }],
 	thumbnailImageUrls: [{ url: "https://images.heb.com/is/image/HEBGrocery/007001-t", __typename: "Image" }],
 	shoppingContext: "CURBSIDE_PICKUP", storeId: 92,
 	SKUs: [{ id: "9001", customerFriendlySize: "1 lb", weightSelectionIncrements: [0.5], twelveDigitUPC: "000000000001", contextPrices: [{ isOnSale: false }], __typename: "SKU" }],
@@ -1380,4 +1380,21 @@ test("a name under SKUs or an unknown key still holds, and the trace names the p
 	assert.equal(heldOf(a), "naming_key:product.SKUs.#.displayName");
 	assert.equal(heldOf(b), "naming_key:product.?");
 	for (const r of [a, b]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread|productName/);
+});
+
+test("a name hidden in a skipped-looking subtree still holds; only the proven leaves are allowed", async () => {
+	const image = liveLeftOver({ productImageUrls: [{ url: "https://images.heb.com/x", displayName: "Zq9x Bread" }] });
+	const category = liveLeftOver({ productCategory: { name: "Produce", description: "Zq9x Bread" } });
+	const thumb = liveLeftOver({ thumbnailImageUrls: [{ url: "https://images.heb.com/x", title: "Zq9x Bread" }] });
+	const [a, b, c] = (await Promise.all([image, category, thumb].map((product) =>
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2, product)], inSection(itemRow(0) + nlLine(1.2, "$3.17")))))) as [Awaited<ReturnType<typeof resolveLinkless>>, Awaited<ReturnType<typeof resolveLinkless>>, Awaited<ReturnType<typeof resolveLinkless>>];
+	assert.equal(heldOf(a), "naming_key:product.productImageUrls.#.displayName");
+	assert.equal(heldOf(b), "naming_key:product.productCategory.description");
+	assert.equal(heldOf(c), "naming_key:product.thumbnailImageUrls.#.title");
+	for (const r of [a, b, c]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread/);
+});
+
+test("a named row's department survives a section title with < and &", async () => {
+	const r = await resolveLinkless([ssrItem("500")], `<main><section><h2 data-qe-id="orderDetailsGroupTitle">Fish &amp; &lt;Chips&gt;</h2><ul>${itemRow(0)}</ul></section></main>`);
+	assert.equal(r.detail.items[0]?.department, "Fish & <Chips>");
 });
