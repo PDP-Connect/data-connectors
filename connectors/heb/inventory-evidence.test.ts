@@ -1748,3 +1748,44 @@ test("the diagnostic search running out of budget keeps the gap, though every ro
 	assert.equal(matchesTotal(r, n + 1), false);
 	assert.equal(r.inventoryComplete, false);
 });
+
+// ─── round 17: positions are the 0.6.62 positions; nested qty is exact ────
+// The ids the 0.6.62 path gave: parse the same DOM as it stands (every row,
+// nested ones included) and name each record with the verbatim old id function.
+const legacyIdsFor = (rows: string) =>
+	parseOrderDetailDom(rows)!.items.map((item, i, all) => legacyOrderItemId(order.orderId, item, i, all));
+
+test("kept rows keep the position 0.6.62 gave them when an earlier row holds a nested substitute, with and without a collapse", async () => {
+	const body = (top: string, bottom: string) =>
+		top + dupRow("903", { nested: nestedSub("904") }) + dupRow("901", { cents: "$3.00" }) + dupRow("901", { cents: "$4.00" }) + dupRow("902") + bottom;
+	const plain = body("", dupRow("900"));
+	const withExtra = body(dupRow("900"), dupRow("900"));
+	const without = await resolveLinkless(dupSsr, plain, DUP_COUNT);
+	assert.doesNotMatch(without.linklessTrace ?? "", /dup_render/);
+	const withCollapse = await resolveLinkless(dupSsr, withExtra, DUP_COUNT);
+	assert.match(withCollapse.linklessTrace ?? "", /;dup_render=1/);
+	const old = (rows: string) => legacyIdsFor(rows).filter((id) => !id.includes("|900"));
+	assert.deepEqual(asRecords(without).map((r) => r.id).filter((id) => !id.includes("|900")).sort(), old(plain).sort());
+	assert.deepEqual(asRecords(withCollapse).map((r) => r.id).filter((id) => !id.includes("|900")).sort(), old(withExtra).sort());
+	assert.ok(old(withExtra).includes(`${order.orderId}|901|3`) || old(withExtra).some((id) => id.includes("|901|")));
+});
+
+// A nested substitute counts toward the item_count sum only as exactly
+// `Qty: N` (N a positive integer) with an id listed under its original's SSR
+// subbedProducts.
+test("a nested row blocks the collapse unless its qty is exactly 'Qty: N' and its id is a listed substitute", async () => {
+	const nestedWith = (id: string, qty: string) => `<ul>${dupRow(id, { cents: "$2.00", qty })}</ul>`;
+	const page = (nested: string) =>
+		dupRow("900") + dupRow("902") + dupRow("901", { cents: "$3.00" }) + dupRow("901", { cents: "$4.00" }) + dupRow("903", { nested }) + dupRow("900");
+	const good = await resolveLinkless(dupSsr, page(nestedWith("904", "Qty: 1")), DUP_COUNT);
+	assert.match(good.linklessTrace ?? "", /;dup_render=1/);
+	const bad = [
+		page(nestedWith("904", "Qty: 1.5")),
+		page(nestedWith("904", "Qty: 1 of 2 lb")),
+		page(nestedWith("904", "Qty: 1…")),
+		page(nestedWith("904", "Qty: 0")),
+		page(nestedWith("999", "Qty: 1")),
+	];
+	const results = await Promise.all(bad.map((html) => resolveLinkless(dupSsr, html, DUP_COUNT)));
+	for (const [i, r] of results.entries()) assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/, `form ${i}`);
+});

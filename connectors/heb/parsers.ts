@@ -1004,11 +1004,16 @@ function matchRows(
  *    the quantities of the nested substitute rows. A second real purchase
  *    raises item_count, and a missing or unequal count blocks the collapse.
  * The first D-S rows go and the last S stay: a pinned or promoted rendering
- * comes before the line's normal place. Every kept row keeps its original DOM
- * position (stamped as `data-index` when it has none), so no other duplicate's
- * positional id shifts. The kept P row takes the product-only id because SSR
- * holds P once; that matches the oldest stored key. Stale `|<position>` rows an
- * older run stored for P are part of the owner's legacy cleanup, not migrated.
+ * comes before the line's normal place. A removed row leaves a marker
+ * (`data-dup-removed`) so resolveLinklessOrderItems can give every kept record
+ * the position it had before the removal: its record index in the page as
+ * drawn, nested rows included, which is what the positional fallback id used
+ * (0.6.62). The kept P row takes the product-only id because SSR holds P once;
+ * that matches the oldest stored key. Stale `|<position>` rows an older run
+ * stored for P are part of the owner's legacy cleanup, not migrated.
+ * A nested row counts toward the unit sum only as exactly `Qty: N` (N a
+ * positive integer) with its own link id listed under `subbedProducts` of an
+ * SSR item for its original's product id; any other nested row blocks.
  * Returns null, changing nothing, when no product qualifies or the rows and the
  * collected source ids do not pair one to one. */
 export function collapseDuplicateRenderings(
@@ -1022,6 +1027,10 @@ export function collapseDuplicateRenderings(
 	const outer = [...document.querySelectorAll("li")].filter((li) => !li.parentElement?.closest("li"));
 	if (outer.length === 0 || outer.length !== sourceIds.length) return null;
 	const nameSelector = 'a[data-qe-id="itemRowDetailsName"]';
+	const exactQty = (text: string) => {
+		const n = /^Qty: ([1-9]\d*)$/.exec(text)?.[1];
+		return n === undefined ? null : Number(n);
+	};
 	const qtyOf = (text: string) => /^\s*Qty:\s*(\d+)/i.exec(text)?.[1];
 	const facts = outer.map((line) => {
 		const own = line.cloneNode(true) as Element;
@@ -1036,7 +1045,8 @@ export function collapseDuplicateRenderings(
 			id: ids.length === 1 && ids[0] ? ids[0] : null,
 			holdsNested: line.querySelector("li") !== null,
 			hasImage: ownImageIds(own).size > 0,
-			stated: qtyOf(qtyText) !== undefined && cents !== null,
+			stated: qtyOf(qtyText) !== undefined && cents !== null &&
+				[...own.querySelectorAll(nameSelector)].every((link) => normText(link) !== ""),
 			same: JSON.stringify([
 				ids,
 				[...ownImageIds(own)].sort(),
@@ -1071,10 +1081,25 @@ export function collapseDuplicateRenderings(
 		if (typeof item.fulfilledQuantity !== "number" || !Number.isInteger(item.fulfilledQuantity)) return null;
 		units += item.fulfilledQuantity;
 	}
-	for (const nested of outer.flatMap((line) => [...line.querySelectorAll("li")])) {
-		const qty = qtyOf(normText(nested.querySelector('[data-qe-id="orderItemQty"]')));
-		if (qty === undefined) return null;
-		units += Number(qty);
+	const listedUnder = new Map<string, Set<string>>();
+	for (const item of items) {
+		if (item.productId === null) continue;
+		const listed = listedUnder.get(item.productId) ?? new Set<string>();
+		for (const id of item.substituteIds) listed.add(id);
+		listedUnder.set(item.productId, listed);
+	}
+	for (const line of outer) {
+		const nestedRows = [...line.querySelectorAll("li")];
+		if (nestedRows.length === 0) continue;
+		const originalId = facts[outer.indexOf(line)]!.id;
+		const listed = originalId === null ? undefined : listedUnder.get(originalId);
+		for (const nested of nestedRows) {
+			const links = [...nested.querySelectorAll(nameSelector)];
+			const nestedId = links.length === 1 ? (links[0]!.getAttribute("href") ?? "").split("/").filter(Boolean).pop() : undefined;
+			const qty = exactQty(normText(nested.querySelector('[data-qe-id="orderItemQty"]')));
+			if (qty === null || !nestedId || nested.querySelector("li") || !listed?.has(nestedId)) return null;
+			units += qty;
+		}
 	}
 	if (units !== itemCount) return null;
 	const removed = new Set<Element>();
@@ -1082,11 +1107,11 @@ export function collapseDuplicateRenderings(
 		for (const row of rows.slice(0, rows.length - supply)) removed.add(row.line);
 	}
 	const kept = sourceIds.filter((_, i) => !removed.has(outer[i]!));
-	outer.forEach((line, position) => {
-		if (!removed.has(line) && !line.hasAttribute("data-index") && !line.hasAttribute("aria-posinset"))
-			line.setAttribute("data-index", String(position));
-	});
-	for (const line of removed) line.remove();
+	for (const line of removed) {
+		const marker = document.createElement("span");
+		marker.setAttribute("data-dup-removed", "");
+		line.replaceWith(marker);
+	}
 	return { html: document.toString(), sourceIds: kept, collapsed: removed.size };
 }
 
@@ -1365,6 +1390,22 @@ export function resolveLinklessOrderItems(
 	const detail = parsed ?? (namelessItems
 		? { items: [], parsing: { observedRows: 0, rejectedRows: 0, missingIdentityRows: 0, sourceIds: [] } }
 		: null);
+	if (parsed) {
+		// A collapse leaves markers where it removed a rendering. A kept record
+		// with no DOM position takes the index it had with that rendering drawn.
+		let shift = 0;
+		let at = 0;
+		for (const el of document.querySelectorAll(`${nameSelector}, [data-dup-removed]`)) {
+			if (el.hasAttribute("data-dup-removed")) {
+				shift++;
+				continue;
+			}
+			if (!parseDetailItem(el as HTMLAnchorElement)) continue;
+			const record = parsed.items[at]!;
+			if (shift > 0 && record.sourcePosition === null) record.sourcePosition = at + shift;
+			at++;
+		}
+	}
 	if (parsed) {
 		// The temporary anchor is only a parser adapter: the record keeps the SSR
 		// product page URL when H-E-B gave a valid one, and no URL otherwise.
