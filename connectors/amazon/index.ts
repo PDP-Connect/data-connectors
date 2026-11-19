@@ -1545,7 +1545,25 @@ async function reportEmptyPageDiagnostics(
 					any_order_header: document.querySelectorAll(
 						'[class*="order" i][class*="header" i]',
 					).length,
-					sign_in_form: Boolean(document.querySelector('form[name="signIn"]')),
+					// Only a sign-in form the person could see. Amazon's header account
+					// menu carries a hidden form[name="signIn"] on ordinary pages, and an
+					// empty last page of a year ("0 orders") read as a lost sign-in
+					// (live 2026-11-19, amazon.ca: every run stopped after 2026).
+					sign_in_form: [
+						...document.querySelectorAll<HTMLFormElement>(
+							'form[name="signIn"]',
+						),
+					].some((form) => {
+						const rect = form.getBoundingClientRect();
+						const style = getComputedStyle(form);
+						return (
+							rect.width > 0 &&
+							rect.height > 0 &&
+							style.visibility !== "hidden" &&
+							style.display !== "none" &&
+							form.closest("[hidden],[aria-hidden='true']") === null
+						);
+					}),
 					// A challenge is Amazon's own challenge form or its exact wording.
 					// Never a bare word: an empty year's "Buy it again" carousel can
 					// list a product named "Robot ..." or "CAPTCHA ...".
