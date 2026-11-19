@@ -1504,9 +1504,10 @@ export function resolveLinklessOrderItems(
 		trace,
 		nameless: namelessItems ?? [],
 		ledgerExhausted: budgetSpent || diagnosticSpent,
-		// No row took its item through an image or a text key: every linked row
-		// fit through its own link id (or a listed substitute id).
-		placedByOwnLink: fitByImage === 0 && keyed === 0,
+		// No row took its item through an image, a text key or elimination:
+		// every row is linked and fit through its own link id (or a listed
+		// substitute id), and no linkless row exists at all.
+		placedByOwnLink: fitByImage === 0 && keyed === 0 && linkless === 0 && eliminated === 0,
 		// The ledger is complete (every linked row sits on its own SSR item) and
 		// every SSR item ended on a distinct row: claimed, or paired as nameless.
 		allItemsPlaced: ledgerComplete && (

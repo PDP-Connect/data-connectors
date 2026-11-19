@@ -1877,3 +1877,36 @@ test("a stray row with a link to another product and a missing item's image bloc
 	assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
 	assert.equal(matchesTotal(r, 5), false);
 });
+
+// ─── round 19: elimination under a collapse; a contradictory link is not rescued by image ───
+const img = (id: string) => `<img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${id.padStart(9, "0")}.jpg">`;
+const rowOf = (links: string[], image: string, cents = "$4.00") =>
+	`<li><a aria-hidden="true" href="/product-detail/x/${links[0]}">${img(image)}</a>` +
+	links.map((id) => `<a data-qe-id="itemRowDetailsName" href="/product-detail/x/${id}">Item ${id}</a>`).join("") +
+	`<span data-qe-id="checkoutItemPrice">${cents}</span><span data-qe-id="orderItemQty">Qty: 1</span></li>`;
+
+test("a collapse does not stand when a linkless row fills a missing item by elimination", async () => {
+	const bare = '<li><span data-qe-id="checkoutItemPrice">$4.00</span><span data-qe-id="orderItemQty">Qty: 1</span></li>';
+	// 902 is the one unmatched item, so elimination is unambiguous.
+	const rows = dupRow("900") + dupRow("901", { cents: "$3.00" }) + dupRow("901", { cents: "$4.00" }) + dupRow("903", { nested: nestedSub("904") }) + bare + dupRow("900");
+	const r = await resolveLinkless(dupSsr, rows, DUP_COUNT);
+	assert.doesNotMatch(r.linklessTrace ?? "", /dup_render/);
+	assert.equal(matchesTotal(r, 5), false);
+});
+
+const pq = [{ ...ssrItem("700"), fulfilledQuantity: 1 }, { ...ssrItem("701"), fulfilledQuantity: 1 }];
+test("a linked row naming a product SSR knows is not placed on another item by its image", async () => {
+	// Two anchors: 700 is SSR's product P, 999 is unknown. The image is Q's.
+	const contradictory = await resolveLinkless(pq, rowOf(["700"], "700") + rowOf(["700", "999"], "701"));
+	assert.equal(matchesTotal(contradictory, 2), false);
+	assert.deepEqual(contradictory.detail.items.map((i) => i.productId).includes("701"), false);
+	// One link naming P again, with Q's image: its candidates are P alone (the
+	// image fallback runs only for a row whose link matches no SSR item).
+	const repeated = await resolveLinkless(pq, rowOf(["700"], "700") + rowOf(["700"], "701"));
+	assert.equal(matchesTotal(repeated, 2), false);
+});
+
+test("a linked row whose link SSR does not know at all is still placed by its image", async () => {
+	const reId = await resolveLinkless(pq, rowOf(["700"], "700") + rowOf(["999"], "701"));
+	assert.equal(matchesTotal(reId, 2), true);
+});
