@@ -1926,6 +1926,8 @@ class DocumentPage {
 	private pageLogSent = 0;
 	private pageLogHanging = 0;
 	private drainCount = 0;
+	private readonly setupStall: "hydration" | "wait" | "jsonValue" | "dispose" | undefined;
+	private hydrationStalled = false;
 	/** The page's own stop token, kept across the fake's per-call windows. */
 	private pageStopToken: unknown;
 	/** Held scroll evaluates run only after this settles. */
@@ -1965,6 +1967,8 @@ class DocumentPage {
 			hangDrainFrom?: number;
 			/** The nth readListEnd evaluate, and every one after it, never resolves. */
 			hangReadListEndFrom?: number;
+			/** One setup step never settles. */
+			setupStall?: "hydration" | "wait" | "jsonValue" | "dispose";
 			/** The drain's short wait never returns. */
 			hangDrainWait?: boolean;
 			/** Scroll evaluates are held until this settles. */
@@ -1989,6 +1993,7 @@ class DocumentPage {
 		this.browseRequestsOnScroll = options.browseRequestsOnScroll ?? [];
 		this.gotoError = options.gotoError;
 		this.hangDrainFrom = options.hangDrainFrom;
+		this.setupStall = options.setupStall;
 		this.hangDrainWait = options.hangDrainWait ?? false;
 		this.scrollGate = options.scrollGate;
 		this.hangReadListEndFrom = options.hangReadListEndFrom;
@@ -2142,6 +2147,10 @@ class DocumentPage {
 	}
 	async waitForTimeout(ms?: number) {
 		if (this.hangDrainWait && ms === 250) await new Promise<never>(() => undefined);
+		if (this.setupStall === "hydration" && ms !== 250 && !this.hydrationStalled) {
+			this.hydrationStalled = true;
+			await new Promise<never>(() => undefined);
+		}
 		if (!this.pendingHistoryScroll) return;
 		this.pendingHistoryScroll = false;
 		if (this.browseRequestsFirst)
@@ -2187,9 +2196,14 @@ class DocumentPage {
 		}
 	}
 	async waitForFunction(fn: Function, arg: unknown) {
+		if (this.setupStall === "wait") await new Promise<never>(() => undefined);
 		const value = this.forcedReadiness ?? this.inPage(() => fn(arg));
 		if (!value) throw new Error("page read timed out");
-		return { jsonValue: async () => value, dispose: async () => undefined };
+		const never = () => new Promise<never>(() => undefined);
+		return {
+			jsonValue: this.setupStall === "jsonValue" ? never : async () => value,
+			dispose: this.setupStall === "dispose" ? never : async () => undefined,
+		};
 	}
 	async evaluate(fn: Function, arg?: unknown) {
 		if (
@@ -4036,6 +4050,31 @@ test("a scroll evaluation dispatched after the walk stopped does not scroll", { 
 		assert.equal(page?.scrollByCount, 0);
 	} finally {
 		release();
+		setHistoryLoopCallDeadlineMsForTest(previous);
+	}
+});
+
+test("a stalled setup step fails the walk closed with nothing emitted", { timeout: 20_000 }, async () => {
+	const previous = setHistoryLoopCallDeadlineMsForTest(50);
+	try {
+		for (const setupStall of ["hydration", "wait", "jsonValue", "dispose"] as const) {
+			const { records, messages, outcome } = await collectFromDocuments(
+				() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+				["watch_history"],
+				undefined,
+				{ watch_history: { complete: false } },
+				{ setupStall },
+			);
+			assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"], setupStall);
+			assert.equal(
+				messages.find((message) => message.stream === "watch_history")?.message,
+				"youtube_history_setup_timeout",
+				setupStall,
+			);
+			assert.equal(records.get("watch_history")?.length ?? 0, 0, setupStall);
+			assert.equal(messages.some((message) => message.type === "STATE"), false, setupStall);
+		}
+	} finally {
 		setHistoryLoopCallDeadlineMsForTest(previous);
 	}
 });

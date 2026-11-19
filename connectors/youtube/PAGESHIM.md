@@ -55,7 +55,7 @@ call ends the walk with `history-loop-timeout`: no complete STATE, the stream
 fails, and the checkpoint stays tied to the rows already accounted. The record callback runs under the same deadline
 (`history-record-timeout`), each tracker flush too (a stalled wait bridge marks
 the evidence incomplete, so no complete STATE), and a stop token set in the page
-when the walk stops keeps a scroll still queued from scrolling afterwards. A history browse still in
+when the walk stops keeps a scroll still queued from scrolling afterwards. The limit: on a stalled bridge, a scroll queued ahead of the stop token still runs when the bridge recovers. Setup (hydration wait, readiness handle read and dispose) runs under the same deadline and fails closed with `youtube_history_setup_timeout` before any record is emitted. A history browse still in
 flight (started, not yet answered or failed) keeps the final refresh from being
 stable, bounded by the three refreshes and the page-log drain wait. A veto blocks the complete STATE only; the partial checkpoint rests on
 rows already read and is kept. On this path the terminal logged response must also
