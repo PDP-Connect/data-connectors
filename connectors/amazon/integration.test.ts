@@ -4139,11 +4139,20 @@ function collectContextFor(
 	page: Page,
 	state: Record<string, unknown>,
 	messages: EmittedMessage[],
+	options: {
+		records?: Array<{ stream: string; id: unknown }> | undefined;
+		streams?: string[] | undefined;
+	} = {},
 ): BrowserCollectContext {
 	return {
-		scope: { streams: [{ name: "orders" }] },
+		scope: {
+			streams: (options.streams ?? ["orders"]).map((name) => ({ name })),
+		},
 		state,
-		emitRecord: () => Promise.resolve(),
+		emitRecord: (stream: string, data: { id?: unknown }) => {
+			options.records?.push({ stream, id: data.id });
+			return Promise.resolve();
+		},
 		emit: (message: EmittedMessage) => {
 			messages.push(message);
 			return Promise.resolve();
@@ -4161,7 +4170,10 @@ function collectContextFor(
 
 function lastOrdersCursor(messages: EmittedMessage[]): {
 	store?: string;
-	years?: Record<string, { order_count: number; frozen: boolean } | undefined>;
+	years?: Record<
+		string,
+		{ order_count: number; frozen: boolean; resume?: unknown } | undefined
+	>;
 	otherStores?: Record<string, unknown>;
 } {
 	const states = messages.filter(
@@ -4219,9 +4231,13 @@ test("collectAmazon: a walk-budget stop part way through a year leaves that year
 		const cursor1 = lastOrdersCursor(messages1);
 		assert.equal(cursor1.store, "com");
 		assert.equal(
-			cursor1.years?.[String(year)],
-			undefined,
-			"the unfinished year is not recorded as read or frozen for amazon.com",
+			cursor1.years?.[String(year)]?.frozen,
+			false,
+			"the unfinished year is not frozen for amazon.com",
+		);
+		assert.ok(
+			cursor1.years?.[String(year)]?.resume,
+			"it is kept as a part read year with a resume point, not as read",
 		);
 		assert.deepEqual(
 			cursor1.otherStores,
@@ -4262,4 +4278,279 @@ test("collectAmazon: a walk-budget stop part way through a year leaves that year
 			process.env.PDPP_AMAZON_SKIP_DETAIL = env;
 		}
 	}
+});
+
+// ─── A year too long for one bounded run resumes where it stopped ─────────
+//
+// Listings are flat newest-first id lists served ten to a page. The clock
+// expires once a pass has fetched `pageLimit` list pages.
+
+const LISTING_PAGE_SIZE = 10;
+
+function listingOrderIds(prefix: string, count: number): string[] {
+	return Array.from(
+		{ length: count },
+		(_, n) => `${prefix}-${String(n + 1).padStart(7, "0")}-0000000`,
+	);
+}
+
+function listingPageHtml(ids: string[], year: number): string {
+	const cards = ids.map(
+		(id, n) =>
+			`<div class="order-card js-order-card"><div class="order-header"><ul><li class="order-header__header-list-item"><span class="a-color-secondary a-text-caps">Order placed</span><span>January ${(n % 27) + 1}, ${year}</span></li></ul><div class="yohtmlc-order-id"><span class="a-color-secondary a-text-caps">Order #</span><span class="a-color-secondary" dir="ltr">${id}</span></div></div><div class="item-box"><span class="yohtmlc-product-title">Synthetic Item</span></div></div>`,
+	);
+	return `<html><body><div id="ordersContainer">${cards.join("")}</div></body></html>`;
+}
+
+function listingPage(listings: Record<number, string[]>, log: string[]): Page {
+	const empty = '<html><body><div id="ordersContainer"></div></body></html>';
+	let current = empty;
+	return Object.assign({} as Page, {
+		url: (): string => "https://www.amazon.com/your-orders/orders",
+		content: (): Promise<string> => Promise.resolve(current),
+		evaluate: (fn: () => unknown): Promise<unknown> => {
+			const src = String(fn);
+			if (src.includes("select#time-filter")) {
+				return Promise.resolve(Object.keys(listings).map((y) => `year-${y}`));
+			}
+			if (src.includes("timeFilter=year-")) {
+				return Promise.resolve([]);
+			}
+			return Promise.resolve(
+				makeEmptyPageDiagnostics({
+					order_cards: 0,
+					any_card: 0,
+					any_order_header: 0,
+					no_orders_text: "false",
+				}),
+			);
+		},
+		goto: (url: string): Promise<null> => {
+			log.push(url);
+			const year = Number(/year-(\d+)/.exec(url)?.[1]);
+			const start = Number(/startIndex=(\d+)/.exec(url)?.[1] ?? "0");
+			const ids = (listings[year] ?? []).slice(
+				start,
+				start + LISTING_PAGE_SIZE,
+			);
+			current = ids.length > 0 ? listingPageHtml(ids, year) : empty;
+			return Promise.resolve(null);
+		},
+		locator: (): { first: () => { waitFor: () => Promise<null> } } => ({
+			first: () => ({ waitFor: (): Promise<null> => Promise.resolve(null) }),
+		}),
+	});
+}
+
+type OrdersCursor = ReturnType<typeof lastOrdersCursor>;
+
+/** One pass of the real run; the walk clock expires after `pageLimit` list pages. */
+async function runPass(args: {
+	listings: Record<number, string[]>;
+	pageLimit: number;
+	records?: Array<{ stream: string; id: unknown }>;
+	state: Record<string, unknown>;
+	streams?: string[];
+}): Promise<{
+	cursor: OrdersCursor;
+	log: string[];
+	messages: EmittedMessage[];
+}> {
+	const log: string[] = [];
+	const messages: EmittedMessage[] = [];
+	const realNow = Date.now.bind(Date);
+	const skipDetail = process.env.PDPP_AMAZON_SKIP_DETAIL;
+	process.env.PDPP_AMAZON_SKIP_DETAIL = "1";
+	mock.method(Date, "now", () =>
+		log.length >= args.pageLimit ? realNow() + 3_600_000 : realNow(),
+	);
+	try {
+		await collectAmazon(
+			collectContextFor(listingPage(args.listings, log), args.state, messages, {
+				records: args.records,
+				streams: args.streams,
+			}),
+		);
+	} finally {
+		mock.restoreAll();
+		if (skipDetail === undefined) {
+			delete process.env.PDPP_AMAZON_SKIP_DETAIL;
+		} else {
+			process.env.PDPP_AMAZON_SKIP_DETAIL = skipDetail;
+		}
+	}
+	return { cursor: lastOrdersCursor(messages), log, messages };
+}
+
+function startIndexes(log: string[], year?: number): string[] {
+	return log
+		.filter((u) => year === undefined || u.includes(`year-${year}&`))
+		.map((u) => /startIndex=(\d+)/.exec(u)?.[1] ?? "?");
+}
+
+function emittedOrderIds(
+	records: Array<{ stream: string; id: unknown }>,
+): string[] {
+	return records.filter((r) => r.stream === "orders").map((r) => String(r.id));
+}
+
+test("collectAmazon: a five-page year read two new pages per pass is finished by the third pass, then the next year is read, every order recorded once", async () => {
+	const year = new Date().getFullYear();
+	const listings = {
+		[year]: listingOrderIds("111", 45),
+		[year - 1]: listingOrderIds("222", 7),
+	};
+	const records: Array<{ stream: string; id: unknown }> = [];
+
+	const pass1 = await runPass({ listings, pageLimit: 2, records, state: {} });
+	assert.deepEqual(startIndexes(pass1.log), ["0", "10"]);
+	const pass2 = await runPass({
+		listings,
+		pageLimit: 3,
+		records,
+		state: { orders: pass1.cursor },
+	});
+	assert.deepEqual(
+		startIndexes(pass2.log),
+		["10", "20", "30"],
+		"the resumed run starts one page before the saved page and moves forward",
+	);
+	assert.equal(pass1.cursor.years?.[String(year)]?.frozen, false);
+	assert.ok(
+		pass1.cursor.years?.[String(year)]?.resume,
+		"the unfinished year keeps a resume point in its own store's cursor",
+	);
+
+	const pass3 = await runPass({
+		listings,
+		pageLimit: 50,
+		records,
+		state: { orders: pass2.cursor },
+	});
+	assert.deepEqual(startIndexes(pass3.log, year), ["30", "40", "50"]);
+	assert.ok(
+		startIndexes(pass3.log, year - 1).includes("0"),
+		"once the year is finished the run moves on to the next year",
+	);
+	assert.equal(pass3.cursor.years?.[String(year)]?.resume, undefined);
+	assert.equal(pass3.cursor.years?.[String(year - 1)]?.order_count, 7);
+
+	const ids = emittedOrderIds(records);
+	assert.equal(new Set(ids).size, 52, "every order of both years is recorded");
+	assert.equal(ids.length, 52, "and each is recorded exactly once");
+});
+
+test("collectAmazon: when the resume anchor is gone because orders were removed, the year restarts from page 1 and no order is lost", async () => {
+	const year = new Date().getFullYear();
+	const all = listingOrderIds("111", 45);
+	const records: Array<{ stream: string; id: unknown }> = [];
+
+	const pass1 = await runPass({
+		listings: { [year]: all },
+		pageLimit: 2,
+		records,
+		state: {},
+	});
+	// Amazon now lists 15 fewer orders (the two newest pages' worth is removed):
+	// the saved overlap page holds none of the orders it held before.
+	const removed = all.slice(15);
+	const pass2 = await runPass({
+		listings: { [year]: removed },
+		pageLimit: 50,
+		records,
+		state: { orders: pass1.cursor },
+	});
+	assert.equal(
+		startIndexes(pass2.log)[0],
+		"10",
+		"the overlap page is read first",
+	);
+	assert.equal(
+		startIndexes(pass2.log)[1],
+		"0",
+		"with no anchor on it the year restarts from page 1",
+	);
+	assert.equal(pass2.cursor.years?.[String(year)]?.resume, undefined);
+	assert.equal(pass2.cursor.years?.[String(year)]?.order_count, 30);
+	const seen = new Set(emittedOrderIds(records));
+	for (const id of removed) {
+		assert.ok(seen.has(id), `order ${id} was recorded`);
+	}
+});
+
+test("collectAmazon: orders added at the top only cause re-reads on resume; none already listed is skipped", async () => {
+	const year = new Date().getFullYear();
+	const original = listingOrderIds("111", 45);
+	const records: Array<{ stream: string; id: unknown }> = [];
+
+	const pass1 = await runPass({
+		listings: { [year]: original },
+		pageLimit: 2,
+		records,
+		state: {},
+	});
+	// Two new orders appear at the top: every page shifts down by two.
+	const added = ["333-0000001-0000000", "333-0000002-0000000"];
+	const grown = [...added, ...original];
+	const pass2 = await runPass({
+		listings: { [year]: grown },
+		pageLimit: 50,
+		records,
+		state: { orders: pass1.cursor },
+	});
+	assert.deepEqual(
+		startIndexes(pass2.log).slice(0, 2),
+		["10", "20"],
+		"the anchor is still on the overlap page, so the run continues forward",
+	);
+	const seen = new Set(emittedOrderIds(records));
+	for (const id of original) {
+		assert.ok(seen.has(id), `order ${id} was recorded`);
+	}
+	// The next run of the finished year starts at page 1 and picks up the new ones.
+	const pass3 = await runPass({
+		listings: { [year]: grown },
+		pageLimit: 50,
+		records,
+		state: { orders: pass2.cursor },
+	});
+	assert.equal(startIndexes(pass3.log)[0], "0");
+	for (const id of grown) {
+		assert.ok(new Set(emittedOrderIds(records)).has(id));
+	}
+});
+
+test("collectAmazon: a run that read only duplicates or only items and then hits the walk budget keeps its partial cursor instead of throwing", async () => {
+	const year = new Date().getFullYear();
+	const listings = { [year]: listingOrderIds("111", 45) };
+
+	// Only duplicates: a first run recorded page one; the cursor then forgets
+	// the year, so the next run re-reads page one (nothing new to record).
+	const first = await runPass({ listings, pageLimit: 1, state: {} });
+	const forgotten = {
+		orders: { ...first.cursor, years: {} },
+	};
+	const dup = await runPass({ listings, pageLimit: 1, state: forgotten });
+	assert.ok(
+		dup.messages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "amazon_stopped_early",
+		),
+		"the duplicate-only run ends as a kept partial run",
+	);
+	assert.ok(lastOrdersCursor(dup.messages).store);
+
+	// Only items: order_items is requested, orders is not.
+	const items = await runPass({
+		listings,
+		pageLimit: 1,
+		state: {},
+		streams: ["order_items"],
+	});
+	assert.ok(
+		items.messages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "amazon_stopped_early",
+		),
+		"the items-only run ends as a kept partial run",
+	);
+	assert.ok(lastOrdersCursor(items.messages).store);
 });

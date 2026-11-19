@@ -69,10 +69,30 @@ import type {
 	OrderDetail,
 } from "./types.ts";
 
+/**
+ * Where a year the walk could not finish in one bounded run picks up. The
+ * year is NOT complete: `startIndex` is the first list page not yet read,
+ * `anchor` the order ids on the last page read. The next run opens the page
+ * before `startIndex` and continues only if an anchor id is on it; otherwise
+ * the list moved under the saved position and the year restarts from page 1.
+ */
+export interface YearResume {
+	anchor: string[];
+	/** Orders counted on the pages read so far. */
+	counted: number;
+	startIndex: number;
+	/** List rows dropped so far because their order date did not parse. */
+	dateDrops: number;
+}
+
 export interface YearState {
 	frozen: boolean;
 	last_scraped: string;
 	order_count: number;
+	/** Present only while the year is part read. Lives in the store-scoped
+	 *  years cursor, so it belongs to one store and legacy untagged cursors
+	 *  (which `storeYearsCursor` ignores) never carry one. */
+	resume?: YearResume;
 }
 
 export interface YearsCursor {
@@ -2081,8 +2101,19 @@ export async function processResolvedListOrder(
 	}
 }
 
+/** What `runYear` has durably read so far, updated after each whole page. */
+interface YearWalkProgress {
+	anchor: string[];
+	counted: number;
+	/** First list page not yet read (0 = nothing read). */
+	startIndex: number;
+	dateDrops: number;
+}
+
 interface YearRunResult {
 	orderCount: number;
+	/** True when the walk continued from a saved resume point. */
+	resumedFromSaved: boolean;
 	/** True when the year's walk stopped at `PAGE_LIMIT` with orders still
 	 *  arriving, rather than because the year ran out of pages. */
 	truncated: boolean;
@@ -2255,6 +2286,44 @@ export function priorOrdersEvidenceForYear(
 	return { hasPriorOrders: (yearsState[String(year)]?.order_count ?? 0) > 0 };
 }
 
+/** The entry without its resume point. */
+function withoutResume(entry: YearState): YearState {
+	const { resume: _dropped, ...rest } = entry;
+	return rest;
+}
+
+/**
+ * Record that `year` is part read: not frozen, not complete, with the point
+ * to continue from. Nothing read yet (or the anchor check just failed and the
+ * year restarted) means no resume point, so the year starts from page 1.
+ */
+function saveYearResume(
+	newYearsState: YearsCursor,
+	year: number,
+	prior: YearState | undefined,
+	progress: YearWalkProgress,
+): void {
+	const key = String(year);
+	if (progress.startIndex <= 0) {
+		const entry = newYearsState[key];
+		if (entry?.resume) {
+			newYearsState[key] = withoutResume(entry);
+		}
+		return;
+	}
+	newYearsState[key] = {
+		frozen: false,
+		last_scraped: prior?.last_scraped ?? "",
+		order_count: progress.counted,
+		resume: {
+			anchor: progress.anchor,
+			counted: progress.counted,
+			startIndex: progress.startIndex,
+			dateDrops: progress.dateDrops,
+		},
+	};
+}
+
 /**
  * Scrape every list page for one year and emit records. Returns both the total
  * order count seen for the year (used for freeze-once-stable policy) and the
@@ -2265,11 +2334,32 @@ async function runYear(
 	deps: EmitDeps,
 	flags: RunFlags,
 	year: number,
-	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
+	priorOrdersEvidence: PriorOrdersEvidence,
+	resume: YearResume | undefined,
+	progressOut: YearWalkProgress,
+	tally: { rows: number },
 ): Promise<YearRunResult> {
-	let yearOrderCount = 0;
-	let unparseableDateCount = 0;
-	let pageCount = 0;
+	// A saved resume point is used from one page BEFORE its startIndex, and
+	// only once an anchor id is seen on that overlap page.
+	let overlapPending =
+		resume !== undefined && resume.startIndex >= START_INDEX_STEP;
+	let resumedFromSaved = overlapPending;
+	const anchorIds = new Set(overlapPending ? resume?.anchor : []);
+	let pageCount =
+		overlapPending && resume ? resume.startIndex / START_INDEX_STEP - 1 : 0;
+	let yearOrderCount = overlapPending && resume ? resume.counted : 0;
+	let unparseableDateCount = overlapPending && resume ? resume.dateDrops : 0;
+	Object.assign(
+		progressOut,
+		overlapPending && resume
+			? {
+					anchor: resume.anchor,
+					counted: resume.counted,
+					startIndex: resume.startIndex,
+					dateDrops: resume.dateDrops,
+				}
+			: { anchor: [], counted: 0, startIndex: 0, dateDrops: 0 },
+	);
 	const walk = await walkPagesWithCeiling({
 		maxPages: PAGE_LIMIT,
 		fetchPage: async () => {
@@ -2289,6 +2379,28 @@ async function runYear(
 				priorOrdersEvidence,
 				deps.store,
 			);
+			if (overlapPending) {
+				overlapPending = false;
+				if (orders.some((o) => anchorIds.has(o.orderId))) {
+					// The list still holds what this run last read: continue after it.
+					pageCount += 1;
+					return true;
+				}
+				// The list moved under the saved position (orders removed): the
+				// pages after it cannot be trusted. Read the year again from page 1.
+				connectorDiagnostic("amazon", "year_resume_anchor_missing", { year });
+				resumedFromSaved = false;
+				pageCount = 0;
+				yearOrderCount = 0;
+				unparseableDateCount = 0;
+				Object.assign(progressOut, {
+					anchor: [],
+					counted: 0,
+					startIndex: 0,
+					dateDrops: 0,
+				});
+				return true;
+			}
 			if (orders.length === 0) {
 				// EXIT A — honest completion: the year is exhausted.
 				await deps.progress(
@@ -2311,6 +2423,7 @@ async function runYear(
 				);
 				const detailAttemptsBefore = flags.detailAttempts;
 				const processed = await processListOrder(page, deps, flags, o);
+				tally.rows += 1;
 				// Pace the order-detail pages: back to back they read as a bot, and
 				// live runs were stopped by Amazon after about 32 of them in 2 minutes.
 				if (flags.detailAttempts > detailAttemptsBefore) {
@@ -2322,6 +2435,12 @@ async function runYear(
 				}
 			}
 			pageCount += 1;
+			Object.assign(progressOut, {
+				anchor: orders.map((o) => o.orderId),
+				counted: yearOrderCount,
+				startIndex: pageCount * START_INDEX_STEP,
+				dateDrops: unparseableDateCount,
+			});
 			await politeDelay(POLITE_DELAY_MS);
 			return true;
 		},
@@ -2361,6 +2480,7 @@ async function runYear(
 	}
 	return {
 		orderCount: yearOrderCount,
+		resumedFromSaved,
 		truncated: walk.truncated,
 		unparseableDateCount,
 	};
@@ -2412,7 +2532,7 @@ export function planIncrementalYears(
 			continue;
 		}
 		const prior = yearsState[String(year)];
-		if (prior?.last_scraped) {
+		if (prior?.last_scraped && !prior.resume) {
 			// Historical year with prior state: skip to prevent unbounded re-scrape.
 			skipped.push({
 				year,
@@ -2676,10 +2796,15 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 	// that will not load), the orders already read are kept and the run
 	// ends with them, rather than failing and losing every one.
 	let ordersEmittedThisRun = 0;
+	let itemsEmittedThisRun = 0;
+	// List rows handled this run, counted even when nothing new was emitted for
+	// them (a duplicate the fingerprint cursor suppressed, an items-only scope).
+	const tally = { rows: 0 };
 	const yearDeps: EmitDeps = {
 		...deps,
 		emitRecord: async (stream, record, options) => {
 			if (stream === "orders") ordersEmittedThisRun += 1;
+			if (stream === "order_items") itemsEmittedThisRun += 1;
 			return deps.emitRecord(stream, record, options);
 		},
 	};
@@ -2699,6 +2824,12 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 		// contradiction to escalate rather than a result to trust. Read here,
 		// next to the year cursor it derives from, and passed down explicitly.
 		let yearResult: Awaited<ReturnType<typeof runYear>>;
+		const walkProgress: YearWalkProgress = {
+			anchor: [],
+			counted: 0,
+			startIndex: 0,
+			dateDrops: 0,
+		};
 		try {
 			yearResult = await runYear(
 				page,
@@ -2706,29 +2837,38 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 				flags,
 				year,
 				priorOrdersEvidenceForYear(yearsState, year),
+				prior?.resume,
+				walkProgress,
+				tally,
 			);
 		} catch (error) {
 			const code = error instanceof Error ? error.message : "";
-			if (ordersEmittedThisRun === 0 || !AMAZON_MID_WALK_STOP_RE.test(code)) {
+			const rowsKept = Math.max(ordersEmittedThisRun, tally.rows);
+			if (
+				(rowsKept === 0 && itemsEmittedThisRun === 0) ||
+				!AMAZON_MID_WALK_STOP_RE.test(code)
+			) {
 				throw error;
 			}
-			// Not frozen and no STATE for this year: the next run reads it again.
+			// A recognized stop after any row was handled: keep the partial run.
+			// The year is not complete; the cursor says where to pick it up.
+			saveYearResume(newYearsState, year, prior, walkProgress);
 			connectorDiagnostic("amazon", "stopped_early_kept_orders", {
 				code,
 				year,
-				orders_kept: ordersEmittedThisRun,
+				orders_kept: rowsKept,
 			});
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "orders",
 				reason: "amazon_stopped_early",
-				message: `Amazon stopped the order history at ${year}; kept the ${ordersEmittedThisRun} orders read before it.`,
-				diagnostics: { code, year, orders_kept: ordersEmittedThisRun },
+				message: `Amazon stopped the order history at ${year}; kept the ${rowsKept} orders read before it.`,
+				diagnostics: { code, year, orders_kept: rowsKept },
 			});
 			// The orders read are real: never follow with "no orders on this store".
-			ordersSeen += ordersEmittedThisRun;
-			// Save fingerprints and hydration for the orders read; the stopped
-			// year has no entry in newYearsState, so nothing is frozen or advanced.
+			ordersSeen += rowsKept;
+			// Save fingerprints and hydration for the orders read and the year's
+			// resume point; nothing is frozen or marked complete.
 			await emit({
 				type: "STATE",
 				stream: "orders",
@@ -2746,13 +2886,24 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 		ordersSeen += yearOrderCount;
 		await applyYearCompletionState({
 			newYearsState,
-			prior,
+			// A year finished from a saved position has an approximate count (list
+			// shifts), so it cannot prove "unchanged since last run": no freezing.
+			prior: yearResult.resumedFromSaved ? undefined : prior,
 			progress,
 			truncated,
 			unparseableDateCount,
 			year,
 			yearOrderCount,
 		});
+		if (truncated) {
+			// Cut at the page ceiling: not complete, resume where it ended.
+			saveYearResume(newYearsState, year, prior, walkProgress);
+		} else if (newYearsState[String(year)]?.resume) {
+			// Walked to its end: a stale resume point must not survive.
+			newYearsState[String(year)] = withoutResume(
+				newYearsState[String(year)] as YearState,
+			);
+		}
 		// Carry the per-order fingerprint map and known-hydrated order map
 		// forward alongside the year cursors so the next run can suppress
 		// re-scraped orders whose body is unchanged modulo the run clock, and
