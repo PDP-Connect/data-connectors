@@ -72,12 +72,99 @@ export interface ListEnd {
 	readonly latestHistoryResponse: HistoryResponseEvidence | null;
 }
 
-type UnknownObject = Record<string, unknown>;
+/** Continuation facts one response body carries, before any request correlation. */
+export interface HistoryResponseScan {
+	readonly recognized: boolean;
+	readonly hasContinuation: boolean;
+	readonly itemCount: number;
+	readonly nextContinuation: string | null;
+}
 
-function asObject(value: unknown): UnknownObject | null {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-		? (value as UnknownObject)
-		: null;
+/**
+ * The one implementation of the response scan. It ships as a string so the page
+ * can run it on a body it cannot send to the host, and the host runs the same
+ * text on a body it has parsed.
+ */
+const HISTORY_RESPONSE_SCAN_SOURCE = String.raw`(value) => {
+	const ITEMS = [
+		"videoRenderer", "gridVideoRenderer", "playlistVideoRenderer", "playlistPanelVideoRenderer",
+		"compactVideoRenderer", "videoWithContextRenderer", "richItemRenderer", "lockupViewModel",
+		"shortsLockupViewModel", "reelItemRenderer",
+	];
+	const asObject = (node) => typeof node === "object" && node !== null && !Array.isArray(node) ? node : null;
+	const tokens = new Set();
+	let recognized = false;
+	let hasContinuation = false;
+	let itemCount = 0;
+	let bounded = true;
+	let visited = 0;
+	const visit = (node) => {
+		visited += 1;
+		if (visited > 10000) { bounded = false; return; }
+		if (Array.isArray(node)) {
+			for (const child of node) { if (!bounded) break; visit(child); }
+			return;
+		}
+		const object = asObject(node);
+		if (!object) return;
+		for (const [key, child] of Object.entries(object)) {
+			if (ITEMS.includes(key)) itemCount += 1;
+			if (key === "appendContinuationItemsAction" || key === "reloadContinuationItemsCommand" ||
+				key === "twoColumnBrowseResultsRenderer" || key === "singleColumnBrowseResultsRenderer") recognized = true;
+			if (key === "continuationItemRenderer" && asObject(child)) {
+				hasContinuation = true;
+				const renderer = asObject(child);
+				const endpoint = asObject(renderer.continuationEndpoint);
+				const command = asObject(endpoint && endpoint.continuationCommand);
+				const direct = asObject(renderer.continuationCommand);
+				const token = command && typeof command.token === "string" ? command.token
+					: direct && typeof direct.token === "string" ? direct.token : null;
+				if (token && token.length <= 16384) tokens.add(token);
+				else bounded = false;
+			}
+			if (key === "nextContinuationData") {
+				hasContinuation = true;
+				const holder = asObject(child);
+				const continuation = holder ? holder.continuation : undefined;
+				if (typeof continuation === "string" && continuation.length > 0 && continuation.length <= 16384) tokens.add(continuation);
+				else bounded = false;
+			}
+			if (key === "continuations" && Array.isArray(child) && child.length > 0) { recognized = true; hasContinuation = true; }
+			visit(child);
+			if (!bounded) break;
+		}
+	};
+	visit(value);
+	if (tokens.size > 8) bounded = false;
+	return {
+		recognized: recognized && bounded,
+		hasContinuation,
+		itemCount,
+		nextContinuation: tokens.values().next().value ?? null,
+	};
+}`;
+
+export const scanHistoryResponse = new Function(
+	"value",
+	`return (${HISTORY_RESPONSE_SCAN_SOURCE})(value);`,
+) as (value: unknown) => HistoryResponseScan;
+
+/** Join a response scan to the request that asked for it. */
+export function historyEvidenceFromScan(
+	scan: HistoryResponseScan,
+	requestedContinuation: string | null,
+	previouslyRequested: ReadonlySet<string>,
+): HistoryResponseEvidence {
+	return {
+		recognized: scan.recognized,
+		hasContinuation: scan.hasContinuation,
+		itemCount: scan.itemCount,
+		requestedContinuation,
+		nextContinuation: scan.nextContinuation,
+		repeatedContinuation:
+			scan.nextContinuation !== null &&
+			previouslyRequested.has(scan.nextContinuation),
+	};
 }
 
 /** Extract continuation facts from one response already correlated to history. */
@@ -86,96 +173,12 @@ export function readHistoryResponseEvidence(
 	requestedContinuation: string | null,
 	previouslyRequested: ReadonlySet<string>,
 ): HistoryResponseEvidence {
-	const tokens = new Set<string>();
-	let recognized = false;
-	let hasContinuation = false;
-	let itemCount = 0;
-	let bounded = true;
-	let visited = 0;
-	const visit = (node: unknown): void => {
-		visited += 1;
-		if (visited > 10000) {
-			bounded = false;
-			return;
-		}
-		if (Array.isArray(node)) {
-			for (const child of node) {
-				if (!bounded) break;
-				visit(child);
-			}
-			return;
-		}
-		const object = asObject(node);
-		if (!object) return;
-		for (const [key, child] of Object.entries(object)) {
-			if (ITEM_KEYS_FOR_HISTORY.has(key)) itemCount += 1;
-			if (
-				key === "appendContinuationItemsAction" ||
-				key === "reloadContinuationItemsCommand" ||
-				key === "twoColumnBrowseResultsRenderer" ||
-				key === "singleColumnBrowseResultsRenderer"
-			)
-				recognized = true;
-			if (key === "continuationItemRenderer" && asObject(child)) {
-				hasContinuation = true;
-				const renderer = asObject(child);
-				const endpoint = asObject(renderer?.continuationEndpoint);
-				const command = asObject(endpoint?.continuationCommand);
-				const direct = asObject(renderer?.continuationCommand);
-				const token =
-					typeof command?.token === "string"
-						? command.token
-						: typeof direct?.token === "string"
-							? direct.token
-							: null;
-				if (token && token.length <= 16384) tokens.add(token);
-				else bounded = false;
-			}
-			if (key === "nextContinuationData") {
-				hasContinuation = true;
-				const continuation = asObject(child)?.continuation;
-				if (
-					typeof continuation === "string" &&
-					continuation.length > 0 &&
-					continuation.length <= 16384
-				)
-					tokens.add(continuation);
-				else bounded = false;
-			}
-			if (key === "continuations" && Array.isArray(child) && child.length > 0) {
-				recognized = true;
-				hasContinuation = true;
-			}
-			visit(child);
-			if (!bounded) break;
-		}
-	};
-	visit(value);
-	if (tokens.size > 8) bounded = false;
-	const nextContinuation = tokens.values().next().value ?? null;
-	return {
-		recognized: recognized && bounded,
-		hasContinuation,
-		itemCount,
+	return historyEvidenceFromScan(
+		scanHistoryResponse(value),
 		requestedContinuation,
-		nextContinuation,
-		repeatedContinuation:
-			nextContinuation !== null && previouslyRequested.has(nextContinuation),
-	};
+		previouslyRequested,
+	);
 }
-
-const ITEM_KEYS_FOR_HISTORY = new Set([
-	"videoRenderer",
-	"gridVideoRenderer",
-	"playlistVideoRenderer",
-	"playlistPanelVideoRenderer",
-	"compactVideoRenderer",
-	"videoWithContextRenderer",
-	"richItemRenderer",
-	"lockupViewModel",
-	"shortsLockupViewModel",
-	"reelItemRenderer",
-]);
 
 /**
  * True only when the source proves exhaustion: a verified empty list has no
@@ -627,3 +630,129 @@ export const readListEnd = Object.defineProperty(
 	"name",
 	{ value: "readListEnd" },
 ) as (request: ListKind | ListEndRequest) => ListEnd;
+
+/** One browse call the page-side log saw, already reduced to compact facts. */
+export interface HistoryBrowseLogEntry {
+	/** Decoded request facts, or null when the request body could not be decoded. */
+	readonly requestBody: {
+		readonly continuation?: string;
+		readonly continuationTooLong?: true;
+		readonly browseId?: string;
+	} | null;
+	/** HTTP status; 0 when the call failed or went through XHR. */
+	readonly status: number;
+	/** Response scan, or null when the body was not readable JSON. */
+	readonly summary: HistoryResponseScan | null;
+}
+
+export interface HistoryBrowseLogDrain {
+	readonly entries: readonly HistoryBrowseLogEntry[];
+	/** The bounded log dropped entries; the traversal cannot account for every call. */
+	readonly overflow: boolean;
+	/** Browse calls the page started, completed or not. */
+	readonly sent: number;
+	/** Browse calls whose entry was logged or dropped. */
+	readonly completed: number;
+}
+
+const HISTORY_BROWSE_LOG_KEY = "__pdpHistoryBrowseLog";
+
+const HISTORY_BROWSE_LOG_INSTALL_FUNCTION = `(request) => {
+	const KEY = ${JSON.stringify(HISTORY_BROWSE_LOG_KEY)};
+	if (window[KEY]) return true;
+	if (typeof window.fetch !== "function" || typeof DecompressionStream === "undefined") return false;
+	const scan = ${HISTORY_RESPONSE_SCAN_SOURCE};
+	const MAX_ENTRIES = 32;
+	const MAX_TOKEN = 16384;
+	const log = { entries: [], overflow: false, sent: 0, completed: 0 };
+	Object.defineProperty(window, KEY, { value: log, enumerable: false, configurable: true });
+	const isBrowse = (url) => typeof url === "string" && url.indexOf("/youtubei/v1/browse") >= 0;
+	const finish = (entry) => {
+		log.completed += 1;
+		if (log.entries.length >= MAX_ENTRIES) log.overflow = true;
+		else log.entries.push(entry);
+	};
+	const failed = { requestBody: null, status: 0, summary: null };
+	const decodeText = async (buffer) => {
+		const bytes = new Uint8Array(buffer);
+		if (!(bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b)) return new TextDecoder().decode(bytes);
+		return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+	};
+	const summarizeRequest = (text) => {
+		let parsed;
+		try { parsed = JSON.parse(text); } catch { return null; }
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+		if (typeof parsed.continuation === "string")
+			return parsed.continuation.length <= MAX_TOKEN ? { continuation: parsed.continuation } : { continuationTooLong: true };
+		if (typeof parsed.browseId === "string") return { browseId: parsed.browseId.slice(0, 64) };
+		return {};
+	};
+	// The Request must be cloned before the original fetch runs: afterwards its body is used.
+	const readRequest = (input, init) => {
+		try {
+			let source;
+			if (init && init.body != null) {
+				if (typeof ReadableStream !== "undefined" && init.body instanceof ReadableStream) return Promise.resolve(null);
+				source = new Response(init.body);
+			} else if (typeof Request !== "undefined" && input instanceof Request) source = input.clone();
+			else return Promise.resolve(null);
+			return source.arrayBuffer().then(decodeText).then(summarizeRequest).catch(() => null);
+		} catch { return Promise.resolve(null); }
+	};
+	const original = window.fetch;
+	window.fetch = function (input, init) {
+		let url = "";
+		try { url = typeof input === "string" ? input : input && typeof input.url === "string" ? input.url : String(input); } catch {}
+		if (!isBrowse(url)) return original.apply(this, arguments);
+		log.sent += 1;
+		const requestPromise = readRequest(input, init);
+		const result = original.apply(this, arguments);
+		Promise.resolve(result).then(
+			(response) => {
+				const status = response.status;
+				const bodyPromise = status >= 200 && status < 300
+					? response.clone().json().then(scan, () => null)
+					: Promise.resolve(null);
+				return Promise.all([requestPromise, bodyPromise]).then(([requestBody, summary]) => finish({ requestBody, status, summary }));
+			},
+			() => requestPromise.then(() => finish(failed)),
+		).catch(() => finish(failed));
+		return result;
+	};
+	if (typeof XMLHttpRequest !== "undefined") {
+		const open = XMLHttpRequest.prototype.open;
+		const send = XMLHttpRequest.prototype.send;
+		XMLHttpRequest.prototype.open = function (method, url) {
+			try { this.__pdpBrowse = isBrowse(String(url)); } catch {}
+			return open.apply(this, arguments);
+		};
+		XMLHttpRequest.prototype.send = function () {
+			if (this.__pdpBrowse) { log.sent += 1; finish(failed); }
+			return send.apply(this, arguments);
+		};
+	}
+	return true;
+}`;
+
+const HISTORY_BROWSE_LOG_DRAIN_FUNCTION = `(request) => {
+	const log = window[${JSON.stringify(HISTORY_BROWSE_LOG_KEY)}];
+	if (!log) return null;
+	return { entries: log.entries.splice(0), overflow: log.overflow, sent: log.sent, completed: log.completed };
+}`;
+
+/**
+ * Runs in the page. Wraps window.fetch and XHR once so each browse call leaves a
+ * bounded, compact entry. Returns false when the page cannot support the wrapper.
+ */
+export const installHistoryBrowseLog = Object.defineProperty(
+	new Function("request", `return (${HISTORY_BROWSE_LOG_INSTALL_FUNCTION})(request);`),
+	"name",
+	{ value: "installHistoryBrowseLog" },
+) as (request?: unknown) => boolean;
+
+/** Runs in the page. Takes the logged entries; null when the wrapper is gone. */
+export const drainHistoryBrowseLog = Object.defineProperty(
+	new Function("request", `return (${HISTORY_BROWSE_LOG_DRAIN_FUNCTION})(request);`),
+	"name",
+	{ value: "drainHistoryBrowseLog" },
+) as (request?: unknown) => HistoryBrowseLogDrain | null;

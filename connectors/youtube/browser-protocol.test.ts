@@ -204,7 +204,14 @@ test("history waits for delayed client DOM before recording", async () => {
 		assert.equal(records.length, 1);
 		assert.equal(records[0]?.video_title, "Delayed title");
 		// The page shows no end of the list: a stream failure, not a completion.
-		assert.deepEqual(failures, [["watch_history", { retryable: true }]]);
+		assert.equal(failures.length, 1);
+		const [name, options] = failures[0] as [string, Record<string, unknown>];
+		assert.equal(name, "watch_history");
+		assert.equal(options.retryable, true);
+		assert.equal(
+			(options.diagnostics as Record<string, unknown>).stop_reason,
+			"stalled",
+		);
 		assert.equal(skips.length, 1);
 		assert.equal(skips[0]?.type, "STATE");
 		assert.equal((skips[0]?.cursor as Record<string, unknown>).complete, false);

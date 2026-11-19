@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
 	enumerationEnded,
+	drainHistoryBrowseLog,
+	installHistoryBrowseLog,
 	readHistoryResponseEvidence,
+	scanHistoryResponse,
 	type ListEnd,
 	readListEnd,
 	readPageReadiness,
@@ -729,4 +733,149 @@ test("only an authenticated selected history empty message proves a zero-row end
 		globals.document = undefined;
 		globals.window = undefined;
 	}
+});
+
+const BROWSE_URL = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false";
+const continuationBody = (next: string | null) => ({
+	onResponseReceivedActions: [
+		{
+			appendContinuationItemsAction: {
+				continuationItems: [
+					{ lockupViewModel: {} },
+					{ lockupViewModel: {} },
+					...(next
+						? [{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: next } } } }]
+						: []),
+				],
+			},
+		},
+	],
+});
+
+/** Run the page-side wrapper against a fake window, as the page would. */
+async function withFakeWindow<T>(
+	respond: (input: unknown) => Promise<Response>,
+	run: (window: Record<string, any>) => Promise<T>,
+): Promise<T> {
+	const globals = globalThis as Record<string, unknown>;
+	const previous = globals.window;
+	const fakeWindow: Record<string, any> = { fetch: respond };
+	globals.window = fakeWindow;
+	try {
+		return await run(fakeWindow);
+	} finally {
+		globals.window = previous;
+	}
+}
+
+async function drainAll() {
+	// Let every started call finish, then take the log once.
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	const drained = drainHistoryBrowseLog();
+	assert.ok(drained);
+	assert.equal(drained.completed, drained.sent, "every call finished");
+	return drained;
+}
+
+test("the page browse log decodes a gzip Request body and summarizes the response", async () => {
+	const token = "T".repeat(5000);
+	const body = continuationBody("next-token");
+	let pageSawBody = "";
+	await withFakeWindow(
+		async (input) => {
+			// The page's own fetch consumes the body after the wrapper cloned it.
+			if (typeof input !== "string")
+				pageSawBody = String((await (input as Request).arrayBuffer()).byteLength > 0);
+			return new Response(JSON.stringify(body), { status: 200 });
+		},
+		async (window) => {
+			assert.equal(installHistoryBrowseLog(), true);
+			const wrapped = window.fetch;
+			assert.equal(installHistoryBrowseLog(), true);
+			assert.equal(window.fetch, wrapped, "install is idempotent");
+			await window.fetch(
+				new Request(BROWSE_URL, {
+					method: "POST",
+					body: gzipSync(JSON.stringify({ continuation: token })),
+					headers: { "content-encoding": "gzip" },
+				}),
+			);
+			await window.fetch("https://www.youtube.com/youtubei/v1/next");
+			const drained = await drainAll();
+			assert.equal(pageSawBody, "true");
+			assert.equal(drained.sent, 1);
+			assert.equal(drained.entries.length, 1);
+			const [entry] = drained.entries;
+			assert.deepEqual(entry?.requestBody, { continuation: token });
+			assert.equal(entry?.status, 200);
+			// One implementation: the page summary equals the host's evidence.
+			const host = readHistoryResponseEvidence(body, token, new Set());
+			assert.deepEqual(entry?.summary, scanHistoryResponse(body));
+			assert.equal(entry?.summary?.recognized, host.recognized);
+			assert.equal(entry?.summary?.hasContinuation, host.hasContinuation);
+			assert.equal(entry?.summary?.itemCount, host.itemCount);
+			assert.equal(entry?.summary?.nextContinuation, host.nextContinuation);
+			assert.equal(drainHistoryBrowseLog()?.entries.length, 0, "a drain takes the entries");
+		},
+	);
+});
+
+test("the page browse log keeps a plain init body, an undecodable body and a bounded log", async () => {
+	await withFakeWindow(
+		async () => new Response("not json", { status: 200 }),
+		async (window) => {
+			assert.equal(installHistoryBrowseLog(), true);
+			await window.fetch(BROWSE_URL, { method: "POST", body: JSON.stringify({ browseId: "FEhistory" }) });
+			await window.fetch(BROWSE_URL, { method: "POST", body: "{broken" });
+			await window.fetch(BROWSE_URL, { method: "POST", body: JSON.stringify({ continuation: "x".repeat(16385) }) });
+			const first = await drainAll();
+			assert.deepEqual(first.entries.map((entry) => entry.requestBody), [
+				{ browseId: "FEhistory" },
+				null,
+				{ continuationTooLong: true },
+			]);
+			assert.ok(first.entries.every((entry) => entry.summary === null), "an unreadable body has no summary");
+			for (let call = 0; call < 40; call += 1)
+				await window.fetch(BROWSE_URL, { method: "POST", body: "{}" });
+			const flood = await drainAll();
+			assert.equal(flood.entries.length, 32);
+			assert.equal(flood.overflow, true);
+			assert.equal(flood.sent, 43);
+		},
+	);
+});
+
+test("the page browse log counts XHR browse sends without a body", async () => {
+	const globals = globalThis as Record<string, unknown>;
+	const previous = globals.XMLHttpRequest;
+	class FakeXhr {
+		open(_method: string, _url: string) {}
+		send() {}
+	}
+	globals.XMLHttpRequest = FakeXhr;
+	try {
+		await withFakeWindow(
+			async () => new Response("{}"),
+			async () => {
+				assert.equal(installHistoryBrowseLog(), true);
+				const xhr = new FakeXhr();
+				xhr.open("POST", BROWSE_URL);
+				xhr.send();
+				const other = new FakeXhr();
+				other.open("GET", "https://www.youtube.com/other");
+				other.send();
+				const drained = await drainAll();
+				assert.equal(drained.sent, 1);
+				assert.deepEqual(drained.entries.map((entry) => entry.requestBody), [null]);
+			},
+		);
+	} finally {
+		globals.XMLHttpRequest = previous;
+	}
+});
+
+test("the page browse log is absent until installed", async () => {
+	await withFakeWindow(async () => new Response("{}"), async () => {
+		assert.equal(drainHistoryBrowseLog(), null);
+	});
 });

@@ -3891,28 +3891,51 @@ for (const handlerOn of ["renderer", "anchor"]) test(`youtube: profile email com
 	}
 });
 
-test("youtube: capped history upserts the prefix without claiming completion or checkpoint", { timeout: 180_000 }, async () => {
+test("youtube: history walks every continuation batch to the source end and commits STATE", { timeout: 180_000 }, async () => {
 	const fx = await import("./fixtures/youtube.mjs");
-	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-prefix.js") });
-	const fixtures = { ...fx.youtubeFixtures, resolve: (raw) =>
-		new URL(raw).pathname === "/feed/history" ? fx.historyPrefixFixture(60) : fx.resolveFixture(raw) };
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-history-full.js") });
 	for (const resultStreaming of [false, true]) {
-	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"], resultStreaming,
-		resultSpoolDirectory: join(out, `youtube-prefix-${resultStreaming}`),
-		initialState: { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } } });
-	assert.deepEqual(run.ret, { ok: true });
-	assertCleanRun(run);
-	const result = resultStreaming ? run.streamDone : run.result;
-	const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8")) : run.result["youtube.watch_history"];
-	assert.equal(scope.records.length, 50);
-	assert.deepEqual(scope.records.map((row) => row.video_id), Array.from({ length: 50 }, (_, index) => `synthetic-history-${index}`));
-	assert.equal(scope.records[0].id, createHash("sha256").update("history|synthetic-history-0").digest("hex").slice(0, 24));
-	assert.match(result.errors[0].reason, /inventory_not_proven_complete/);
-	assert.deepEqual(run.states, { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } });
-	assert.deepEqual(run.stateMessages, []);
-	assert.equal(result.errors.length, 1);
-	assert.equal(result.errors[0].errorClass, "partial");
-	assert.match(run.data.status, /^Partial:/);
+		const fixtures = fx.historyContinuationFixtures({ batches: 3, batchSize: 30 });
+		const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"], resultStreaming,
+			resultSpoolDirectory: join(out, `youtube-history-full-${resultStreaming}`),
+			initialState: { "youtube.watch_history": { complete: false } } });
+		assert.deepEqual(run.ret, { ok: true });
+		assertCleanRun(run);
+		const result = resultStreaming ? run.streamDone : run.result;
+		const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8")) : run.result["youtube.watch_history"];
+		// 30 rows load with the page and 3 gzip browse calls add 90: more than the old 50-row cap.
+		assert.equal(fixtures.browseCalls(), 3);
+		assert.deepEqual(scope.records.map((row) => row.video_id), Array.from({ length: 120 }, (_, index) => `synthetic-history-${index}`));
+		assert.deepEqual(result.errors, []);
+		assert.equal(run.stateMessages.length, 1);
+		const cursor = run.states["youtube.watch_history"];
+		assert.equal(cursor.complete, true);
+		assert.equal(cursor.evidence, "latest-history-response");
+		assert.doesNotMatch(run.data.status ?? "", /^Partial:/);
+	}
+});
+
+test("youtube: history whose browse calls no wrapper can see ends incomplete with no STATE", { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-history-blind.js") });
+	for (const resultStreaming of [false, true]) {
+		const fixtures = fx.historyContinuationFixtures({ batches: 2, batchSize: 30, nativeFetch: true });
+		const prior = { "youtube.watch_history": { complete: false } };
+		const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"], resultStreaming,
+			resultSpoolDirectory: join(out, `youtube-history-blind-${resultStreaming}`), initialState: structuredClone(prior) });
+		assert.deepEqual(run.ret, { ok: true });
+		assertCleanRun(run);
+		const result = resultStreaming ? run.streamDone : run.result;
+		const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8")) : run.result["youtube.watch_history"];
+		// The rows load, but without correlated responses nothing proves the end.
+		assert.ok(scope.records.length > 0);
+		assert.equal(result.errors.length, 1);
+		assert.equal(result.errors[0].errorClass, "partial");
+		assert.equal(result.errors[0].recovery_hint.action, "retry_by_runtime");
+		assert.equal(result.errors[0].recovery_hint.retryable, true);
+		assert.match(run.data.status, /^Partial:/);
+		assert.deepEqual(run.states, prior);
+		assert.deepEqual(run.stateMessages, []);
 	}
 });
 
