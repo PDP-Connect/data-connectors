@@ -1229,10 +1229,11 @@ test("a missing, numberless or conflicting charged quantity holds the line; no f
 		.map((row) => resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + row)));
 	assert.deepEqual(reads.map(heldOf), ["qty", "qty", "qty", "qty"], "two spans hold, even when they state the same number");
 	assert.ok(reads.every((r) => r.evidence.linklessLines === 1));
-	const truncated = await Promise.all(["Qty: 1.", "Qty: 1.2.3 lb", "Qty: 1.2-3", "Qty: ."].map((text) =>
+	const truncated = await Promise.all(["Qty: 1.", "Qty: 1.2.3 lb", "Qty: 1.2-3", "Qty: .", "Qty: 1 - 2 lb", "Qty: 1 of", "Qty: 1 of 2 3 lb", "Qty 1 lb", "Qty: 1 lb lb"].map((text) =>
 		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + base(text))));
-	assert.deepEqual(truncated.map(heldOf), ["qty", "qty", "qty", "qty"]);
-	const complete = await Promise.all(["Qty: 1.2", "Qty: 1.2lb", "Qty: 1.2 lb", "Qty: 1.2 of 1.3 lb"].map((text) =>
+	assert.ok(truncated.every((r) => heldOf(r) === "qty" || /^text:/.test(heldOf(r) ?? "")), truncated.map(heldOf).join());
+	assert.deepEqual(truncated.map(heldOf).filter((reason) => reason !== "qty"), []);
+	const complete = await Promise.all(["Qty: 1.2", "Qty: 1.2lb", "QTY: 1.2 LB", "Qty: 1.2 lb", "Qty: 1.2 of 1.3", "Qty: 1.2 of 1.3 lb", "Qty: 1.2  of  1.3  oz"].map((text) =>
 		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + base(text))));
 	assert.ok(complete.every((r) => r.evidence.linklessLines === 0));
 });
@@ -1312,33 +1313,31 @@ test("an SSR item that names itself but has no product id still fails the whole 
 	assert.match(r.linklessTrace ?? "", /ssr=unread:/);
 });
 
-test("aria-labelledby is read through the element it names, anywhere in the document; an unresolved reference holds the line", async () => {
+test("any aria-labelledby in the line holds it as naming_attr, whatever it points at", async () => {
 	const line = (ref: string) => realLine({ ordered: 1.2, actualText: "Qty: 1.2 lb", total: "$3.17", attrs: ` aria-labelledby="${ref}"` });
-	const target = (id: string, text: string) => `<span id="${id}">${text}</span>`;
-	// The collected page holds only the order's lines, so a referenced element
-	// is found inside another line (here the named one) or not at all.
-	const read = (ref: string, targets = "") =>
-		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0).replace("</li>", `${targets}</li>`) + line(ref));
-	const [word, vocab, twoOneBad, missing, outside] = await Promise.all([
-		read("lbl", target("lbl", "Zq9x Bread")),
-		read("lbl", target("lbl", "Avg. 1.2 lb")),
-		read("a b", target("a", "lb") + target("b", "Zq9x Bread")),
-		read("gone"),
-		read("lbl", target("other", "Café Ñandú")),
+	const reads = await Promise.all([
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + line("gone")),
+		// A target whose name sits in an attribute, not its text.
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0).replace("</li>", '<span id="lbl" aria-label="Zq9x Bread"></span></li>') + line("lbl")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0).replace("</li>", '<span id="lbl">lb</span></li>') + line("lbl")),
+		resolveLinkless([ssrItem("500"), nlSsr("$3.17", 1.2)], itemRow(0) + realLine({ ordered: 1.2, actualText: "Qty: 1.2 lb", total: "$3.17", text: '<span aria-labelledby=""></span>' })),
 	]);
-	assert.deepEqual([word, twoOneBad, missing, outside].map(heldOf), ["naming_attr", "naming_attr", "naming_attr", "naming_attr"]);
-	assert.equal(vocab.evidence.linklessLines, 0);
-	for (const r of [word, twoOneBad, missing, outside]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread|Caf|gone|lbl/);
+	assert.deepEqual(reads.map(heldOf), ["naming_attr", "naming_attr", "naming_attr", "naming_attr"]);
+	for (const r of reads) {
+		assert.equal(r.evidence.linklessLines, 1);
+		assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread|gone|lbl/);
+	}
 });
 
 test("two nameless lines whose cents are written differently still get distinct ids", async () => {
 	const r = await resolveLinkless(
-		[ssrItem("500"), nlSsr("$3.10", 1.2), nlSsr("$3.1", 1.2)],
-		itemRow(0) + nlLine(1.2, "$3.10") + nlLine(1.2, "$3.1"),
+		[ssrItem("500"), nlSsr("$1,003.10", 1.2), nlSsr("$1003.10", 1.2)],
+		itemRow(0) + nlLine(1.2, "$1,003.10") + nlLine(1.2, "$1003.10"),
 	);
 	assert.equal(r.evidence.linklessLines, 0);
 	const ids = asRecords(r).map((record) => record.id);
 	assert.equal(new Set(ids).size, 3);
-	assert.deepEqual(ids.slice(1), [`${order.orderId}|nameless|310|1.2|0`, `${order.orderId}|nameless|310|1.2|1`]);
+	assert.deepEqual(ids.slice(1), [`${order.orderId}|nameless|100310|1.2|0`, `${order.orderId}|nameless|100310|1.2|1`]);
+	assert.ok(asRecords(r).every((record) => orderItemsSchema.safeParse(record).success));
 	assert.equal(r.evidence.duplicateRecordIds, 0);
 });

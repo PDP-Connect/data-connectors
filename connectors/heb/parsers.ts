@@ -760,9 +760,11 @@ const NAMELESS_VOCABULARY = new Set([
 ]);
 const NAMELESS_ORDERED_RE = /Quantity:\s*(\d+(?:\.\d+)?)/i;
 const NAMELESS_SENTENCE_PRICE_RE = /Price:\s*(\$\d[\d,]*\.\d{2})/i;
-// A complete number: it ends at the end of the text, at whitespace or at a unit.
-const NAMELESS_ACTUAL_RE = /^Qty:?\s*(\d+(?:\.\d+)?)(?=$|\s|[A-Za-z])/i;
-const NAMELESS_ATTRIBUTES = ["aria-label", "title", "alt", "aria-labelledby"];
+// The whole quantity span, in one of four complete forms: Qty: N, Qty: N unit,
+// Qty: N of M, Qty: N of M unit. The charged amount is N.
+const NAMELESS_ACTUAL_RE =
+	/^Qty:\s*(\d+(?:\.\d+)?)(?:\s+of\s+\d+(?:\.\d+)?)?(?:\s*(?:lb|lbs|oz|kg|g|ct|each|ea))?$/i;
+const NAMELESS_ATTRIBUTES = ["aria-label", "title", "alt"];
 
 /** A text's shape, built only from a fixed alphabet: vocabulary words (lower
  * case), d for a number, $d.d for a price, w for any other word (Unicode
@@ -790,23 +792,19 @@ type NamelessLine =
 
 /** What a linkless line states, only when it carries no naming evidence: no
  * link, no image with a H-E-B product image id, no accessible attribute
- * (aria-label, title, alt, aria-labelledby) and no text whose mask holds a word
+ * (aria-label, title, alt) and no aria-labelledby and no text whose mask holds a word
  * outside the fixed vocabulary. `actual` is the quantity span's one first
  * number (the charged amount, as the named path reads it); `ordered` is the
  * accessible sentence's quantity. A refusal is a fixed code, never text. */
-function namelessLineFacts(own: Element, hasProductImage: boolean, document: Document): NamelessLine {
+function namelessLineFacts(own: Element, hasProductImage: boolean): NamelessLine {
 	if (own.querySelector("a") || hasProductImage) return { ok: false, reason: "text" };
 	const elements = [own, ...own.querySelectorAll("*")];
 	for (const element of elements) {
+		// aria-labelledby points at an accessible name that can sit in any
+		// attribute of another element: hold, rather than resolve every source.
+		if (element.hasAttribute("aria-labelledby")) return { ok: false, reason: "naming_attr" };
 		for (const attribute of NAMELESS_ATTRIBUTES)
-			if (attribute !== "aria-labelledby" && maskText(element.getAttribute(attribute) ?? "").unknown)
-				return { ok: false, reason: "naming_attr" };
-		// aria-labelledby names other elements: read the text they hold, in the
-		// whole document; a reference that resolves to nothing is unproven.
-		for (const id of (element.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean)) {
-			const target = [...document.querySelectorAll("[id]")].find((candidate) => candidate.getAttribute("id") === id);
-			if (!target || maskText(target.textContent ?? "").unknown) return { ok: false, reason: "naming_attr" };
-		}
+			if (maskText(element.getAttribute(attribute) ?? "").unknown) return { ok: false, reason: "naming_attr" };
 	}
 	const totals = new Set<string>();
 	const structuredTotal = normText(own.querySelector('[data-qe-id="checkoutItemPrice"]'));
@@ -844,7 +842,6 @@ function namelessLineFacts(own: Element, hasProductImage: boolean, document: Doc
  * Otherwise the reason the order was held, as a fixed code. */
 function namelessRecords(
 	lines: readonly { own: Element; hasProductImage: boolean }[],
-	document: Document,
 	items: readonly {
 		productId: string | null;
 		productUrl: string | null;
@@ -865,7 +862,7 @@ function namelessRecords(
 	}
 	const facts: Extract<NamelessLine, { ok: true }>[] = [];
 	for (const line of lines) {
-		const fact = namelessLineFacts(line.own, line.hasProductImage, document);
+		const fact = namelessLineFacts(line.own, line.hasProductImage);
 		if (!fact.ok) return { held: fact.reason };
 		facts.push(fact);
 	}
@@ -1111,7 +1108,6 @@ export function resolveLinklessOrderItems(
 				const own = ownCopy(line);
 				return { own, hasProductImage: ownImageIds(own).size > 0 };
 			}),
-			document,
 			items,
 			unclaimed,
 		)
