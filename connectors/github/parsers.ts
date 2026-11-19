@@ -327,9 +327,8 @@ export function gistRecord(g: GitHubGist): Record<string, unknown> {
 }
 
 /**
- * Public event record: GitHub Events API only retains a ~90-day rolling
- * window (undocumented exact retention; GitHub states "recent" events and
- * caps list endpoints at 300 events / 10 pages). `id` is the provider's own
+ * Public event record: GitHub Events API serves at most 300 events
+ * from the last 30 days. `id` is the provider's own
  * stable event id — monotonically increasing, safe as both primary key and
  * dedup key. Returns null for a malformed entry missing a required field
  * (id, type, created_at, repo name) rather than guessing.

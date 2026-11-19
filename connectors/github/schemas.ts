@@ -217,8 +217,8 @@ export const gistsSchema = z.object({
 });
 
 /**
- * events stream: public activity events (GitHub Events API, ~90-day rolling
- * window; see connector header for the retention caveat). Cursor: created_at.
+ * events stream: public activity events (GitHub Events API: at most 300 events
+ * from the last 30 days; see connector header for the retention caveat). Cursor: created_at.
  */
 export const eventsSchema = z.object({
 	id: pdppSafeText.max(40),
