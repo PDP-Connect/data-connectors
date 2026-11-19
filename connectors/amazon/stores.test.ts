@@ -387,3 +387,15 @@ test("noOrdersOnStore: only when every listed year was read empty and nothing wa
 		/^No orders on amazon\.com for this Amazon account\. .*pick that store/,
 	);
 });
+
+test("readStoreCookies: a context that cannot list cookies gives no signal, never an error", async () => {
+	const { readStoreCookies } = await import("./index.ts");
+	assert.deepEqual(await readStoreCookies(undefined), []);
+	assert.deepEqual(await readStoreCookies({} as never), []);
+	assert.deepEqual(
+		await readStoreCookies({
+			cookies: () => Promise.reject(new Error("denied")),
+		} as never),
+		[],
+	);
+});

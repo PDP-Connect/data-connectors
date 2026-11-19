@@ -2277,6 +2277,21 @@ export function noOrdersOnStore(
 	);
 }
 
+/**
+ * The browser's cookies, for `resolveAmazonStore`. Never throws: a context
+ * that cannot list cookies (a host that hands over a restricted context, a
+ * test double) just gives that signal no say.
+ */
+export async function readStoreCookies(
+	context: Pick<BrowserContext, "cookies"> | undefined,
+): Promise<Awaited<ReturnType<BrowserContext["cookies"]>>> {
+	try {
+		return (await context?.cookies?.()) ?? [];
+	} catch {
+		return [];
+	}
+}
+
 /** What the person is told when their store showed no orders. */
 export function amazonNoOrdersOnStoreMessage(store: AmazonStore): string {
 	return `No orders on ${store.name} for this Amazon account. If you shop on another Amazon store (amazon.ca, amazon.co.uk, amazon.de, ...), pick that store and connect again.`;
@@ -2313,7 +2328,7 @@ if (isMainModule(import.meta.url)) {
 			// The store to sign in to and read (stores.ts): PDPP_AMAZON_STORE,
 			// else the store this profile is already signed in to, else amazon.com.
 			const { store } = resolveAmazonStore({
-				cookies: await context.cookies().catch(() => []),
+				cookies: await readStoreCookies(context),
 				pageUrl: page.url(),
 				requested: process.env.PDPP_AMAZON_STORE,
 			});
@@ -2360,7 +2375,7 @@ if (isMainModule(import.meta.url)) {
 			// its page), else the one store the browser is signed in to, else
 			// amazon.com.
 			const storeChoice = resolveAmazonStore({
-				cookies: await context.cookies().catch(() => []),
+				cookies: await readStoreCookies(context),
 				pageUrl: page.url(),
 				requested: process.env.PDPP_AMAZON_STORE,
 			});
