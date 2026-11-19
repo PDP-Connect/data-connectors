@@ -3750,7 +3750,16 @@ test("collectAmazonProfile: emits a profile record parsed from the current page 
 	});
 
 	assert.deepEqual(harness.emitted, [
-		{ stream: "profile", data: { id: "me", name: "Jane Doe", is_prime: true } },
+		{
+			stream: "profile",
+			data: {
+				id: "me",
+				name: "Jane Doe",
+				is_prime: true,
+				postal_code: null,
+				store: "amazon.com",
+			},
+		},
 	]);
 	const coverage = harness.protocolMessages.find(
 		(m) => m.type === "DETAIL_COVERAGE",

@@ -1,0 +1,102 @@
+{
+	"schema": "pdpp.submission-fixture/1",
+	"environment": {},
+	"refresh": {
+		"streams": ["items"],
+		"responses": [
+			{
+				"url": "https://submission.invalid/items",
+				"body": {
+					"results": [
+						{
+							"id": "a",
+							"text": "unchanged"
+						}
+					],
+					"total_count": 1
+				}
+			}
+		],
+		"records": [
+			{
+				"stream": "items",
+				"key": "a"
+			}
+		]
+	},
+	"deletions": {
+		"streams": ["items"],
+		"responses": [
+			{
+				"url": "https://submission.invalid/items",
+				"body": {
+					"results": [
+						{
+							"id": "d",
+							"text": "deleted",
+							"is_deleted": true
+						}
+					],
+					"total_count": 1
+				}
+			}
+		],
+		"deleted": [
+			{
+				"stream": "items",
+				"key": "d"
+			}
+		]
+	},
+	"text": {
+		"streams": ["items"],
+		"responses": [
+			{
+				"url": "https://submission.invalid/items",
+				"body": {
+					"results": [
+						{
+							"id": "a",
+							"text": "A\u0001B\u0092 literal \\u0001"
+						}
+					],
+					"total_count": 1
+				}
+			}
+		],
+		"values": [
+			{
+				"stream": "items",
+				"key": "a",
+				"field": ["text"],
+				"source": "A\u0001B\u0092 literal \\u0001"
+			}
+		]
+	},
+	"counts": {
+		"streams": ["items"],
+		"responses": [
+			{
+				"url": "https://submission.invalid/items",
+				"body": {
+					"results": [
+						{
+							"id": "a",
+							"text": "retained"
+						}
+					],
+					"total_count": 2
+				}
+			}
+		],
+		"stream": "items",
+		"total": ["total_count"],
+		"items": ["results"],
+		"records": [
+			{
+				"stream": "items",
+				"key": "a"
+			}
+		]
+	}
+}
