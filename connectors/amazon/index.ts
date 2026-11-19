@@ -79,7 +79,7 @@ export interface YearsCursor {
 	[year: string]: YearState | undefined;
 }
 
-interface OrdersStateShape {
+export interface OrdersStateShape {
 	/** Per-order fingerprint map (keyed by order id), excluding the
 	 *  run-clock `fetched_at`. Sibling to `years` in the orders STATE
 	 *  cursor. */
@@ -96,7 +96,14 @@ interface OrdersStateShape {
 	 *  `fingerprints` is not pruned: a frozen year's entries must stay valid
 	 *  even though that year is no longer (re)visited. */
 	hydratedOrders?: Record<string, string>;
+	/** The years cursor of the store named by `store`. */
 	years?: YearsCursor;
+	/** Id of the Amazon store `years` belongs to. Absent on state written
+	 *  before stores existed: every such run read amazon.com. */
+	store?: string;
+	/** Years cursors of the OTHER stores this connection has read, kept so
+	 *  switching back to one finds its history, never lost or reused. */
+	otherStores?: Record<string, YearsCursor>;
 }
 
 /**
@@ -2036,6 +2043,35 @@ export async function applyYearCompletionState({
 }
 
 /**
+ * The years cursor that belongs to `store`, plus every OTHER store's cursor
+ * (to be written back untouched). Year completion is a fact about one store's
+ * history: amazon.ca's year 2020 is not done because amazon.com's is.
+ *   - state tagged with this store: its `years`;
+ *   - state tagged with another store: that store's years move to
+ *     `otherStores`; this store reads its own entry there, else starts empty
+ *     and so reads its full history once;
+ *   - state with no store tag (every run before stores existed read
+ *     amazon.com): amazon.com's years. For any other store it starts empty,
+ *     and the untagged years are kept for amazon.com.
+ */
+export function storeYearsCursor(
+	ordersState: Pick<OrdersStateShape, "otherStores" | "store" | "years">,
+	legacyYears: YearsCursor | undefined,
+	store: AmazonStore,
+): { years: YearsCursor; otherStores: Record<string, YearsCursor> } {
+	const tagged = ordersState.store;
+	const held: Record<string, YearsCursor> = { ...ordersState.otherStores };
+	const stored = ordersState.years ?? (tagged ? undefined : legacyYears);
+	const storedFor = tagged ?? DEFAULT_AMAZON_STORE.id;
+	if (stored) {
+		held[storedFor] = stored;
+	}
+	const years = held[store.id] ?? {};
+	delete held[store.id];
+	return { years, otherStores: held };
+}
+
+/**
  * Build the `orders` STATE cursor: year cursors plus the optional per-order
  * fingerprint map and known-hydrated order map. Shared by every STATE emit
  * site in `collect()` so the carry-forward fields are assembled identically
@@ -2045,8 +2081,13 @@ function buildAmazonOrdersStateCursor(
 	yearsState: YearsCursor,
 	ordersFingerprintCursor: FingerprintCursor | undefined,
 	hydratedOrders: ReadonlyMap<string, string>,
+	store: AmazonStore,
+	otherStores: Record<string, YearsCursor>,
 ): OrdersStateShape {
-	const cursor: OrdersStateShape = { years: yearsState };
+	const cursor: OrdersStateShape = { store: store.id, years: yearsState };
+	if (Object.keys(otherStores).length > 0) {
+		cursor.otherStores = otherStores;
+	}
 	if (ordersFingerprintCursor && ordersFingerprintCursor.size() > 0) {
 		cursor.fingerprints = ordersFingerprintCursor.toState();
 	}
@@ -2444,7 +2485,12 @@ if (isMainModule(import.meta.url)) {
 			// cursor={years:{...}}, so reads must go through state.orders.
 			const ordersState = (state.orders ?? {}) as OrdersStateShape;
 			const legacyYears = (state as { years?: YearsCursor }).years;
-			const yearsState: YearsCursor = ordersState.years ?? legacyYears ?? {};
+			// The cursor is scoped to the resolved store (see storeYearsCursor).
+			const { years: yearsState, otherStores } = storeYearsCursor(
+				ordersState,
+				legacyYears,
+				store,
+			);
 
 			// Per-order fingerprint cursor (excludes the run-clock `fetched_at`).
 			// One cursor for the whole orders stream — order ids are globally
@@ -2528,6 +2574,8 @@ if (isMainModule(import.meta.url)) {
 					newYearsState,
 					ordersFingerprintCursor,
 					hydratedOrders,
+					store,
+					otherStores,
 				);
 
 			// Tracks whether the loop below has emitted STATE at least once, so

@@ -63,6 +63,7 @@ import {
 	listSurfaceFingerprint,
 	newOrderItemsCoverage,
 	newOrdersCoverage,
+	noOrdersOnStore,
 	type OrderItemsCoverage,
 	type OrdersCoverage,
 	planIncrementalYears,
@@ -77,9 +78,11 @@ import {
 	redactAmazonListPageDiagnostics,
 	scrapeListPage,
 	shouldEmitTrailingOrdersState,
+	storeYearsCursor,
 	type YearsCursor,
 } from "./index.ts";
 import { buildOrderRecord, parseOrderDate } from "./parsers.ts";
+import { DEFAULT_AMAZON_STORE, storeById } from "./stores.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
 	DetailItem,
@@ -3797,4 +3800,126 @@ test("collectAmazonProfile: a page-read failure emits SKIP_RESULT with zero cove
 		assert.equal(coverage.considered, 1);
 		assert.equal(coverage.covered, 0);
 	}
+});
+
+// ─── Store-scoped years cursor and signed-out reads ─────────────────────
+
+test("scrapeListPage: a store that redirects to sign-in aborts; it can never prove a year empty", async () => {
+	// The wrong-store sequence: signed in only on amazon.ca, a run reads
+	// amazon.com. Result (recorded): the orders page is the sign-in page, which
+	// classifies as source_auth_or_challenge and the run FAILS. It never reads
+	// terminal-empty, so no year is recorded. (The stub even satisfies the
+	// readiness wait, the worst case for the classifier.)
+	const messages: EmittedMessage[] = [];
+	const page = Object.assign({} as Page, {
+		content: (): Promise<string> =>
+			Promise.resolve("<form name='signIn'></form>"),
+		evaluate: (): Promise<ListPageDiagnostics> =>
+			Promise.resolve(
+				makeEmptyPageDiagnostics({
+					no_orders_text: "true",
+					sign_in_form: true,
+					url: "https://www.amazon.com/ap/signin?openid.mode=checkid_setup",
+				}),
+			),
+		goto: (): Promise<null> => Promise.resolve(null),
+		locator: (): { first: () => { waitFor: () => Promise<null> } } => ({
+			first: () => ({ waitFor: (): Promise<null> => Promise.resolve(null) }),
+		}),
+		screenshot: (): Promise<null> => Promise.resolve(null),
+	});
+	await assert.rejects(
+		scrapeListPage(page, null, 2024, 0, (message) => {
+			messages.push(message);
+			return Promise.resolve();
+		}),
+		/source_auth_or_challenge/,
+	);
+	assert.deepEqual(
+		messages
+			.map((message) => message.type)
+			.filter((type) => type !== "PROGRESS" && type !== "SKIP_RESULT"),
+		[],
+		"no RECORD and no STATE: nothing is recorded for the signed-out store",
+	);
+});
+
+const CA = storeById("ca");
+const COM = DEFAULT_AMAZON_STORE;
+const YEAR_DONE = {
+	frozen: true,
+	last_scraped: "2026-01-01T00:00:00.000Z",
+	order_count: 5,
+};
+
+test("storeYearsCursor: years written for amazon.com are not used for another store", () => {
+	assert.ok(CA);
+	const state = { store: "com", years: { "2020": YEAR_DONE } };
+	assert.deepEqual(storeYearsCursor(state, undefined, CA).years, {});
+	// Same store: its own years.
+	assert.deepEqual(storeYearsCursor(state, undefined, COM).years, {
+		"2020": YEAR_DONE,
+	});
+	// The other store's years are kept for it, not dropped.
+	assert.deepEqual(storeYearsCursor(state, undefined, CA).otherStores, {
+		com: { "2020": YEAR_DONE },
+	});
+});
+
+test("storeYearsCursor: switching stores and back loses nothing", () => {
+	assert.ok(CA);
+	const onCa = storeYearsCursor(
+		{ store: "com", years: { "2020": YEAR_DONE } },
+		undefined,
+		CA,
+	);
+	const caYears = { "2019": { ...YEAR_DONE, order_count: 2 } };
+	// What collect() persists after a ca run:
+	const persisted = {
+		store: "ca",
+		years: caYears,
+		otherStores: onCa.otherStores,
+	};
+	assert.deepEqual(storeYearsCursor(persisted, undefined, COM).years, {
+		"2020": YEAR_DONE,
+	});
+	assert.deepEqual(storeYearsCursor(persisted, undefined, CA).years, caYears);
+	assert.deepEqual(storeYearsCursor(persisted, undefined, COM).otherStores, {
+		ca: caYears,
+	});
+});
+
+test("storeYearsCursor: state with no store id belongs to amazon.com only", () => {
+	assert.ok(CA);
+	const legacy = { years: { "2020": YEAR_DONE } };
+	assert.deepEqual(storeYearsCursor(legacy, undefined, COM).years, {
+		"2020": YEAR_DONE,
+	});
+	assert.deepEqual(storeYearsCursor(legacy, undefined, CA).years, {});
+	// Kept for amazon.com so a later amazon.com run still has it.
+	assert.deepEqual(storeYearsCursor(legacy, undefined, CA).otherStores, {
+		com: { "2020": YEAR_DONE },
+	});
+	// The oldest flat shape (years at the top of state) too.
+	assert.deepEqual(storeYearsCursor({}, { "2018": YEAR_DONE }, COM).years, {
+		"2018": YEAR_DONE,
+	});
+	assert.deepEqual(storeYearsCursor({}, { "2018": YEAR_DONE }, CA).years, {});
+});
+
+test("another store's orders no longer hide this store's empty history, and its years are all planned", () => {
+	assert.ok(CA);
+	const state = {
+		store: "com",
+		years: { "2019": YEAR_DONE, "2020": YEAR_DONE },
+	};
+	const { years } = storeYearsCursor(state, undefined, CA);
+	assert.equal(noOrdersOnStore([2025, 2024], 0, years), true);
+	assert.deepEqual(
+		planIncrementalYears([2025, 2024, 2020, 2019], years, 2026),
+		{
+			planned: [2025, 2024, 2020, 2019],
+			skipped: [],
+		},
+	);
 });
