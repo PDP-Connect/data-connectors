@@ -48,9 +48,14 @@ export { readPageReadiness } from "./page-evidence.ts";
 
 const HOME = "https://www.youtube.com/";
 const HISTORY_READ_BATCH_SIZE = 50;
-const HISTORY_MAX_SCROLL_ROUNDS = 400;
 const HISTORY_DEDUP_WINDOW = 500;
-const HISTORY_TIME_BUDGET_MS = 180_000;
+/**
+ * Bound on the history page's setup (navigation, hydration, first rows). It is a
+ * per-call bound, not a limit on the walk: the walk has no time or round cap, and
+ * only the no-progress watchdog ends a walk that is not moving. Not forced by the
+ * platform; kept as the setup navigation timeout.
+ */
+const HISTORY_SETUP_BUDGET_MS = 180_000;
 const HISTORY_SCROLL_WAIT_MS = 1_000;
 const HISTORY_HEAD_REFRESH_ROUNDS = 3;
 const HISTORY_HEAD_REFRESH_ROWS =
@@ -233,7 +238,7 @@ export function setHistoryLoopCallDeadlineMsForTest(ms: number): number {
  * misses; the inner deadlines only make the failure reason more specific.
  *
  * Ten minutes is above the longest legitimate gap between progress events. The
- * longest is setup, before the first row: a navigation up to HISTORY_TIME_BUDGET_MS
+ * longest is setup, before the first row: a navigation up to HISTORY_SETUP_BUDGET_MS
  * (180 s) plus its 60 s bridge margin, then the hydration wait and the readiness
  * wait at up to 60 s each, about 6 minutes. In the walk, one round makes about
  * five bridge calls, each bounded at 60 s. A stall is any gap longer than this.
@@ -411,7 +416,6 @@ async function withinDeadline<T>(
 }
 
 class HistoryResponseTracker {
-	private static readonly MAX_TRACKED_TOKENS = HISTORY_MAX_SCROLL_ROUNDS + 8;
 	private static readonly MAX_PRESEED_RESPONSES = 32;
 	private readonly page: BrowserCollectContext["page"];
 	/**
@@ -784,11 +788,9 @@ class HistoryResponseTracker {
 		const repeatedRequest =
 			requestedContinuation !== null &&
 			this.requestedTokens.has(requestedContinuation);
-		if (
-			requestedContinuation &&
-			this.requestedTokens.size < HistoryResponseTracker.MAX_TRACKED_TOKENS
-		)
-			this.requestedTokens.add(requestedContinuation);
+		// No count cap: a cap would leave a long history's later pages
+		// uncorrelated and so unable to complete. Each token is length-bounded.
+		if (requestedContinuation) this.requestedTokens.add(requestedContinuation);
 		if (status < 200 || status >= 300) {
 			this.non2xxResponseCount += 1;
 			this.non2xxSeen = true;
@@ -831,11 +833,7 @@ class HistoryResponseTracker {
 			continuationItemCount: this.continuationItemCount,
 			repeatedContinuation: evidence.repeatedContinuation || repeatedRequest,
 		};
-		if (
-			evidence.nextContinuation &&
-			this.tokens.size < HistoryResponseTracker.MAX_TRACKED_TOKENS
-		)
-			this.tokens.add(evidence.nextContinuation);
+		if (evidence.nextContinuation) this.tokens.add(evidence.nextContinuation);
 	}
 }
 
@@ -1527,7 +1525,6 @@ function setHistoryStopToken(token: string): void {
 
 async function scrollHistoryOnce(
 	page: BrowserCollectContext["page"],
-	remainingMs: number,
 	stopToken: string,
 ): Promise<HistoryScrollGeometry> {
 	const geometry = (await loopCall(
@@ -1569,9 +1566,7 @@ async function scrollHistoryOnce(
 		windowHeight: null,
 		windowScrollY: null,
 	};
-	await page.waitForTimeout(
-		Math.max(0, Math.min(HISTORY_SCROLL_WAIT_MS, remainingMs)),
-	);
+	await page.waitForTimeout(HISTORY_SCROLL_WAIT_MS);
 	return geometry;
 }
 
@@ -1591,15 +1586,15 @@ async function readHistoryVideoList(
 	const navigated = await settlesWithin(
 		page.goto(url, {
 			waitUntil: "domcontentloaded",
-			timeout: HISTORY_TIME_BUDGET_MS,
+			timeout: HISTORY_SETUP_BUDGET_MS,
 		}),
-		HISTORY_TIME_BUDGET_MS + historyLoopCallDeadlineMs,
+		HISTORY_SETUP_BUDGET_MS + historyLoopCallDeadlineMs,
 	);
 	if (!navigated) {
 		responseTracker.dispose();
 		throw new Error("youtube_history_page_unreadable");
 	}
-	let remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
+	let remainingMs = HISTORY_SETUP_BUDGET_MS - (performance.now() - startedAt);
 	if (remainingMs <= 0) {
 		responseTracker.dispose();
 		throw new Error("youtube_history_page_unreadable");
@@ -1614,7 +1609,7 @@ async function readHistoryVideoList(
 		responseTracker.dispose();
 		throw new Error("youtube_history_setup_timeout");
 	}
-	remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
+	remainingMs = HISTORY_SETUP_BUDGET_MS - (performance.now() - startedAt);
 	const state = await waitForContentBounded(
 		page,
 		"ytd-item-section-renderer yt-lockup-view-model, ytd-item-section-renderer ytd-video-renderer",
@@ -1682,10 +1677,11 @@ async function readHistoryVideoList(
 	let parseGap = false;
 	let headAnchorIds: string[] = [];
 	let evidence: ExhaustionEvidence = { kind: "unproven", page: null };
-	// Connector memory holds at most 500 recent identities, 408 requestable
-	// and 408 requested tokens (each <= 4 KiB), 32 pre-seed response handles,
-	// and one 50-row parse batch. Each response scan visits at most 10,000
-	// nodes; traversal is capped at 180 seconds and 400 scroll rounds.
+	// Connector memory holds at most 500 recent identities, one 50-row parse
+	// batch and 32 pre-seed response handles, plus the continuation tokens of
+	// the pages walked (each <= 16 KiB). Each response scan visits at most
+	// 10,000 nodes. The walk has no time or round cap; the no-progress watchdog
+	// alone bounds a walk that stops moving.
 	const rememberIdentity = (key: string): void => {
 		rowsSeen.add(key);
 		if (rowsSeen.size > HISTORY_DEDUP_WINDOW)
@@ -1694,12 +1690,6 @@ async function readHistoryVideoList(
 
 	try {
 		while (true) {
-			const elapsed = performance.now() - startedAt;
-			remainingMs = HISTORY_TIME_BUDGET_MS - elapsed;
-			if (remainingMs <= 0) {
-				stopReason = "time-budget";
-				break;
-			}
 			const request = {
 				mode: "history",
 				offset,
@@ -1774,12 +1764,8 @@ async function readHistoryVideoList(
 					stopReason = "head-reconciled";
 					break;
 				}
-				if (scrollRounds >= HISTORY_MAX_SCROLL_ROUNDS) {
-					stopReason = "scroll-budget";
-					break;
-				}
 				lastScrollGeometry = await loopCall(
-					scrollHistoryOnce(page, remainingMs, stopToken),
+					scrollHistoryOnce(page, stopToken),
 				);
 				const scrollPosition =
 					lastScrollGeometry.containerTop ?? lastScrollGeometry.windowScrollY;
@@ -1997,14 +1983,9 @@ async function readHistoryVideoList(
 		evidence = { kind: "unproven", page: currentEnd };
 		stopReason = stateVeto;
 	}
-	const hasSafePrefix = lastAccounted !== null;
 	const partialCheckpointAllowed =
 		!blocked &&
-		((hasSafePrefix &&
-			!sourceEnded &&
-			!parseGap &&
-			["time-budget", "scroll-budget"].includes(endStopReason)) ||
-			(headOnly && endStopReason === "head-reconciled"));
+		headOnly && endStopReason === "head-reconciled";
 	return {
 		items: [],
 		exhausted: sourceEnded && !blocked,
@@ -2769,7 +2750,7 @@ export async function collectYoutubeBrowser(
 					const evidence = result.exhausted
 						? result.evidence.kind
 						: result.partialCheckpointAllowed
-							? "youtube_history_budget_yield"
+							? "youtube_history_head_reconciled"
 							: "youtube_history_safe_prefix_before_gap";
 					await historyCtx.emit({
 						type: "STATE",
