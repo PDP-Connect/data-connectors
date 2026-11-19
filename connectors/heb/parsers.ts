@@ -1358,11 +1358,25 @@ export function resolveLinklessOrderItems(
 		keyed++;
 	}
 	const unclaimed = items.map((_, i) => i).filter((i) => !claimed.has(i));
+	// Elimination alone is a count argument. A row it places counts only when
+	// its own parsed line cents equal an unclaimed item's paid cents (the SSR
+	// total, read apart from the row); with several rows the cents must match
+	// one to one. A missing or non-numeric SSR amount corroborates nothing.
+	const eliminationCorroborated = (): boolean => {
+		const rowCents = remaining.map((line) => {
+			const own = ownCopy(line);
+			return parseCurrencyCents(parseLineTotal(own, rawLines(own)));
+		});
+		const itemCents = unclaimed.map((i) => parseCurrencyCents(items[i]!.lineTotal));
+		if (rowCents.includes(null) || itemCents.includes(null)) return false;
+		return JSON.stringify([...rowCents].sort()) === JSON.stringify([...itemCents].sort());
+	};
 	const stop = !ledgerComplete ? "ledger"
 		: remaining.length === 0 ? "none"
 		: !eliminationSafe ? "unsafe"
 		: remaining.length !== unclaimed.length ? "count"
 		: !unclaimed.every((i) => items[i]!.fullDisplayName !== null) ? "unnamed"
+		: !eliminationCorroborated() ? "uncorroborated"
 		: "ok";
 	// Left-overs H-E-B serves with no name at all, each paired by exact line
 	// total with a linkless line that names nothing either. The caller adds

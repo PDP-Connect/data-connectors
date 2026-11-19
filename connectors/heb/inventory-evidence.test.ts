@@ -846,9 +846,9 @@ for (const [label, image, name, copies, expected] of [
 	test(`linkless SSR resolution: ${label}`, async () => {
 		const extra = label === "conflict" || label === "reused";
 		const items = [
-			{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1 },
-			{ product: { id: "501", fullDisplayName: "SSR Name" }, quantity: 1 },
-			...(extra ? [{ product: { id: "502", fullDisplayName: "Other" }, quantity: 1 }] : []),
+			{ product: { id: "500", fullDisplayName: "Widget" }, quantity: 1, totalLineItemPricePaid: { formattedAmount: "$6.00" } },
+			{ product: { id: "501", fullDisplayName: "SSR Name" }, quantity: 1, totalLineItemPricePaid: { formattedAmount: "$6.00" } },
+			...(extra ? [{ product: { id: "502", fullDisplayName: "Other" }, quantity: 1, totalLineItemPricePaid: { formattedAmount: "$6.00" } }] : []),
 		];
 		const line = `<li><img src="https://images.heb.com/is/image/HEBGrocery/prd-small/${image.padStart(9, "0")}.jpg"><p>${name}</p><span data-qe-id="orderItemQty">Qty: 3</span><span data-qe-id="checkoutItemPrice">$6.00</span></li>`;
 		const rows = label === "nested" ? itemRow(0).replace("</li>", `<ul>${line}</ul></li>`) : itemRow(0) + line.repeat(copies);
@@ -1014,7 +1014,12 @@ test("a linkless line stays unresolved when which SSR item is left over depends 
 });
 
 const unrelatedLine = () => `<li><img src="https://example.test/unrelated.jpg"><p>Unrelated label</p><span data-qe-id="orderItemQty">Qty: 3</span><span data-qe-id="checkoutItemPrice">$6.00</span></li>`;
-const ssrItem = (id: string, quantity = 1) => ({ product: { id, fullDisplayName: `SSR ${id}` }, quantity });
+const ssrItem = (id: string, quantity = 1) => ({
+	product: { id, fullDisplayName: `SSR ${id}` }, quantity,
+	// The live SSR carries the paid amount on every item; the rows these tests
+	// eliminate show $6.00.
+	totalLineItemPricePaid: { formattedAmount: "$6.00" },
+});
 test("elimination resolves one unmatched line using its own quantity and price", async () => {
  const r = await resolveLinkless([ssrItem("500"), ssrItem("501", 7)], itemRow(0) + unrelatedLine());
  assert.equal(r.evidence.linklessLines, 0);
@@ -1108,8 +1113,8 @@ test("the gap message carries only fixed codes and counts: no DOM ids, no SSR ke
 
 test("SSR items whose product id is a number or whose quantity is missing still resolve", async () => {
 	const results = await Promise.all([
-		resolveLinkless([ssrItem("500"), { product: { id: 501, fullDisplayName: "SSR 501" }, quantity: 1 }], itemRow(0) + unrelatedLine()),
-		resolveLinkless([ssrItem("500"), { product: { id: "501", fullDisplayName: "SSR 501" } }], itemRow(0) + unrelatedLine()),
+		resolveLinkless([ssrItem("500"), { product: { id: 501, fullDisplayName: "SSR 501" }, quantity: 1, totalLineItemPricePaid: { formattedAmount: "$6.00" } }], itemRow(0) + unrelatedLine()),
+		resolveLinkless([ssrItem("500"), { product: { id: "501", fullDisplayName: "SSR 501" }, totalLineItemPricePaid: { formattedAmount: "$6.00" } }], itemRow(0) + unrelatedLine()),
 	]);
 	for (const r of results) {
 		assert.equal(r.evidence.linklessLines, 0);
@@ -1909,4 +1914,47 @@ test("a linked row naming a product SSR knows is not placed on another item by i
 test("a linked row whose link SSR does not know at all is still placed by its image", async () => {
 	const reId = await resolveLinkless(pq, rowOf(["700"], "700") + rowOf(["999"], "701"));
 	assert.equal(matchesTotal(reId, 2), true);
+});
+
+// ─── round 20: elimination needs the row's own price to equal the item's paid amount ───
+const paid = (id: string, amount: string | null) => ({
+	...ssrItem(id),
+	...(amount === null ? {} : { totalLineItemPricePaid: { formattedAmount: amount } }),
+});
+const clueFree = (cents: string) =>
+	`<li><span data-qe-id="checkoutItemPrice">${cents}</span><span data-qe-id="orderItemQty">Qty: 1</span></li>`;
+const eliminated = (itemB: ReturnType<typeof paid>, rowCents: string) =>
+	resolveLinkless([paid("A1", "$5.00"), itemB], dupRow("A1") + clueFree(rowCents));
+
+test("elimination places a clue-free row only when its price equals the left-over item's paid amount", async () => {
+	const [equal, differing, missing, nonNumeric] = await Promise.all([
+		eliminated(paid("B2", "$7.25"), "$7.25"),
+		eliminated(paid("B2", "$7.25"), "$3.00"),
+		eliminated(paid("B2", null), "$7.25"),
+		eliminated(paid("B2", "free"), "$7.25"),
+	]);
+	assert.equal(matchesTotal(equal, 2), true);
+	assert.equal(equal.detail.items[1]?.productId, "B2");
+	for (const r of [differing, missing, nonNumeric]) {
+		assert.equal(matchesTotal(r, 2), false);
+		assert.equal(r.detail.items.some((item) => item.productId === "B2"), false);
+	}
+});
+
+test("with several eliminated rows every one must corroborate", async () => {
+	const items = [paid("A1", "$5.00"), paid("B2", "$7.25"), paid("C3", "$1.10")];
+	const ok = await resolveLinkless(items, dupRow("A1") + clueFree("$1.10") + clueFree("$7.25"));
+	const bad = await resolveLinkless(items, dupRow("A1") + clueFree("$1.10") + clueFree("$9.99"));
+	assert.equal(matchesTotal(ok, 3), true);
+	assert.equal(matchesTotal(bad, 3), false);
+});
+
+// Behaviour change (0.6.68): elimination needs the row's own price to equal the item's
+// paid amount, so SSR items that serve no paid amount leave an eliminated row unplaced.
+test("an SSR item with no paid amount leaves an eliminated row uncorroborated and the gap open", async () => {
+	const bare = (id: string) => ({ product: { id, fullDisplayName: `SSR ${id}` }, quantity: 1 });
+	const r = await resolveLinkless([bare("500"), bare("501")], itemRow(0) + unrelatedLine());
+	assert.equal(r.evidence.linklessLines, 1);
+	assert.match(r.linklessTrace ?? "", /;stop=uncorroborated;/);
+	assert.equal(matchesTotal(r, 2), false);
 });
