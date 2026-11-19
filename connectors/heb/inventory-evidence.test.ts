@@ -1266,8 +1266,9 @@ test("the real nameless line shape is kept: extra text span, Qty N of M unit, a 
 	const rows = itemRow(0) +
 		realLine({ ordered: 1.2, actualText: "Qty: 1.27 of 1.2 lb", total: "$3.17", second: "Avg. 1.2 lb" }) +
 		realLine({ ordered: 2.0, actualText: "Qty: 2.1 lb", total: "$8.40", second: "$4.00 / lb", extraPrice: "$8.40" });
-	for (const quantity of [1.2, 1.27, null]) {
-		const r = await resolveLinkless(ssr(quantity), rows);
+	const reads = await Promise.all([1.2, 1.27, null].map((quantity) => resolveLinkless(ssr(quantity), rows)));
+	for (const [n, r] of reads.entries()) {
+		const quantity = [1.2, 1.27, null][n];
 		assert.equal(r.evidence.linklessLines, 0, `ssr quantity ${quantity}`);
 		const [, a, b] = asRecords(r);
 		assert.equal(a?.quantity, 1.27, "the charged amount, as the named path reads it");
