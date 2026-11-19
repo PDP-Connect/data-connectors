@@ -293,7 +293,8 @@ const POSTAL_SHAPES: Readonly<Record<string, PostalShape>> = Object.freeze({
 	},
 	gb: {
 		loose: /\b([A-Z]{1,2}\d[A-Z\d]?)\s?(\d[A-Z]{2})\b/gi,
-		strict: /\b([A-Z]{1,2}\d[A-Z\d]?)\s?(\d[A-Z]{2})\b/gi,
+		// Uppercase only: case-insensitive, "Apt B2 3rd Floor" reads as B2 3RD.
+		strict: /\b([A-Z]{1,2}\d[A-Z\d]?)\s?(\d[A-Z]{2})\b/g,
 	},
 	de: { loose: /\b(\d{5})\b/g },
 	fr: { loose: /\b(\d{5})\b/g },
@@ -303,7 +304,9 @@ const POSTAL_SHAPES: Readonly<Record<string, PostalShape>> = Object.freeze({
 	au: { loose: /\b(\d{4})\b/g },
 	jp: {
 		loose: /(?:〒\s*)?\b(\d{3})-?(\d{4})\b/g,
-		strict: /(?:〒\s*)?\b(\d{3})-(\d{4})\b/g,
+		// Outside Japan a bare 123-4567 is as likely a phone number's tail, so
+		// only the 〒 mark makes it a postal code.
+		strict: /〒\s*(\d{3})-?(\d{4})\b/g,
 	},
 	in: { loose: /\b(\d{3})\s?(\d{3})\b/g },
 	br: {
@@ -335,10 +338,28 @@ const COUNTRY_NAMES: readonly (readonly [string, RegExp])[] = [
 	["br", /\b(?:Brazil|Brasil)\b/i],
 ];
 
-// A phone line under the address ("Phone: 416-555-1234") holds digit groups
-// shaped like postal codes; it is never read for one.
+// A phone line under the address ("Phone: 416-555-1234", or the bare number)
+// holds digit groups shaped like postal codes; it is never read for one.
 const PHONE_LINE_RE =
-	/\b(?:phone|tel|telefon|t[ée]l[ée]phone|telefono|tel[ée]fono|telefone)\b|電話/i;
+	/\b(?:phone|mobile|mobil|cell|tel|telefon|t[ée]l[ée]phone|telefono|tel[ée]fono|telefone|celular|m[óo]vil|portable|handy)\b|電話|携帯/i;
+// A phone number: international (+44 20 7946 0000), North American
+// (416-555-1234, (416) 555-1234) or Japanese (03-1234-5678).
+const PHONE_NUMBER_RE =
+	/\+\d[\d\s().-]{7,}\d|\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b0\d{1,4}-\d{1,4}-\d{4}\b/;
+const PHONE_CHARS_ONLY_RE = /^[\d\s().+-]+$/;
+const NON_DIGIT_RE = /\D/g;
+// A line of only digits and phone separators is a phone number from 10 digits
+// on; 9 or fewer is a postal code on its own line (98101-1234, 01310-100).
+const MIN_BARE_PHONE_DIGITS = 10;
+
+function isPhoneLine(line: string): boolean {
+	return (
+		PHONE_LINE_RE.test(line) ||
+		PHONE_NUMBER_RE.test(line) ||
+		(PHONE_CHARS_ONLY_RE.test(line) &&
+			line.replace(NON_DIGIT_RE, "").length >= MIN_BARE_PHONE_DIGITS)
+	);
+}
 
 function cleanText(text: string | null | undefined): string {
 	return String(text ?? "")
@@ -404,18 +425,26 @@ function bestInLine(
 	return best?.code ?? null;
 }
 
-/** The country the address names, read from its last line upwards, and the line it is on. */
+/**
+ * The country the address names on its LAST line (a phone line below it is
+ * passed over), and that line. Amazon prints the country last; a country word
+ * on a street line ("12345 France St") is a street name, never the country.
+ */
 function addressCountry(
 	lines: readonly string[],
 	first: number,
 ): { country: string; line: number } | null {
 	for (let index = lines.length - 1; index >= first; index -= 1) {
 		const line = lines[index] ?? "";
+		if (!line || isPhoneLine(line)) {
+			continue;
+		}
 		for (const [country, re] of COUNTRY_NAMES) {
 			if (re.test(line)) {
 				return { country, line: index };
 			}
 		}
+		return null;
 	}
 	return null;
 }
@@ -428,7 +457,7 @@ function scanLines(
 ): string | null {
 	for (let index = from; index >= first; index -= 1) {
 		const line = lines[index] ?? "";
-		if (!line || PHONE_LINE_RE.test(line)) {
+		if (!line || isPhoneLine(line)) {
 			continue;
 		}
 		const found = bestInLine(line, shapes);
@@ -446,11 +475,11 @@ function scanLines(
  * line wins over a street number of the same shape, and rightmost within a
  * line (`12345 Main St Seattle, WA 98101` is 98101).
  *
- *   1. The address names a country (`Canada`, `Deutschland`): that country's
- *      shape, from the country's line upwards.
+ *   1. The address's last line names a country (`Canada`, `Deutschland`):
+ *      that country's shape, from that line upwards.
  *   2. Otherwise the store country's shape, together with every shape that
  *      cannot be mistaken for another country's (A1A 1A1, SW1A 1AA,
- *      12345-678, 123-4567, 12345-6789).
+ *      12345-678, 〒123-4567, 12345-6789).
  *
  * `skipFirst` skips line 0, the recipient on an order's shipping address.
  */

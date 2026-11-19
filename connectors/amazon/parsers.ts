@@ -66,7 +66,10 @@ const PRIME_MEMBER_TEXT_RE = /your prime|prime benefits/i;
 // on a signed-in page. `config.customerName` is `false` when signed out.
 const NAV_IS_PRIME_MEMBER_RE =
 	/\$Nav\.declare\(\s*['"]config\.isPrimeMember['"]\s*,\s*(true|false)\s*\)/;
-const NAV_MENU_IS_PRIME_RE = /["']isPrime["']\s*:\s*(1|0|true|false)\b/;
+// Anchored to the nav menu's own config object: an `"isPrime":1` elsewhere on
+// the page (an item widget, a recommendation) says nothing about the account.
+const NAV_MENU_IS_PRIME_RE =
+	/\$Nav\.declare\(\s*['"]config\.dynamicMenuArgs['"]\s*,\s*\{[^{}]*?["']isPrime["']\s*:\s*(1|0|true|false)\b/;
 const NAV_CUSTOMER_SIGNED_OUT_RE =
 	/\$Nav\.declare\(\s*['"]config\.customerName['"]\s*,\s*false\s*\)/;
 

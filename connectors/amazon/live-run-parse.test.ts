@@ -291,3 +291,104 @@ test("profile: a signed-out page's nav config (isPrimeMember false) is not a non
 	assert.equal(record.postal_code, null);
 	assert.equal(record.name, null);
 });
+
+test("shipping postal code: a bare phone number under the address is never a 123-4567 code", () => {
+	assert.equal(
+		parsePostalCode(
+			["Ada", "100 Queen St W", "Toronto, ON M5H 2N2", "416-555-1234"],
+			store("com"),
+		),
+		"M5H 2N2",
+	);
+	for (const phone of [
+		"416-555-1234",
+		"(416) 555-1234",
+		"+1 416 555 1234",
+		"Mobile: 555-1234",
+		"03-1234-5678",
+		"4165551234",
+	]) {
+		assert.equal(
+			parsePostalCode(["Ada", phone], store("com")),
+			null,
+			`${phone} on amazon.com`,
+		);
+	}
+	// outside Japan a 123-4567 is a postal code only with its 〒 mark
+	assert.equal(parsePostalCode(["Ada", "Tokyo 100-0001"], store("com")), null);
+	assert.equal(
+		parsePostalCode(["Ada", "〒100-0001 東京都"], store("com")),
+		"100-0001",
+	);
+	assert.equal(
+		parsePostalCode(["Ada", "東京都千代田区 100-0001"], store("co.jp")),
+		"100-0001",
+	);
+	// a postal code alone on its line is not taken for a phone number
+	assert.equal(
+		parsePostalCode(["Ada", "1 Main St", "98101-1234"], store("com")),
+		"98101-1234",
+	);
+});
+
+test("shipping postal code: lowercase apartment text is not a UK postcode outside the UK", () => {
+	assert.equal(
+		parsePostalCode(["Ada", "Apt B2 3rd Floor", "Seattle"], store("com")),
+		null,
+	);
+	assert.equal(
+		parsePostalCode(["Ada", "1 Main St", "Apt B2 3rd Floor"], store("ca")),
+		null,
+	);
+	// the UK store still reads its own codes in any case
+	assert.equal(
+		parsePostalCode(["Ada", "London sw1a 1aa"], store("co.uk")),
+		"SW1A 1AA",
+	);
+});
+
+test("shipping postal code: a country word on a street line is a street name, not the country", () => {
+	assert.equal(
+		parsePostalCode(
+			["Ada", "12345 France St", "Montreal QC H2X 1Y4"],
+			store("ca"),
+		),
+		"H2X 1Y4",
+	);
+	assert.equal(
+		parsePostalCode(
+			["Ada", "12345 Canada Way", "Burnaby, WA 98101"],
+			store("com"),
+		),
+		"98101",
+	);
+	// the country on the last line, a phone line below it passed over
+	assert.equal(
+		parsePostalCode(
+			[
+				"Ada",
+				"100 Queen St W",
+				"Toronto, ON M5H 2N2",
+				"Canada",
+				"Phone: 416-555-1234",
+			],
+			store("com"),
+		),
+		"M5H 2N2",
+	);
+});
+
+test("profile: an isPrime outside the nav menu config is not Prime membership", () => {
+	const html = `<html><head><script>
+		window.$Nav && $Nav.declare('config.customerName','Ada');
+		var widget = {"asin":"B000000001","isPrime":1};
+	</script></head><body>
+		<div id="nav-link-accountList"><span class="nav-line-1">Hello, Ada</span></div>
+	</body></html>`;
+	assert.equal(parseAmazonProfileDom(html, store("com")).is_prime, null);
+	const anchored = html.replace(
+		"var widget",
+		`window.$Nav && $Nav.declare('config.dynamicMenuArgs',{"rid":"X","isPrime":0,"dynamicRequest":1});\n\t\tvar widget`,
+	);
+	assert.equal(parseAmazonProfileDom(anchored, store("com")).is_prime, false);
+});
