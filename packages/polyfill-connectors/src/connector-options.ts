@@ -4,15 +4,11 @@
 /**
  * Read connector operator-options in a forward-compatible way.
  *
- * Today: options come from `process.env` under a connector-specific prefix.
- * Tomorrow (pending): options come from `START.connector_options`.
- *
- * Migration when the spec lands: replace the env read here with a
- * `startMsg.connector_options`-based read; every connector that calls
- * `readOptions(...)` gets the upgrade for free.
- *
- * See openspec/changes/add-polyfill-connector-system/design-notes/
- *     connector-configuration-open-question.md
+ * A value comes from `START.connector_options` (owner-confirmed by the
+ * runtime, declared in the manifest's `options_schema`) when present, else from
+ * `process.env` under a connector-specific prefix, else from the default. The
+ * env fallback keeps deployments that set a variable working; new tuning goes
+ * through the manifest.
  *
  * Credentials vs. options:
  *   - Credentials (tokens, passwords, cookies) belong in the credential vault
@@ -36,7 +32,7 @@ export interface OptionsSpec {
 }
 
 export interface StartMessageWithOptions {
-	connector_options?: Record<string, unknown>;
+	connector_options?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -74,6 +70,35 @@ export function readOptions(
 	return out;
 }
 
+/**
+ * For a connector whose existing resolvers already parse and bound env-shaped
+ * strings: `process.env` with each named option overlaid by its effective
+ * value (START first, then env, through `readOptions`). The resolvers keep
+ * their own validation, so a bad owner value is ignored exactly as a bad
+ * env value is. Pass the result wherever a resolver takes `env`.
+ */
+export function readOptionsAsEnv(
+	startMsg: StartMessageWithOptions | null | undefined,
+	envPrefix: string,
+	names: readonly string[],
+): NodeJS.ProcessEnv {
+	const fields: Record<string, OptionFieldSpec> = {};
+	for (const name of names) {
+		fields[name] = { default: undefined, parse: "string" };
+	}
+	const effective = readOptions(startMsg, { envPrefix, fields });
+	const overlay: NodeJS.ProcessEnv = { ...process.env };
+	for (const name of names) {
+		const value = effective[name];
+		if (value === undefined) {
+			delete overlay[`${envPrefix}${name}`];
+		} else {
+			overlay[`${envPrefix}${name}`] = String(value);
+		}
+	}
+	return overlay;
+}
+
 function coerce(
 	raw: unknown,
 	parse: OptionParseKind,
@@ -94,13 +119,10 @@ function coerce(
 			return BOOL_TRUE.test(String(raw).trim());
 		}
 		case "csv": {
-			if (Array.isArray(raw)) {
-				return raw;
-			}
-			return String(raw)
-				.split(",")
-				.map((s) => s.trim())
-				.filter(Boolean);
+			const items = Array.isArray(raw)
+				? raw.map(String)
+				: String(raw).split(",");
+			return items.map((s) => s.trim()).filter(Boolean);
 		}
 		default:
 			return String(raw);

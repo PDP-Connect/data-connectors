@@ -1078,12 +1078,11 @@ export function extractSlackCredentials(
 	};
 }
 
-function readSlackOptions(): SlackOpts {
+function readSlackOptions(
+	connectorOptions: CollectContext["connectorOptions"],
+): SlackOpts {
 	const parsed = readOptions(
-		// readOptions reads from START.connector_options today; scope+state here
-		// is preserved for the forward-compatible migration path documented on
-		// the function.
-		null,
+		{ connector_options: connectorOptions },
 		{
 			envPrefix: "SLACK_",
 			fields: {
@@ -3970,7 +3969,7 @@ if (isMainModule(import.meta.url)) {
 			const { state, requested, credentials, emit, progress } = ctx;
 
 			const { workspace, token, cookie } = extractSlackCredentials(credentials);
-			const opts = readSlackOptions();
+			const opts = readSlackOptions(ctx.connectorOptions);
 
 			// Resource filters (pre-fetch: pass as positional args; post-fetch: enforce too)
 			const resFilters = new Map<string, ReadonlySet<string> | null>();

@@ -43,12 +43,54 @@ interface ConnectorOptionKinds {
  */
 const PLATFORM_OPTION_KINDS: Readonly<Record<string, ConnectorOptionKinds>> =
 	Object.freeze({
+		chatgpt: Object.freeze({
+			// Pacing and per-run bounds. A run that stops early defers the rest as
+			// resumable gaps, so none of these changes what is eventually collected.
+			BACKEND_FETCH_TIMEOUT_MS: "transport",
+			BATCH_MAX_PARALLELISM: "transport",
+			CIRCUIT_BREAKER: "transport",
+			DETAIL_INITIAL_CONCURRENCY_PROBE: "transport",
+			DETAIL_MAX_CONCURRENCY_PROBE: "transport",
+			DETAIL_PAUSE_MAX_MS_PROBE: "transport",
+			DETAIL_PAUSE_MIN_MS_PROBE: "transport",
+			DETAIL_RATE_LIMIT_STOP_AFTER: "transport",
+			MAX_DETAIL_FETCHES_PER_RUN: "transport",
+			MAX_RUN_WALL_CLOCK_MS: "transport",
+			MAX_TAIL_DEFERRAL_GAPS_PER_RUN: "transport",
+			PACING_BURST_TOLERANCE_MS: "transport",
+			PACING_INITIAL_INTERVAL_MS: "transport",
+			PACING_MAX_INTERVAL_MS: "transport",
+			PACING_MIN_INTERVAL_MS: "transport",
+			PACING_RECOVERY_GAIN: "transport",
+			RETRY_BUDGET_CAPACITY: "transport",
+			RETRY_BUDGET_INITIAL_TOKENS: "transport",
+			// These change which records a run emits: the stateless flags drop the
+			// unchanged-record suppression, USAGE_DETAIL sets how many conversations
+			// the usage summary reads, and SIDE_EFFECT_PROBE skips collection.
+			ACCOUNT_PLAN_STATELESS: "collection_scope",
+			SIDE_EFFECT_PROBE: "collection_scope",
+			USAGE_DETAIL: "collection_scope",
+			USAGE_STATELESS: "collection_scope",
+		}),
 		claude_code: Object.freeze({
 			// Both are substring filters over the project folders that get scanned
 			// (connectors/claude_code/parsers.ts applyProjectDirScope), so each one
 			// decides which sources are collected at all.
 			CLAUDE_CODE_PROJECT_EXCLUDE: "collection_scope",
 			CLAUDE_CODE_PROJECT_INCLUDE: "collection_scope",
+		}),
+		gmail: Object.freeze({
+			// Attachments above the cap are not downloaded, so it decides which
+			// attachments are collected.
+			MAX_ATTACHMENT_BYTES: "collection_scope",
+			// Page sizes, stall and progress cadence: shape how a run proceeds, not
+			// what is eventually collected.
+			ATTACHMENT_BACKFILL_PAGE_BYTES: "transport",
+			ATTACHMENT_PROGRESS_MIN_BYTES: "transport",
+			ATTACHMENT_PROGRESS_MIN_INTERVAL_MS: "transport",
+			ATTACHMENT_RECOVERY_PAGE_BYTES: "transport",
+			ATTACHMENT_STALL_TIMEOUT_MS: "transport",
+			MESSAGES_BACKFILL_WINDOW_UIDS: "transport",
 		}),
 		google_messages: Object.freeze({
 			// Caps how many conversations are scanned after a recency sort, so it
@@ -59,6 +101,13 @@ const PLATFORM_OPTION_KINDS: Readonly<Record<string, ConnectorOptionKinds>> =
 			GMCLI_MESSAGES_PER_CHAT_LIMIT: "collection_scope",
 			// Subprocess timeout for one helper invocation; changes no selection.
 			GMCLI_TIMEOUT_MS: "transport",
+		}),
+		slack_browser: Object.freeze({
+			CHANNEL_ALLOWLIST: "collection_scope",
+			CHANNEL_TYPES: "collection_scope",
+			LOOKBACK_DAYS: "collection_scope",
+			MAX_BACKFILL_DAYS: "collection_scope",
+			WORKSPACE: "collection_scope",
 		}),
 		slack: Object.freeze({
 			CHANNEL_ALLOWLIST: "collection_scope",

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "gmail",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-	"version": "0.2.31",
+	"version": "0.2.32",
 	"display_name": "Gmail",
 	"brand": {
 		"icon": "icon.svg",
@@ -663,5 +663,62 @@
 		"historical_backfill_pending": "This bounded sync page completed; more historical Gmail data remains and will be collected automatically",
 		"historical_message_unaccounted": "A historical message could not be represented; its UID was recorded as a permanent coverage gap",
 		"schema_validation_failed": "Some data didn't match the expected format and was skipped"
+	},
+	"options_schema": {
+		"type": "object",
+		"description": "Settings for the Gmail connector. Values are delivered in START.connector_options; the matching PDPP_GMAIL_<NAME> environment variable is read only when the owner has set none. The platform registry, not this manifest, decides which options need owner confirmation.",
+		"properties": {
+			"MAX_ATTACHMENT_BYTES": {
+				"type": "integer",
+				"description": "Largest single attachment, in bytes, that is downloaded. Attachments larger than this are not downloaded.",
+				"default": 26214400,
+				"minimum": 1,
+				"declared_option_kind": "collection_scope"
+			},
+			"MESSAGES_BACKFILL_WINDOW_UIDS": {
+				"type": "integer",
+				"description": "How many message UIDs one run walks of the historical backlog. Smaller values make shorter runs; they do not change what is eventually collected.",
+				"default": 500,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			},
+			"ATTACHMENT_BACKFILL_PAGE_BYTES": {
+				"type": "integer",
+				"description": "Attachment bytes one run transfers for historical attachment backfill (256 KiB to 4 MiB).",
+				"default": 1048576,
+				"minimum": 262144,
+				"maximum": 4194304,
+				"declared_option_kind": "transport"
+			},
+			"ATTACHMENT_RECOVERY_PAGE_BYTES": {
+				"type": "integer",
+				"description": "Attachment bytes one run transfers when it only recovers attachment gaps (256 KiB to 4 MiB).",
+				"default": 4194304,
+				"minimum": 262144,
+				"maximum": 4194304,
+				"declared_option_kind": "transport"
+			},
+			"ATTACHMENT_STALL_TIMEOUT_MS": {
+				"type": "integer",
+				"description": "Milliseconds of silence after which a stalled attachment transfer closes the connection and the run retries.",
+				"default": 90000,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			},
+			"ATTACHMENT_PROGRESS_MIN_INTERVAL_MS": {
+				"type": "integer",
+				"description": "Minimum milliseconds between attachment transfer progress messages.",
+				"default": 15000,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			},
+			"ATTACHMENT_PROGRESS_MIN_BYTES": {
+				"type": "integer",
+				"description": "Minimum bytes transferred between attachment transfer progress messages.",
+				"default": 262144,
+				"minimum": 1,
+				"declared_option_kind": "transport"
+			}
+		}
 	}
 }

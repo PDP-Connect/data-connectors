@@ -40,6 +40,7 @@ import {
 	CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE,
 	ensureChatGptSession,
 } from "../../packages/polyfill-connectors/src/auto-login/chatgpt.ts";
+import { readOptionsAsEnv } from "../../packages/polyfill-connectors/src/connector-options.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
@@ -129,7 +130,11 @@ import {
 	usageCaptureBody,
 	usageCaptureRoute,
 } from "./usage.ts";
-import { runUsageStreams, type UsageStreamHooks } from "./usage-stream.ts";
+import {
+	isChatGptStatelessFlag,
+	runUsageStreams,
+	type UsageStreamHooks,
+} from "./usage-stream.ts";
 
 // schemas.js is a plain-JS Zod validator; cast at the boundary to the
 // runtime's ValidateRecord contract. The JS module's safeParse already
@@ -533,6 +538,37 @@ const CHATGPT_RETRY_BUDGET_CAPACITY_ENV = "PDPP_CHATGPT_RETRY_BUDGET_CAPACITY";
 const CHATGPT_RETRY_BUDGET_INITIAL_TOKENS_ENV =
 	"PDPP_CHATGPT_RETRY_BUDGET_INITIAL_TOKENS";
 const CHATGPT_CIRCUIT_BREAKER_ENV = "PDPP_CHATGPT_CIRCUIT_BREAKER";
+/**
+ * The settings this connector reads, declared in manifest `options_schema` and
+ * delivered in `START.connector_options`. Each is also still read from the env
+ * variable `PDPP_CHATGPT_<name>` when the owner has set none, so a deployment
+ * that exports one keeps working. A test holds this list equal to the manifest.
+ */
+export const CHATGPT_OPTIONS_ENV_PREFIX = "PDPP_CHATGPT_";
+export const CHATGPT_OPTION_NAMES = [
+	"ACCOUNT_PLAN_STATELESS",
+	"BACKEND_FETCH_TIMEOUT_MS",
+	"BATCH_MAX_PARALLELISM",
+	"CIRCUIT_BREAKER",
+	"DETAIL_INITIAL_CONCURRENCY_PROBE",
+	"DETAIL_MAX_CONCURRENCY_PROBE",
+	"DETAIL_PAUSE_MAX_MS_PROBE",
+	"DETAIL_PAUSE_MIN_MS_PROBE",
+	"DETAIL_RATE_LIMIT_STOP_AFTER",
+	"MAX_DETAIL_FETCHES_PER_RUN",
+	"MAX_RUN_WALL_CLOCK_MS",
+	"MAX_TAIL_DEFERRAL_GAPS_PER_RUN",
+	"PACING_BURST_TOLERANCE_MS",
+	"PACING_INITIAL_INTERVAL_MS",
+	"PACING_MAX_INTERVAL_MS",
+	"PACING_MIN_INTERVAL_MS",
+	"PACING_RECOVERY_GAIN",
+	"RETRY_BUDGET_CAPACITY",
+	"RETRY_BUDGET_INITIAL_TOKENS",
+	"SIDE_EFFECT_PROBE",
+	"USAGE_DETAIL",
+	"USAGE_STATELESS",
+] as const;
 // Cold-start DISCOVERY seed (ms), used ONLY when no fresh learned interval is
 // restored from durable state (see warm-start below). It is a one-time entry to
 // the AIMD ramp, NOT a hand-authored operating point: warm-start persists the
@@ -1703,8 +1739,11 @@ export function createChatGptApi({
 	onUnlanedRateLimited,
 	page,
 	providerBudget,
+	env = process.env,
 }: {
 	capture: CaptureSession | null;
+	/** Settings view for this run; see `readOptionsAsEnv`. */
+	env?: NodeJS.ProcessEnv;
 	emit?: CollectContext["emit"];
 	// Invoked once per served 429 that happens OUTSIDE an adaptive lane run
 	// context (list pagination, memories, custom_gpts, shared_conversations).
@@ -1790,7 +1829,7 @@ export function createChatGptApi({
 			projection?: ChatGptUsageProjection | undefined;
 		},
 	): Promise<ChatGptFetchResult> {
-		const timeoutMs = resolveChatGptBackendFetchTimeoutMs();
+		const timeoutMs = resolveChatGptBackendFetchTimeoutMs(env);
 		const measureProviderFetch =
 			(/^\/conversation\//.test(path) || path === "/conversations/batch") &&
 			typeof (
@@ -2397,6 +2436,8 @@ function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
  *  orchestration and the helpers are individually testable. */
 export interface StreamDeps {
 	api: ChatGptApi;
+	/** Owner-confirmed settings overlaid on the env; see `readOptionsAsEnv`. */
+	tuningEnv?: NodeJS.ProcessEnv;
 	/** Optional clock seam for deterministic list retry tests. */
 	sleep?: (milliseconds: number) => Promise<void>;
 	detailGaps?: CollectContext["detailGaps"];
@@ -2734,7 +2775,11 @@ export async function runAccountPlanStream(
 		});
 		return;
 	}
-	if (process.env[CHATGPT_ACCOUNT_PLAN_STATELESS_ENV] === "1") {
+	if (
+		isChatGptStatelessFlag(
+			(deps.tuningEnv ?? process.env)[CHATGPT_ACCOUNT_PLAN_STATELESS_ENV],
+		)
+	) {
 		for (const record of records) await deps.emitRecord("account_plan", record);
 		deps.emit(buildFullScanCoverageMessage("account_plan", records.length));
 		return;
@@ -6059,7 +6104,8 @@ export async function runMessagesAndConversationsWithDetail(
 	// Defaults are the frozen production values (1 / 1 / 1500ms / 3000ms). A
 	// cold-state A/B probe may override them via PDPP_CHATGPT_DETAIL_*_PROBE env
 	// vars; see resolveChatGptDetailLaneTuning. Tests may also inject `tuning`.
-	const rawRequestedTuning = pacing.tuning ?? resolveChatGptDetailLaneTuning();
+	const rawRequestedTuning =
+		pacing.tuning ?? resolveChatGptDetailLaneTuning(deps.tuningEnv);
 	// The adaptive lane is the SOLE send governor. Pacing (when present) rides as
 	// a `launchDelayHint` — one pre-flight wait, no stacking. Calibrated
 	// 2026-06-11 (run_1781139968889): 14,721 records committed, upstream-pressure
@@ -6098,7 +6144,8 @@ export async function runMessagesAndConversationsWithDetail(
 	const seededRateLimited =
 		pacing.preDetailRateLimited ?? deps.preDetailPressure?.rateLimited ?? 0;
 	const densityTracker = new ChatGptRateLimitDensityTracker(
-		pacing.densityStopThreshold ?? resolveChatGptRateLimitDensityStop(),
+		pacing.densityStopThreshold ??
+			resolveChatGptRateLimitDensityStop(deps.tuningEnv),
 		seededRateLimited,
 	);
 	// Bounded-run budget. `pacing` wins for tests; production reads the run-scoped
@@ -6110,15 +6157,16 @@ export async function runMessagesAndConversationsWithDetail(
 		pacing.runBudget ??
 		deps.runBudget ??
 		new ChatGptRunBudget({
-			maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
-			maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
+			maxFetches: resolveChatGptMaxDetailFetchesPerRun(deps.tuningEnv),
+			maxWallClockMs: resolveChatGptMaxRunWallClockMs(deps.tuningEnv),
 		});
 	// Max per-key DETAIL_GAP rows a run-cap tail may materialize before folding
 	// the older remainder into one backlog gap. `pacing` wins for tests; otherwise
 	// env-resolved (Infinity = today's unbounded per-key behavior). This bounds the
 	// FOREGROUND WRITE burn of a cap trip; it does not change fetching.
 	const tailGapBound =
-		pacing.tailGapBound ?? resolveChatGptMaxTailDeferralGapsPerRun();
+		pacing.tailGapBound ??
+		resolveChatGptMaxTailDeferralGapsPerRun(deps.tuningEnv);
 	let emittedConversationDetailLaneStart = false;
 	const lane = createAdaptiveLane<ChatGptFetchResult>({
 		name: "chatgpt.conversationDetail",
@@ -6200,7 +6248,8 @@ export async function runMessagesAndConversationsWithDetail(
 	let batchEndpointUnavailable = false;
 	let consecutiveBatchFailures = 0;
 	const batchMaxParallelism =
-		pacing.batchMaxParallelism ?? resolveChatGptBatchMaxParallelism();
+		pacing.batchMaxParallelism ??
+		resolveChatGptBatchMaxParallelism(deps.tuningEnv);
 	const batchFallbackLog = deps.batchFallbackLog ?? { logged: false };
 	// Once run-cap or source-pressure deferral trips, all later conversation
 	// details are local bookkeeping: emit durable DETAIL_GAP rows for the tail,
@@ -8208,16 +8257,21 @@ export async function collectChatGpt(
 	// Run-scoped bounded-run envelope, created once so the gap-recovery pass
 	// and the forward-walk pass share one budget. By default ChatGPT has no
 	// fixed size/time cap; positive env values opt into explicit envelopes.
+	const tuningEnv = readOptionsAsEnv(
+		{ connector_options: ctx.connectorOptions },
+		CHATGPT_OPTIONS_ENV_PREFIX,
+		CHATGPT_OPTION_NAMES,
+	);
 	const runBudget = new ChatGptRunBudget({
-		maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
-		maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
+		maxFetches: resolveChatGptMaxDetailFetchesPerRun(tuningEnv),
+		maxWallClockMs: resolveChatGptMaxRunWallClockMs(tuningEnv),
 	});
 	// Warm-start: pass the RAW persisted pacing (interval + when it was
 	// learned) so ProviderPacing can apply the §10-E staleness guard itself —
 	// a stale interval (idle > 6h) cold-starts instead of bursting into a
 	// possibly-tightened quota. The descent compounds across fresh runs.
 	const providerBudget = resolveChatGptProviderBudget(
-		process.env,
+		tuningEnv,
 		readChatGptPersistedPacing(state),
 	);
 
@@ -8230,6 +8284,7 @@ export async function collectChatGpt(
 		onUnlanedRateLimited: (retryAfterWaitMs) =>
 			recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
 		providerBudget,
+		env: tuningEnv,
 	});
 	const emitRecord = makeEmitRecord(baseEmitRecord);
 
@@ -8260,9 +8315,10 @@ export async function collectChatGpt(
 		requested,
 		requestDetailGapPage: ctx.requestDetailGapPage,
 		runBudget,
+		tuningEnv,
 	};
 
-	if (isChatGptSideEffectProbeEnabled()) {
+	if (isChatGptSideEffectProbeEnabled(tuningEnv)) {
 		await runChatGptSideEffectProbe({ api, emit, page });
 		return;
 	}
