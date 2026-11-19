@@ -2050,21 +2050,24 @@ export async function applyYearCompletionState({
  *   - state tagged with another store: that store's years move to
  *     `otherStores`; this store reads its own entry there, else starts empty
  *     and so reads its full history once;
- *   - state with no store tag (every run before stores existed read
- *     amazon.com): amazon.com's years. For any other store it starts empty,
- *     and the untagged years are kept for amazon.com.
+ *   - state with no store tag: IGNORED, for every store. No tag means the
+ *     cursor was written by amazon 0.2.22 or earlier (amazon.com only) OR by
+ *     0.2.23 (#668), which read any store yet wrote the same untagged
+ *     `{ years }`; nothing in the cursor tells the two apart (git history shows
+ *     no version before 0.2.24 wrote a store id, and none wrote a top-level
+ *     `state.years`, only read it). Trusting it could skip a year the store
+ *     never read, so each store reads its full history once; orders are
+ *     idempotent by order id. Not kept: it is never safe to use, even as the
+ *     "prior orders" hint, which would abort a store with no orders that year.
  */
 export function storeYearsCursor(
 	ordersState: Pick<OrdersStateShape, "otherStores" | "store" | "years">,
-	legacyYears: YearsCursor | undefined,
 	store: AmazonStore,
 ): { years: YearsCursor; otherStores: Record<string, YearsCursor> } {
 	const tagged = ordersState.store;
 	const held: Record<string, YearsCursor> = { ...ordersState.otherStores };
-	const stored = ordersState.years ?? (tagged ? undefined : legacyYears);
-	const storedFor = tagged ?? DEFAULT_AMAZON_STORE.id;
-	if (stored) {
-		held[storedFor] = stored;
+	if (tagged && ordersState.years) {
+		held[tagged] = ordersState.years;
 	}
 	const years = held[store.id] ?? {};
 	delete held[store.id];
@@ -2484,11 +2487,9 @@ if (isMainModule(import.meta.url)) {
 			// { <stream>: <cursor>, ... }. We write STATE stream='orders'
 			// cursor={years:{...}}, so reads must go through state.orders.
 			const ordersState = (state.orders ?? {}) as OrdersStateShape;
-			const legacyYears = (state as { years?: YearsCursor }).years;
 			// The cursor is scoped to the resolved store (see storeYearsCursor).
 			const { years: yearsState, otherStores } = storeYearsCursor(
 				ordersState,
-				legacyYears,
 				store,
 			);
 

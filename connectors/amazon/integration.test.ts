@@ -3855,13 +3855,13 @@ const YEAR_DONE = {
 test("storeYearsCursor: years written for amazon.com are not used for another store", () => {
 	assert.ok(CA);
 	const state = { store: "com", years: { "2020": YEAR_DONE } };
-	assert.deepEqual(storeYearsCursor(state, undefined, CA).years, {});
+	assert.deepEqual(storeYearsCursor(state, CA).years, {});
 	// Same store: its own years.
-	assert.deepEqual(storeYearsCursor(state, undefined, COM).years, {
+	assert.deepEqual(storeYearsCursor(state, COM).years, {
 		"2020": YEAR_DONE,
 	});
 	// The other store's years are kept for it, not dropped.
-	assert.deepEqual(storeYearsCursor(state, undefined, CA).otherStores, {
+	assert.deepEqual(storeYearsCursor(state, CA).otherStores, {
 		com: { "2020": YEAR_DONE },
 	});
 });
@@ -3870,7 +3870,6 @@ test("storeYearsCursor: switching stores and back loses nothing", () => {
 	assert.ok(CA);
 	const onCa = storeYearsCursor(
 		{ store: "com", years: { "2020": YEAR_DONE } },
-		undefined,
 		CA,
 	);
 	const caYears = { "2019": { ...YEAR_DONE, order_count: 2 } };
@@ -3880,31 +3879,71 @@ test("storeYearsCursor: switching stores and back loses nothing", () => {
 		years: caYears,
 		otherStores: onCa.otherStores,
 	};
-	assert.deepEqual(storeYearsCursor(persisted, undefined, COM).years, {
+	assert.deepEqual(storeYearsCursor(persisted, COM).years, {
 		"2020": YEAR_DONE,
 	});
-	assert.deepEqual(storeYearsCursor(persisted, undefined, CA).years, caYears);
-	assert.deepEqual(storeYearsCursor(persisted, undefined, COM).otherStores, {
+	assert.deepEqual(storeYearsCursor(persisted, CA).years, caYears);
+	assert.deepEqual(storeYearsCursor(persisted, COM).otherStores, {
 		ca: caYears,
 	});
 });
 
-test("storeYearsCursor: state with no store id belongs to amazon.com only", () => {
-	assert.ok(CA);
-	const legacy = { years: { "2020": YEAR_DONE } };
-	assert.deepEqual(storeYearsCursor(legacy, undefined, COM).years, {
+// A 0.2.23 run (#668) on amazon.ca wrote the same untagged `{ years }` an
+// amazon.com-only run wrote, so an untagged cursor proves no store.
+const UNTAGGED_CA_FROZEN = {
+	years: {
 		"2020": YEAR_DONE,
+		"2025": { ...YEAR_DONE, frozen: false, order_count: 3 },
+	},
+};
+
+test("storeYearsCursor: an untagged 0.2.23-shaped cursor with a frozen ca year gives amazon.com nothing", () => {
+	assert.deepEqual(storeYearsCursor(UNTAGGED_CA_FROZEN, COM), {
+		years: {},
+		otherStores: {},
 	});
-	assert.deepEqual(storeYearsCursor(legacy, undefined, CA).years, {});
-	// Kept for amazon.com so a later amazon.com run still has it.
-	assert.deepEqual(storeYearsCursor(legacy, undefined, CA).otherStores, {
-		com: { "2020": YEAR_DONE },
-	});
-	// The oldest flat shape (years at the top of state) too.
-	assert.deepEqual(storeYearsCursor({}, { "2018": YEAR_DONE }, COM).years, {
-		"2018": YEAR_DONE,
-	});
-	assert.deepEqual(storeYearsCursor({}, { "2018": YEAR_DONE }, CA).years, {});
+	const { years } = storeYearsCursor(UNTAGGED_CA_FROZEN, COM);
+	assert.deepEqual(
+		planIncrementalYears([2026, 2025, 2020, 2019], years, 2026),
+		{
+			planned: [2026, 2025, 2020, 2019],
+			skipped: [],
+		},
+	);
+	assert.equal(noOrdersOnStore([2026], 0, years), true);
+});
+
+test("storeYearsCursor: untagged cursor, then com, then ca: neither store skips a year it did not read", () => {
+	assert.ok(CA);
+	// ca (unmigrated) reads in full too.
+	assert.deepEqual(storeYearsCursor(UNTAGGED_CA_FROZEN, CA).years, {});
+	// com runs and persists its own tagged cursor; the untagged data is gone.
+	const comYears = { "2019": { ...YEAR_DONE, order_count: 1 } };
+	const afterCom = {
+		store: "com",
+		years: comYears,
+		...(Object.keys(storeYearsCursor(UNTAGGED_CA_FROZEN, COM).otherStores)
+			.length > 0
+			? { otherStores: storeYearsCursor(UNTAGGED_CA_FROZEN, COM).otherStores }
+			: {}),
+	};
+	const ca = storeYearsCursor(afterCom, CA);
+	assert.deepEqual(ca.years, {}, "ca did not read 2020 on its own");
+	assert.deepEqual(ca.otherStores, { com: comYears });
+	// ca persists; com still has exactly what com read.
+	const afterCa = {
+		store: "ca",
+		years: { "2020": YEAR_DONE },
+		otherStores: ca.otherStores,
+	};
+	assert.deepEqual(storeYearsCursor(afterCa, COM).years, comYears);
+});
+
+test("storeYearsCursor: the oldest top-level state.years is not read either (no version wrote it)", () => {
+	// collect() no longer reads `state.years`; only the tagged orders cursor counts.
+	assert.ok(CA);
+	assert.deepEqual(storeYearsCursor({}, COM).years, {});
+	assert.deepEqual(storeYearsCursor({ otherStores: {} }, CA).years, {});
 });
 
 test("another store's orders no longer hide this store's empty history, and its years are all planned", () => {
@@ -3913,7 +3952,7 @@ test("another store's orders no longer hide this store's empty history, and its 
 		store: "com",
 		years: { "2019": YEAR_DONE, "2020": YEAR_DONE },
 	};
-	const { years } = storeYearsCursor(state, undefined, CA);
+	const { years } = storeYearsCursor(state, CA);
 	assert.equal(noOrdersOnStore([2025, 2024], 0, years), true);
 	assert.deepEqual(
 		planIncrementalYears([2025, 2024, 2020, 2019], years, 2026),
