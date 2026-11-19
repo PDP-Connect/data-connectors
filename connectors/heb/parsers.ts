@@ -914,6 +914,57 @@ function hebGroceryImageId(pathname: string): string | undefined {
 	return /^\/is\/image\/HEBGrocery\/(?:[\w-]*[a-z_][\w-]*\/)?(\d+)(?:[-.][^/]*)?$/i.exec(pathname)?.[1];
 }
 
+/** One-to-one matching of rows to items by augmenting paths, found with an
+ * explicit stack: no recursion, one stamp array per run instead of a set per
+ * row. `owner[item]` is the row holding it, or -1. With `stopAtFailure` it ends
+ * at the first row that cannot be placed; otherwise it skips such rows and
+ * returns them. `budget` caps the edge visits (null: no cap); past it the
+ * result is `exhausted` and not a matching. */
+function matchRows(
+	candidates: readonly (readonly number[])[],
+	itemCount: number,
+	stopAtFailure: boolean,
+	budget: number | null,
+): { owner: Int32Array; unplaced: number[]; exhausted: boolean } {
+	const owner = new Int32Array(itemCount).fill(-1);
+	const seen = new Int32Array(itemCount).fill(-1);
+	const unplaced: number[] = [];
+	let visits = 0;
+	for (let root = 0; root < candidates.length; root++) {
+		const rows = [root];
+		const next = [0];
+		const via: number[] = [];
+		let placed = false;
+		while (rows.length > 0 && !placed) {
+			const top = rows.length - 1;
+			const options = candidates[rows[top]!]!;
+			if (next[top]! >= options.length) {
+				rows.pop();
+				next.pop();
+				continue;
+			}
+			const item = options[next[top]!++]!;
+			if (budget !== null && ++visits > budget) return { owner, unplaced, exhausted: true };
+			if (seen[item] === root) continue;
+			seen[item] = root;
+			via[top] = item;
+			const holder = owner[item]!;
+			if (holder === -1) {
+				for (let k = 0; k <= top; k++) owner[via[k]!] = rows[k]!;
+				placed = true;
+			} else {
+				rows.push(holder);
+				next.push(0);
+			}
+		}
+		if (!placed) {
+			if (stopAtFailure) return { owner, unplaced: [root], exhausted: false };
+			unplaced.push(root);
+		}
+	}
+	return { owner, unplaced, exhausted: false };
+}
+
 export function resolveLinklessOrderItems(
 	html: string,
 	items: readonly {
@@ -1013,20 +1064,12 @@ export function resolveLinklessOrderItems(
 			else unfitImage ??= imageShape(own);
 			return byImage;
 		});
+	const placement = matchRows(candidates, items.length, true, null);
 	const lineOf = new Map<number, number>();
-	const place = (line: number, tried: Set<number>): boolean => {
-		for (const item of candidates[line]!) {
-			if (tried.has(item)) continue;
-			tried.add(item);
-			const holder = lineOf.get(item);
-			if (holder === undefined || place(holder, tried)) {
-				lineOf.set(item, line);
-				return true;
-			}
-		}
-		return false;
-	};
-	let ledgerComplete = candidates.every((_, line) => place(line, new Set()));
+	placement.owner.forEach((row, item) => {
+		if (row !== -1) lineOf.set(item, row);
+	});
+	let ledgerComplete = placement.unplaced.length === 0;
 	let ledger = ledgerComplete ? "complete" : "unplaced";
 	if (ledgerComplete) {
 		// An item could be left over instead of a matched one when some line
@@ -1153,22 +1196,22 @@ export function resolveLinklessOrderItems(
 	// When the ledger fails, count and classify what the matcher saw, with
 	// fixed codes only. Read-only: it changes no record and no decision.
 	const ledgerConflict = (): string => {
-		// The full maximum matching: a row that cannot be placed is skipped
-		// instead of ending the run.
-		const owner = new Map<number, number>();
-		const tryPlace = (row: number, tried: Set<number>): boolean => {
-			for (const item of candidates[row]!) {
-				if (tried.has(item)) continue;
-				tried.add(item);
-				const holder = owner.get(item);
-				if (holder === undefined || tryPlace(holder, tried)) {
-					owner.set(item, row);
-					return true;
-				}
-			}
-			return false;
-		};
-		const unplaced = candidates.map((_, row) => row).filter((row) => !tryPlace(row, new Set()));
+		try {
+			return ledgerConflictTrace();
+		} catch {
+			return "lg=err";
+		}
+	};
+	const ledgerConflictTrace = (): string => {
+		// The full maximum matching, within a fixed work budget.
+		const subItems = items.filter((item) => item.substituteIds.length > 0).length;
+		const repeatedSsr = [...items.reduce((counts, item) => item.productId === null ? counts
+			: counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1), new Map<string, number>()).values()]
+			.filter((n) => n > 1).length;
+		const tail = `,ssr:${subItems}/${repeatedSsr}`;
+		const matching = matchRows(candidates, items.length, false, 50_000);
+		if (matching.exhausted) return `lg=mx:?/${candidates.length}/${items.length}${tail}`;
+		const unplaced = matching.unplaced;
 		const namedLines = outerLines.filter((line) => ownCopy(line).querySelector(nameSelector));
 		const ownIds = (line: Element) => [...ownCopy(line).querySelectorAll(nameSelector)].map(
 			(link) => (link.getAttribute("href") ?? "").split("/").filter(Boolean).pop() ?? "");
@@ -1186,7 +1229,7 @@ export function resolveLinklessOrderItems(
 				: ids.length > 0 && ids.every((id) => !ssrIds.has(id)) ? "no_ssr_product"
 				: "other";
 		};
-		const unplacedFlags = unplaced.map((row) => {
+		const unplacedFlags = unplaced.slice(0, 4).map((row) => {
 			const line = namedLines[row]!;
 			const at = outerLines.indexOf(line);
 			const own = ownCopy(line);
@@ -1195,12 +1238,7 @@ export function resolveLinklessOrderItems(
 			const priceOrPromo = /\$\s*\d|\b(?:free|promo|bonus)\b/i.test(normText(own));
 			return `${rowClass(line)}:${anchors}${sameParent ? "y" : "n"}${priceOrPromo ? "y" : "n"}`;
 		});
-		const repeatedSsr = [...items.reduce((counts, item) => item.productId === null ? counts
-			: counts.set(item.productId, (counts.get(item.productId) ?? 0) + 1), new Map<string, number>()).values()]
-			.filter((n) => n > 1).length;
-		const subItems = items.filter((item) => item.substituteIds.length > 0).length;
 		const head = `lg=mx:${candidates.length - unplaced.length}/${candidates.length}/${items.length}`;
-		const tail = `,ssr:${subItems}/${repeatedSsr}`;
 		// Keep the field under 120 characters: drop listed rows from the end.
 		const shown = unplacedFlags.slice(0, 4);
 		const render = () => `${head},u:${unplaced.length}${shown.length ? `[${shown.join("|")}]` : ""}${tail}`;

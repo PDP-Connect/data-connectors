@@ -26,6 +26,7 @@ import {
 	parseNutritionDom,
 	parseOrderDetailDom,
 	parseProfileDom,
+	resolveLinklessOrderItems,
 } from "./parsers.ts";
 
 function pageFor(html: string, landed?: string): Page {
@@ -1458,4 +1459,52 @@ test("the ledger trace changes no record: the parsed items are the rows' own", a
 	assert.deepEqual(r.detail.items.map((item) => item.productId), ["500", "ZQ9X77"]);
 	assert.equal(r.evidence.linklessLines, 0);
 	assert.doesNotMatch(r.linklessTrace ?? "", /nameless/);
+});
+
+// ─── the ledger trace is bounded and never throws ────────────────────────
+const bareRow = (id: string) => `<li><a data-qe-id="itemRowDetailsName" href="/product-detail/x/${id}">Row</a><span data-qe-id="orderItemQty">Qty: 1</span></li>`;
+const bareItem = (productId: string, substituteIds: string[] = []) =>
+	({ productId, quantity: 1, substituteIds, fullDisplayName: "SSR", productUrl: null, lineTotal: null });
+
+test("a dense order past the work budget reports mx:? with the SSR counts and finishes quickly", () => {
+	const ids = Array.from({ length: 400 }, (_, i) => `D${i}`);
+	const items = ids.slice(0, 399).map((id) => bareItem(id, ids));
+	const started = Date.now();
+	const r = resolveLinklessOrderItems(ids.map(bareRow).join(""), items);
+	assert.ok(Date.now() - started < 20_000);
+	assert.match(r.trace, /;stop=ledger;lg=mx:\?\/400\/399,ssr:399\/0;why=/);
+});
+
+test("a long chain of forced shifts stays within the stack and is matched exactly", () => {
+	// Row i fits items i and i+1; the last row fits only item 0, so placing it
+	// shifts every earlier row by one: an augmenting path as long as the order.
+	const n = 11000;
+	const rowIds = Array.from({ length: n }, (_, i) => `C${i}`);
+	const items = Array.from({ length: n - 1 }, (_, i) => bareItem(`C${i}`, i > 0 ? [`C${i - 1}`] : []));
+	const rows = rowIds.map((id, i) => (i === n - 1 ? bareRow("C0") : bareRow(id)));
+	const r = resolveLinklessOrderItems(rows.join(""), items);
+	assert.match(r.trace, /;stop=ledger;lg=mx:10999\/11000\/10999,u:1\[/);
+});
+
+test("an error inside the ledger diagnostic becomes lg=err and changes nothing else", () => {
+	const rows = bareRow("E0") + bareRow("E1") + bareRow("E0");
+	let reads = 0;
+	let throwAt = Infinity;
+	const counted = (id: string) => ({
+		...bareItem(id),
+		get substituteIds() {
+			if (++reads >= throwAt) throw new Error("injected");
+			return [] as string[];
+		},
+	});
+	const base = resolveLinklessOrderItems(rows, [counted("E0"), counted("E1")]);
+	assert.match(base.trace, /;stop=ledger;lg=mx:2\/3\/2,u:1\[/);
+	const total = reads;
+	reads = 0;
+	throwAt = total; // the last read is inside the diagnostic
+	const hurt = resolveLinklessOrderItems(rows, [counted("E0"), counted("E1")]);
+	assert.match(hurt.trace, /;stop=ledger;lg=err;why=/);
+	assert.equal(hurt.unresolved, base.unresolved);
+	assert.deepEqual(hurt.nameless, base.nameless);
+	assert.equal(JSON.stringify(hurt.detail), JSON.stringify(base.detail));
 });
