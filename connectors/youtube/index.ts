@@ -224,19 +224,24 @@ export function setHistoryLoopCallDeadlineMsForTest(ms: number): number {
 }
 
 class HistoryLoopTimeout extends Error {
-	constructor() {
+	readonly reason: string;
+	constructor(reason: string) {
 		super("history_loop_call_timeout");
+		this.reason = reason;
 	}
 }
 
 /** The value; throws HistoryLoopTimeout when the call does not settle in time. */
-async function loopCall<T>(work: Promise<T>): Promise<T> {
+async function loopCall<T>(
+	work: Promise<T>,
+	reason = "history-loop-timeout",
+): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([
 			work,
 			new Promise<never>((_, reject) => {
-				timer = setTimeout(() => reject(new HistoryLoopTimeout()), historyLoopCallDeadlineMs);
+				timer = setTimeout(() => reject(new HistoryLoopTimeout(reason)), historyLoopCallDeadlineMs);
 			}),
 		]);
 	} finally {
@@ -468,9 +473,21 @@ class HistoryResponseTracker {
 		return this.processedVersion === this.evidenceVersion;
 	}
 
+	/**
+	 * Wait for queued arrivals and drain the page log, under the walk deadline.
+	 * A stalled bridge ends the wait and marks the evidence incomplete, which
+	 * vetoes the complete STATE.
+	 */
 	async flush(): Promise<void> {
-		await this.pending;
-		await this.drainPageLog();
+		const settled = await withinDeadline(
+			(async () => {
+				await this.pending;
+				await this.drainPageLog();
+				return true;
+			})(),
+			historyLoopCallDeadlineMs,
+		);
+		if (settled === null) this.evidenceTimedOut = true;
 	}
 
 	dispose(): void {
@@ -1330,13 +1347,24 @@ type HistoryScrollGeometry = {
 	windowScrollY: number | null;
 };
 
+type ScrollRequest = { itemSelector: string; stopToken: string };
+
+/** Runs in the page: marks this walk as stopped, so a queued scroll returns unscrolled. */
+function setHistoryStopToken(token: string): void {
+	(window as unknown as Record<string, unknown>).__pdpHistoryStop = token;
+}
+
 async function scrollHistoryOnce(
 	page: BrowserCollectContext["page"],
 	remainingMs: number,
+	stopToken: string,
 ): Promise<HistoryScrollGeometry> {
 	const geometry = (await loopCall(
-		page.evaluate<HistoryScrollGeometry, string>(
-		(itemSelector) => {
+		page.evaluate<HistoryScrollGeometry | null, ScrollRequest>(
+		({ itemSelector, stopToken: stopped }) => {
+			// The walk set this token when it stopped: a late call must not scroll.
+			if ((window as unknown as Record<string, unknown>).__pdpHistoryStop === stopped)
+				return null;
 			const scrollable = Array.from(document.querySelectorAll("*"))
 				.filter(
 					(element) =>
@@ -1359,7 +1387,7 @@ async function scrollHistoryOnce(
 				windowScrollY: window.scrollY,
 			};
 		},
-		"yt-lockup-view-model",
+		{ itemSelector: "yt-lockup-view-model", stopToken },
 		),
 	)) ?? {
 		containerFound: false,
@@ -1453,6 +1481,8 @@ async function readHistoryVideoList(
 	let lastAccounted: BrowserVideo | null = null;
 	let stopReason = "unproven-end";
 	let loopTimedOut = false;
+	let loopTimeoutReason = "history-loop-timeout";
+	const stopToken = `stop-${Math.random().toString(36).slice(2)}`;
 	let sourceEnded = false;
 	let verifiedEmpty = false;
 	let blocked = false;
@@ -1555,7 +1585,9 @@ async function readHistoryVideoList(
 					stopReason = "scroll-budget";
 					break;
 				}
-				lastScrollGeometry = await loopCall(scrollHistoryOnce(page, remainingMs));
+				lastScrollGeometry = await loopCall(
+					scrollHistoryOnce(page, remainingMs, stopToken),
+				);
 				const scrollPosition =
 					lastScrollGeometry.containerTop ?? lastScrollGeometry.windowScrollY;
 				scrollRounds += 1;
@@ -1635,7 +1667,10 @@ async function readHistoryVideoList(
 						dedupedCount += 1;
 					} else {
 						rememberIdentity(key);
-						await emitRecord(video, position);
+						await loopCall(
+							emitRecord(video, position),
+							"history-record-timeout",
+						);
 					}
 					parsedCount += 1;
 					scannedCount += 1;
@@ -1651,7 +1686,10 @@ async function readHistoryVideoList(
 					dedupedCount += 1;
 				} else {
 					rememberIdentity(key);
-					await emitRecord(video, position);
+					await loopCall(
+							emitRecord(video, position),
+							"history-record-timeout",
+						);
 				}
 				// Before a movable saved identity is found, every observed row belongs
 				// to head reconciliation. Upsert the full prefix; never infer delivery
@@ -1670,14 +1708,27 @@ async function readHistoryVideoList(
 	} catch (error) {
 		if (!(error instanceof HistoryLoopTimeout)) throw error;
 		loopTimedOut = true;
-		stopReason = "history-loop-timeout";
+		loopTimeoutReason = error.reason;
+		stopReason = error.reason;
+		// A call still queued in the page must not scroll after the walk stopped.
+		await withinDeadline(
+			page.evaluate(setHistoryStopToken, stopToken),
+			HISTORY_EVALUATE_DEADLINE_MS,
+		);
 	}
 	let stableEnd = false;
 	for (let refresh = 0; refresh < 3 && !loopTimedOut; refresh += 1) {
 		await responseTracker.flush();
 		if (responseTracker.inFlight > 0) {
 			// Bounded: three refreshes, one short wait each.
-			await page.waitForTimeout(PAGE_LOG_DRAIN_WAIT_MS);
+			const waited = await withinDeadline(
+				page.waitForTimeout(PAGE_LOG_DRAIN_WAIT_MS),
+				historyLoopCallDeadlineMs,
+			);
+			if (waited === null) {
+				responseTracker.markEvidenceTimeout();
+				break;
+			}
 			continue;
 		}
 		if (!responseTracker.allArrivalsProcessed) continue;
@@ -1731,7 +1782,7 @@ async function readHistoryVideoList(
 		sourceEnded = false;
 		verifiedEmpty = false;
 		evidence = { kind: "unproven", page: currentEnd };
-		stopReason = "history-loop-timeout";
+		stopReason = loopTimeoutReason;
 	} else if (!stableEnd || !responseTracker.trackingComplete) {
 		sourceEnded = false;
 		verifiedEmpty = false;

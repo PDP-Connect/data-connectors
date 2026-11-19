@@ -52,7 +52,10 @@ the same deadline; a timeout is incomplete evidence (`history-evidence-timeout`)
 and vetoes completion. On Desktop, each evaluate and capture in the history walk
 races one generous deadline (`HISTORY_LOOP_CALL_DEADLINE_MS`, 60 s); a stalled
 call ends the walk with `history-loop-timeout`: no complete STATE, the stream
-fails, and the checkpoint stays tied to the rows already accounted. A history browse still in
+fails, and the checkpoint stays tied to the rows already accounted. The record callback runs under the same deadline
+(`history-record-timeout`), each tracker flush too (a stalled wait bridge marks
+the evidence incomplete, so no complete STATE), and a stop token set in the page
+when the walk stops keeps a scroll still queued from scrolling afterwards. A history browse still in
 flight (started, not yet answered or failed) keeps the final refresh from being
 stable, bounded by the three refreshes and the page-log drain wait. A veto blocks the complete STATE only; the partial checkpoint rests on
 rows already read and is kept. On this path the terminal logged response must also
