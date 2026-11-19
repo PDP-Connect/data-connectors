@@ -14,6 +14,7 @@ import {
 	checkSharedHelpers,
 	checkVersion,
 	declaredNoHttpExemption,
+	isApiSubmissionPilot,
 	listOpenSemantics,
 	parseCoverageRegistry,
 	type ReadinessManifest,
@@ -76,6 +77,38 @@ test("JSON conformance identifies its revision, scan mode and dirty subject", ()
 		);
 	} finally {
 		rmSync(marker);
+	}
+});
+
+test("static submission-pilot findings are mandatory gaps without executing fixtures", () => {
+	const report = JSON.parse(
+		execFileSync(
+			process.execPath,
+			[
+				"--import",
+				"tsx",
+				"packages/polyfill-connectors/scripts/conformance.ts",
+				"readwise",
+				"--json",
+				"--static",
+				"--submission-pilot",
+			],
+			{
+				cwd: repoRoot,
+				encoding: "utf8",
+				env: { ...process.env, CONFORMANCE_BASE_REF: "HEAD" },
+			},
+		),
+	);
+	for (const name of [
+		"submission refresh",
+		"submission deletions",
+		"submission text",
+		"submission counts",
+	]) {
+		const step = report.steps.find((step: Step) => step.name === name);
+		assert.equal(step?.verdict, "UNKNOWN");
+		assert.equal(step?.required_for_review, true);
 	}
 });
 
@@ -558,4 +591,26 @@ test("readinessSteps: steam (governed API connector with a coverage driver) has 
 	assert.ok(byName.has("evidence"));
 	assert.ok(byName.has("semantics"));
 	assert.ok(!byName.has("reachability"), "the never-actionable step is gone");
+});
+
+test("API pilot scope accepts only required network-only declarations", () => {
+	for (const bindings of [
+		{ network: { required: true } },
+		{ provider: { kind: "network", required: true } },
+	])
+		assert.equal(
+			isApiSubmissionPilot({ runtime_requirements: { bindings } }),
+			true,
+		);
+	for (const bindings of [
+		{},
+		{ network: { required: false } },
+		{ filesystem: { required: true } },
+		{ browser: { required: true }, network: { required: true } },
+		{ network: { required: true }, secondary: { kind: "network" } },
+	])
+		assert.equal(
+			isApiSubmissionPilot({ runtime_requirements: { bindings } }),
+			false,
+		);
 });
