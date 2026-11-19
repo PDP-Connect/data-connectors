@@ -209,3 +209,119 @@ for (const [label, make] of [
 		assert.equal(sent.length, 1);
 	});
 }
+
+class Holder {
+	value = 1;
+}
+
+const sharedMemory = (): object => {
+	try {
+		return new WebAssembly.Memory({
+			initial: 1,
+			maximum: 1,
+			shared: true,
+		});
+	} catch {
+		return new WebAssembly.Memory({ initial: 1 });
+	}
+};
+
+for (const [label, make] of [
+	[
+		"an Error whose cause holds a shared view",
+		() =>
+			new Error("outer", {
+				cause: { view: new Uint8Array(new SharedArrayBuffer(8)) },
+			}),
+	],
+	["a WebAssembly.Memory", sharedMemory],
+	["a class instance", () => new Holder()],
+	["a RegExp", () => /x/u],
+	[
+		"a getter property",
+		() =>
+			Object.defineProperty({}, "g", {
+				enumerable: true,
+				get: () => 1,
+			}),
+	],
+] as const) {
+	test(`a frame holding ${label} is refused at admission and never sent`, async () => {
+		const sent: EmittedMessage[] = [];
+		const channel = createOutputChannel(async (message) => {
+			sent.push(message);
+		});
+		const frame = {
+			type: "RECORD",
+			stream: "s",
+			key: "k",
+			data: { hidden: make() },
+		} as unknown as EmittedMessage;
+		await assert.rejects(channel.write(frame), (e: unknown) =>
+			String((e as Error).message).includes("cannot be serialized"),
+		);
+		await sleep(10);
+		assert.equal(sent.length, 0);
+	});
+}
+
+test("plain data, dates, arrays and private buffers are admitted as clones", async () => {
+	const sent: EmittedMessage[] = [];
+	const channel = createOutputChannel(async (message) => {
+		sent.push(message);
+	});
+	const data = {
+		s: "x",
+		n: 1,
+		b: true,
+		z: null,
+		u: undefined,
+		d: new Date(0),
+		a: [1, { k: "v" }],
+		o: { k: 1 },
+		bytes: new Uint8Array([1, 2]),
+		view: new DataView(new ArrayBuffer(2)),
+		buf: new ArrayBuffer(2),
+	};
+	const frame = {
+		type: "RECORD",
+		stream: "s",
+		key: "k",
+		data,
+	} as unknown as EmittedMessage;
+	await channel.write(frame);
+	assert.equal(sent.length, 1);
+	assert.notEqual((sent[0] as unknown as { data: object }).data, data);
+	assert.deepEqual(sent[0], frame);
+});
+
+test("a null-prototype object is plain data", async () => {
+	const sent: EmittedMessage[] = [];
+	const channel = createOutputChannel(async (message) => {
+		sent.push(message);
+	});
+	await channel.write({
+		type: "RECORD",
+		stream: "s",
+		key: "k",
+		data: Object.assign(Object.create(null), { k: 1 }),
+	} as unknown as EmittedMessage);
+	assert.equal(sent.length, 1);
+});
+
+test("after a refused frame no later frame is written", async () => {
+	const sent: EmittedMessage[] = [];
+	const channel = createOutputChannel(async (message) => {
+		sent.push(message);
+	});
+	await channel
+		.write({
+			type: "RECORD",
+			stream: "s",
+			key: "k",
+			data: { bad: 1n },
+		} as unknown as EmittedMessage)
+		.catch(() => undefined);
+	await channel.write(progress("later")).catch(() => undefined);
+	assert.equal(sent.length, 0);
+});

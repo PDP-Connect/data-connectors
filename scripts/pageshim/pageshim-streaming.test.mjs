@@ -1074,7 +1074,7 @@ test("a collector cannot swallow a record serialization error and complete inval
 			resultStreaming: true,
 			resultSpoolDirectory: spoolDirectory,
 		});
-		assert.equal(run.data.error, "serialize_failed (TypeError)");
+		assert.equal(run.data.error, "A message held a value that cannot be serialized; the run is incomplete");
 		assert.equal(run.streamResult.completed, false);
 		assert.ok(run.streamResult.totalCodeUnits > 100_000);
 		const partial = await readFile(
@@ -1083,8 +1083,11 @@ test("a collector cannot swallow a record serialization error and complete inval
 		);
 		assert.equal(
 			partial,
-			`{"records":[${JSON.stringify({ text: "x".repeat(100_000) })}`,
+			`{"records":[${JSON.stringify({ text: "x".repeat(100_000) })}]}`,
 		);
+		// The refused record never reached the spool, so what was written is
+		// complete, valid JSON of the delivered records; the run is failed.
+		JSON.parse(partial);
 		assert.doesNotMatch(partial, /,,/);
 		assertCleanRun(run);
 	} finally {

@@ -2130,16 +2130,18 @@ export function createOutputChannel(
 		message: EmittedMessage,
 		open: () => boolean,
 	): Promise<void> => {
+		// Allowlist first, on the producer's own object, then the clone: both
+		// run here, so a refused frame is never queued and the run ends in one
+		// failed DONE. Every admitted frame is a full snapshot.
+		// Once a frame was refused the run is failed: later frames from a
+		// collector that swallowed the refusal are not written either.
+		if (unserializable)
+			return Promise.reject(new FixedFailure("frame_not_serializable"));
 		let snapshot: EmittedMessage;
 		try {
+			if (!isPlainSnapshotData(message)) throw new Error("not plain data");
 			snapshot = structuredClone(message);
 		} catch {
-			// Not plain data: no full snapshot is possible, so the frame is
-			// refused here and never queued. The run ends in one failed DONE.
-			unserializable = true;
-			return Promise.reject(new FixedFailure("frame_not_serializable"));
-		}
-		if (sharesMemory(snapshot)) {
 			unserializable = true;
 			return Promise.reject(new FixedFailure("frame_not_serializable"));
 		}
@@ -2201,36 +2203,53 @@ export function createOutputChannel(
 }
 
 /**
- * True when a (cloned) frame still aliases shared memory: `structuredClone`
- * keeps a SharedArrayBuffer, and any view over one, pointing at the original
- * storage. The transports take objects, not bytes, so the chosen guard is to
- * refuse such a frame at admission rather than to serialize it.
+ * Allowlist: true only when every value reachable from a frame is plain data
+ * with no hidden reference. Admitted: primitives (no bigint: the transports
+ * serialize JSON), plain objects and arrays (own enumerable string keys, data
+ * properties only), Date, and ArrayBuffers, typed arrays and DataViews over a
+ * non-shared ArrayBuffer. Anything else (Error, RegExp, Map, Set, class
+ * instances, WebAssembly.Memory, accessors, shared memory) is refused: it can
+ * hide a reference to storage the producer can still change. `undefined` is
+ * admitted because records drop it. Iterative, with a seen set.
  */
-function sharesMemory(root: unknown): boolean {
-	// A browser without cross-origin isolation has no SharedArrayBuffer at all,
-	// and nothing in a frame can alias it.
-	if (typeof SharedArrayBuffer === "undefined") return false;
+function isPlainSnapshotData(root: unknown): boolean {
+	const tag = (value: object): string => Object.prototype.toString.call(value);
 	const seen = new Set<object>();
 	const stack: unknown[] = [root];
 	while (stack.length > 0) {
 		const value = stack.pop();
-		if (typeof value !== "object" || value === null || seen.has(value))
-			continue;
+		switch (typeof value) {
+			case "undefined":
+			case "boolean":
+			case "number":
+			case "string":
+				continue;
+			case "object":
+				break;
+			default:
+				return false;
+		}
+		if (value === null) continue;
+		if (seen.has(value)) continue;
 		seen.add(value);
-		if (value instanceof SharedArrayBuffer) return true;
+		const proto = Object.getPrototypeOf(value);
 		if (ArrayBuffer.isView(value)) {
-			if (value.buffer instanceof SharedArrayBuffer) return true;
+			if (tag(value.buffer) !== "[object ArrayBuffer]") return false;
 			continue;
 		}
-		if (value instanceof Map) {
-			for (const [k, v] of value) stack.push(k, v);
-		} else if (value instanceof Set) {
-			for (const v of value) stack.push(v);
-		} else {
-			for (const v of Object.values(value)) stack.push(v);
+		const kind = tag(value);
+		if (kind === "[object ArrayBuffer]") continue;
+		if (kind === "[object Date]" && value instanceof Date) continue;
+		const isArray = Array.isArray(value);
+		const isPlain = proto === null || Object.getPrototypeOf(proto) === null;
+		if (!isArray && !(isPlain && kind === "[object Object]")) return false;
+		for (const key of Object.keys(value)) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (descriptor === undefined || !("value" in descriptor)) return false;
+			stack.push(descriptor.value);
 		}
 	}
-	return false;
+	return true;
 }
 
 /** Wait for a promise up to `ms`; a rejection propagates, a hang is "expired". */
