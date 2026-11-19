@@ -12,6 +12,14 @@ declare const PAGESHIM_TERMINAL_CODE: string;
 declare const PAGESHIM_COVERAGE_RECORD: boolean;
 declare const PAGESHIM_COVERAGE_STREAM: boolean;
 declare const PAGESHIM_COVERAGE_RANGE_MODE: string;
+declare const PAGESHIM_POLICY_SETUP: string;
+declare const PAGESHIM_COVERAGE_LATE_EMIT: boolean;
+// Stand in for the build's captured connector policy (see lifecycle-config.mjs).
+if (typeof PAGESHIM_POLICY_SETUP === "string") {
+	Object.assign(globalThis, JSON.parse(PAGESHIM_POLICY_SETUP) as Record<string, unknown>);
+	if (PAGESHIM_POLICY_SETUP.includes("UNDEFINED_MEMBER"))
+		(globalThis as Record<string, unknown>).__pageshimConnectorConfig = { retryablePattern: undefined };
+}
 const rangeMode =
 	typeof PAGESHIM_COVERAGE_RANGE_MODE === "string"
 		? PAGESHIM_COVERAGE_RANGE_MODE
@@ -70,6 +78,9 @@ const rangeMode =
 				}
 				if (PAGESHIM_COVERAGE_RECORD)
 					await emitRecord("conversations", { id: "one" });
+				// An unawaited emission that lands only after settlement began.
+				if (typeof PAGESHIM_COVERAGE_LATE_EMIT === "boolean" && PAGESHIM_COVERAGE_LATE_EMIT)
+					setTimeout(() => void emitRecord("conversations", { id: "late" }).catch(() => undefined), 0);
 				for (const message of PAGESHIM_COVERAGE_MESSAGES) await emit(message);
 				if (typeof PAGESHIM_TERMINAL_CODE === "string")
 					throw createConnectorFailure(

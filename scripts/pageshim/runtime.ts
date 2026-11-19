@@ -426,6 +426,30 @@ function resolveRequestedScopes(
 	return deduped;
 }
 
+/**
+ * The policy the build captured from the connector's own runConnector call.
+ * Every key written in source must resolve to a defined value in the bundle:
+ * an undefined retry pattern, normalizer, record key or tombstone would
+ * silently disable that policy. A bundle with no capture at all (a test entry
+ * that never loads a connector) has no policy.
+ */
+function capturedConnectorPolicy(): Partial<RunConnectorConfig> | undefined {
+	const captured = globalThis as {
+		__pageshimConnectorConfig?: unknown;
+		__pageshimConnectorConfigKeys?: unknown;
+	};
+	const keys = captured.__pageshimConnectorConfigKeys;
+	const policy = captured.__pageshimConnectorConfig;
+	if (keys === undefined && policy === undefined) return undefined;
+	if (!Array.isArray(keys) || typeof policy !== "object" || policy === null)
+		throw new Error("PageShim connector policy was not captured as an object");
+	for (const key of keys) {
+		if ((policy as Record<string, unknown>)[String(key)] === undefined)
+			throw new Error(`PageShim connector policy ${String(key)} resolved to undefined`);
+	}
+	return policy as Partial<RunConnectorConfig>;
+}
+
 export async function runOnPageShim(
 	pageShim: ShimPage,
 	connector: PageshimConnector,
@@ -803,6 +827,9 @@ export async function runOnPageShim(
 		const done = lifecycle.done;
 		if (!done) return;
 		lifecycle.done = undefined;
+		// Contract: DONE reaches connector:message before result:done and a later
+		// result:done failure cannot retract it. The host must therefore refuse a
+		// spool that lacks the result:done terminator, whatever DONE said.
 		await shim.setData("connector:message", done);
 	};
 	const emitMessage = async (msg: Msg): Promise<void> => {
@@ -877,6 +904,20 @@ export async function runOnPageShim(
 				});
 				return;
 			case "DONE":
+				// An emission can still land between the end of settlement and
+				// this DONE; it is not in the result, so the run cannot succeed.
+				if (msg.status === "succeeded" && lateEmission) {
+					msg = {
+						type: "DONE",
+						status: "failed",
+						records_emitted: msg.records_emitted,
+						error: {
+							message: lateEmission.message,
+							code: "emission_after_settlement",
+							retryable: false,
+						},
+					};
+				}
 				// Keep the lifecycle's terminal value unchanged. Publish it after
 				// candidate STATE writes settle, before closing the result spool.
 				lifecycle.done = msg;
@@ -901,7 +942,21 @@ export async function runOnPageShim(
 	// concurrent/unawaited emits. A rejected write cannot be swallowed into
 	// terminal success by a collector that isolates individual record errors.
 	let messageChain: Promise<void> = Promise.resolve();
-	const emit = (msg: Msg): Promise<void> => {
+	// Settlement builds the finalized coverage view and the result payload from
+	// what was admitted so far. Once it starts, only its own emissions and the
+	// terminal DONE may enter; anything else would miss that view.
+	let settlementSealed = false;
+	let lateEmission: Error | null = null;
+	const admit = (msg: Msg, internal: boolean): Promise<void> | null => {
+		if (!settlementSealed || internal || msg.type === "DONE") return null;
+		lateEmission ??= new Error(
+			`PageShim ${msg.type} emitted after settlement began`,
+		);
+		return Promise.reject(lateEmission);
+	};
+	const emit = (msg: Msg, internal = false): Promise<void> => {
+		const rejected = admit(msg, internal);
+		if (rejected) return rejected;
 		const pending = messageChain.then(() => emitMessage(msg));
 		messageChain = pending.catch((error: unknown) => {
 			streamFailure ??= error instanceof Error ? error : new Error(String(error));
@@ -940,6 +995,7 @@ export async function runOnPageShim(
 
 	let completeResult: (() => Promise<void>) | undefined;
 	const settleResult = async (withheldAtOrAfterUntil: ReadonlySet<string>): Promise<void> => {
+		settlementSealed = true;
 		await messageChain;
 		// Some entry adapters attach host bounds during collect. Preserve their
 		// unsupported-scope diagnostics after those mutations, without repeating
@@ -954,7 +1010,7 @@ export async function runOnPageShim(
 			);
 			if (unsupported !== null) await emit({
 				type: "SKIP_RESULT", stream, reason: "scope_not_supported", message: unsupported,
-			});
+			}, true);
 		}
 		const finalized = outcome.finalize(
 			new Set(
@@ -985,6 +1041,7 @@ export async function runOnPageShim(
 			}
 		};
 		if (streamFailure) throw streamFailure;
+		if (lateEmission) throw lateEmission;
 		if (streamConfig) {
 			await finishStreamScope();
 			for (const stream of streamOrder) {
@@ -1085,8 +1142,14 @@ export async function runOnPageShim(
 	};
 
 	try {
-		const policy = (globalThis as { __pageshimConnectorConfig?: RunConnectorConfig })
-			.__pageshimConnectorConfig;
+		// A bad capture reports through the lifecycle's own failed DONE, like
+		// any other start-up failure.
+		let policy: Partial<RunConnectorConfig> | undefined;
+		try {
+			policy = capturedConnectorPolicy();
+		} catch (error) {
+			initError ??= error;
+		}
 		const { exitCode } = await runConnectorLifecycle(
 			{
 				name:
@@ -1140,7 +1203,8 @@ export async function runOnPageShim(
 		// A reported stream failure still closes the partial spool; its failed
 		// DONE remains authoritative. A thrown collection/login error keeps the
 		// existing fatal transport path.
-		if (exitCode !== 0 && lifecycle.failure?.code !== "stream_collection_failed")
+		if ((exitCode !== 0 || lifecycle.failure) &&
+			lifecycle.failure?.code !== "stream_collection_failed")
 			throw (
 				initError ??
 				lifecycle.failure ??

@@ -27,6 +27,7 @@ import {
 	type InteractionRequest,
 	isContextDisconnected,
 	makeBrowserInteractionKeepalive,
+	makeEmitRecord,
 	makeTracer,
 	resolveBrowserLaunchSource,
 	resolveBrowserRuntimeVisibility,
@@ -1952,3 +1953,96 @@ for (const scenario of [
 		}
 	});
 }
+
+for (const gate of [
+	"output",
+	"beforeEmit",
+	"tombstone",
+	"anomalous",
+] as const) {
+	test(`DONE.records_emitted counts only records whose delivery succeeded: ${gate}`, async () => {
+		const messages: EmittedMessage[] = [];
+		const swallowed: unknown[] = [];
+		const result = await runConnectorLifecycle(
+			{
+				name: "synthetic_counts",
+				isTombstone: (_stream, data) => data.gone === true,
+				validateRecord: (_stream, data) =>
+					({
+						ok: true,
+						data,
+						...(data.drift === true
+							? { anomalies: [{ path: "/drift", reason: "unmodeled" }] }
+							: {}),
+					}) as never,
+				collect: async ({ emitRecord }) => {
+					await emitRecord("items", { id: "delivered" });
+					const rejected =
+						gate === "beforeEmit"
+							? emitRecord(
+									"items",
+									{ id: "gated" },
+									{
+										beforeEmit: async () => {
+											throw new Error("synthetic gate rejection");
+										},
+									},
+								)
+							: emitRecord("items", {
+									id: "rejected",
+									gone: gate === "tombstone",
+									drift: gate === "anomalous",
+								});
+					// A collector that isolates per-record errors swallows the rejection.
+					await rejected.catch((error: unknown) => swallowed.push(error));
+					throw new Error("synthetic collection failure");
+				},
+			},
+			{
+				readStart: async () => ({
+					type: "START",
+					scope: { streams: [{ name: "items" }] },
+				}),
+				emit: async (message) => {
+					if (
+						message.type === "RECORD" &&
+						(message as { key?: unknown }).key === "rejected"
+					)
+						throw new Error("synthetic output rejection");
+					messages.push(message);
+				},
+				sendInteraction: async () => {
+					throw new Error("Unexpected interaction");
+				},
+				requestDetailGapPage: async () => [],
+			},
+		);
+		assert.equal(swallowed.length, 1);
+		assert.equal(result.exitCode, 1);
+		const done = messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		assert.equal(done?.status, "failed");
+		assert.equal(done?.records_emitted, 1);
+	});
+}
+
+test("makeEmitRecord counters stay exact when a rejected emit is retried", async () => {
+	let failNext = true;
+	const gate = makeEmitRecord({
+		requested: new Map([["items", { name: "items" }]]),
+		emit: async () => {
+			if (failNext) {
+				failNext = false;
+				throw new Error("synthetic output rejection");
+			}
+		},
+		emittedAt: "2026-11-12T00:00:00.000Z",
+		validateRecord: undefined,
+		isTombstone: undefined,
+		timeRangeFieldFor: () => null,
+	});
+	await assert.rejects(gate.emit("items", { id: "a" }), /synthetic output/);
+	assert.equal(gate.counters.totalEmitted, 0);
+	await gate.emit("items", { id: "a" });
+	assert.equal(gate.counters.totalEmitted, 1);
+});
