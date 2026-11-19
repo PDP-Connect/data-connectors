@@ -33,8 +33,11 @@ evidence are one implementation (`HISTORY_RESPONSE_SCAN_SOURCE`).
 The proof rules are strict. A response counts as recognized only when it carries
 readable rows or an explicit continuation item; a list key alone proves nothing.
 Any correlated non-2xx answer, and any browse call the run cannot attribute
-(XHR, an undecodable body, an unknown token) after the last terminal response,
-vetoes STATE for the run. On this path the terminal logged response must also
+(XHR, an undecodable body, an over-long or unknown continuation token) after the
+last terminal response, vetoes the end claim for the run. A request for another
+page (a browseId other than history, no continuation) is counted as foreign and
+ignored. A veto blocks the complete STATE only; the partial checkpoint rests on
+rows already read and is kept. On this path the terminal logged response must also
 account for the page: if the page shows more rows than the bootstrap plus the
 logged responses carried, or still shows a continuation, the log is blind (a
 fetch captured before the wrapper, or a replaced `fetch`) and the run fails

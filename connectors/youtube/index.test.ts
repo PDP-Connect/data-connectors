@@ -1856,6 +1856,7 @@ type HistoryResponseAfterReadListEnd = {
 	requested: string;
 	next: string | null;
 	initialRequest?: boolean;
+	requestBody?: Record<string, unknown>;
 	duringJson?: {
 		requested: string;
 		next: string | null;
@@ -2135,6 +2136,9 @@ class DocumentPage {
 					this.emitHistoryResponse(response.requested, response.next, {
 						...(response.initialRequest !== undefined
 							? { initialRequest: response.initialRequest }
+							: {}),
+						...(response.requestBody
+							? { requestBody: response.requestBody }
 							: {}),
 						...(response.jsonDelayMs !== undefined
 							? { jsonDelayMs: response.jsonDelayMs }
@@ -3160,6 +3164,7 @@ test("a failed history read carries bounded diagnostics and no row values", asyn
 		"browse_total",
 		"correlated",
 		"deduped_count",
+		"foreign",
 		"non_2xx",
 		"parsed_count",
 		"phase",
@@ -3397,4 +3402,123 @@ test("a gzip token in a content-encoding list still decodes the body", async () 
 		},
 	);
 	assert.equal(completeCursorEmitted(messages), true);
+});
+
+// --- a foreign browse call is not unseen history; a veto still keeps the prefix ---
+
+const loggedForeign = (browseId: string): LoggedEntry => ({
+	requestBody: { browseId },
+	status: 200,
+	summary: {
+		recognized: true,
+		hasContinuation: false,
+		itemCount: 5,
+		nextContinuation: null,
+	},
+});
+
+const browseDiagnostic = (diagnostics: string[]): Record<string, unknown> =>
+	JSON.parse(
+		(
+			diagnostics.find((line) =>
+				line.startsWith("[youtube-diagnostic] history_browse "),
+			) ?? ""
+		).slice("[youtube-diagnostic] history_browse ".length) || "{}",
+	) as Record<string, unknown>;
+
+test("a request for another page after the terminal response is foreign and still allows STATE", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1 },
+			],
+			historyResponsesAfterReadListEnd: [
+				{
+					readNumber: 4,
+					requested: "other",
+					next: null,
+					requestBody: { browseId: "FEsubscriptions" },
+				},
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), true);
+	assert.equal(browseDiagnostic(diagnostics).foreign, 1);
+});
+
+test("page log: a request for another page after the terminal response is foreign and still allows STATE", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			pageLogOnScroll: [
+				[loggedResponse("bootstrap-C", 1, null), loggedForeign("FEsubscriptions")],
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), true);
+	assert.equal(browseDiagnostic(diagnostics).foreign, 1);
+});
+
+test("an unknown continuation token still vetoes STATE, with or without a browseId", async () => {
+	for (const requestBody of [
+		{ continuation: "stray-token" },
+		{ browseId: "FEsubscriptions", continuation: "stray-token" },
+	]) {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				historyResponsesOnScroll: [
+					{ requested: "bootstrap-C", next: null, itemCount: 1 },
+				],
+				historyResponsesAfterReadListEnd: [
+					{ readNumber: 4, requested: "stray-token", next: null, requestBody },
+				],
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), false, JSON.stringify(requestBody));
+		assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+	}
+});
+
+test("a vetoed run keeps its partial checkpoint", async () => {
+	const ids = Array.from(
+		{ length: 50 },
+		(_, n) => `vid${String(n).padStart(8, "0")}`,
+	);
+	const rows = ids
+		.map(
+			(id, n) =>
+				`<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>V${n}</h3></yt-lockup-view-model>`,
+		)
+		.join("");
+	const page = () =>
+		`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...ids.map((contentId) => ({ lockupViewModel: { contentId } })), { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }] } }))}`;
+	for (const stray of [false, true]) {
+		const { messages, outcome, diagnostics } = await collectFromDocuments(
+			page,
+			["watch_history"],
+			undefined,
+			{},
+			stray
+				? {
+						historyResponsesOnGoto: [
+							{ requested: "stray-token", next: "more", itemCount: 0 },
+						],
+					}
+				: {},
+		);
+		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"], `stray=${stray}`);
+		assert.equal(completeCursorEmitted(messages), false);
+		if (stray) assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+	}
 });
