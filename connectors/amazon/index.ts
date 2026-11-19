@@ -216,19 +216,24 @@ const RETRY_FACTOR = 2;
 const RETRY_COUNT = 2;
 // Keep optional detail enrichment comfortably below the controller watchdog;
 // recovery-only runs can drain the durable gaps without re-walking the list.
-// With the 1.5-3 s pace after each detail page, 60 pages fit inside the walk
-// budget below; older orders are read from the list only.
+// Live runs open one detail page: the most recent order's, for the shipping address
+// and zip code. Every other order comes from the list pages, which is what
+// makes a full read fast (live 2026-11-19: a buyer demo needs the order list
+// and a current zip in about a minute, not item-level detail per order).
+const AMAZON_DETAIL_PAGES_PER_RUN = 1;
+/** Upper bound when a caller sets no per-run limit (tests, other hosts). */
 const MAX_DETAIL_ATTEMPTS_PER_RUN = 60;
 /**
  * The order walk's own time budget. The host cuts a run off at 14 minutes,
  * sign-in included (a code by SMS can take several), and a cut-off run loses
  * every record. Live 2026-11-19 (amazon.ca): sign-in 2 min, then the walk
- * reached 2022 and the run was killed at 14 min with nothing kept. The walk
- * stops opening detail pages a minute before this and list pages at it, and
- * the run ends with the orders read.
+ * reached 2022 and the run was killed at 14 min with nothing kept. A demo
+ * also wants the order list in about a minute. The walk stops opening detail
+ * pages 15 s before this and list pages at it, and the run ends with the
+ * orders read.
  */
-export const AMAZON_WALK_BUDGET_MS = 8 * 60_000;
-const DETAIL_STOP_BEFORE_DEADLINE_MS = 60_000;
+export const AMAZON_WALK_BUDGET_MS = 75_000;
+const DETAIL_STOP_BEFORE_DEADLINE_MS = 15_000;
 export function walkTimeSpent(
 	flags: Pick<RunFlags, "walkDeadlineAt">,
 	marginMs = 0,
@@ -616,6 +621,8 @@ export interface RunFlags {
 	 *  list pages, so the run ends with what it read before the host's run
 	 *  deadline cuts it off (and every record with it). Absent: no limit. */
 	walkDeadlineAt?: number;
+	/** Detail pages this run may open; absent: MAX_DETAIL_ATTEMPTS_PER_RUN. */
+	maxDetailAttempts?: number;
 	detailCaptured: boolean;
 	failedDetailCaptured: boolean;
 	/** One-shot budget: at most one mid-run automated session-repair attempt
@@ -907,7 +914,8 @@ async function resolveOrderDetail(
 		});
 	}
 	if (
-		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN ||
+		flags.detailAttempts >=
+			(flags.maxDetailAttempts ?? MAX_DETAIL_ATTEMPTS_PER_RUN) ||
 		walkTimeSpent(flags, DETAIL_STOP_BEFORE_DEADLINE_MS)
 	) {
 		return Promise.resolve({
@@ -1129,8 +1137,10 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 	}
 	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
 	const detailBudgetExhausted =
-		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN ||
-		flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN;
+		flags.detailAttempts >=
+			(flags.maxDetailAttempts ?? MAX_DETAIL_ATTEMPTS_PER_RUN) ||
+		flags.temporaryDetailFailures >= MAX_TEMPORARY_DETAIL_FAILURES_PER_RUN ||
+		walkTimeSpent(flags, DETAIL_STOP_BEFORE_DEADLINE_MS);
 	return {
 		...recovery,
 		suppressForward: options.recoveryOnly === true || detailBudgetExhausted,
@@ -2513,6 +2523,7 @@ if (isMainModule(import.meta.url)) {
 			const flags: RunFlags = {
 				detailAttempts: 0,
 				walkDeadlineAt: Date.now() + AMAZON_WALK_BUDGET_MS,
+				maxDetailAttempts: AMAZON_DETAIL_PAGES_PER_RUN,
 				detailCaptured: false,
 				failedDetailCaptured: false,
 				repairAttempted: false,

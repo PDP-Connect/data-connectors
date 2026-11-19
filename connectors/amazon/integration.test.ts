@@ -708,7 +708,7 @@ test("the walk stops at its own time budget, detail pages a minute earlier, and 
 	assert.equal(walkTimeSpent({}, 0, Number.MAX_SAFE_INTEGER), false);
 	assert.match("amazon_walk_time_budget", AMAZON_MID_WALK_STOP_RE);
 	// Sign-in (several minutes for a code) plus the walk stays under the host's 14 minute ceiling.
-	assert(AMAZON_WALK_BUDGET_MS <= 8 * 60_000);
+	assert(AMAZON_WALK_BUDGET_MS <= 2 * 60_000);
 });
 
 test("stop diagnostics keep the URL path only, ids masked", () => {
