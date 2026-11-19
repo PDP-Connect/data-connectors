@@ -426,9 +426,13 @@ class HistoryResponseTracker {
 			this.foreignResponseCount += 1;
 			return;
 		}
+		// A continuation request is history only when its token is one the page
+		// issued, whatever browseId it also names; a request without one is the
+		// initial history request only when it names FEhistory.
 		if (
-			!initialHistoryRequest &&
-			(!requestedContinuation || !this.tokens.has(requestedContinuation))
+			requestedContinuation !== null
+				? !this.tokens.has(requestedContinuation)
+				: !initialHistoryRequest
 		) {
 			this.uncorrelatedResponseCount += 1;
 			this.uncorrelatedSinceTerminal = true;
