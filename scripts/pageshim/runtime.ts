@@ -108,6 +108,7 @@ type FailureClass =
 	| "serialize_failed"
 	| "bridge_rejected"
 	| "bridge_timeout"
+	| "login_wait_failed"
 	| "evaluate_failed"
 	| "chunk_parse_failed";
 // Classification is total: every property read on an unknown exception is
@@ -172,8 +173,18 @@ export function withBridgeCallTimeout(
 			} catch (error) {
 				throw classifyBridgeFailure(error);
 			}
-			if (property === "requestedScopes" || typeof value !== "function")
-				return value;
+			if (typeof value !== "function") return value;
+			if (property === "requestedScopes") {
+				// Read synchronously, so it is not raced. A host exception is a
+				// fixed class, never the raw text.
+				return (...args: unknown[]) => {
+					try {
+						return (value as (...a: unknown[]) => unknown).apply(target, args);
+					} catch (error) {
+						throw classifyBridgeFailure(error);
+					}
+				};
+			}
 			return async (...args: unknown[]) => {
 				const started = performance.now();
 				let timer: ReturnType<typeof setTimeout> | undefined;
@@ -208,10 +219,16 @@ export function withBridgeCallTimeout(
 					]);
 					return result;
 				} catch (error) {
-					// Host rejections can echo page or row content. Report a class
-					// only; the person's login wait keeps its own message.
-					if (USER_WAIT_CALLS.has(property)) throw error;
-					throw classifyBridgeFailure(error);
+					// Host rejections can echo page or row content, the login wait's
+					// included. Report a class only.
+					// The wait's class keeps "login" in its text, so the run still reads
+					// as an authentication failure.
+					throw classifyBridgeFailure(
+						error,
+						USER_WAIT_CALLS.has(property)
+							? "login_wait_failed"
+							: "bridge_rejected",
+					);
 				} finally {
 					if (timer) clearTimeout(timer);
 					try {
@@ -937,6 +954,10 @@ export async function runOnPageShim(
 		// it. The host MUST refuse a spool that lacks result:done, even after it
 		// has seen a succeeded DONE. Every scope's result:scope-done is awaited
 		// (and so acknowledged) before this DONE is published.
+		// Second contract, the same kind: the lifecycle's output channel seals
+		// before DONE, so nothing new starts after it. A transport write that
+		// already started, and hangs past the settlement deadline, cannot be
+		// recalled. The host MUST discard any frame that arrives after DONE.
 		await shim.setData("connector:message", done);
 	};
 	const emitMessage = async (msg: Msg): Promise<void> => {

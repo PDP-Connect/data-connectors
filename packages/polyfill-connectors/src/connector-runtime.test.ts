@@ -14,6 +14,7 @@ import {
 	type BrowserRuntimeVisibility,
 	buildDetailCoverageMessage,
 	buildDetailGap,
+	type CollectContext,
 	captureBrowserPage,
 	closeBrowserContextPagesExcept,
 	closeBrowserPage,
@@ -2274,7 +2275,7 @@ test("an emit admitted after settlement began is refused and fails the run", asy
 		lifecycleTransport(messages),
 	);
 	assert.equal(result.exitCode, 1);
-	assert.equal(lastDone(messages)?.error?.code, "record_delivery_failed");
+	assert.equal(lastDone(messages)?.error?.code, "late_emission");
 	assert.equal(
 		messages.some((message) => (message as { key?: unknown }).key === "late"),
 		false,
@@ -2329,4 +2330,342 @@ test("a transport write that never completes is bounded by the settlement deadli
 	);
 	assert.equal(result.exitCode, 1);
 	assert.equal(lastDone(messages)?.error?.code, "record_settlement_timeout");
+});
+
+// ─── One ordered output channel ────────────────────────────────────────
+
+/** A transport that logs every call at call time, so a call after DONE shows. */
+function recordingTransport(
+	calls: EmittedMessage[],
+	behave: (message: EmittedMessage) => Promise<void> = async () => undefined,
+	extra: { inflightSettleTimeoutMs?: number } = {},
+) {
+	return {
+		...lifecycleTransport([], undefined, extra),
+		emit: (message: EmittedMessage): Promise<void> => {
+			calls.push(message);
+			return behave(message);
+		},
+	};
+}
+
+const sleep = (ms: number): Promise<void> =>
+	new Promise((resolve) => setTimeout(resolve, ms));
+
+/** After DONE returns, wait, then assert DONE was the last call and the only one. */
+async function assertDoneIsLast(calls: EmittedMessage[]): Promise<void> {
+	await sleep(120);
+	assert.equal(calls.filter((m) => m.type === "DONE").length, 1);
+	assert.equal(calls.at(-1)?.type, "DONE");
+}
+
+test("collect throws while a record gate is pending: nothing is written after the failed DONE", async () => {
+	const calls: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_throw_pending_gate",
+			collect: async ({ emitRecord }) => {
+				void emitRecord(
+					"items",
+					{ id: "held" },
+					{ beforeEmit: () => sleep(40) },
+				);
+				throw new Error("synthetic collection failure");
+			},
+		},
+		recordingTransport(calls),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(calls)?.status, "failed");
+	await assertDoneIsLast(calls);
+	assert.equal(
+		calls.some((m) => m.type === "RECORD"),
+		false,
+	);
+});
+
+test("a write queued behind a hung write never starts after the deadline", async () => {
+	const calls: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_queued_behind_hung",
+			collect: async ({ emitRecord, emit }) => {
+				void emitRecord("items", { id: "hung" });
+				void emit({
+					type: "STATE",
+					stream: "items",
+					cursor: { after: "x" },
+				}).catch(() => undefined);
+			},
+		},
+		recordingTransport(
+			calls,
+			(message) =>
+				message.type === "RECORD"
+					? new Promise<void>(() => {})
+					: Promise.resolve(),
+			{ inflightSettleTimeoutMs: 20 },
+		),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(calls)?.error?.code, "record_settlement_timeout");
+	await assertDoneIsLast(calls);
+	assert.equal(
+		calls.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("a late emit during awaited skip progress fails the run", async () => {
+	const calls: EmittedMessage[] = [];
+	let late: Promise<unknown> | undefined;
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_late_during_progress",
+			validateRecord: () => ({ ok: false, issues: [] }) as never,
+			collect: async ({ emitRecord, emit }) => {
+				await emitRecord("items", { id: "skipped" });
+				// Lands while the skip summary is being written.
+				setTimeout(() => {
+					late = emit({
+						type: "RECORD",
+						stream: "items",
+						key: "late",
+						data: { id: "late" },
+						emitted_at: "2026-11-12T00:00:00.000Z",
+					}).catch(() => undefined);
+				}, 10);
+			},
+		},
+		recordingTransport(calls, (message) =>
+			message.type === "PROGRESS" ? sleep(60) : Promise.resolve(),
+		),
+	);
+	await late;
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(calls)?.status, "failed");
+	await assertDoneIsLast(calls);
+	assert.equal(
+		calls.some((m) => (m as { key?: unknown }).key === "late"),
+		false,
+	);
+});
+
+for (const kind of ["STATE", "PROGRESS"] as const) {
+	test(`a delayed ${kind} after DONE never reaches the transport`, async () => {
+		const calls: EmittedMessage[] = [];
+		let delayed: Promise<unknown> | undefined;
+		const result = await runConnectorLifecycle(
+			{
+				name: "synthetic_delayed_non_record",
+				collect: async ({ emit, progress }) => {
+					setTimeout(() => {
+						delayed =
+							kind === "STATE"
+								? emit({
+										type: "STATE",
+										stream: "items",
+										cursor: { a: 1 },
+									}).catch(() => undefined)
+								: progress("late").catch(() => undefined);
+					}, 40);
+				},
+			},
+			recordingTransport(calls),
+		);
+		assert.equal(result.exitCode, 0);
+		await sleep(100);
+		await delayed;
+		await assertDoneIsLast(calls);
+		assert.equal(
+			calls.some((m) => m.type === kind),
+			false,
+		);
+	});
+}
+
+for (const [label, config, expectedCode] of [
+	[
+		"gate TerminalError",
+		{
+			collect: async ({
+				emitRecord,
+			}: {
+				emitRecord: CollectContext["emitRecord"];
+			}) => {
+				await emitRecord(
+					"items",
+					{ id: "x" },
+					{
+						beforeEmit: async () => {
+							throw new TerminalError(`row ${LEAK} rejected`, {
+								code: "row_code",
+							});
+						},
+					},
+				);
+			},
+		},
+		"record_delivery_failed",
+	],
+	[
+		"validation TerminalError",
+		{
+			validateRecord: () => {
+				throw new TerminalError(`row ${LEAK} invalid`, { code: "row_code" });
+			},
+			collect: async ({
+				emitRecord,
+			}: {
+				emitRecord: CollectContext["emitRecord"];
+			}) => {
+				await emitRecord("items", { id: "x" });
+			},
+		},
+		"record_validation_failed",
+	],
+	[
+		"validation Error",
+		{
+			validateRecord: () => {
+				throw new Error(`row ${LEAK} invalid`);
+			},
+			collect: async ({
+				emitRecord,
+			}: {
+				emitRecord: CollectContext["emitRecord"];
+			}) => {
+				await emitRecord("items", { id: "x" });
+			},
+		},
+		"record_validation_failed",
+	],
+	[
+		"selection TerminalError",
+		{
+			isTombstone: () => {
+				throw new TerminalError(`row ${LEAK} selected`, { code: "row_code" });
+			},
+			collect: async ({
+				emitRecord,
+			}: {
+				emitRecord: CollectContext["emitRecord"];
+			}) => {
+				await emitRecord("items", { id: "x" });
+			},
+		},
+		"record_selection_failed",
+	],
+	[
+		"selection throw caught by the collector",
+		{
+			isTombstone: () => {
+				throw new Error(`row ${LEAK} selected`);
+			},
+			collect: async ({
+				emitRecord,
+			}: {
+				emitRecord: CollectContext["emitRecord"];
+			}) => {
+				await emitRecord("items", { id: "x" }).catch(() => undefined);
+			},
+		},
+		"record_selection_failed",
+	],
+] as const) {
+	test(`record-path failures end in a fixed DONE text: ${label}`, async () => {
+		const calls: EmittedMessage[] = [];
+		const result = await runConnectorLifecycle(
+			{ name: "synthetic_fixed_text", ...config } as never,
+			recordingTransport(calls),
+		);
+		assert.equal(result.exitCode, 1);
+		const done = lastDone(calls);
+		assert.equal(done?.status, "failed");
+		assert.equal(done?.error?.code, expectedCode);
+		assert.equal(JSON.stringify(calls).includes(LEAK), false);
+		assert.equal(JSON.stringify(calls).includes("row_code"), false);
+	});
+}
+
+for (const scenario of [
+	"success",
+	"collect_throw",
+	"stream_failure",
+	"rejected_start",
+	"no_streams_left",
+	"delivery_failure",
+	"hung_write",
+	"late_emit",
+] as const) {
+	test(`every exit writes exactly one DONE, last: ${scenario}`, async () => {
+		const calls: EmittedMessage[] = [];
+		await runConnectorLifecycle(
+			{
+				name: "synthetic_every_exit",
+				collect: async ({ emitRecord, emit, reportStreamFailure }) => {
+					const sent = emitRecord("items", { id: "ok" }).catch(() => undefined);
+					// An awaited write that hangs would hang the collector itself.
+					if (scenario !== "hung_write") await sent;
+					if (scenario === "collect_throw")
+						throw new Error("synthetic failure");
+					if (scenario === "stream_failure")
+						await reportStreamFailure?.("items", "synthetic", {
+							retryable: true,
+						});
+					if (scenario === "late_emit")
+						setTimeout(
+							() =>
+								void emit({ type: "PROGRESS", message: "late" }).catch(
+									() => undefined,
+								),
+							5,
+						);
+				},
+			},
+			{
+				...recordingTransport(
+					calls,
+					async (message) => {
+						if (scenario === "delivery_failure" && message.type === "RECORD")
+							throw new Error("synthetic");
+						if (scenario === "hung_write" && message.type === "RECORD")
+							await new Promise<void>(() => {});
+					},
+					{ inflightSettleTimeoutMs: 20 },
+				),
+				readStart: async () => {
+					if (scenario === "rejected_start")
+						throw new TerminalError("Expected START message");
+					return {
+						type: "START",
+						scope: {
+							streams: [
+								scenario === "no_streams_left"
+									? {
+											name: "items",
+											time_range: { until: "2026-01-01T00:00:00.000Z" },
+										}
+									: { name: "items" },
+							],
+						},
+					};
+				},
+			},
+		);
+		await assertDoneIsLast(calls);
+	});
+}
+
+test("a DONE that cannot be written is not followed by a second DONE", async () => {
+	const calls: EmittedMessage[] = [];
+	await assert.rejects(
+		runConnectorLifecycle(
+			{ name: "synthetic_done_rejected", collect: async () => undefined },
+			recordingTransport(calls, async (message) => {
+				if (message.type === "DONE") throw new Error("synthetic ack failure");
+			}),
+		),
+	);
+	assert.equal(calls.filter((m) => m.type === "DONE").length, 1);
 });

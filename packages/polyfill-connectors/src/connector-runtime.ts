@@ -1245,7 +1245,10 @@ export interface ConnectorLifecycleTransport {
 	/**
 	 * How long, after collect returns, the lifecycle waits for emissions the
 	 * collector admitted but did not await (a pre-emit gate can still be
-	 * pending). Default 30 000 ms. On expiry the run ends in a failed DONE.
+	 * pending), and then for queued writes to drain. One budget covers both.
+	 * Default 30 000 ms. On expiry the run ends in a failed DONE, written
+	 * without waiting for a write the transport already started: the host MUST
+	 * discard any frame that arrives after DONE.
 	 */
 	inflightSettleTimeoutMs?: number;
 	readStart: () => Promise<StartMessage>;
@@ -1263,8 +1266,31 @@ export async function runConnectorLifecycle(
 	transport: ConnectorLifecycleTransport,
 ): Promise<{ exitCode: number; withheldAtOrAfterUntil: ReadonlySet<string> }> {
 	let withheldAtOrAfterUntil: ReadonlySet<string> = new Set();
-	const { readStart, emit, sendInteraction, requestDetailGapPage } = transport;
+	const { readStart } = transport;
 	const capture = transport.capture ?? null;
+	// Every write the lifecycle makes goes through this one ordered channel.
+	// `emit` is the connector-origin writer: refused once the collector's run
+	// is over. Nothing below calls `transport.emit` directly.
+	const channel = createOutputChannel(transport.emit);
+	const emit = channel.offer;
+	// Request/response frames the transport writes itself. Once the run closes
+	// they must not start, so a late call cannot write after DONE.
+	const sendInteraction: BaseCollectContext["sendInteraction"] = (...args) => {
+		if (!channel.admissionOpen()) {
+			channel.noteLate();
+			return Promise.reject(new FixedFailure("late_emission"));
+		}
+		return transport.sendInteraction(...args);
+	};
+	const requestDetailGapPage: BaseCollectContext["requestDetailGapPage"] = (
+		...args
+	) => {
+		if (!channel.admissionOpen()) {
+			channel.noteLate();
+			return Promise.reject(new FixedFailure("late_emission"));
+		}
+		return transport.requestDetailGapPage(...args);
+	};
 
 	const {
 		name,
@@ -1293,6 +1319,7 @@ export async function runConnectorLifecycle(
 
 	let observedCounters: { totalEmitted: number; totalSkipped: number } | null =
 		null;
+	let emitRecordGate: ReturnType<typeof makeEmitRecord> | null = null;
 	// Every stream failure this run reported, by stream. DONE is derived from
 	// the whole set (see `streamFailureDone`), never from report order.
 	const reportedStreamFailures = new Map<string, StreamFailureRecord>();
@@ -1316,39 +1343,62 @@ export async function runConnectorLifecycle(
 		setObservationSink(createWireObservationSink());
 	}
 
-	const emitFailed = async (
-		message: string,
-		retryable = false,
-		records_emitted = observedCounters?.totalEmitted ?? 0,
-		code?: string,
-		errorBasis: readonly string[] = [],
-		recoveryHint?: TerminalErrorDetails["recovery_hint"],
-	): Promise<void> => {
-		// The runtime ACK handshake may outlive every ref'd process handle. Mark
-		// the natural exit path before emitting DONE so it cannot contradict the
-		// failed terminal status if Node exits before the explicit callback.
-		transport.onFailure?.();
-		const normalized = composeNormalizedTerminalError({
+	type DonePlan =
+		| { status: "succeeded" }
+		| {
+				status: "failed";
+				message: string;
+				retryable: boolean;
+				code?: string | undefined;
+				basis?: readonly string[];
+				recoveryHint?: TerminalErrorDetails["recovery_hint"] | undefined;
+				/** The collector returned: still join records and run beforeDone. */
+				afterCollect?: boolean;
+		  };
+	const failedPlanFor = (err: unknown): DonePlan => {
+		const basis = observationBasisOf(err);
+		if (err instanceof TerminalError) {
+			return {
+				status: "failed",
+				message: err.message,
+				retryable: err.retryable,
+				code: err.code,
+				basis,
+				recoveryHint: err.recoveryHint,
+			};
+		}
+		const message = describeUnexpectedFailure(err);
+		return {
+			status: "failed",
 			message,
-			retryable,
-			code,
-			recoveryHint,
+			retryable: retryablePattern.test(message),
+			basis,
+		};
+	};
+	const buildFailedDone = (
+		plan: Extract<DonePlan, { status: "failed" }>,
+	): EmittedMessage => {
+		const normalized = composeNormalizedTerminalError({
+			message: plan.message,
+			retryable: plan.retryable,
+			code: plan.code,
+			recoveryHint: plan.recoveryHint,
 			normalizeTerminalError,
 		});
 		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
 		// (Section 5.8). It is a connector claim, distinct from a diagnosis
 		// cause's basis; the runtime decides scope on its own records.
+		const errorBasis = plan.basis ?? [];
 		const terminalError =
 			observationsDeclared && errorBasis.length > 0
 				? { ...normalized, basis: errorBasis }
 				: normalized;
-		// Both transports must acknowledge DONE before settling the run.
-		await emit({
+		return {
 			type: "DONE",
 			status: "failed",
-			records_emitted,
+			records_emitted: observedCounters?.totalEmitted ?? 0,
 			error: terminalError,
-		});
+		};
 	};
 
 	let assistanceCounter = 0;
@@ -1411,36 +1461,117 @@ export async function runConnectorLifecycle(
 		});
 	};
 
-	// Kick off the run. The outer catch distinguishes TerminalError (which
-	// the runtime threw deliberately with an explicit retryable bit) from
-	// unexpected throws (where we pattern-match the message).
-	try {
-		return { exitCode: await run(), withheldAtOrAfterUntil };
-	} catch (err: unknown) {
-		const errorBasis = observationBasisOf(err);
-		if (err instanceof TerminalError) {
-			await emitFailed(
-				err.message,
-				err.retryable,
-				undefined,
-				err.code,
-				errorBasis,
-				err.recoveryHint,
-			);
-			return { exitCode: 1, withheldAtOrAfterUntil };
+	// One terminal path for every exit: a normal return, a collect throw, a
+	// timeout, a skip. Admission closes, earlier writes drain up to the
+	// deadline, the status is decided from the failure flags, and DONE is the
+	// channel's last write. A succeeded DONE needs no failure, no late attempt
+	// and a full drain.
+	const terminate = async (plan: DonePlan): Promise<number> => {
+		const settleMs = transport.inflightSettleTimeoutMs ?? 30_000;
+		const startedAt = Date.now();
+		const remaining = (): number =>
+			Math.max(0, settleMs - (Date.now() - startedAt));
+		channel.closeAdmission();
+		let verdict: DonePlan = plan;
+		// `live`: the collector returned, so the run still joins its records and
+		// runs beforeDone. Any failure found on the way ends that pipeline.
+		let live = plan.status === "succeeded" || plan.afterCollect === true;
+		const replace = (error: unknown): void => {
+			verdict = failedPlanFor(error);
+			live = false;
+		};
+		if (live) {
+			// Join emissions the collector did not await (a pre-emit gate may still
+			// be pending), so DONE sees every admitted record.
+			if (
+				emitRecordGate &&
+				(await emitRecordGate.settle(remaining())) === "expired"
+			)
+				replace(new FixedFailure("record_settlement_timeout"));
+		} else {
+			emitRecordGate?.closeAdmission();
 		}
-		const message = describeUnexpectedFailure(err);
-		await emitFailed(
-			message,
-			retryablePattern.test(message),
-			undefined,
-			undefined,
-			errorBasis,
-		);
-		return { exitCode: 1, withheldAtOrAfterUntil };
-	}
+		if (live && verdict.status === "succeeded" && !stateHasFailure()) {
+			try {
+				await writeSkipSummary();
+			} catch (error) {
+				replace(error);
+			}
+		}
+		channel.seal();
+		if ((await channel.drain(remaining())) === "expired" && live)
+			replace(new FixedFailure("record_settlement_timeout"));
+		if (live) {
+			try {
+				await transport.beforeDone?.(withheldAtOrAfterUntil);
+			} catch (error) {
+				replace(error);
+			}
+		}
+		if (live) {
+			const failure = flagFailure();
+			if (failure) replace(failure);
+		}
+		if (verdict.status === "succeeded") {
+			await channel.writeDone({
+				type: "DONE",
+				status: "succeeded",
+				records_emitted: observedCounters?.totalEmitted ?? 0,
+			});
+			return 0;
+		}
+		// The runtime ACK handshake may outlive every ref'd process handle. Mark
+		// the natural exit path before emitting DONE so it cannot contradict the
+		// failed terminal status if Node exits before the explicit callback.
+		transport.onFailure?.();
+		await channel.writeDone(buildFailedDone(verdict));
+		return 1;
+	};
+	const stateHasFailure = (): boolean =>
+		flagFailure() !== null || reportedStreamFailures.size > 0;
+	/** The first failure the flags record: a timeout, a late write, then a rejection. */
+	const flagFailure = (): TerminalError | null => {
+		const flags = channel.flags();
+		if (flags.expired) return new FixedFailure("record_settlement_timeout");
+		if (flags.late) return new FixedFailure("late_emission");
+		const recordFailure = emitRecordGate?.failure() ?? null;
+		if (recordFailure) return recordFailure;
+		if (flags.writeFailed) return new FixedFailure("output_delivery_failed");
+		return null;
+	};
+	/** Report the skipped-item count, which only a run that can still succeed owes. */
+	const writeSkipSummary = async (): Promise<void> => {
+		const counters = emitRecordGate?.counters;
+		if (!counters) return;
+		if (counters.totalSkipped > 0) {
+			connectorDiagnostic("runtime", "shape_check_skipped", {
+				records: counters.totalSkipped,
+			});
+			await channel.write({
+				type: "PROGRESS",
+				message: `Skipped ${String(counters.totalSkipped)} ${counters.totalSkipped === 1 ? "item" : "items"} that could not be read`,
+			});
+		}
+		// Retained-with-drift records are emitted, so they are absent from the skip
+		// line above; logging the count keeps schema drift from going unnoticed
+		// simply because nothing was lost to it. Nothing was lost, so the owner
+		// sees no message; each record also has its own SKIP_RESULT.
+		if (counters.totalAnomalous) {
+			connectorDiagnostic("runtime", "shape_check_retained_unmodeled", {
+				records: counters.totalAnomalous,
+			});
+		}
+	};
 
-	async function run(): Promise<number> {
+	let plan: DonePlan;
+	try {
+		plan = await run();
+	} catch (err: unknown) {
+		plan = failedPlanFor(err);
+	}
+	return { exitCode: await terminate(plan), withheldAtOrAfterUntil };
+
+	async function run(): Promise<DonePlan> {
 		const startMsg = await parseStart(readStart);
 		const scopeRequested = buildRequested(startMsg);
 		// §5.1: a bounded stream with no timestamp consent field cannot apply
@@ -1468,9 +1599,7 @@ export async function runConnectorLifecycle(
 		if (requested.size === 0) {
 			// Every requested stream was skipped: nothing to collect, so the
 			// run ends here without opening a session.
-			await transport.beforeDone?.(withheldAtOrAfterUntil);
-			await emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
-			return 0;
+			return { status: "succeeded" };
 		}
 		// Deferred for browser connectors that declare BOTH `auth` and
 		// `probeSession`: a valid pre-authenticated browser profile must be
@@ -1505,7 +1634,9 @@ export async function runConnectorLifecycle(
 
 		const emitRecord = makeEmitRecord({
 			requested: scopeRequested,
-			emit,
+			// A record unit admitted before the run closed may still write while
+			// settlement joins it; only the seal stops it.
+			emit: channel.write,
 			emittedAt: nowIso(),
 			validateRecord,
 			isTombstone,
@@ -1513,28 +1644,35 @@ export async function runConnectorLifecycle(
 			recordKeyFields,
 		});
 		observedCounters = emitRecord.counters;
+		emitRecordGate = emitRecord;
 		withheldAtOrAfterUntil = emitRecord.withheldAtOrAfterUntil;
 		const emittedAt = nowIso();
 		// After a record was withheld at or after `until`, a cursor may point
 		// past it, and a recovery receipt may close a gap whose record was
 		// withheld. Save neither in this run; the next run resumes from the
 		// prior checkpoints and re-reads instead of losing it.
-		const emitWithBoundedCheckpoints = (msg: EmittedMessage): Promise<void> =>
+		const emitWithBoundedCheckpoints = (
+			msg: EmittedMessage,
+			send: (message: EmittedMessage) => Promise<void>,
+		): Promise<void> =>
 			withholdsBoundedProgress(msg, emitRecord.withheldAtOrAfterUntil)
-				? emit({
+				? send({
 						type: "PROGRESS",
 						stream: msg.stream,
 						message: `${msg.type} for ${msg.stream} not saved: a record at or after the time range's end was withheld in this run, so the next run resumes from the previous checkpoint`,
 					})
-				: emit(msg);
+				: send(msg);
 
 		// §5.5 and §5.8: an enumeration the connector could not prove complete
 		// goes out as the portable `stream_collection_failed` SKIP_RESULT, and the
 		// run ends failed with the same code, as `reportStreamFailure` does. The
 		// connector's own cause stays in `diagnostics.original_reason`.
-		const emitConnectorMessage = (msg: EmittedMessage): Promise<void> => {
+		const emitConnectorMessage = (
+			msg: EmittedMessage,
+			send: (message: EmittedMessage) => Promise<void>,
+		): Promise<void> => {
 			if (!isUnprovenEnumerationSkip(msg)) {
-				return emitWithBoundedCheckpoints(msg);
+				return emitWithBoundedCheckpoints(msg, send);
 			}
 			const skip = portableUnprovenEnumerationSkip(msg);
 			recordStreamFailure(
@@ -1542,7 +1680,7 @@ export async function runConnectorLifecycle(
 				skip.message,
 				unprovenEnumerationRetryable(skip),
 			);
-			return emitWithBoundedCheckpoints(skip);
+			return emitWithBoundedCheckpoints(skip, send);
 		};
 
 		const baseCtx: BaseCollectContext = {
@@ -1550,12 +1688,12 @@ export async function runConnectorLifecycle(
 			state: startMsg.state ?? {},
 			requested,
 			credentials,
-			// A raw RECORD is joined, fenced and failure-tracked like emitRecord, so a
-			// caught transport rejection cannot be invisible to settlement.
+			// A raw RECORD is joined and failure-tracked like emitRecord, so a caught
+			// transport rejection cannot be invisible to settlement.
 			emit: (msg) =>
 				msg.type === "RECORD"
-					? emitRecord.track(() => emitConnectorMessage(msg))
-					: emitConnectorMessage(msg),
+					? emitRecord.track(() => emitConnectorMessage(msg, channel.write))
+					: emitConnectorMessage(msg, emit),
 			emitRecord: emitRecord.emit,
 			isRecordSelected: emitRecord.isSelected,
 			assist,
@@ -1614,23 +1752,17 @@ export async function runConnectorLifecycle(
 			await collect(baseCtx);
 		}
 
-		// Join emissions the collector did not await (a pre-emit gate may still
-		// be pending), so DONE and beforeDone see every admitted record.
-		await emitRecord.settle(transport.inflightSettleTimeoutMs ?? 30_000);
-		await transport.beforeDone?.(withheldAtOrAfterUntil);
-		emitRecord.assertDelivered();
 		const streamFailure = streamFailureDone(reportedStreamFailures);
 		if (streamFailure) {
-			await emitFailed(
-				streamFailure.message,
-				streamFailure.retryable,
-				emitRecord.counters.totalEmitted,
-				"stream_collection_failed",
-			);
-			return 1;
+			return {
+				status: "failed",
+				message: streamFailure.message,
+				retryable: streamFailure.retryable,
+				code: "stream_collection_failed",
+				afterCollect: true,
+			};
 		}
-		await finalizeRun(emitRecord.counters, progress, emit);
-		return 0;
+		return { status: "succeeded" };
 	}
 }
 
@@ -1783,6 +1915,168 @@ export async function resolveCredentials(
 	}
 }
 
+/** Fixed terminal texts for failures on the record and output paths. */
+const FIXED_FAILURE = {
+	record_delivery_failed:
+		"A record could not be delivered; the run is incomplete",
+	record_validation_failed:
+		"A record could not be validated; the run is incomplete",
+	record_selection_failed:
+		"A record could not be selected; the run is incomplete",
+	output_delivery_failed:
+		"A message could not be delivered; the run is incomplete",
+	record_settlement_timeout:
+		"Records still being emitted did not settle before the run ended",
+	late_emission:
+		"An emission arrived after the run closed; the run is incomplete",
+} as const;
+type FixedFailureCode = keyof typeof FIXED_FAILURE;
+
+/**
+ * A terminal failure whose text comes from `FIXED_FAILURE`, never from the
+ * thrown error: a delivery, validation or selection error can quote record
+ * content.
+ */
+class FixedFailure extends TerminalError {
+	// `text` is for the runtime's own authored messages (they name a stream,
+	// never record content); every other caller takes the table text.
+	constructor(
+		code: FixedFailureCode,
+		text: string = FIXED_FAILURE[code],
+		retryable = true,
+	) {
+		super(text, { code, retryable });
+	}
+}
+
+export interface OutputChannel {
+	/** A connector-origin write. Refused, and counted late, once admission closes. */
+	offer: (message: EmittedMessage) => Promise<void>;
+	/** A lifecycle-origin write. Refused, and counted late, once sealed. */
+	write: (message: EmittedMessage) => Promise<void>;
+	/** Synchronous: later `offer` calls never reach the transport. */
+	closeAdmission: () => void;
+	admissionOpen: () => boolean;
+	/** Synchronous: later writes of any origin never reach the transport. */
+	seal: () => void;
+	/** Wait for earlier writes; on expiry abandon the queue and report it. */
+	drain: (timeoutMs: number) => Promise<"drained" | "expired">;
+	/** The one DONE. Goes last: the caller sealed and drained (or abandoned) first. */
+	writeDone: (message: EmittedMessage) => Promise<void>;
+	/** Count an emission refused before it reached the channel. */
+	noteLate: () => void;
+	flags: () => { writeFailed: boolean; late: boolean; expired: boolean };
+}
+
+/**
+ * The only way the lifecycle writes to the transport. Writes run one at a
+ * time, in order, so DONE is the last frame. `seal()` is a flag, not a wait:
+ * once set, nothing more reaches the transport. A write the transport already
+ * started cannot be recalled; if it hangs past the drain deadline, DONE is
+ * written without waiting for it (see the contract at `publishDone`).
+ */
+export function createOutputChannel(
+	transportWrite: (message: EmittedMessage) => Promise<void>,
+): OutputChannel {
+	interface Entry {
+		message: EmittedMessage;
+		resolve: () => void;
+		reject: (error: unknown) => void;
+	}
+	const queue: Entry[] = [];
+	let running = false;
+	let admissionOpen = true;
+	let sealed = false;
+	let abandoned = false;
+	let doneAttempted = false;
+	let writeFailed = false;
+	let late = false;
+	let idleWaiters: (() => void)[] = [];
+	const call = (message: EmittedMessage): Promise<void> => {
+		try {
+			return Promise.resolve(transportWrite(message));
+		} catch (error) {
+			return Promise.reject(error);
+		}
+	};
+	const refuse = (): Promise<void> => {
+		late = true;
+		return Promise.reject(new FixedFailure("late_emission"));
+	};
+	const settleIdle = (): void => {
+		const waiters = idleWaiters;
+		idleWaiters = [];
+		for (const resolve of waiters) resolve();
+	};
+	const pump = async (): Promise<void> => {
+		if (running) return;
+		running = true;
+		while (queue.length > 0) {
+			const entry = queue.shift();
+			if (entry === undefined) break;
+			try {
+				await call(entry.message);
+				entry.resolve();
+			} catch (error) {
+				writeFailed = true;
+				entry.reject(error);
+			}
+		}
+		running = false;
+		settleIdle();
+	};
+	const enqueue = (message: EmittedMessage): Promise<void> =>
+		new Promise<void>((resolve, reject) => {
+			queue.push({ message, resolve, reject });
+			void pump();
+		});
+	return {
+		offer: (message) =>
+			admissionOpen && !sealed ? enqueue(message) : refuse(),
+		write: (message) => (sealed ? refuse() : enqueue(message)),
+		closeAdmission: () => {
+			admissionOpen = false;
+		},
+		admissionOpen: () => admissionOpen && !sealed,
+		seal: () => {
+			sealed = true;
+			admissionOpen = false;
+		},
+		drain: async (timeoutMs) => {
+			if (!running && queue.length === 0) return "drained";
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const outcome = await Promise.race([
+				new Promise<"drained">((resolve) => {
+					idleWaiters.push(() => resolve("drained"));
+				}),
+				new Promise<"expired">((resolve) => {
+					timer = setTimeout(() => resolve("expired"), timeoutMs);
+				}),
+			]);
+			clearTimeout(timer);
+			if (outcome === "expired") {
+				abandoned = true;
+				// A write still queued behind a hung one never starts.
+				for (const entry of queue.splice(0)) {
+					late = true;
+					entry.reject(new FixedFailure("late_emission"));
+				}
+			}
+			return outcome;
+		},
+		writeDone: (message) => {
+			if (doneAttempted)
+				return Promise.reject(new Error("DONE was already written"));
+			doneAttempted = true;
+			return call(message);
+		},
+		noteLate: () => {
+			late = true;
+		},
+		flags: () => ({ writeFailed, late, expired: abandoned }),
+	};
+}
+
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
 export function makeEmitRecord(deps: {
 	requested: Map<string, StreamScope>;
@@ -1810,13 +2104,15 @@ export function makeEmitRecord(deps: {
 	};
 	withheldAtOrAfterUntil: ReadonlySet<string>;
 	/**
-	 * Join every admitted, still-in-flight emission, then fail if any delivery
-	 * ever rejected, whether or not the collector caught that rejection.
+	 * Close admission, then join every admitted, still-in-flight emission up to
+	 * the deadline. Never throws: read `failure()` for the verdict.
 	 */
-	settle: (timeoutMs: number) => Promise<void>;
-	/** Throw if any record's delivery has rejected. */
-	assertDelivered: () => void;
-	/** Run a raw RECORD emission under the same tracking, fence and failure rules. */
+	settle: (timeoutMs: number) => Promise<"settled" | "expired">;
+	/** Close admission without waiting (the run already failed). */
+	closeAdmission: () => void;
+	/** The first record-path failure, whether or not the collector caught it. */
+	failure: () => TerminalError | null;
+	/** Run a raw RECORD emission under the same tracking and failure rules. */
 	track: (run: () => Promise<void>) => Promise<void>;
 } {
 	const {
@@ -1904,8 +2200,10 @@ export function makeEmitRecord(deps: {
 			typeof value === "string" &&
 			/^\d{4}-\d{2}-\d{2}$/.test(value)
 		) {
-			throw new TerminalError(
+			throw new FixedFailure(
+				"record_selection_failed",
 				`time_range cannot be applied to date-precision consent value for ${stream}`,
+				false,
 			);
 		}
 		if (
@@ -1926,39 +2224,38 @@ export function makeEmitRecord(deps: {
 	};
 
 	// Every emission this gate admitted and has not yet seen settle, and the
-	// first delivery failure. The failure is sticky: a collector that catches a
-	// rejected emitRecord cannot turn the run into a succeeded DONE.
+	// first failure. The failure is sticky: a collector that catches a rejected
+	// emitRecord cannot turn the run into a succeeded DONE.
 	const inFlight = new Set<Promise<void>>();
-	let deliveryFailure: TerminalError | null = null;
-	// `closed`: settlement began, so no new emission is admitted. `fenced`:
-	// settlement ended (or timed out), so a gate that resolves later writes
-	// nothing, and nothing lands after DONE.
+	let firstFailure: TerminalError | null = null;
+	// Admission closed: settlement began, so no new emission is accepted. Where
+	// a write lands after that is the output channel's business, not this gate's.
 	let closed = false;
-	let fenced = false;
-	// A delivery failure carries a fixed message: the underlying error can
-	// quote record content. A connector's own TerminalError is already a
-	// deliberate message and passes through.
-	const fail = (error: unknown): TerminalError => {
+	// A record-path failure carries fixed text: the underlying error can quote
+	// record content, and a connector's gate or validator may throw a
+	// TerminalError built from it. Only this file's own FixedFailure passes.
+	const fail = (error: unknown, code: FixedFailureCode): TerminalError => {
 		const failure =
-			error instanceof TerminalError
-				? error
-				: new TerminalError(
-						"A record could not be delivered; the run is incomplete",
-						{ code: "record_delivery_failed", retryable: true },
-					);
-		deliveryFailure ??= failure;
+			error instanceof FixedFailure ? error : new FixedFailure(code);
+		firstFailure ??= failure;
 		return failure;
 	};
-	const output = (message: EmittedMessage): Promise<void> => {
-		if (fenced) return Promise.reject(new Error("delivery fenced"));
+	/** Run one stage of the record path; any throw becomes a fixed failure. */
+	const stage = <T>(code: FixedFailureCode, run: () => T): T => {
 		try {
-			return emitOutput(message);
+			return run();
+		} catch (error) {
+			throw fail(error, code);
+		}
+	};
+	const output = (message: EmittedMessage): Promise<void> => {
+		try {
+			return Promise.resolve(emitOutput(message));
 		} catch (error) {
 			return Promise.reject(error);
 		}
 	};
 	const gate = (beforeEmit: () => Promise<void>): Promise<void> => {
-		if (fenced) return Promise.reject(new Error("delivery fenced"));
 		try {
 			return Promise.resolve(beforeEmit());
 		} catch (error) {
@@ -1967,8 +2264,7 @@ export function makeEmitRecord(deps: {
 	};
 	/** Admit one emission as a tracked unit; a synchronous throw is a rejection. */
 	const admit = (run: () => Promise<void>): Promise<void> => {
-		if (closed)
-			return Promise.reject(fail(new Error("emission after settlement")));
+		if (closed) return Promise.reject(fail(new Error("late"), "late_emission"));
 		let unit: Promise<void>;
 		try {
 			unit = run();
@@ -1976,7 +2272,7 @@ export function makeEmitRecord(deps: {
 			unit = Promise.reject(error);
 		}
 		const tracked = unit.catch((error: unknown) => {
-			throw fail(error);
+			throw fail(error, "record_delivery_failed");
 		});
 		inFlight.add(tracked);
 		const done = (): void => {
@@ -1985,10 +2281,7 @@ export function makeEmitRecord(deps: {
 		tracked.then(done, done);
 		return tracked;
 	};
-	const assertDelivered = (): void => {
-		if (deliveryFailure) throw deliveryFailure;
-	};
-	const settle = async (timeoutMs: number): Promise<void> => {
+	const settle = async (timeoutMs: number): Promise<"settled" | "expired"> => {
 		closed = true;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const expired = new Promise<"expired">((resolve) => {
@@ -2000,35 +2293,35 @@ export function makeEmitRecord(deps: {
 					Promise.allSettled([...inFlight]).then(() => "settled" as const),
 					expired,
 				]);
-				if (outcome === "expired") {
-					throw new TerminalError(
-						"Records still being emitted did not settle before the run ended",
-						{ code: "record_settlement_timeout", retryable: true },
-					);
-				}
+				if (outcome === "expired") return "expired";
 			}
+			return "settled";
 		} finally {
 			clearTimeout(timer);
-			fenced = true;
 		}
-		assertDelivered();
 	};
 
 	const emitRecord = (
 		stream: string,
 		data: RecordData,
 		options: EmitRecordOptions = {},
-	): Promise<void> => {
-		const identity = recordKey(stream, data);
-		if (identity === null) return Promise.resolve();
-		const selection = selectRecord(stream, data, options);
-		if (selection === "skip") return Promise.resolve();
-		// A record counts only once its delivery succeeded: DONE.records_emitted
-		// must not include a record whose output or beforeEmit gate rejected.
-		if (selection === "tombstone") {
-			const fields = keyFieldsFor(stream) ?? ["id"];
-			return admit(() =>
-				output({
+	): Promise<void> =>
+		// Key, selection and validation run inside the tracked unit: a throw from
+		// any of them is a fixed failure the run cannot lose.
+		admit(() => {
+			const identity = stage("record_selection_failed", () =>
+				recordKey(stream, data),
+			);
+			if (identity === null) return Promise.resolve();
+			const selection = stage("record_selection_failed", () =>
+				selectRecord(stream, data, options),
+			);
+			if (selection === "skip") return Promise.resolve();
+			// A record counts only once its delivery succeeded: DONE.records_emitted
+			// must not include a record whose output or beforeEmit gate rejected.
+			if (selection === "tombstone") {
+				const fields = keyFieldsFor(stream) ?? ["id"];
+				return output({
 					type: "RECORD",
 					stream,
 					key: identity.key,
@@ -2037,55 +2330,60 @@ export function makeEmitRecord(deps: {
 					op: "delete",
 				}).then(() => {
 					counters.totalEmitted += 1;
-				}),
-			);
-		}
+				});
+			}
 
-		const validation = validateRecord?.(stream, data);
-		if (validation && !validation.ok) {
-			return admit(() =>
-				output(makeShapeCheckSkip(stream, data, validation.issues)).then(() => {
-					counters.totalSkipped += 1;
-				}),
+			const validation = stage("record_validation_failed", () =>
+				validateRecord?.(stream, data),
 			);
-		}
-		// Present only when the record was RETAINED despite carrying a value the
-		// schema does not model (see makeValidateRecord in schema-registry.ts).
-		const anomalies = validation?.anomalies;
-		const record: EmittedMessage = {
-			type: "RECORD",
-			stream,
-			key: identity.key,
-			data,
-			emitted_at: emittedAt,
-		};
-		const deliver = (): Promise<void> =>
-			(options.beforeEmit
-				? gate(options.beforeEmit).then(() => output(record))
-				: output(record)
-			).then(() => {
-				counters.totalEmitted += 1;
-				if (anomalies?.length) counters.totalAnomalous += 1;
-			});
-		// A retained-with-drift record still emits; its diagnostic rides alongside
-		// so the unmodeled value is visible rather than silently tolerated. Reported
-		// BEFORE the RECORD so a truncated stream never shows the record without the
-		// caveat attached to it.
-		return admit(() =>
-			anomalies?.length
+			if (validation && !validation.ok) {
+				return output(makeShapeCheckSkip(stream, data, validation.issues)).then(
+					() => {
+						counters.totalSkipped += 1;
+					},
+				);
+			}
+			// Present only when the record was RETAINED despite carrying a value the
+			// schema does not model (see makeValidateRecord in schema-registry.ts).
+			const anomalies = validation?.anomalies;
+			const record: EmittedMessage = {
+				type: "RECORD",
+				stream,
+				key: identity.key,
+				data,
+				emitted_at: emittedAt,
+			};
+			const deliver = (): Promise<void> =>
+				(options.beforeEmit
+					? gate(options.beforeEmit).then(() => output(record))
+					: output(record)
+				).then(() => {
+					counters.totalEmitted += 1;
+					if (anomalies?.length) counters.totalAnomalous += 1;
+				});
+			// A retained-with-drift record still emits; its diagnostic rides alongside
+			// so the unmodeled value is visible rather than silently tolerated.
+			// Reported BEFORE the RECORD so a truncated stream never shows the record
+			// without the caveat attached to it.
+			return anomalies?.length
 				? output(makeShapeAnomalyReport(stream, data, anomalies)).then(deliver)
-				: deliver(),
-		);
-	};
+				: deliver();
+		});
 
 	return {
 		emit: emitRecord,
 		isSelected: (stream, data, options) =>
-			selectRecord(stream, data, options) !== "skip",
+			stage(
+				"record_selection_failed",
+				() => selectRecord(stream, data, options) !== "skip",
+			),
 		counters,
 		withheldAtOrAfterUntil,
 		settle,
-		assertDelivered,
+		closeAdmission: () => {
+			closed = true;
+		},
+		failure: () => firstFailure,
 		track: admit,
 	};
 }
@@ -2868,40 +3166,6 @@ function attachBrowserDisconnectedDiagnostic(
 			eventTarget.off("disconnected", onDisconnected);
 		}
 	};
-}
-
-/** Emit the final PROGRESS summary (if any skips) and the succeeded DONE. */
-async function finalizeRun(
-	counters: {
-		totalEmitted: number;
-		totalSkipped: number;
-		totalAnomalous?: number;
-	},
-	progress: BaseCollectContext["progress"],
-	emit: (msg: EmittedMessage) => Promise<void>,
-): Promise<void> {
-	if (counters.totalSkipped > 0) {
-		connectorDiagnostic("runtime", "shape_check_skipped", {
-			records: counters.totalSkipped,
-		});
-		await progress(
-			`Skipped ${String(counters.totalSkipped)} ${counters.totalSkipped === 1 ? "item" : "items"} that could not be read`,
-		);
-	}
-	// Retained-with-drift records are emitted, so they are absent from the skip
-	// line above; logging the count keeps schema drift from going unnoticed
-	// simply because nothing was lost to it. Nothing was lost, so the owner
-	// sees no message; each record also has its own SKIP_RESULT.
-	if (counters.totalAnomalous) {
-		connectorDiagnostic("runtime", "shape_check_retained_unmodeled", {
-			records: counters.totalAnomalous,
-		});
-	}
-	await emit({
-		type: "DONE",
-		status: "succeeded",
-		records_emitted: counters.totalEmitted,
-	});
 }
 
 // ─── Browser-mode helpers ──────────────────────────────────────────────

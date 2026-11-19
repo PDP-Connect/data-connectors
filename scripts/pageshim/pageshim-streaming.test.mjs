@@ -138,7 +138,7 @@ for (const streamRecords of [false, true]) {
 		const terminals = run.connectorMessages.filter(message => message.type === "DONE");
 		assert.equal(terminals.length, 1);
 		assert.equal(terminals[0].status, "failed");
-		assert.match(String(run.data.error), /could not be delivered/);
+		assert.match(String(run.data.error), /arrived after the run closed/);
 		assert.equal(run.streamResult?.completed === true, false);
 	});
 }
@@ -329,7 +329,7 @@ test("a swallowed evidence acknowledgement failure cannot produce succeeded DONE
 	const terminals = run.connectorMessages.filter(message => message.type === "DONE");
 	assert.equal(terminals.length, 1);
 	assert.equal(terminals[0].status, "failed");
-	assert.equal(run.data.error, DELIVERY_FAILED);
+	assert.equal(run.data.error, "bridge_rejected (Error)");
 	// Every record's delivery was rejected, so none counts as emitted.
 	assert.equal(terminals[0].records_emitted, 0);
 	assert.equal(run.streamResult?.completed === true, false);
@@ -1051,7 +1051,7 @@ test("a collector cannot swallow a rejected chunk and complete a partial scope",
 			resultSpoolDirectory: spoolDirectory,
 			resultStreamFailure: { key: "result:chunk", sequence: 0 },
 		});
-		assert.equal(run.data.error, DELIVERY_FAILED);
+		assert.equal(run.data.error, "bridge_rejected (Error)");
 		assert.equal(run.streamResult.completed, false);
 		assert.equal(run.streamResult.rejectedMessages, 1);
 		assert.equal(run.streamResult.messageCount, 2);
@@ -1073,7 +1073,7 @@ test("a collector cannot swallow a record serialization error and complete inval
 			resultStreaming: true,
 			resultSpoolDirectory: spoolDirectory,
 		});
-		assert.equal(run.data.error, DELIVERY_FAILED);
+		assert.equal(run.data.error, "serialize_failed (TypeError)");
 		assert.equal(run.streamResult.completed, false);
 		assert.ok(run.streamResult.totalCodeUnits > 100_000);
 		const partial = await readFile(

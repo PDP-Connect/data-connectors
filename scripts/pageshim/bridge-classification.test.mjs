@@ -94,3 +94,52 @@ test("an unlisted error name is reported as other", async () => {
 		"bridge_rejected (other)",
 	);
 });
+
+test("a host rejection during the login wait becomes a fixed class", async () => {
+	const page = wrap({
+		promptUser: async () => {
+			throw new Error(`login wait failed for ${LEAK}`);
+		},
+	});
+	const error = await rejection(() =>
+		page.promptUser("Sign in", async () => false, 2000),
+	);
+	assert.equal(error.message, "login_wait_failed (Error)");
+	assert.equal(String(error.stack).includes(LEAK), false);
+});
+
+test("the host's login-wait expiry stays a login failure and names the timeout", async () => {
+	const expiry = Object.assign(new Error(`gave up waiting ${LEAK}`), {
+		name: "TimeoutError",
+	});
+	const page = wrap({
+		promptUser: async () => {
+			throw expiry;
+		},
+	});
+	const error = await rejection(() =>
+		page.promptUser("Sign in", async () => false, 2000),
+	);
+	assert.equal(error.message, "login_wait_failed (TimeoutError)");
+});
+
+test("a synchronous requestedScopes exception becomes a fixed class", () => {
+	const page = wrap({
+		requestedScopes: () => {
+			throw new Error(`scopes failed for ${LEAK}`);
+		},
+	});
+	let thrown;
+	try {
+		page.requestedScopes();
+	} catch (error) {
+		thrown = error;
+	}
+	assert.equal(thrown?.message, "bridge_rejected (Error)");
+	assert.equal(String(thrown?.stack).includes(LEAK), false);
+});
+
+test("requestedScopes still returns the host's scopes synchronously", () => {
+	const page = wrap({ requestedScopes: () => ["chatgpt.conversations"] });
+	assert.deepEqual(page.requestedScopes(), ["chatgpt.conversations"]);
+});
