@@ -1926,6 +1926,12 @@ class DocumentPage {
 	private pageLogSent = 0;
 	private pageLogHanging = 0;
 	private drainCount = 0;
+	/** The page's own stop token, kept across the fake's per-call windows. */
+	private pageStopToken: unknown;
+	/** Held scroll evaluates run only after this settles. */
+	private readonly scrollGate: Promise<void> | undefined;
+	scrollByCount = 0;
+	private readonly hangDrainWait: boolean;
 	private readonly hangDrainFrom: number | undefined;
 	private readonly hangReadListEndFrom: number | undefined;
 	private readonly browseRequestsFirst: boolean;
@@ -1959,6 +1965,10 @@ class DocumentPage {
 			hangDrainFrom?: number;
 			/** The nth readListEnd evaluate, and every one after it, never resolves. */
 			hangReadListEndFrom?: number;
+			/** The drain's short wait never returns. */
+			hangDrainWait?: boolean;
+			/** Scroll evaluates are held until this settles. */
+			scrollGate?: Promise<void>;
 			/** Start the scroll's browse requests before its response arrives. */
 			browseRequestsFirst?: boolean;
 			historyResponseOnReadListEnd?: {
@@ -1979,6 +1989,8 @@ class DocumentPage {
 		this.browseRequestsOnScroll = options.browseRequestsOnScroll ?? [];
 		this.gotoError = options.gotoError;
 		this.hangDrainFrom = options.hangDrainFrom;
+		this.hangDrainWait = options.hangDrainWait ?? false;
+		this.scrollGate = options.scrollGate;
 		this.hangReadListEndFrom = options.hangReadListEndFrom;
 		this.browseRequestsFirst = options.browseRequestsFirst ?? false;
 		if (this.pageLogOnScroll)
@@ -2128,7 +2140,8 @@ class DocumentPage {
 				this.inPage(() => document.querySelectorAll(selector).length),
 		};
 	}
-	async waitForTimeout() {
+	async waitForTimeout(ms?: number) {
+		if (this.hangDrainWait && ms === 250) await new Promise<never>(() => undefined);
 		if (!this.pendingHistoryScroll) return;
 		this.pendingHistoryScroll = false;
 		if (this.browseRequestsFirst)
@@ -2157,7 +2170,10 @@ class DocumentPage {
 			configurable: true,
 			value: new URL(this.url || "https://www.youtube.com/"),
 		});
-		(window as unknown as { scrollBy: () => void }).scrollBy = () => undefined;
+		(window as unknown as { scrollBy: () => void }).scrollBy = () => {
+			this.scrollByCount += 1;
+		};
+		(window as unknown as Record<string, unknown>).__pdpHistoryStop = this.pageStopToken;
 		const globals = globalThis as Record<string, unknown>;
 		const previous = { document: globals.document, window: globals.window };
 		globals.document = document;
@@ -2165,6 +2181,7 @@ class DocumentPage {
 		try {
 			return run();
 		} finally {
+			this.pageStopToken = (window as unknown as Record<string, unknown>).__pdpHistoryStop;
 			globals.document = previous.document;
 			globals.window = previous.window;
 		}
@@ -2175,6 +2192,11 @@ class DocumentPage {
 		return { jsonValue: async () => value, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function, arg?: unknown) {
+		if (
+			this.scrollGate &&
+			fn.toString().includes("scrollable=Array.from(document.querySelectorAll")
+		)
+			await this.scrollGate;
 		if (fn.name === "installHistoryBrowseLog") return true;
 		if (fn.name === "drainHistoryBrowseLog") {
 			this.drainCount += 1;
@@ -2246,32 +2268,39 @@ class DocumentPage {
 	}
 }
 
+/** When set, the downstream record callback never settles. */
+let recordCallbackHangs = false;
+
 async function collectFromDocuments(
 	pageFor: (url: string) => string,
 	streams: string[],
 	forcedReadiness?: "content" | "empty",
 	state: Record<string, unknown> = {},
 	pageOptions: ConstructorParameters<typeof DocumentPage>[2] = {},
+	onPage?: (page: DocumentPage) => void,
 ) {
 	const records = new Map<string, Record<string, unknown>[]>();
 	const messages: Record<string, unknown>[] = [];
 	const diagnostics: string[] = [];
 	setConnectorDiagnosticSink((line) => diagnostics.push(line));
 	try {
+		const documentPage = new DocumentPage(
+			(url) => {
+				const html = pageFor(url);
+				return url.includes("/feed/history") && !html.includes("avatar-btn")
+					? `${SIGNED_IN}${html}`
+					: html;
+			},
+			forcedReadiness,
+			pageOptions,
+		);
+		onPage?.(documentPage);
 		await collectYoutubeBrowser({
-			page: new DocumentPage(
-				(url) => {
-					const html = pageFor(url);
-					return url.includes("/feed/history") && !html.includes("avatar-btn")
-						? `${SIGNED_IN}${html}`
-						: html;
-				},
-				forcedReadiness,
-				pageOptions,
-			) as never,
+			page: documentPage as never,
 			requested: new Map(streams.map((name) => [name, { name }])) as never,
 			state,
 			emitRecord: async (stream, data) => {
+				if (recordCallbackHangs) await new Promise<never>(() => undefined);
 				records.set(stream, [...(records.get(stream) ?? []), data]);
 			},
 			emit: async (message) => {
@@ -3938,6 +3967,75 @@ test("a Desktop evaluate that never resolves inside the walk ends it with a part
 		assert.equal(completeCursorEmitted(messages), false);
 		assert.equal(historyStopReason(diagnostics), "history-loop-timeout");
 	} finally {
+		setHistoryLoopCallDeadlineMsForTest(previous);
+	}
+});
+
+test("a record callback that never settles fails the walk closed, with no checkpoint", { timeout: 20_000 }, async () => {
+	const previous = setHistoryLoopCallDeadlineMsForTest(50);
+	recordCallbackHangs = true;
+	try {
+		const { messages, outcome, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+		);
+		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+		assert.equal(completeCursorEmitted(messages), false);
+		assert.equal(historyStopReason(diagnostics), "history-record-timeout");
+	} finally {
+		recordCallbackHangs = false;
+		setHistoryLoopCallDeadlineMsForTest(previous);
+	}
+});
+
+test("page log: a drain wait that never returns leaves the evidence incomplete", { timeout: 20_000 }, async () => {
+	const previous = setHistoryLoopCallDeadlineMsForTest(50);
+	try {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				pageLogOnScroll: [[loggedResponse("bootstrap-C", 1, null)]],
+				pageLogHangOnScroll: 1,
+				hangDrainWait: true,
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), false);
+		assert.equal(historyStopReason(diagnostics), "history-evidence-timeout");
+	} finally {
+		setHistoryLoopCallDeadlineMsForTest(previous);
+	}
+});
+
+test("a scroll evaluation dispatched after the walk stopped does not scroll", { timeout: 20_000 }, async () => {
+	const previous = setHistoryLoopCallDeadlineMsForTest(50);
+	let release: () => void = () => undefined;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let page: DocumentPage | undefined;
+	try {
+		const { outcome, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{ scrollGate: gate },
+			(created) => {
+				page = created;
+			},
+		);
+		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+		assert.equal(historyStopReason(diagnostics), "history-loop-timeout");
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(page?.scrollByCount, 0);
+	} finally {
+		release();
 		setHistoryLoopCallDeadlineMsForTest(previous);
 	}
 });
