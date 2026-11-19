@@ -224,28 +224,58 @@ export function setHistoryLoopCallDeadlineMsForTest(ms: number): number {
 }
 
 /**
- * The whole history path, from the browser-date evaluation to the last STATE
- * acknowledgement, must finish inside this one outer deadline. It covers every
- * await under it, including any an inner deadline misses; the inner deadlines
- * only make the failure reason more specific.
+ * A no-progress watchdog over the whole history path, from the browser-date
+ * evaluation to the last STATE acknowledgement. It is not a cap on total length:
+ * every real progress event re-arms it (a row accounted or acknowledged, a browse
+ * response that adds rows, a STATE acknowledged), so a long history that keeps
+ * moving never expires. A path that goes the full window with no progress
+ * expires. It covers every await under it, including any an inner deadline
+ * misses; the inner deadlines only make the failure reason more specific.
+ *
+ * Ten minutes is above the longest legitimate gap between progress events. The
+ * longest is setup, before the first row: a navigation up to HISTORY_TIME_BUDGET_MS
+ * (180 s) plus its 60 s bridge margin, then the hydration wait and the readiness
+ * wait at up to 60 s each, about 6 minutes. In the walk, one round makes about
+ * five bridge calls, each bounded at 60 s. A stall is any gap longer than this.
  */
 export const HISTORY_OUTER_DEADLINE_MS = 600_000;
 let historyOuterDeadlineMs = HISTORY_OUTER_DEADLINE_MS;
-/** Test seam: a short outer deadline. Returns the previous value. */
+/** Test seam: a short no-progress window. Returns the previous value. */
 export function setHistoryOuterDeadlineMsForTest(ms: number): number {
 	const previous = historyOuterDeadlineMs;
 	historyOuterDeadlineMs = ms;
 	return previous;
 }
 
-/** "done" when the work settled in time (its rejection propagates); "expired" otherwise. */
-async function raceOuterDeadline(work: Promise<void>): Promise<"done" | "expired"> {
+/** Progress hooks by page, so the walk and the tracker can re-arm the watchdog. */
+const historyProgressHooks = new WeakMap<object, () => void>();
+function noteHistoryProgress(page: object): void {
+	historyProgressHooks.get(page)?.();
+}
+
+/**
+ * "done" when the work settled (its rejection propagates); "expired" when the
+ * window passed with no call to `touch`. `onTouch` receives the re-arm function.
+ */
+async function raceNoProgress(
+	work: Promise<void>,
+	register: (touch: () => void) => void,
+): Promise<"done" | "expired"> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let deadlineAt = performance.now() + historyOuterDeadlineMs;
+	register(() => {
+		deadlineAt = performance.now() + historyOuterDeadlineMs;
+	});
 	try {
 		return await Promise.race([
 			work.then(() => "done" as const),
 			new Promise<"expired">((resolve) => {
-				timer = setTimeout(() => resolve("expired"), historyOuterDeadlineMs);
+				const check = () => {
+					const left = deadlineAt - performance.now();
+					if (left <= 0) resolve("expired");
+					else timer = setTimeout(check, left);
+				};
+				timer = setTimeout(check, historyOuterDeadlineMs);
 			}),
 		]);
 	} finally {
@@ -705,6 +735,8 @@ class HistoryResponseTracker {
 			return;
 		}
 		const scan = await observation.readScan();
+		// A browse response that adds rows is real progress.
+		if (scan && scan.itemCount > 0) noteHistoryProgress(this.page);
 		if (!scan) {
 			this.unrecognizedResponseCount += 1;
 			this.unreadableSeen = true;
@@ -1788,6 +1820,7 @@ async function readHistoryVideoList(
 				// to head reconciliation. Upsert the full prefix; never infer delivery
 				// from its position above that identity.
 				lastAccounted = video;
+				noteHistoryProgress(page);
 				parsedCount += 1;
 				scannedCount += 1;
 				offset += 1;
@@ -2553,6 +2586,7 @@ export async function collectYoutubeBrowser(
 		// path is abandoned: its late emits are dropped, so no STATE can follow.
 		let historyAbandoned = false;
 		let stateInFlight = false;
+		let touchHistory: () => void = () => undefined;
 		const gate = <A extends unknown[]>(send: (...args: A) => Promise<void>) =>
 			async (...args: A): Promise<void> => {
 				if (!historyAbandoned) await send(...args);
@@ -2566,8 +2600,13 @@ export async function collectYoutubeBrowser(
 				if (isState) stateInFlight = true;
 				await gatedEmit(message);
 				if (isState) stateInFlight = false;
+				touchHistory();
 			},
-			emitRecord: gate(ctx.emitRecord.bind(ctx)),
+			emitRecord: async (stream, record) => {
+				if (historyAbandoned) return;
+				await ctx.emitRecord(stream, record);
+				touchHistory();
+			},
 			...(ctx.reportStreamFailure
 				? { reportStreamFailure: gate(ctx.reportStreamFailure.bind(ctx)) }
 				: {}),
@@ -2683,7 +2722,10 @@ export async function collectYoutubeBrowser(
 				}
 			}
 		};
-		if ((await raceOuterDeadline(runHistory())) === "expired") {
+		if ((await raceNoProgress(runHistory(), (touch) => {
+			historyProgressHooks.set(page, touch);
+			touchHistory = touch;
+		})) === "expired") {
 			historyAbandoned = true;
 			// A STATE that was sent but never acknowledged has an unknown outcome:
 			// it is reported as such, never as success.

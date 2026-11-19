@@ -2297,6 +2297,8 @@ class DocumentPage {
 
 /** When set, the downstream record callback never settles. */
 let recordCallbackHangs = false;
+/** Each record callback takes this long to acknowledge. */
+let recordCallbackDelayMs = 0;
 /** When set, the downstream sink never acknowledges a STATE. */
 let stateSinkHangs = false;
 
@@ -2330,6 +2332,8 @@ async function collectFromDocuments(
 			state,
 			emitRecord: async (stream, data) => {
 				if (recordCallbackHangs) await new Promise<never>(() => undefined);
+				if (recordCallbackDelayMs > 0)
+					await new Promise((resolve) => setTimeout(resolve, recordCallbackDelayMs));
 				records.set(stream, [...(records.get(stream) ?? []), data]);
 			},
 			emit: async (message) => {
@@ -4139,5 +4143,29 @@ test("a STATE sink that never acknowledges is reported as an unknown outcome, no
 		assert.equal(messages.some((message) => message.type === "STATE"), false);
 	} finally {
 		stateSinkHangs = false;
+	}
+});
+
+test("a slow walk that keeps progressing for longer than the window still completes", { timeout: 20_000 }, async () => {
+	const ids = Array.from({ length: 8 }, (_, n) => `slowvid${String(n).padStart(4, "0")}`);
+	// Eight rows at 120 ms each take about 1 s, over three times the 300 ms
+	// window, but no gap between acknowledged rows is longer than the window.
+	recordCallbackDelayMs = 120;
+	const previous = setHistoryOuterDeadlineMsForTest(300);
+	try {
+		const { messages, outcome } = await collectFromDocuments(
+			() => grownHistory(ids, 7, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				historyResponsesOnScroll: [{ requested: "bootstrap-C", next: null, itemCount: 7 }],
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), true);
+		assert.equal(outcome("watch_history").includes("stream_collection_failed"), false);
+	} finally {
+		recordCallbackDelayMs = 0;
+		setHistoryOuterDeadlineMsForTest(previous);
 	}
 });
