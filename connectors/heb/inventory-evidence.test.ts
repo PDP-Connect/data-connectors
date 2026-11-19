@@ -1327,7 +1327,7 @@ test("aria-labelledby is read through the element it names, anywhere in the docu
 		read("lbl", target("other", "Café Ñandú")),
 	]);
 	assert.deepEqual([word, twoOneBad, missing, outside].map(heldOf), ["naming_attr", "naming_attr", "naming_attr", "naming_attr"]);
-	assert.equal(vocab.evidence.linklessLines, 0, vocab.linklessTrace);
+	assert.equal(vocab.evidence.linklessLines, 0);
 	for (const r of [word, twoOneBad, missing, outside]) assert.doesNotMatch(r.linklessTrace ?? "", /Zq9x|Bread|Caf|gone|lbl/);
 });
 
