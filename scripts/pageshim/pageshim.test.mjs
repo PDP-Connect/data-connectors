@@ -464,7 +464,11 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 		);
 		assert.match(
 			unsupported.result.errors[0]?.reason ?? "",
-			/unsupported requestedScopes: chatgpt\.unsupported/,
+			/received 1 unsupported requestedScopes\./,
+		);
+		assert.equal(
+			(unsupported.result.errors[0]?.reason ?? "").includes("chatgpt.unsupported"),
+			false,
 		);
 		assert.equal(unsupported.result["chatgpt.memories"], undefined);
 

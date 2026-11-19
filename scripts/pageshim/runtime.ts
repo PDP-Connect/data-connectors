@@ -300,6 +300,15 @@ function boundedPageEvaluate(shim: ShimPage) {
 		if (response?.type === "undefined") return undefined;
 		if (response?.type === "value") return response.value;
 		if (response?.type === "too-large") {
+			// The length came from the page; only a finite number may be shown.
+			if (
+				typeof response.length !== "number" ||
+				!Number.isFinite(response.length)
+			) {
+				throw new FixedMessageError(
+					"PageShim evaluation returned an invalid transfer marker",
+				);
+			}
 			throw new FixedMessageError(
 				`PageShim evaluation result is ${response.length} UTF-16 code units; the per-item limit is ${EVALUATE_RESULT_MAX_UNITS}`,
 			);
@@ -525,7 +534,7 @@ function resolveRequestedScopes(
 	const invalid = deduped.filter((s) => !connector.scopes.includes(s));
 	if (invalid.length > 0)
 		throw fatal(
-			`${connector.platform} connector received unsupported requestedScopes: ${invalid.join(", ")}.`,
+			`${connector.platform} connector received ${invalid.length} unsupported requestedScopes.`,
 		);
 	return deduped;
 }

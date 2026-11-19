@@ -228,6 +228,7 @@ for (const [kind, expected] of [["serialize", "serialize_failed (Error)"], ["bri
 for (const [mode, expected] of [
 	["error", "evaluate_failed (Error)"],
 	["corrupt_chunk", "chunk_parse_failed (SyntaxError)"],
+	["bad_length", "PageShim evaluation returned an invalid transfer marker"],
 ]) {
 	test(`an evaluate ${mode} reports a fixed class and never page content`, { timeout: 60_000 }, async () => {
 		await mkdir(root, { recursive: true });
@@ -1366,4 +1367,22 @@ test("SKIP_RESULT forwards only bounded machine codes and recovery actions", { t
 			assert.equal(error.recovery_hint, undefined);
 		}
 	}
+});
+
+
+test("an unsupported scope from the host is reported as a count, never as the scope text", { timeout: 60_000 }, async () => {
+	await mkdir(root, { recursive: true });
+	const bundle = join(root, "foreign-scope.js");
+	await buildPageshim({ connector: "chatgpt", outfile: bundle,
+		entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+		extraDefines: {
+			PAGESHIM_COVERAGE_MESSAGES: "[]", PAGESHIM_COVERAGE_THROW: "false",
+			PAGESHIM_COVERAGE_RECORD: "false", PAGESHIM_COVERAGE_STREAM: "false",
+		},
+	});
+	const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations", "chatgpt.ACME-4417"],
+		fixtureReady: true, resultStreaming: true, connectorEndEvidence: true,
+		resultSpoolDirectory: join(root, "foreign-scope-spool") });
+	assert.equal(run.data.error, "chatgpt connector received 1 unsupported requestedScopes.");
+	assert.equal(JSON.stringify([run.data, run.connectorMessages, run.log]).includes("ACME-4417"), false);
 });

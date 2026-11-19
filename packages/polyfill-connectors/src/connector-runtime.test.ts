@@ -2669,3 +2669,137 @@ test("a DONE that cannot be written is not followed by a second DONE", async () 
 	);
 	assert.equal(calls.filter((m) => m.type === "DONE").length, 1);
 });
+
+// ─── Entry points to the channel and the terminal path ─────────────────
+
+test("a raw ctx.emit(DONE) never reaches the transport and fails the run", async () => {
+	const calls: EmittedMessage[] = [];
+	let refused: unknown;
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_raw_done",
+			collect: async ({ emit }) => {
+				refused = await emit({
+					type: "DONE",
+					status: "succeeded",
+					records_emitted: 99,
+				}).catch((error: unknown) => error);
+				await emit({ type: "PROGRESS", message: "after" }).catch(
+					() => undefined,
+				);
+			},
+		},
+		recordingTransport(calls),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.ok(refused instanceof Error);
+	const dones = calls.filter((m) => m.type === "DONE");
+	assert.equal(dones.length, 1);
+	assert.equal(lastDone(calls)?.status, "failed");
+	assert.equal(lastDone(calls)?.error?.code, "lifecycle_violation");
+	assert.equal(lastDone(calls)?.records_emitted, 0);
+	await assertDoneIsLast(calls);
+});
+
+test("a stalled skip-summary write cannot hold DONE past the deadline", {
+	timeout: 3000,
+}, async () => {
+	const calls: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_stalled_summary",
+			validateRecord: () => ({ ok: false, issues: [] }) as never,
+			collect: async ({ emitRecord }) => {
+				await emitRecord("items", { id: "skipped" });
+			},
+		},
+		recordingTransport(
+			calls,
+			(message) =>
+				message.type === "PROGRESS"
+					? new Promise<void>(() => {})
+					: Promise.resolve(),
+			{ inflightSettleTimeoutMs: 40 },
+		),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(calls)?.error?.code, "record_settlement_timeout");
+	await assertDoneIsLast(calls);
+});
+
+test("a non-record transport rejection reaches DONE as fixed text", async () => {
+	const calls: EmittedMessage[] = [];
+	const result = await runConnectorLifecycle(
+		{
+			name: "synthetic_state_rejection",
+			collect: async ({ emit }) => {
+				await emit({ type: "STATE", stream: "items", cursor: { a: 1 } });
+			},
+		},
+		recordingTransport(calls, async (message) => {
+			if (message.type === "STATE") throw new Error(`state bytes ${LEAK}`);
+		}),
+	);
+	assert.equal(result.exitCode, 1);
+	assert.equal(lastDone(calls)?.error?.code, "output_delivery_failed");
+	assert.equal(JSON.stringify(calls).includes(LEAK), false);
+});
+
+test("a DONE write that is rejected rejects the run with fixed text", async () => {
+	const calls: EmittedMessage[] = [];
+	await assert.rejects(
+		runConnectorLifecycle(
+			{ name: "synthetic_done_bytes", collect: async () => undefined },
+			recordingTransport(calls, async (message) => {
+				if (message.type === "DONE") throw new Error(`done bytes ${LEAK}`);
+			}),
+		),
+		(error: unknown) => !String((error as Error).message).includes(LEAK),
+	);
+});
+
+for (const hook of ["onFailure", "normalizer", "hostile error"] as const) {
+	test(`a throwing ${hook} still ends in a fixed failed DONE`, async () => {
+		const calls: EmittedMessage[] = [];
+		const hostile = new Error("collection failed");
+		Object.defineProperty(hostile, "message", {
+			get() {
+				throw new Error(LEAK);
+			},
+		});
+		const result = await runConnectorLifecycle(
+			{
+				name: "synthetic_throwing_hook",
+				...(hook === "normalizer"
+					? {
+							normalizeTerminalError: () => {
+								throw new Error(`normalizer ${LEAK}`);
+							},
+						}
+					: {}),
+				collect: async () => {
+					throw hook === "hostile error"
+						? hostile
+						: new Error("collection failed");
+				},
+			},
+			{
+				...recordingTransport(calls),
+				...(hook === "onFailure"
+					? {
+							onFailure: () => {
+								throw new Error(`hook ${LEAK}`);
+							},
+						}
+					: {}),
+			},
+		);
+		assert.equal(result.exitCode, 1);
+		const done = lastDone(calls);
+		assert.equal(done?.status, "failed");
+		assert.equal(JSON.stringify(calls).includes(LEAK), false);
+		if (hook !== "onFailure")
+			assert.equal(done?.error?.code, "terminal_report_failed");
+		await assertDoneIsLast(calls);
+	});
+}

@@ -63,7 +63,10 @@ const rangeMode =
 						page as { evaluate: (code: string) => Promise<unknown> }
 					).evaluate;
 					// A page error whose message quotes a row value.
-					if (PAGESHIM_COVERAGE_EVALUATE === "error")
+					if (PAGESHIM_COVERAGE_EVALUATE === "bad_length")
+						// A page that forges the size field of its own transfer reply.
+						await evaluate.call(page, `(() => { JSON.stringify = () => ({ length: "1e12" }); return 1; })()`);
+					else if (PAGESHIM_COVERAGE_EVALUATE === "error")
 						await evaluate.call(
 							page,
 							"(() => { throw new Error('page row value ACME-4417'); })()",

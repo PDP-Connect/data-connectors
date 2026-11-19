@@ -85,3 +85,41 @@ test("DONE is written once", async () => {
 	);
 	assert.deepEqual(calls, ["DONE"]);
 });
+
+test("DONE offered through offer or write is refused and counted as a violation", async () => {
+	const calls: string[] = [];
+	const channel = createOutputChannel(async (m) => void calls.push(m.type));
+	const done: EmittedMessage = {
+		type: "DONE",
+		status: "succeeded",
+		records_emitted: 0,
+	};
+	await assert.rejects(channel.offer(done));
+	await assert.rejects(channel.write(done));
+	assert.deepEqual(calls, []);
+	assert.equal(channel.flags().violation, true);
+});
+
+test("a rejected write reaches the caller as fixed text, whatever the frame", async () => {
+	const channel = createOutputChannel(async () => {
+		throw new Error("frame bytes ACME-4417");
+	});
+	for (const message of [
+		progress("p"),
+		{ type: "STATE", stream: "s", cursor: {} } as EmittedMessage,
+	]) {
+		await assert.rejects(
+			channel.write(message),
+			(e: unknown) => !String((e as Error).message).includes("ACME-4417"),
+		);
+	}
+	channel.seal();
+	await assert.rejects(
+		channel.writeDone({
+			type: "DONE",
+			status: "succeeded",
+			records_emitted: 0,
+		}),
+		(e: unknown) => !String((e as Error).message).includes("ACME-4417"),
+	);
+});

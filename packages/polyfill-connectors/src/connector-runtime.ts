@@ -1356,6 +1356,19 @@ export async function runConnectorLifecycle(
 				afterCollect?: boolean;
 		  };
 	const failedPlanFor = (err: unknown): DonePlan => {
+		try {
+			return describeFailedPlan(err);
+		} catch {
+			// An error whose properties throw still ends the run, in fixed text.
+			return {
+				status: "failed",
+				message: FIXED_FAILURE.terminal_report_failed,
+				retryable: true,
+				code: "terminal_report_failed",
+			};
+		}
+	};
+	const describeFailedPlan = (err: unknown): DonePlan => {
 		const basis = observationBasisOf(err);
 		if (err instanceof TerminalError) {
 			return {
@@ -1491,13 +1504,10 @@ export async function runConnectorLifecycle(
 		} else {
 			emitRecordGate?.closeAdmission();
 		}
-		if (live && verdict.status === "succeeded" && !stateHasFailure()) {
-			try {
-				await writeSkipSummary();
-			} catch (error) {
-				replace(error);
-			}
-		}
+		// Queued, not awaited: a stalled write must not hold the run before the
+		// deadline starts. The drain below waits for it, bounded.
+		if (live && verdict.status === "succeeded" && !stateHasFailure())
+			writeSkipSummary();
 		channel.seal();
 		if ((await channel.drain(remaining())) === "expired" && live)
 			replace(new FixedFailure("record_settlement_timeout"));
@@ -1523,8 +1533,28 @@ export async function runConnectorLifecycle(
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
 		// failed terminal status if Node exits before the explicit callback.
-		transport.onFailure?.();
-		await channel.writeDone(buildFailedDone(verdict));
+		try {
+			transport.onFailure?.();
+		} catch {
+			// A throwing hook must not stop the attempt at DONE.
+		}
+		let failedDone: EmittedMessage;
+		try {
+			failedDone = buildFailedDone(verdict);
+		} catch {
+			// A throwing normalizer: report a fixed failure instead.
+			failedDone = {
+				type: "DONE",
+				status: "failed",
+				records_emitted: observedCounters?.totalEmitted ?? 0,
+				error: {
+					code: "terminal_report_failed",
+					message: FIXED_FAILURE.terminal_report_failed,
+					retryable: true,
+				},
+			};
+		}
+		await channel.writeDone(failedDone);
 		return 1;
 	};
 	const stateHasFailure = (): boolean =>
@@ -1532,6 +1562,7 @@ export async function runConnectorLifecycle(
 	/** The first failure the flags record: a timeout, a late write, then a rejection. */
 	const flagFailure = (): TerminalError | null => {
 		const flags = channel.flags();
+		if (flags.violation) return new FixedFailure("lifecycle_violation");
 		if (flags.expired) return new FixedFailure("record_settlement_timeout");
 		if (flags.late) return new FixedFailure("late_emission");
 		const recordFailure = emitRecordGate?.failure() ?? null;
@@ -1540,17 +1571,20 @@ export async function runConnectorLifecycle(
 		return null;
 	};
 	/** Report the skipped-item count, which only a run that can still succeed owes. */
-	const writeSkipSummary = async (): Promise<void> => {
+	const writeSkipSummary = (): void => {
 		const counters = emitRecordGate?.counters;
 		if (!counters) return;
 		if (counters.totalSkipped > 0) {
 			connectorDiagnostic("runtime", "shape_check_skipped", {
 				records: counters.totalSkipped,
 			});
-			await channel.write({
-				type: "PROGRESS",
-				message: `Skipped ${String(counters.totalSkipped)} ${counters.totalSkipped === 1 ? "item" : "items"} that could not be read`,
-			});
+			// A rejection sets the channel's write-failed flag, which fails the run.
+			channel
+				.write({
+					type: "PROGRESS",
+					message: `Skipped ${String(counters.totalSkipped)} ${counters.totalSkipped === 1 ? "item" : "items"} that could not be read`,
+				})
+				.catch(() => undefined);
 		}
 		// Retained-with-drift records are emitted, so they are absent from the skip
 		// line above; logging the count keeps schema drift from going unnoticed
@@ -1929,6 +1963,10 @@ const FIXED_FAILURE = {
 		"Records still being emitted did not settle before the run ended",
 	late_emission:
 		"An emission arrived after the run closed; the run is incomplete",
+	lifecycle_violation:
+		"A connector wrote a terminal message itself; the run is incomplete",
+	terminal_report_failed:
+		"The run failed and its error could not be reported in full",
 } as const;
 type FixedFailureCode = keyof typeof FIXED_FAILURE;
 
@@ -1965,7 +2003,12 @@ export interface OutputChannel {
 	writeDone: (message: EmittedMessage) => Promise<void>;
 	/** Count an emission refused before it reached the channel. */
 	noteLate: () => void;
-	flags: () => { writeFailed: boolean; late: boolean; expired: boolean };
+	flags: () => {
+		writeFailed: boolean;
+		late: boolean;
+		expired: boolean;
+		violation: boolean;
+	};
 }
 
 /**
@@ -1991,6 +2034,7 @@ export function createOutputChannel(
 	let doneAttempted = false;
 	let writeFailed = false;
 	let late = false;
+	let violation = false;
 	let idleWaiters: (() => void)[] = [];
 	const call = (message: EmittedMessage): Promise<void> => {
 		try {
@@ -2003,6 +2047,20 @@ export function createOutputChannel(
 		late = true;
 		return Promise.reject(new FixedFailure("late_emission"));
 	};
+	// Only `writeDone` (called by the terminal path) may write DONE. A DONE
+	// offered anywhere else is a lifecycle violation and fails the run.
+	const refuseDone = (): Promise<void> => {
+		violation = true;
+		return Promise.reject(new FixedFailure("lifecycle_violation"));
+	};
+	// A transport rejection can carry frame bytes. Whatever the frame, the
+	// caller sees a fixed failure.
+	const rejectionFor = (message: EmittedMessage): FixedFailure =>
+		new FixedFailure(
+			message.type === "RECORD"
+				? "record_delivery_failed"
+				: "output_delivery_failed",
+		);
 	const settleIdle = (): void => {
 		const waiters = idleWaiters;
 		idleWaiters = [];
@@ -2017,9 +2075,9 @@ export function createOutputChannel(
 			try {
 				await call(entry.message);
 				entry.resolve();
-			} catch (error) {
+			} catch {
 				writeFailed = true;
-				entry.reject(error);
+				entry.reject(rejectionFor(entry.message));
 			}
 		}
 		running = false;
@@ -2032,8 +2090,17 @@ export function createOutputChannel(
 		});
 	return {
 		offer: (message) =>
-			admissionOpen && !sealed ? enqueue(message) : refuse(),
-		write: (message) => (sealed ? refuse() : enqueue(message)),
+			message.type === "DONE"
+				? refuseDone()
+				: admissionOpen && !sealed
+					? enqueue(message)
+					: refuse(),
+		write: (message) =>
+			message.type === "DONE"
+				? refuseDone()
+				: sealed
+					? refuse()
+					: enqueue(message),
 		closeAdmission: () => {
 			admissionOpen = false;
 		},
@@ -2068,12 +2135,14 @@ export function createOutputChannel(
 			if (doneAttempted)
 				return Promise.reject(new Error("DONE was already written"));
 			doneAttempted = true;
-			return call(message);
+			return call(message).catch(() => {
+				throw new FixedFailure("output_delivery_failed");
+			});
 		},
 		noteLate: () => {
 			late = true;
 		},
-		flags: () => ({ writeFailed, late, expired: abandoned }),
+		flags: () => ({ writeFailed, late, expired: abandoned, violation }),
 	};
 }
 
