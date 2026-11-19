@@ -7,7 +7,8 @@
  * runtime's browser (Polar's sign-in lives on auth.polar.com: e-mail and password, no captcha or
  * second factor on the form as of November 2026). Collection then reads the JSON the web app itself
  * loads, from inside a flow.polar.com page, with the page's cookies: the profile, the training
- * history and each session's analysis summary, the 24/7 activity timeline, the sleep report
+ * history, each session's analysis summary and its heart rate samples (from the analysis details,
+ * cut down to the heart rate series inside the page), the 24/7 activity timeline, the sleep report
  * (served from sleep-api.flow.polar.com, which allows the flow.polar.com origin with credentials)
  * and Nightly Recharge. No credential reaches this code, and the session cookie never leaves the
  * page. Every request is a read; the one POST (`/api/training/history`) is how the web app itself
@@ -31,6 +32,8 @@ import {
 	activityDays,
 	type Built,
 	dailyActivityRecord,
+	type HeartRateSeries,
+	heartRateSamples,
 	isDay,
 	localTime,
 	nightlyRechargeRecord,
@@ -38,6 +41,7 @@ import {
 	parseTrainingRow,
 	parseTrainingSummary,
 	profileRecord,
+	recordedHeartRate,
 	rowDate,
 	sleepRecord,
 	sleepRows,
@@ -47,7 +51,13 @@ import {
 	utcOffset,
 	type Window,
 } from "./parsers.ts";
-import { STREAMS, type Stream, validateRecord } from "./schemas.ts";
+import {
+	STREAMS,
+	type Stream,
+	type TrainingHistoryRow,
+	type TrainingSummaryResponse,
+	validateRecord,
+} from "./schemas.ts";
 
 export { STREAMS };
 export const ORIGIN = "https://flow.polar.com";
@@ -123,6 +133,12 @@ export interface PolarRequest {
 	url: string;
 	method: "GET" | "POST";
 	body?: string;
+	/**
+	 * "heart_rate": the page keeps only the session id, each exercise's start time and its
+	 * HEART_RATE series from a 200 JSON answer, and hands over that. The rest of the analysis
+	 * details (GPS fixes, the other series: about 500 KB for an hour) never leaves the page.
+	 */
+	pick?: "heart_rate";
 }
 
 export const addDays = (day: string, n: number): string =>
@@ -148,6 +164,15 @@ export function trainingHistoryRequest(
 
 export function trainingSummaryRequest(id: number): PolarRequest {
 	return { url: `/api/training/analysis/${id}/summary`, method: "GET" };
+}
+
+/** The analysis page's chart data: per-exercise series at 1 Hz; only heart rate is kept. */
+export function trainingDetailsRequest(id: number): PolarRequest {
+	return {
+		url: `/api/training/analysis/${id}/details`,
+		method: "GET",
+		pick: "heart_rate",
+	};
 }
 
 /**
@@ -222,12 +247,52 @@ export async function pageFetch(
 						body: request.body ?? null,
 						signal: controller.signal,
 					});
+					let body = await res.text();
+					if (request.pick === "heart_rate" && res.status === 200) {
+						// No named helpers here: the function is serialised into the page, where a
+						// bundler's name-keeping wrapper would not exist.
+						try {
+							const details = JSON.parse(body) as Record<
+								string,
+								unknown
+							> | null;
+							const picked: Record<string, unknown> = { id: details?.id };
+							for (const [part, key] of [
+								["exercises", "startTime"],
+								["samples", "HEART_RATE"],
+							] as const) {
+								const value = details?.[part];
+								// A map keeps only `key` of each entry; anything else passes as is,
+								// for the boundary parse to refuse.
+								picked[part] =
+									typeof value === "object" &&
+									value !== null &&
+									!Array.isArray(value)
+										? Object.fromEntries(
+												Object.entries(value).map(([id, entry]) => [
+													id,
+													typeof entry === "object" && entry !== null
+														? {
+																[key]:
+																	(entry as Record<string, unknown>)[key] ??
+																	null,
+															}
+														: entry,
+												]),
+											)
+										: value;
+							}
+							body = JSON.stringify(picked);
+						} catch {
+							// Not JSON: handed over as is, and classified as unreadable.
+						}
+					}
 					return {
 						kind: "response",
 						status: res.status,
 						contentType: res.headers.get("content-type") ?? "",
 						retryAfter: res.headers.get("retry-after"),
-						body: await res.text(),
+						body,
 					};
 				} catch (error) {
 					return {
@@ -679,7 +744,52 @@ interface Run {
 	issues: Record<Stream, Set<string>>;
 }
 
-/** One window of training history, each session's analysis summary read after it. */
+interface SamplesRead {
+	samples: HeartRateSeries[] | null;
+	/** A lost sign-in or a rate limit, which stop the window as any other read's would. */
+	failure: Failure | null;
+	unreadable: boolean;
+}
+
+/**
+ * A session's heart rate samples, read right after its summary, as the web app's analysis page
+ * loads the two together (so without a pause of its own). Not asked for a session that recorded
+ * no heart rate. A 404 is a session without details. Any other answer that does not give the
+ * samples (an unexpected shape, a 5xx, a timeout on a very long session) ships the session without
+ * them and counts it unreadable: the window is read once more on the next run, and after that the
+ * hold is released (walkStream), so one session's samples can never pin the stream.
+ */
+async function readHeartRate(
+	run: Run,
+	row: TrainingHistoryRow,
+	summary: TrainingSummaryResponse | null,
+): Promise<SamplesRead> {
+	if (!recordedHeartRate(row, summary)) {
+		return { samples: null, failure: null, unreadable: false };
+	}
+	const detail = await fetchJson(
+		run.ctx.page,
+		trainingDetailsRequest(row.id),
+		run.p,
+		{ notFoundIsEmpty: true },
+	);
+	if (!detail.ok) {
+		const stops =
+			detail.reason === "sign_in_required" || detail.retryAfterMs !== undefined;
+		return stops
+			? { samples: null, failure: detail, unreadable: false }
+			: { samples: null, failure: null, unreadable: true };
+	}
+	if (detail.json === null) {
+		return { samples: null, failure: null, unreadable: false };
+	}
+	const samples = heartRateSamples(detail.json, row.id);
+	return samples === "unreadable"
+		? { samples: null, failure: null, unreadable: true }
+		: { samples, failure: null, unreadable: false };
+}
+
+/** One window of training history, each session's analysis summary and heart rate read after it. */
 async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 	const { ctx, p } = run;
 	await p.sleep(p.requestDelayMs);
@@ -722,13 +832,20 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 			!detail.ok || (detail.json !== null && summary === null);
 		if (summaryUnreadable)
 			run.issues.training_sessions.add("(analysis summary)");
+		const hr = await readHeartRate(
+			run,
+			row,
+			summary && summary.id === row.id ? summary : null,
+		);
+		if (hr.failure) return { failure: hr.failure, unreadable };
+		if (hr.unreadable) run.issues.training_sessions.add("(heart rate samples)");
 		const undelivered = await deliver(
 			ctx,
 			"training_sessions",
-			trainingSessionRecord(row, summary),
+			trainingSessionRecord(row, summary, hr.samples),
 			run.issues.training_sessions,
 		);
-		if (undelivered || summaryUnreadable) unreadable += 1;
+		if (undelivered || summaryUnreadable || hr.unreadable) unreadable += 1;
 	}
 	return { failure: null, unreadable };
 }
