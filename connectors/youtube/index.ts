@@ -194,6 +194,10 @@ class HistoryResponseTracker {
 	private non2xxSeen = false;
 	/** A browse call the run cannot attribute came after the last terminal evidence. */
 	private uncorrelatedSinceTerminal = false;
+	/** Browse requests the page started that have neither answered nor failed. */
+	private readonly openRequests = new Set<Request>();
+	private startedRequests = 0;
+	private pageLogInFlight = 0;
 	private readonly tokens = new Set<string>();
 	private readonly requestedTokens = new Set<string>();
 	private readonly preSeedResponses: Array<{
@@ -220,8 +224,17 @@ class HistoryResponseTracker {
 	private unrecognizedResponseCount = 0;
 	private latestStatus: number | null = null;
 	private pending = Promise.resolve();
+	private readonly onRequest = (request: Request): void => {
+		if (!request.url().includes("/youtubei/v1/browse")) return;
+		this.openRequests.add(request);
+		this.startedRequests += 1;
+	};
+	private readonly onRequestFailed = (request: Request): void => {
+		this.openRequests.delete(request);
+	};
 	private readonly onResponse = (response: Response): void => {
 		if (!response.url().includes("/youtubei/v1/browse")) return;
+		this.openRequests.delete(response.request());
 		const version = ++this.evidenceVersion;
 		if (!this.seeded) {
 			if (
@@ -238,7 +251,11 @@ class HistoryResponseTracker {
 	constructor(page: BrowserCollectContext["page"]) {
 		this.page = page;
 		this.pageLog = typeof (page as { on?: unknown }).on !== "function";
-		if (!this.pageLog) page.on("response", this.onResponse);
+		if (!this.pageLog) {
+			page.on("request", this.onRequest);
+			page.on("requestfailed", this.onRequestFailed);
+			page.on("response", this.onResponse);
+		}
 	}
 
 	/** Install the page-side log after navigation; a no-op where events exist. */
@@ -291,8 +308,14 @@ class HistoryResponseTracker {
 		return this.latestResponse;
 	}
 
+	/** Changes whenever a browse request starts or a response arrives. */
 	get version(): number {
-		return this.evidenceVersion;
+		return this.evidenceVersion + this.startedRequests;
+	}
+
+	/** History browse requests started and not yet answered or failed. */
+	get inFlight(): number {
+		return this.pageLog ? this.pageLogInFlight : this.openRequests.size;
 	}
 
 	get trackingComplete(): boolean {
@@ -330,7 +353,10 @@ class HistoryResponseTracker {
 	}
 
 	dispose(): void {
-		if (!this.pageLog) this.page.off("response", this.onResponse);
+		if (this.pageLog) return;
+		this.page.off("request", this.onRequest);
+		this.page.off("requestfailed", this.onRequestFailed);
+		this.page.off("response", this.onResponse);
 	}
 
 	/**
@@ -369,6 +395,7 @@ class HistoryResponseTracker {
 			}
 			this.evidenceVersion = drained.sent;
 			this.processedVersion = this.pageLogConsumed;
+			this.pageLogInFlight = Math.max(0, drained.sent - drained.completed);
 			if (drained.completed >= drained.sent) return;
 			await this.page.waitForTimeout(PAGE_LOG_DRAIN_WAIT_MS);
 		}
@@ -422,8 +449,17 @@ class HistoryResponseTracker {
 			!initialHistoryRequest &&
 			requestedContinuation === null
 		) {
-			// A request for another page is not unseen history.
-			this.foreignResponseCount += 1;
+			// Another page's request is ignored on positive evidence only: a 2xx
+			// answer that reads and shows no rows and no continuation.
+			if (status >= 200 && status < 300) {
+				const scan = await observation.readScan();
+				if (scan && scan.itemCount === 0 && !scan.hasContinuation) {
+					this.foreignResponseCount += 1;
+					return;
+				}
+			}
+			this.uncorrelatedResponseCount += 1;
+			this.uncorrelatedSinceTerminal = true;
 			return;
 		}
 		// A continuation request is history only when its token is one the page
@@ -1485,6 +1521,11 @@ async function readHistoryVideoList(
 	let stableEnd = false;
 	for (let refresh = 0; refresh < 3; refresh += 1) {
 		await responseTracker.flush();
+		if (responseTracker.inFlight > 0) {
+			// Bounded: three refreshes, one short wait each.
+			await page.waitForTimeout(PAGE_LOG_DRAIN_WAIT_MS);
+			continue;
+		}
 		if (!responseTracker.allArrivalsProcessed) continue;
 		const snapshot = {
 			version: responseTracker.version,
@@ -1497,6 +1538,7 @@ async function readHistoryVideoList(
 		});
 		await responseTracker.flush();
 		if (
+			responseTracker.inFlight === 0 &&
 			responseTracker.version === snapshot.version &&
 			responseTracker.allArrivalsProcessed
 		) {
@@ -1525,9 +1567,11 @@ async function readHistoryVideoList(
 		sourceEnded = false;
 		verifiedEmpty = false;
 		evidence = { kind: "unproven", page: currentEnd };
-		stopReason = responseTracker.trackingComplete
-			? "history-evidence-changed-during-final-refresh"
-			: "history-response-buffer-overflow";
+		stopReason = !responseTracker.trackingComplete
+			? "history-response-buffer-overflow"
+			: responseTracker.inFlight > 0
+				? "history-browse-in-flight"
+				: "history-evidence-changed-during-final-refresh";
 	}
 	// The veto blocks the end claim only. A checkpoint rests on rows already
 	// read, so the stop reason that decides it is the one before the veto.
@@ -1688,6 +1732,21 @@ function readWatchHistoryList(
 	);
 }
 
+const DIAGNOSTIC_ERROR_NAMES = new Set([
+	"Error",
+	"TypeError",
+	"RangeError",
+	"SyntaxError",
+	"TimeoutError",
+	"AbortError",
+]);
+
+/** A fixed vocabulary: a browser or adapter can put data in an error name. */
+function errorNameForDiagnostics(error: unknown): string {
+	if (!(error instanceof Error)) return "non-error";
+	return DIAGNOSTIC_ERROR_NAMES.has(error.name) ? error.name : "other";
+}
+
 /**
  * Why a history read ended failed or incomplete, as numbers, flags and fixed
  * vocabulary only. It never holds a video id, title, date, URL or token.
@@ -1762,8 +1821,7 @@ async function readableVideos(
 			stream === "watch_history"
 				? {
 						stop_reason: "exception",
-						error_name:
-							error instanceof Error ? error.name.slice(0, 40) : "non-error",
+						error_name: errorNameForDiagnostics(error),
 					}
 				: undefined,
 		);

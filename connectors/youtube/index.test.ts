@@ -89,12 +89,12 @@ class FixturePage {
 		"content" | "empty" | "json-empty" | "unreadable"
 	>;
 	private lastWaitState: "content" | "empty" | "json-empty" = "content";
-	on(_event: "response", listener: (response: never) => void): this {
-		this.responseListeners.add(listener);
+	on(event: string, listener: (response: never) => void): this {
+		if (event === "response") this.responseListeners.add(listener);
 		return this;
 	}
-	off(_event: "response", listener: (response: never) => void): this {
-		this.responseListeners.delete(listener);
+	off(event: string, listener: (response: never) => void): this {
+		if (event === "response") this.responseListeners.delete(listener);
 		return this;
 	}
 	private readonly ownAccount: {
@@ -1857,6 +1857,8 @@ type HistoryResponseAfterReadListEnd = {
 	next: string | null;
 	initialRequest?: boolean;
 	requestBody?: Record<string, unknown>;
+	itemCount?: number;
+	status?: number;
 	duringJson?: {
 		requested: string;
 		next: string | null;
@@ -1878,6 +1880,8 @@ type HistoryResponseSpec = {
 	requestBody?: Record<string, unknown>;
 	/** The content-encoding header value; the body is gzip only with gzipRequestBodies. */
 	contentEncoding?: string;
+	/** Wrap each row in an outer row, as a grid item wraps its video. */
+	nested?: boolean;
 };
 
 /** A page-log entry the way the page-side wrapper reports it. */
@@ -1914,6 +1918,10 @@ class DocumentPage {
 	private readonly pageLogOnScroll: LoggedEntry[][] | undefined;
 	private pageLogPending: LoggedEntry[] = [];
 	private pageLogSent = 0;
+	private pageLogHanging = 0;
+	private readonly gotoError: Error | undefined;
+	private readonly browseRequestsOnScroll: Array<"hang" | "fail">;
+	private readonly pageLogHangOnScroll: number;
 	private readonly historyResponseOnReadListEnd:
 		| { readNumber: number; requested: string; next: string | null }
 		| undefined;
@@ -1932,6 +1940,11 @@ class DocumentPage {
 			 * no response events and each scroll appends these logged entries.
 			 */
 			pageLogOnScroll?: LoggedEntry[][];
+			/** Page-log browse calls the page starts on scroll and never finishes. */
+			pageLogHangOnScroll?: number;
+			/** Browse requests the page starts on scroll; "hang" never settles. */
+			browseRequestsOnScroll?: Array<"hang" | "fail">;
+			gotoError?: Error;
 			historyResponseOnReadListEnd?: {
 				readNumber: number;
 				requested: string;
@@ -1946,6 +1959,9 @@ class DocumentPage {
 		this.forcedReadiness = forcedReadiness;
 		this.gzipRequestBodies = options.gzipRequestBodies ?? false;
 		this.pageLogOnScroll = options.pageLogOnScroll;
+		this.pageLogHangOnScroll = options.pageLogHangOnScroll ?? 0;
+		this.browseRequestsOnScroll = options.browseRequestsOnScroll ?? [];
+		this.gotoError = options.gotoError;
 		if (this.pageLogOnScroll)
 			Object.defineProperty(this, "on", { value: undefined });
 		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
@@ -1954,15 +1970,33 @@ class DocumentPage {
 		this.historyResponsesAfterReadListEnd =
 			options.historyResponsesAfterReadListEnd ?? [];
 	}
-	on(_event: "response", listener: (response: never) => void): this {
-		this.responseListeners.add(listener);
+	private readonly requestListeners = new Set<(request: never) => void>();
+	private readonly requestFailedListeners = new Set<(request: never) => void>();
+	private listenersFor(event: string) {
+		return event === "response"
+			? this.responseListeners
+			: event === "request"
+				? this.requestListeners
+				: event === "requestfailed"
+					? this.requestFailedListeners
+					: new Set<(value: never) => void>();
+	}
+	on(event: string, listener: (value: never) => void): this {
+		this.listenersFor(event).add(listener);
 		return this;
 	}
-	off(_event: "response", listener: (response: never) => void): this {
-		this.responseListeners.delete(listener);
+	off(event: string, listener: (value: never) => void): this {
+		this.listenersFor(event).delete(listener);
 		return this;
+	}
+	private emitBrowseRequest(settle: "hang" | "fail" | "none"): void {
+		const request = { url: () => "https://www.youtube.com/youtubei/v1/browse" };
+		for (const listener of this.requestListeners) listener(request as never);
+		if (settle === "fail")
+			for (const listener of this.requestFailedListeners) listener(request as never);
 	}
 	async goto(url: string) {
+		if (this.gotoError && url.includes("/feed/history")) throw this.gotoError;
 		this.url = url;
 		for (const { requested, next, ...options } of this.historyResponsesOnGoto.splice(0))
 			this.emitHistoryResponse(requested, next, options);
@@ -1977,6 +2011,7 @@ class DocumentPage {
 			status?: number;
 			requestBody?: Record<string, unknown>;
 			contentEncoding?: string;
+			nested?: boolean;
 			duringJson?: {
 				requested: string;
 				next: string | null;
@@ -1985,9 +2020,11 @@ class DocumentPage {
 			};
 		} = {},
 	): void {
-		const rows = Array.from({ length: options.itemCount ?? 0 }, () => ({
-			lockupViewModel: {},
-		}));
+		const rows = Array.from({ length: options.itemCount ?? 0 }, () =>
+			options.nested
+				? { richItemRenderer: { content: { videoRenderer: {} } } }
+				: { lockupViewModel: {} },
+		);
 		const continuationItems = next
 			? [
 					{
@@ -2070,6 +2107,12 @@ class DocumentPage {
 			const { requested, next, ...options } = response;
 			this.emitHistoryResponse(requested, next, options);
 		}
+		for (const settle of this.browseRequestsOnScroll.splice(0))
+			this.emitBrowseRequest(settle);
+		if (this.pageLogHangOnScroll > 0) {
+			this.pageLogSent += this.pageLogHangOnScroll;
+			this.pageLogHanging += this.pageLogHangOnScroll;
+		}
 		const logged = this.pageLogOnScroll?.shift();
 		if (logged) {
 			this.pageLogSent += logged.length;
@@ -2106,7 +2149,7 @@ class DocumentPage {
 				entries: this.pageLogPending.splice(0),
 				overflow: false,
 				sent: this.pageLogSent,
-				completed: this.pageLogSent,
+				completed: this.pageLogSent - this.pageLogHanging,
 			};
 		if (fn.name === "readListEnd") {
 			this.readListEndCount += 1;
@@ -2139,6 +2182,12 @@ class DocumentPage {
 							: {}),
 						...(response.requestBody
 							? { requestBody: response.requestBody }
+							: {}),
+						...(response.itemCount !== undefined
+							? { itemCount: response.itemCount }
+							: {}),
+						...(response.status !== undefined
+							? { status: response.status }
 							: {}),
 						...(response.jsonDelayMs !== undefined
 							? { jsonDelayMs: response.jsonDelayMs }
@@ -3412,9 +3461,9 @@ const loggedForeign = (browseId: string): LoggedEntry => ({
 	requestBody: { browseId },
 	status: 200,
 	summary: {
-		recognized: true,
+		recognized: false,
 		hasContinuation: false,
-		itemCount: 5,
+		itemCount: 0,
 		nextContinuation: null,
 	},
 });
@@ -3522,5 +3571,137 @@ test("a vetoed run keeps its partial checkpoint", async () => {
 		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"], `stray=${stray}`);
 		assert.equal(completeCursorEmitted(messages), false);
 		if (stray) assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+	}
+});
+
+// --- in-flight browse requests, foreign evidence, nested rows, error names ---
+
+test("a history browse still in flight during the final refresh leaves the run not complete", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1 },
+			],
+			browseRequestsOnScroll: ["hang"],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-browse-in-flight");
+});
+
+test("a history browse that failed is no longer in flight", async () => {
+	const { messages } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1 },
+			],
+			browseRequestsOnScroll: ["fail"],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), true);
+});
+
+test("page log: a history browse the page started and never finished leaves the run not complete", async () => {
+	const { messages, diagnostics } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			pageLogOnScroll: [[loggedResponse("bootstrap-C", 1, null)]],
+			pageLogHangOnScroll: 1,
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), false);
+	assert.equal(historyStopReason(diagnostics), "history-browse-in-flight");
+});
+
+test("a foreign-looking request is ignored only when its response shows no rows and no continuation", async () => {
+	const body = { browseId: "FEsubscriptions" };
+	const cases: Array<{ name: string; spec: Partial<HistoryResponseSpec> }> = [
+		{ name: "a row", spec: { itemCount: 2 } },
+		{ name: "a continuation", spec: { next: "more" } },
+		{ name: "a non-2xx status", spec: { status: 500 } },
+	];
+	for (const { name, spec } of cases) {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{
+				historyResponsesOnScroll: [
+					{ requested: "bootstrap-C", next: null, itemCount: 1 },
+				],
+				historyResponsesAfterReadListEnd: [
+					{ readNumber: 4, requested: "other", next: spec.next ?? null, requestBody: body, ...spec },
+				],
+			},
+		);
+		assert.equal(completeCursorEmitted(messages), false, name);
+		assert.equal(browseDiagnostic(diagnostics).foreign, 0, name);
+	}
+});
+
+test("page log: a foreign-looking request with a row or an unreadable body vetoes", async () => {
+	for (const entry of [
+		{ ...loggedForeign("FEsubscriptions"), summary: { recognized: true, hasContinuation: false, itemCount: 5, nextContinuation: null } },
+		{ ...loggedForeign("FEsubscriptions"), summary: null },
+		{ ...loggedForeign("FEsubscriptions"), status: 500 },
+	]) {
+		const { messages, diagnostics } = await collectFromDocuments(
+			() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+			["watch_history"],
+			undefined,
+			{ watch_history: { complete: false } },
+			{ pageLogOnScroll: [[loggedResponse("bootstrap-C", 1, null), entry]] },
+		);
+		assert.equal(completeCursorEmitted(messages), false);
+		assert.equal(historyStopReason(diagnostics), "history-browse-uncorrelated");
+	}
+});
+
+test("a row nested in another row is one row, so the Desktop end still holds", async () => {
+	const { messages } = await collectFromDocuments(
+		() => grownHistory(["aaaaaaaaaaa", "bbbbbbbbbbb"], 1, "bootstrap-C"),
+		["watch_history"],
+		undefined,
+		{ watch_history: { complete: false } },
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null, itemCount: 1, nested: true },
+			],
+		},
+	);
+	assert.equal(completeCursorEmitted(messages), true);
+});
+
+test("an exception names only a fixed error vocabulary", async () => {
+	const cases: Array<[unknown, string]> = [
+		[new TypeError("x"), "TypeError"],
+		[Object.assign(new Error("x"), { name: "secret-video-id-abc" }), "other"],
+		["a string", "non-error"],
+	];
+	for (const [thrown, expected] of cases) {
+		const { messages } = await collectFromDocuments(
+			() => "",
+			["watch_history"],
+			undefined,
+			{},
+			{ gotoError: thrown as Error },
+		);
+		const failure = messages.find(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "watch_history",
+		);
+		const diagnostics = failure?.diagnostics as Record<string, unknown> | undefined;
+		assert.equal(diagnostics?.error_name, expected);
 	}
 });

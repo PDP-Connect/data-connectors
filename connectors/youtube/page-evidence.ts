@@ -98,17 +98,19 @@ const HISTORY_RESPONSE_SCAN_SOURCE = String.raw`(value) => {
 	let itemCount = 0;
 	let bounded = true;
 	let visited = 0;
-	const visit = (node) => {
+	// Only the outermost row counts: a row nested inside another row is the same row.
+	const visit = (node, inItem) => {
 		visited += 1;
 		if (visited > 10000) { bounded = false; return; }
 		if (Array.isArray(node)) {
-			for (const child of node) { if (!bounded) break; visit(child); }
+			for (const child of node) { if (!bounded) break; visit(child, inItem); }
 			return;
 		}
 		const object = asObject(node);
 		if (!object) return;
 		for (const [key, child] of Object.entries(object)) {
-			if (ITEMS.includes(key)) itemCount += 1;
+			const isItem = ITEMS.includes(key);
+			if (isItem && !inItem) itemCount += 1;
 			if (key === "appendContinuationItemsAction" || key === "reloadContinuationItemsCommand" ||
 				key === "twoColumnBrowseResultsRenderer" || key === "singleColumnBrowseResultsRenderer") recognized = true;
 			if (key === "continuationItemRenderer" && asObject(child)) {
@@ -130,11 +132,11 @@ const HISTORY_RESPONSE_SCAN_SOURCE = String.raw`(value) => {
 				else bounded = false;
 			}
 			if (key === "continuations" && Array.isArray(child) && child.length > 0) recognized = true;
-			visit(child);
+			visit(child, inItem || isItem);
 			if (!bounded) break;
 		}
 	};
-	visit(value);
+	visit(value, false);
 	if (tokens.size > 8) bounded = false;
 	// A list key alone proves nothing: the response must carry readable rows or an explicit continuation item.
 	return {

@@ -36,7 +36,10 @@ Any correlated non-2xx answer, and any browse call the run cannot attribute
 (XHR, an undecodable body, an over-long or unknown continuation token) after the
 last terminal response, vetoes the end claim for the run. A request for another
 page (a browseId other than history, no continuation) is counted as foreign and
-ignored. A veto blocks the complete STATE only; the partial checkpoint rests on
+ignored only when its response is 2xx, reads, and shows no rows and no
+continuation; otherwise it counts as uncorrelated. A history browse still in
+flight (started, not yet answered or failed) keeps the final refresh from being
+stable, bounded by the three refreshes and the page-log drain wait. A veto blocks the complete STATE only; the partial checkpoint rests on
 rows already read and is kept. On this path the terminal logged response must also
 account for the page: if the page shows more rows than the bootstrap plus the
 logged responses carried, or still shows a continuation, the log is blind (a
