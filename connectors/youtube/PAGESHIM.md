@@ -25,7 +25,7 @@ used), decodes the gzip body with `DecompressionStream`, and keeps the request
 continuation token or browseId, the status, and a compact scan of the response
 (recognized, has continuation, item count, next token). An XHR browse is logged
 the same way when the call ends (`loadend`), with its request body and status;
-a failed or aborted XHR logs status 0. Response bodies (about 450 KB) never cross to the
+a failed or aborted XHR logs status 0. Each send binds its own `loadend` listener (once), so a reused XHR logs each call once with its own body, and the response is read by `responseType` (`json` from `response`, `''` or `text` from `responseText`, any other type unreadable). Response bodies (about 450 KB) never cross to the
 host; the log holds at most 32 entries and flags overflow. The traversal drains
 the log each round, waits a bounded time for calls still in flight, and feeds
 the same transport-free tracker step Desktop uses. The page scan and the host
@@ -49,7 +49,10 @@ response body that stalls counts as unreadable, and a request body whose decode
 stalls counts as unattributable; both veto completion without stalling the
 chain. Every `page.evaluate` in the page-log drain and in the final refresh gets
 the same deadline; a timeout is incomplete evidence (`history-evidence-timeout`)
-and vetoes completion. A history browse still in
+and vetoes completion. On Desktop, each evaluate and capture in the history walk
+races one generous deadline (`HISTORY_LOOP_CALL_DEADLINE_MS`, 60 s); a stalled
+call ends the walk with `history-loop-timeout`: no complete STATE, the stream
+fails, and the checkpoint stays tied to the rows already accounted. A history browse still in
 flight (started, not yet answered or failed) keeps the final refresh from being
 stable, bounded by the three refreshes and the page-log drain wait. A veto blocks the complete STATE only; the partial checkpoint rests on
 rows already read and is kept. On this path the terminal logged response must also

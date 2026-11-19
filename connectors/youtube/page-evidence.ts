@@ -739,10 +739,14 @@ const HISTORY_BROWSE_LOG_INSTALL_FUNCTION = `(request) => {
 				// Like the fetch path: the outcome is logged when the call ends, with its status and request body.
 				const xhr = this;
 				const requestPromise = readRequest(null, { body });
+				// A JSON-typed XHR throws on responseText, so the body is read by type.
 				const readResponse = () => {
-					const text = typeof xhr.response === "string" && xhr.response !== "" ? xhr.response : xhr.responseText;
-					return scan(JSON.parse(text));
+					const type = xhr.responseType;
+					if (type === "json") return scan(xhr.response);
+					if (type === "" || type === "text") return scan(JSON.parse(xhr.responseText));
+					return null;
 				};
+				// One listener per send: a reused XHR must not log a later response against this body.
 				xhr.addEventListener("loadend", () => {
 					const status = xhr.status;
 					requestPromise.then((requestBody) => {
@@ -750,7 +754,7 @@ const HISTORY_BROWSE_LOG_INSTALL_FUNCTION = `(request) => {
 						if (status >= 200 && status < 300) { try { summary = readResponse(); } catch {} }
 						finish({ requestBody, status, summary });
 					}, () => finish(failed));
-				});
+				}, { once: true });
 			}
 			return send.apply(this, arguments);
 		};
