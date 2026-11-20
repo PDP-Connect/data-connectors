@@ -303,29 +303,28 @@ interface ProjectPass {
 }
 
 /**
- * A page ends when has_more is not true, even if empty. With has_more true,
- * follow a fresh cursor even for an empty page; a missing cursor is partial.
- * A seen cursor ends successfully when it echoes the current cursor or adds
- * no new items; a loop back after new items is partial. Callers separately
- * guard consecutive fresh-cursor pages that add no items.
+ * A page ends when it says so: has_more false, or no has_more and no cursor.
+ * A fresh cursor is followed even for an empty page or one without has_more;
+ * has_more true with no cursor is partial. A cursor already used is partial
+ * whatever the page added: an echo or a loop does not prove the end. Callers
+ * separately guard consecutive fresh-cursor pages that add no items.
  */
 export function nextCursorStep(
 	j: Record<string, unknown>,
 	seen: ReadonlySet<string>,
-	current: string | null,
+	_current: string | null,
 	_pageItems: number,
-	newItems: number,
+	_newItems: number,
 ): { next: string } | { done: "ok" | "partial" } {
-	if (j.has_more !== true) return { done: "ok" };
 	const next =
 		typeof j.cursor === "string"
 			? j.cursor
 			: typeof j.cursor === "number"
 				? String(j.cursor)
 				: null;
-	if (next === null) return { done: "partial" };
-	if (seen.has(next))
-		return { done: next === current || newItems === 0 ? "ok" : "partial" };
+	if (j.has_more === false) return { done: "ok" };
+	if (next === null) return { done: j.has_more === true ? "partial" : "ok" };
+	if (seen.has(next)) return { done: "partial" };
 	return { next };
 }
 

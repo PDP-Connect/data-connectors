@@ -1643,11 +1643,11 @@ test("cursor steps honour explicit ends, empty pages and repeated cursors", () =
 			next: "c",
 		},
 	);
-	// The last page echoes its own cursor: done, nothing refetched.
+	// The last page echoes its own cursor: nothing refetched, but no proven end.
 	assert.deepEqual(
 		nextCursorStep({ has_more: true, cursor: "b" }, seen, "b", 5, 5),
 		{
-			done: "ok",
+			done: "partial",
 		},
 	);
 	// Back to an earlier page after new items: a loop that may hide more.
@@ -1660,15 +1660,22 @@ test("cursor steps honour explicit ends, empty pages and repeated cursors", () =
 	assert.deepEqual(
 		nextCursorStep({ has_more: true, cursor: "a" }, seen, "b", 5, 0),
 		{
-			done: "ok",
+			done: "partial",
 		},
 	);
 	assert.deepEqual(nextCursorStep({ has_more: true }, seen, "b", 5, 5), {
 		done: "partial",
 	});
+	// A fresh cursor is followed even when has_more is missing.
+	assert.deepEqual(nextCursorStep({ cursor: "c" }, seen, "b", 5, 5), {
+		next: "c",
+	});
+	assert.deepEqual(nextCursorStep({ cursor: "b" }, seen, "b", 5, 5), {
+		done: "partial",
+	});
 });
 
-test("a project whose last page echoes its cursor is complete, not failed", async () => {
+test("a project whose last page echoes its cursor keeps its rows but counts as failed", async () => {
 	const pageOne = Array.from({ length: 10 }, (_, k) => projectItem(5 + k));
 	const { run, harness, calls } = runHarness(["usage_summary"], {
 		site: {
@@ -1680,7 +1687,8 @@ test("a project whose last page echoes its cursor is complete, not failed", asyn
 	await run();
 	const [summary] = records(harness, "usage_summary");
 	const listing = sub(sub(summary, "coverage"), "project_listing");
-	assert.equal(listing.failed, 0);
+	// Both sidebar projects end on an echoed cursor, so neither proves its end.
+	assert.equal(listing.failed, 2);
 	assert.equal(listing.conversations_added, 11);
 	assert.equal(
 		calls.filter((c) => c.path.startsWith("/gizmos/g-p-CANARYPROJECTA/"))
@@ -2026,13 +2034,17 @@ test("usage profile task pages that loop back to an earlier cursor are partial",
 	assert.deepEqual(h.taskCursors, [0, 1, 2, 3, 4, 5]);
 });
 
-test("usage profile task page that echoes its own cursor ends the walk", async () => {
+test("usage profile task page that echoes its own cursor is partial and does not checkpoint", async () => {
 	const h = uncappedUsageHarness([], 0, 1, 3, false, "2");
 	await h.run();
 	const [profile] = records(h.harness, "account_profile");
-	assert.equal(sub(profile, "source_status").tasks, "ok");
+	assert.equal(sub(profile, "source_status").tasks, "partial");
 	assert.equal(profile?.scheduled_task_count, 3);
 	assert.deepEqual(h.taskCursors, [0, 1, 2]);
+	for (const kind of ["STATE", "DETAIL_COVERAGE"]) {
+		assert.equal(h.harness.protocolMessages.some((message) =>
+			message.type === kind && "stream" in message && message.stream === "account_profile"), false, kind);
+	}
 });
 
 test("usage sidebar reads 21 pages and feeds every project id", async () => {
