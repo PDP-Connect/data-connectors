@@ -19,6 +19,7 @@ import {
 	ingestRecord,
 } from "../../reference-implementation/server/records.ts";
 import {
+	collectEvents,
 	collectGists,
 	collectIssues,
 	collectPullRequests,
@@ -29,6 +30,7 @@ import {
 	GITHUB_RETRYABLE_PATTERN,
 	isoYear,
 	prCreatedWindows,
+	resolveContributionWindows,
 	resolvePrSearchWindows,
 	type StreamCtx,
 } from "./index.ts";
@@ -2042,5 +2044,73 @@ test("GitHub repositories: 201 list pages reach normal coverage and STATE", asyn
 	assert.deepEqual(
 		long.coverages.map((c) => ({ ...c, considered: 1, covered: 1 })),
 		short.coverages,
+	);
+});
+
+function publicEvent(id: string) {
+	return {
+		id,
+		type: "PushEvent",
+		created_at: "2026-06-02T12:00:00Z",
+		repo: { name: "fixture/repo" },
+	};
+}
+
+test("GitHub events follow a next link on a short page and emit each identity once", async (t: TestContext) => {
+	let eventPages = 0;
+	mockFetch(t, async (input) => {
+		const url = new URL(String(input));
+		if (url.pathname === "/user") return jsonResponse({ login: "fixture" });
+		eventPages += 1;
+		assert.equal(url.searchParams.get("page"), eventPages === 1 ? "1" : "7");
+		const next = new URL(url);
+		next.searchParams.set("page", "7");
+		return eventPages === 1
+			? jsonResponse([publicEvent("1")], {
+					headers: { link: `<${next}>; rel="next"` },
+				})
+			: jsonResponse([publicEvent("1"), publicEvent("2")]);
+	});
+	const { ctx, records, states } = makeCtx(["events"]);
+	await collectEvents(ctx);
+	assert.equal(eventPages, 2);
+	assert.equal(records.length, 2);
+	assert.equal(states.length, 1);
+});
+
+for (const failure of ["repeated link", "duplicate terminal page"]) {
+	test(`GitHub events refuse a ${failure} without coverage or STATE`, async (t: TestContext) => {
+		mockFetch(t, async (input) => {
+			const url = new URL(String(input));
+			if (url.pathname === "/user") return jsonResponse({ login: "fixture" });
+			if (url.searchParams.get("page") === "1") {
+				const next = new URL(url);
+				if (failure !== "repeated link") next.searchParams.set("page", "2");
+				return jsonResponse([publicEvent("1")], {
+					headers: { link: `<${next}>; rel="next"` },
+				});
+			}
+			return jsonResponse([publicEvent("1")]);
+		});
+		const { ctx, coverages, states, skips } = makeCtx(["events"]);
+		await assert.rejects(() => collectEvents(ctx), isRetryableGithubGap);
+		assert.equal(states.length, 0);
+		assert.equal(coverages.length, 0);
+		assert.equal(skips.length, 1);
+	});
+}
+
+test("GitHub contributions split a multi-year incremental gap at UTC calendar boundaries", () => {
+	assert.deepEqual(
+		resolveContributionWindows(
+			"2023-10-01",
+			"2019-04-01",
+			new Date("2025-06-15T12:00:00Z"),
+		),
+		[
+			{ from: "2025-01-01T00:00:00Z", to: "2025-06-15T12:00:00.000Z" },
+			{ from: "2024-01-01T00:00:00Z", to: "2024-12-31T23:59:59Z" },
+			{ from: "2023-10-01T00:00:00Z", to: "2023-12-31T23:59:59Z" },
+		],
 	);
 });

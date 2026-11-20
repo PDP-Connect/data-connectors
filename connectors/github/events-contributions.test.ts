@@ -302,11 +302,17 @@ function installContributionsFetch(
 }
 
 test("collectContributions: emits one record per day and a STATE cursor", async (t: TestContext) => {
-	installContributionsFetch(t, () =>
-		graphQlContributionsResponse([
-			{ date: "2026-06-01", count: 3 },
-			{ date: "2026-06-02", count: 0 },
-		]),
+	// The cursor year's window and the current year's window are both asked for;
+	// each answers only with its own days, as GitHub does.
+	installContributionsFetch(t, (variables) =>
+		graphQlContributionsResponse(
+			String(variables.from).startsWith("2026")
+				? [
+						{ date: "2026-06-01", count: 3 },
+						{ date: "2026-06-02", count: 0 },
+					]
+				: [],
+		),
 	);
 	const { ctx, records, states } = makeCtx(["contributions"], {
 		contributions: { last_date: "2025-12-31" },
@@ -373,7 +379,7 @@ test("resolveContributionWindows: full resync partitions by calendar year back t
 	const now = new Date("2026-06-15T00:00:00Z");
 	const windows = resolveContributionWindows(null, "2024-03-01T00:00:00Z", now);
 	assert.deepEqual(windows, [
-		{ from: "2026-01-01T00:00:00Z", to: "2026-12-31T23:59:59Z" },
+		{ from: "2026-01-01T00:00:00Z", to: now.toISOString() },
 		{ from: "2025-01-01T00:00:00Z", to: "2025-12-31T23:59:59Z" },
 		{ from: "2024-01-01T00:00:00Z", to: "2024-12-31T23:59:59Z" },
 	]);
