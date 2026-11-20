@@ -1,0 +1,28 @@
+{
+  "schema": "pdpp.connector-claim/1",
+  "connector": "readwise",
+  "captured_at": "2026-11-17T21:41:52.144Z",
+  "verified_at": "2026-11-17T21:42:27.944Z",
+  "claim": "diagnostic_replay",
+  "limitations": [
+    "network isolation: process-local only - descendant escape not excluded"
+  ],
+  "coverage": [
+    "empty_state_run",
+    "state_seeded_second_run_with_changed_requests"
+  ],
+  "runs": 2,
+  "drivers": [
+    "recorded-http"
+  ],
+  "captured_with": {
+    "source_digest": "4cd1788172b6e7e6fb4ae8a295324079bbef3290b7c6258ae7821863e99303d5",
+    "declaration_digest": "8678fa7ea5538b5f3f2612c7e74f33afdf6a98910e32ef38e2f0e112c65c7e35"
+  },
+  "verified_subject": {
+    "source_digest": "4cd1788172b6e7e6fb4ae8a295324079bbef3290b7c6258ae7821863e99303d5",
+    "declaration_digest": "8678fa7ea5538b5f3f2612c7e74f33afdf6a98910e32ef38e2f0e112c65c7e35"
+  },
+  "scenario_path": "readwise-account-scenario.json",
+  "scenario_status": "candidate oracle"
+}
