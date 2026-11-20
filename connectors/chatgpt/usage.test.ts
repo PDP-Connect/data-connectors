@@ -1611,10 +1611,11 @@ test("cursor steps honour explicit ends, empty pages and repeated cursors", () =
 			done: "ok",
 		},
 	);
+	// Empty pages with a fresh continuation do not prove source end.
 	assert.deepEqual(
 		nextCursorStep({ has_more: true, cursor: "c" }, seen, "b", 0, 0),
 		{
-			done: "ok",
+			next: "c",
 		},
 	);
 	// The last page echoes its own cursor: done, nothing refetched.
