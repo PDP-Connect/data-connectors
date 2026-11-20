@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { describe } from "node:test";
 import {
 	collectAnthropicLive,
 	MAX_CONVERSATIONS_PER_RUN,
@@ -300,7 +300,7 @@ test("account_plan is skipped, not nulled, when subscription_details fails trans
 	assert.equal(free.of("account_plan")[0]?.renews_at, null);
 });
 
-test("payment_country is the card country when valid, otherwise null", async () => {
+describe("payment_country is the card country when valid, otherwise null", { concurrency: false }, () => {
 	const withPayment = (payment_method: unknown) =>
 		harness([], {
 			streams: ["account_plan"],
@@ -322,30 +322,37 @@ test("payment_country is the card country when valid, otherwise null", async () 
 		["number", { country: 12 }, null],
 		["empty", { country: "" }, null],
 	];
-	for (const [name, payment, expected] of cases) {
-		const h = withPayment(payment);
-		await collectAnthropicLive(h.ctx);
-		const [record] = h.of("account_plan");
-		assert.equal(record?.payment_country, expected, name);
-		assert.equal(record?.has_active_subscription, true, name);
-		assert.deepEqual(h.skips(), [], name);
-	}
+	// The harness temporarily swaps globalThis.fetch; run one case at a time.
+	cases.forEach(([name, payment, expected]) => {
+		test(name, async () => {
+			const h = withPayment(payment);
+			await collectAnthropicLive(h.ctx);
+			const [record] = h.of("account_plan");
+			assert.equal(record?.payment_country, expected, name);
+			assert.equal(record?.has_active_subscription, true, name);
+			assert.deepEqual(h.skips(), [], name);
+		});
+	});
 });
 
-test("payment_country is null when subscription_details is unreadable", async () => {
-	for (const status of [403, 404]) {
-		const h = harness([], {
-			streams: ["account_plan"],
-			route: (url) =>
-				url.pathname.endsWith("/subscription_details")
-					? { status }
-					: undefined,
+describe("payment_country is null when subscription_details is unreadable", { concurrency: false }, () => {
+	[403, 404].forEach((status) => {
+		test(`HTTP ${status}`, async () => {
+			const h = harness([], {
+				streams: ["account_plan"],
+				route: (url) =>
+					url.pathname.endsWith("/subscription_details")
+						? { status }
+						: undefined,
+			});
+			await collectAnthropicLive(h.ctx);
+			assert.equal(h.of("account_plan")[0]?.payment_country, null, String(status));
+			assert.deepEqual(h.skips(), []);
 		});
-		await collectAnthropicLive(h.ctx);
-		assert.equal(h.of("account_plan")[0]?.payment_country, null, String(status));
-		assert.deepEqual(h.skips(), []);
-	}
-	assert.equal(paymentCountryOf(null), null);
+	});
+	test("null parser input", () => {
+		assert.equal(paymentCountryOf(null), null);
+	});
 });
 
 test("usage_limits emits one record per reported limit", async () => {
@@ -461,20 +468,23 @@ test("organization selection follows the export connector's rule", () => {
 	assert.equal(selectChatOrganization({}), null);
 });
 
-test("account_plan rejects malformed raw secondary organizations before certifying inventory", async () => {
-	for (const malformed of [{ uuid: "team" }, { uuid: "team", capabilities: "raven" }, { capabilities: ["raven"] }, null]) {
-		const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed] });
-		await collectAnthropicLive(h.ctx);
-		assert.deepEqual(h.of("account_plan"), []);
-		assert.deepEqual(h.states("account_plan"), []);
-		assert.ok(h.emitted.every((event) => event.type !== "DETAIL_COVERAGE"));
-		assert.equal(h.skips().length, 1);
-		assert.equal(h.skips()[0]?.reason, "parse_error");
-		const skip = h.emitted.find((event) => event.type === "SKIP_RESULT") as
-			| { recovery_hint?: { retryable?: boolean } }
-			| undefined;
-		assert.equal(skip?.recovery_hint?.retryable, true);
-	}
+describe("account_plan rejects malformed raw secondary organizations before certifying inventory", { concurrency: false }, () => {
+	const cases = [{ uuid: "team" }, { uuid: "team", capabilities: "raven" }, { capabilities: ["raven"] }, null];
+	cases.forEach((malformed, i) => {
+		test(`malformed input ${i + 1}`, async () => {
+			const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed] });
+			await collectAnthropicLive(h.ctx);
+			assert.deepEqual(h.of("account_plan"), []);
+			assert.deepEqual(h.states("account_plan"), []);
+			assert.ok(h.emitted.every((event) => event.type !== "DETAIL_COVERAGE"));
+			assert.equal(h.skips().length, 1);
+			assert.equal(h.skips()[0]?.reason, "parse_error");
+			const skip = h.emitted.find((event) => event.type === "SKIP_RESULT") as
+				| { recovery_hint?: { retryable?: boolean } }
+				| undefined;
+			assert.equal(skip?.recovery_hint?.retryable, true);
+		});
+	});
 });
 
 test("account_plan treats a valid empty-capabilities secondary as a clean snapshot", async () => {

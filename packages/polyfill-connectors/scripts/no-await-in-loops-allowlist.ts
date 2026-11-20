@@ -6557,13 +6557,6 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			category: "test_assertion_sequencing",
 			note: "Malformed organization cases run in sequence because each collector harness replaces global fetch; each case's assertions finish before the next harness starts.",
 		},
-		{
-			path: "connectors/anthropic_live/index.test.ts",
-			line: 413,
-			column: 3,
-			category: "test_assertion_sequencing",
-			note: "Malformed organization cases run against isolated collector harnesses in sequence so each case's assertions finish before the next starts.",
-		},
 		// ─── connectors/slack_browser ────────────────────────────────────────
 		{
 			path: "connectors/slack_browser/collector.ts",
