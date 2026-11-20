@@ -48,6 +48,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import {
 	connectorsDir,
 	fixturesDir,
@@ -68,6 +69,57 @@ import {
 const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
 const TEMP_NAME_BROWSER = `zz_init_browser_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";
+
+test("API scaffold reports transient HTTP failures as retryable and client errors as terminal", () => {
+	withPrivateConnectorTree(() => {
+		const args = parseArgs([TEMP_NAME]);
+		const plan = writeScaffold(args);
+		const fixture = join(plan.connectorDir, "http-fixture.mjs");
+		writeFileSync(
+			fixture,
+			'globalThis.fetch = async () => new Response("synthetic failure", { status: Number(process.env.SYNTHETIC_STATUS) });\n',
+		);
+		for (const status of [408, 429, 503, 400, 401]) {
+			const result = spawnSync(
+				process.execPath,
+				[
+					"--import",
+					"tsx",
+					"--import",
+					pathToFileURL(fixture).href,
+					plan.files.indexTs,
+				],
+				{
+					cwd: PACKAGE_ROOT,
+					env: {
+						...childTestEnv(),
+						[`${TEMP_NAME.toUpperCase()}_API_TOKEN`]: "synthetic-token",
+						SYNTHETIC_STATUS: String(status),
+					},
+					input: `${JSON.stringify({ type: "START", scope: { streams: [{ name: TEMP_STREAM }] } })}\n`,
+					encoding: "utf8",
+					timeout: 15_000,
+				},
+			);
+			assert.equal(result.error, undefined);
+			const frames = result.stdout
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const failure = frames.find((frame) => frame.type === "DONE")?.error;
+			assert.ok(failure, `${status}: ${result.stdout}\n${result.stderr}`);
+			assert.equal(
+				failure.retryable,
+				status === 408 || status === 429 || status >= 500,
+				`${status}: ${JSON.stringify(failure)}`,
+			);
+			assert.equal(
+				frames.some((frame) => frame.type === "STATE"),
+				false,
+			);
+		}
+	});
+});
 
 function withPrivateConnectorTree(
 	run: () => void,
@@ -714,8 +766,9 @@ test("CLI collision refuses pre-existing targets without changing their bytes", 
 			},
 		);
 		assert.notEqual(result.status, 0);
-		for (const path of [plan.connectorDir, ...files])
+		for (const path of [plan.connectorDir, ...files]) {
 			assert.ok((result.stderr + result.stdout).includes(path));
+		}
 		assert.deepEqual(
 			files.map((path) => readFileSync(path)),
 			before,

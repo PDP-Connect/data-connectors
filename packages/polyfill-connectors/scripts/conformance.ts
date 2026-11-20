@@ -54,14 +54,17 @@ import {
 	computeDeclarationDigest,
 	computeSourceDigest,
 } from "../src/scenario/validate.ts";
+import { checkSubmissionBehavior } from "../src/submission-pilot/check.ts";
 import {
 	checkCoverageProof,
 	checkEvidence,
 	checkSemantics,
 	checkSharedHelpers,
 	checkVersion,
+	declaredNoHttpExemption,
 	parseCoverageRegistry,
 	type ReadinessManifest,
+	requiredForReview,
 	type Step,
 	type Verdict,
 } from "./conformance-readiness.ts";
@@ -93,7 +96,7 @@ export function checkManifest(connector: string): Step {
 				verdict: "FAIL",
 			};
 		}
-		const tier = manifest.capabilities?.public_listing?.tier ?? "unset";
+		const tier = manifest?.capabilities?.public_listing?.tier ?? "unset";
 		return {
 			detail: `${streams} stream(s), lifecycle tier "${tier}"`,
 			name: "manifest",
@@ -275,17 +278,30 @@ function connectorSource(connector: string): string {
 			}
 		}
 	};
-	if (existsSync(root)) walk(root);
+	if (existsSync(root)) {
+		walk(root);
+	}
 	return parts.join("\n");
 }
 
 /**
- * The manifest version on the base branch: null when the connector does not
- * exist there (new), undefined when there is no base to compare. CI passes
+ * Resolved base and manifest (null for a new connector); undefined when no
+ * base can be read. CI passes
  * the PR's base commit in CONFORMANCE_BASE_REF; locally the upstream main
  * comes before a fork's own main.
  */
-function baseManifestVersion(connector: string): string | null | undefined {
+interface ListingManifest {
+	capabilities?: { public_listing?: { tier?: string } };
+	version?: string;
+}
+
+function baseManifest(connector: string):
+	| {
+			revision: string;
+			manifest: ListingManifest | null;
+			hasReplayClaim: boolean;
+	  }
+	| undefined {
 	const git = (args: string[]): string =>
 		execFileSync("git", args, {
 			cwd: repoRoot,
@@ -299,8 +315,14 @@ function baseManifestVersion(connector: string): string | null | undefined {
 		"main",
 	].filter((ref): ref is string => Boolean(ref));
 	for (const ref of refs) {
+		let revision: string;
 		try {
-			git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+			revision = git([
+				"rev-parse",
+				"--verify",
+				"--quiet",
+				`${ref}^{commit}`,
+			]).trim();
 		} catch {
 			continue;
 		}
@@ -308,12 +330,22 @@ function baseManifestVersion(connector: string): string | null | undefined {
 		try {
 			git(["cat-file", "-e", path]);
 		} catch {
-			return null;
+			return { revision, manifest: null, hasReplayClaim: false };
 		}
 		try {
-			const version = (JSON.parse(git(["show", path])) as { version?: unknown })
-				.version;
-			return typeof version === "string" ? version : "";
+			return {
+				revision,
+				manifest: JSON.parse(git(["show", path])) as ListingManifest,
+				hasReplayClaim: Boolean(
+					git([
+						"ls-tree",
+						"--name-only",
+						ref,
+						"--",
+						`connectors/${connector}/evidence/claim.json`,
+					]).trim(),
+				),
+			};
 		} catch {
 			return undefined;
 		}
@@ -357,7 +389,15 @@ function readinessStepsOrThrow(connector: string): Step[] {
 		computeSourceDigest(dir),
 		computeDeclarationDigest(manifestFile),
 	);
-	const version = checkVersion(manifest, baseManifestVersion(connector));
+	const baseline = baseManifest(connector);
+	const version = checkVersion(
+		manifest,
+		baseline
+			? baseline.manifest === null
+				? null
+				: (baseline.manifest.version ?? "")
+			: undefined,
+	);
 	return [
 		checkEvidence(connector, evidence.status, {
 			claim: evidence.claim,
@@ -377,7 +417,10 @@ function readinessStepsOrThrow(connector: string): Step[] {
  */
 export function runConformance(
 	connector: string,
-	{ staticOnly = false }: { staticOnly?: boolean } = {},
+	{
+		staticOnly = false,
+		submissionPilot = false,
+	}: { staticOnly?: boolean; submissionPilot?: boolean } = {},
 ): Step[] {
 	const manifest = checkManifest(connector);
 	if (manifest.verdict === "FAIL") {
@@ -389,6 +432,9 @@ export function runConformance(
 		checkPilotFixture(connector),
 		...readinessSteps(connector),
 		...(staticOnly ? [] : [checkMockMutation(connector)]),
+		...(submissionPilot
+			? checkSubmissionBehavior(repoRoot, connector, staticOnly)
+			: []),
 	];
 }
 
@@ -400,23 +446,138 @@ const GLYPH: Record<Verdict, string> = {
 	WEAK: "⚠",
 };
 
+function reportSubject(connector: string) {
+	let revision: string | null = null;
+	let clean = false;
+	try {
+		const git = (args: string[]) =>
+			execFileSync(
+				"git",
+				["--no-replace-objects", "--no-optional-locks", ...args],
+				{
+					cwd: repoRoot,
+					encoding: "utf8",
+					stdio: "pipe",
+				},
+			).trim();
+		revision = git(["rev-parse", "--verify", "HEAD^{commit}"]);
+		clean =
+			git([
+				"status",
+				"--porcelain=v1",
+				"--untracked-files=all",
+				"--ignore-submodules=none",
+			]) === "";
+	} catch {
+		// Local checks still work outside Git; such a report cannot bind a PR.
+	}
+	const digest = (read: () => string): string | null => {
+		try {
+			return read();
+		} catch {
+			return null;
+		}
+	};
+	return {
+		revision,
+		clean,
+		source_digest: digest(() =>
+			computeSourceDigest(join(CONNECTORS_DIR, connector)),
+		),
+		declaration_digest: digest(() =>
+			computeDeclarationDigest(manifestPath(connector)),
+		),
+	};
+}
+
+function jsonReport(
+	connector: string,
+	staticOnly: boolean,
+	subject: ReturnType<typeof reportSubject>,
+	isKnownScaffold: boolean,
+	steps: Step[],
+) {
+	let manifest: ListingManifest = {};
+	try {
+		manifest = JSON.parse(readFileSync(manifestPath(connector), "utf8"));
+	} catch {
+		/* The manifest step reports this failure. */
+	}
+	const declaredTier = manifest?.capabilities?.public_listing?.tier;
+	const tier =
+		declaredTier &&
+		["development", "preview", "supported"].includes(declaredTier)
+			? declaredTier
+			: null;
+	const baseline = baseManifest(connector);
+	const baselineTier = baseline?.manifest?.capabilities?.public_listing?.tier;
+	const legacyPromotion =
+		(tier === "preview" || tier === "supported") &&
+		(tier === baselineTier ||
+			(baselineTier === "supported" && tier === "preview")) &&
+		baseline?.hasReplayClaim === false;
+	const entry = join(CONNECTORS_DIR, connector, "index.ts");
+	const noHttpReason = existsSync(entry)
+		? declaredNoHttpExemption(readFileSync(entry, "utf8"))
+		: undefined;
+	const findings = steps.map((step) => ({
+		...step,
+		...(step.name === "mock mutation" && noHttpReason
+			? {
+					detail: `${step.detail}; author declares no HTTP requests: ${noHttpReason}`,
+				}
+			: {}),
+		required_for_review: requiredForReview(step, {
+			isKnownScaffold,
+			promotedTier: tier === "preview" || tier === "supported",
+			legacyPromotion,
+			noHttpExemption: Boolean(noHttpReason),
+		}),
+	}));
+
+	return {
+		schema: "pdpp.conformance-report/1",
+		base_revision: baseline?.revision ?? null,
+		connector,
+		tier,
+		mode: staticOnly ? "static" : "full",
+		subject,
+		isKnownScaffold,
+		steps: findings,
+	};
+}
+
 function main(): void {
 	const args = process.argv.slice(2);
 	const jsonOut = args.includes("--json");
 	const staticOnly = args.includes("--static");
+	const submissionPilot = args.includes("--submission-pilot");
 	const connector = args.find((a) => !a.startsWith("--"));
 	if (!connector) {
-		console.error("usage: conformance <connector> [--json] [--static]");
+		console.error(
+			"usage: conformance <connector> [--json] [--static] [--submission-pilot]",
+		);
 		process.exit(2);
 	}
 
-	const steps = runConformance(connector, { staticOnly });
+	const before = reportSubject(connector);
+	const steps = runConformance(connector, { staticOnly, submissionPilot });
+	const subject = reportSubject(connector);
+	if (JSON.stringify(before) !== JSON.stringify(subject)) {
+		subject.clean = false;
+	}
 	const isKnownScaffold = (
 		KNOWN_SCAFFOLD_CONNECTORS as readonly string[]
 	).includes(connector);
 
 	if (jsonOut) {
-		console.log(JSON.stringify({ connector, isKnownScaffold, steps }, null, 2));
+		console.log(
+			JSON.stringify(
+				jsonReport(connector, staticOnly, subject, isKnownScaffold, steps),
+				null,
+				2,
+			),
+		);
 	} else {
 		console.log(`\nconformance: ${connector}\n`);
 		if (isKnownScaffold) {

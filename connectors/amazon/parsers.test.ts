@@ -892,7 +892,13 @@ test("parseAmazonProfileDom: signed-in Prime member nav bar", () => {
 		<div id="nav-prime-menu">Your Prime</div>
 	</body></html>`;
 	const record = parseAmazonProfileDom(html);
-	assert.deepEqual(record, { id: "me", name: "Jane Doe", is_prime: true });
+	assert.deepEqual(record, {
+		id: "me",
+		name: "Jane Doe",
+		is_prime: true,
+		postal_code: null,
+		store: "amazon.com",
+	});
 });
 
 test("parseAmazonProfileDom: signed-in non-Prime nav bar (Try Prime upsell is not membership)", () => {
@@ -901,7 +907,13 @@ test("parseAmazonProfileDom: signed-in non-Prime nav bar (Try Prime upsell is no
 		<div id="navbar-prime">Try Prime</div>
 	</body></html>`;
 	const record = parseAmazonProfileDom(html);
-	assert.deepEqual(record, { id: "me", name: "Jane Doe", is_prime: false });
+	assert.deepEqual(record, {
+		id: "me",
+		name: "Jane Doe",
+		is_prime: false,
+		postal_code: null,
+		store: "amazon.com",
+	});
 });
 
 test("parseAmazonProfileDom: signed-out nav bar yields null name and null is_prime", () => {
@@ -921,5 +933,11 @@ test("parseAmazonProfileDom: missing nav bar entirely (selector drift) degrades 
 	const record = parseAmazonProfileDom(
 		"<html><body>unexpected layout</body></html>",
 	);
-	assert.deepEqual(record, { id: "me", name: null, is_prime: null });
+	assert.deepEqual(record, {
+		id: "me",
+		name: null,
+		is_prime: null,
+		postal_code: null,
+		store: "amazon.com",
+	});
 });
