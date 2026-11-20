@@ -7232,6 +7232,73 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	);
 	assert.ok(skip);
 	assert.equal(skip.reason, "pagination_cap_truncated");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+});
+
+test("conversation search slices resume past 5000 while a truncated head still leaves coverage open", async () => {
+	const prior = "2000-01-01T00:00:00.000Z";
+	const row = (index: number) => makeConvo({
+		id: `synthetic-history-${index}`,
+		update_time: 1_700_100_000 - index,
+	});
+	const total = 17_100; // 12,000 older rows after the initial boundary.
+	const start = {
+		position_hint: 5100,
+		oldest_update_time: new Date(Number(row(5099).update_time) * 1000).toISOString(),
+		boundary_ids: [row(5099).id],
+	};
+	const run = async (backfill: typeof start, stallSuffix = false) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const cursors: number[] = [];
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				if (path.startsWith("/conversations/search?")) {
+					const cursor = Number(new URLSearchParams(path.split("?")[1]).get("cursor"));
+					cursors.push(cursor);
+					if (stallSuffix && cursor >= backfill.position_hint - 30) {
+						return { status: 503, json: null };
+					}
+					return { status: 200, json: {
+						items: Array.from({ length: Math.min(30, Math.max(0, total - cursor)) }, (_, i) => row(cursor + i)),
+						next_cursor: cursor + 30 < total ? cursor + 30 : null,
+					} };
+				}
+				if (path.startsWith("/conversation/")) return emptyConversationDetail(path);
+				throw new Error(`unexpected fetch ${path}`);
+			},
+		};
+		await runConversationsAndMessagesStreams({
+			api, emit: harness.emit, emitRecord: harness.emitRecord,
+			sleep: () => Promise.resolve(), progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		}, { conversations: {
+			enumeration_version: 1, last_update_time: prior,
+			detail_version: 2, detail_frontier: null, backfill,
+		} } as CollectContext["state"],
+		{ detailPacing: { random: () => 0, sleep: () => undefined } });
+		const states = harness.protocolMessages.filter(
+			(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+				m.type === "STATE" && m.stream === "conversations",
+		);
+		assert.ok(states.length);
+		const cursor = states.at(-1)?.cursor as { last_update_time: string; backfill: typeof start };
+		assert.equal(cursor.last_update_time, prior);
+		assert.ok(harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "pagination_cap_truncated",
+		), "head still truncates");
+		assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+		return { cursors, backfill: cursor.backfill };
+	};
+	const first = await run(start);
+	assert.ok(first.cursors.some((cursor) => cursor > 5100));
+	assert.equal(first.backfill.position_hint, 10080);
+	const second = await run(first.backfill);
+	assert.equal(second.backfill.position_hint, 15060);
+	const third = await run(second.backfill);
+	assert.ok(third.cursors.includes(total), "third suffix reads the provider's terminal probe");
+	assert.equal(third.backfill.position_hint, total);
+	assert.deepEqual((await run(start, true)).backfill, start, "a stalled suffix cannot replace its saved boundary");
 });
 
 // ─── task 16: bounded cap-tail deferral materialization ──────────────────────
