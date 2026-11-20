@@ -83,6 +83,11 @@ export interface YearResume {
 	startIndex: number;
 	/** List rows dropped so far because their order date did not parse. */
 	dateDrops: number;
+	/** Set when the source served page 1 again past this `startIndex` and a
+	 *  restart from page 1 got no further. A year carrying it does not run
+	 *  first, and a repeat on it stops the year for the run instead of
+	 *  restarting it again. Gone once the walk moves beyond that index. */
+	stalledAt?: number;
 }
 
 export interface YearState {
@@ -2108,12 +2113,17 @@ interface YearWalkProgress {
 	/** First list page not yet read (0 = nothing read). */
 	startIndex: number;
 	dateDrops: number;
+	/** See `YearResume.stalledAt`. */
+	stalledAt?: number;
 }
 
 interface YearRunResult {
 	orderCount: number;
 	/** True when the walk continued from a saved resume point. */
 	resumedFromSaved: boolean;
+	/** True when the year stopped because the source repeated a page after a
+	 *  restart. Not complete: the resume point stays. */
+	stalled: boolean;
 	/** True when the year's walk stopped at `PAGE_LIMIT` with orders still
 	 *  arriving, rather than because the year ran out of pages. */
 	truncated: boolean;
@@ -2320,6 +2330,11 @@ function saveYearResume(
 			counted: progress.counted,
 			startIndex: progress.startIndex,
 			dateDrops: progress.dateDrops,
+			// Kept only while the walk has not moved beyond the stalled index.
+			...(progress.stalledAt !== undefined &&
+			progress.startIndex <= progress.stalledAt
+				? { stalledAt: progress.stalledAt }
+				: {}),
 		},
 	};
 }
@@ -2360,7 +2375,6 @@ async function runYear(
 	// point always reads the overlap page and one page beyond it, so each run
 	// moves the saved point forward at least one page.
 	let guaranteedPages = overlapPending ? 2 : 0;
-	let overlapIds: Set<string> | undefined;
 	Object.assign(
 		progressOut,
 		overlapPending && resume
@@ -2369,24 +2383,36 @@ async function runYear(
 					counted: resume.counted,
 					startIndex: resume.startIndex,
 					dateDrops: resume.dateDrops,
+					...(resume.stalledAt === undefined
+						? {}
+						: { stalledAt: resume.stalledAt }),
 				}
 			: { anchor: [], counted: 0, startIndex: 0, dateDrops: 0 },
 	);
+	// A year restarts at most once per run. A saved position that already got
+	// nowhere after a restart counts as restarted: another repeat there stops
+	// the year for this run.
+	let restarted = resume?.stalledAt !== undefined;
+	let stalled = false;
+	// Ids of the page just read, while a repeat of it would prove no boundary.
+	let repeatGuard: Set<string> | undefined;
 	// The saved position cannot be trusted: read the year again from page 1.
 	// That first page is itself guaranteed, so the restart saves progress.
-	const restartYear = (): void => {
+	const restartYear = (stalledAt?: number): void => {
 		connectorDiagnostic("amazon", "year_resume_anchor_missing", { year });
 		resumedFromSaved = false;
+		restarted = true;
 		pageCount = 0;
 		yearOrderCount = 0;
 		unparseableDateCount = 0;
-		overlapIds = undefined;
+		repeatGuard = undefined;
 		guaranteedPages = 1;
 		Object.assign(progressOut, {
 			anchor: [],
 			counted: 0,
 			startIndex: 0,
 			dateDrops: 0,
+			stalledAt,
 		});
 	};
 	const walk = await walkPagesWithCeiling({
@@ -2421,16 +2447,19 @@ async function runYear(
 					restartYear();
 					return true;
 				}
-				overlapIds = new Set(orders.map((o) => o.orderId));
-			} else if (overlapIds) {
-				const overlapSeen = overlapIds;
-				overlapIds = undefined;
-				if (
-					orders.length > 0 &&
-					orders.every((o) => overlapSeen.has(o.orderId))
-				) {
-					// The page after the overlap page repeats it: no boundary.
-					restartYear();
+				repeatGuard = new Set(orders.map((o) => o.orderId));
+			} else if (repeatGuard) {
+				const previous = repeatGuard;
+				repeatGuard = undefined;
+				if (orders.length > 0 && orders.every((o) => previous.has(o.orderId))) {
+					// The page repeats the one before it: no boundary.
+					if (restarted) {
+						// A restart already got nowhere. Stop the year for this run,
+						// keep its saved point, count none of these orders.
+						stalled = true;
+						return false;
+					}
+					restartYear(resume?.startIndex);
 					return true;
 				}
 			}
@@ -2474,6 +2503,10 @@ async function runYear(
 				startIndex: pageCount * START_INDEX_STEP,
 				dateDrops: unparseableDateCount,
 			});
+			if (restarted && pageCount === 1) {
+				// A repeat of the restarted page 1 must be caught on the next page.
+				repeatGuard = new Set(orders.map((o) => o.orderId));
+			}
 			await politeDelay(POLITE_DELAY_MS);
 			return true;
 		},
@@ -2511,9 +2544,22 @@ async function runYear(
 			diagnostics: { page_limit: PAGE_LIMIT, total_seen: yearOrderCount, year },
 		});
 	}
+	if (stalled) {
+		// Retryable, not a failure: the source keeps serving a page it already
+		// served. `..._deferred` maps this to the deferred axis (see above).
+		connectorDiagnostic("amazon", "year_page_repeat_stalled", { year });
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "orders",
+			reason: "older_pages_deferred_repeated_page",
+			message: `Amazon year ${year}: the list kept serving a page already read, so the year stopped for this run and will be tried again`,
+			diagnostics: { total_seen: yearOrderCount, year },
+		});
+	}
 	return {
 		orderCount: yearOrderCount,
 		resumedFromSaved,
+		stalled,
 		truncated: walk.truncated,
 		unparseableDateCount,
 	};
@@ -2845,9 +2891,14 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 	// Years with a saved resume point go first, so revisits of years already
 	// finished cannot spend the shared walk budget before an older year moves
 	// forward. A finished year's page-1 check for new orders comes after.
+	// A year whose restart got nowhere (`stalledAt`) does not take first place.
+	const runsFirst = (y: number): boolean => {
+		const resume = yearsState[String(y)]?.resume;
+		return resume !== undefined && resume.stalledAt === undefined;
+	};
 	const yearsInRunOrder = [
-		...years.filter((y) => yearsState[String(y)]?.resume),
-		...years.filter((y) => !yearsState[String(y)]?.resume),
+		...years.filter(runsFirst),
+		...years.filter((y) => !runsFirst(y)),
 	];
 	for (const year of yearsInRunOrder) {
 		const prior = yearsState[String(year)];
@@ -2916,6 +2967,19 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 			});
 			ordersStateEmitted = true;
 			break;
+		}
+		if (yearResult.stalled) {
+			// Not complete, not failed: keep the saved point (marked stalled) and
+			// let the remaining years run.
+			saveYearResume(newYearsState, year, prior, walkProgress);
+			ordersSeen += yearResult.orderCount;
+			await emit({
+				type: "STATE",
+				stream: "orders",
+				cursor: buildOrdersStateCursor(),
+			});
+			ordersStateEmitted = true;
+			continue;
 		}
 		const {
 			orderCount: yearOrderCount,

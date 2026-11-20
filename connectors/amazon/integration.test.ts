@@ -4307,7 +4307,11 @@ function listingPageHtml(ids: string[], year: number): string {
 	return `<html><body><div id="ordersContainer">${cards.join("")}</div></body></html>`;
 }
 
-function listingPage(listings: Record<number, string[]>, log: string[]): Page {
+function listingPage(
+	listings: Record<number, string[]>,
+	log: string[],
+	repeatPageOne: number[] = [],
+): Page {
 	const empty = '<html><body><div id="ordersContainer"></div></body></html>';
 	let current = empty;
 	return Object.assign({} as Page, {
@@ -4333,7 +4337,9 @@ function listingPage(listings: Record<number, string[]>, log: string[]): Page {
 		goto: (url: string): Promise<null> => {
 			log.push(url);
 			const year = Number(/year-(\d+)/.exec(url)?.[1]);
-			const start = Number(/startIndex=(\d+)/.exec(url)?.[1] ?? "0");
+			const asked = Number(/startIndex=(\d+)/.exec(url)?.[1] ?? "0");
+			// A source that serves page 1 again for any later offset.
+			const start = repeatPageOne.includes(year) ? 0 : asked;
 			const ids = (listings[year] ?? []).slice(
 				start,
 				start + LISTING_PAGE_SIZE,
@@ -4354,6 +4360,7 @@ async function runPass(args: {
 	listings: Record<number, string[]>;
 	pageLimit: number;
 	records?: Array<{ stream: string; id: unknown }>;
+	repeatPageOne?: number[];
 	state: Record<string, unknown>;
 	streams?: string[];
 }): Promise<{
@@ -4371,10 +4378,15 @@ async function runPass(args: {
 	);
 	try {
 		await collectAmazon(
-			collectContextFor(listingPage(args.listings, log), args.state, messages, {
-				records: args.records,
-				streams: args.streams,
-			}),
+			collectContextFor(
+				listingPage(args.listings, log, args.repeatPageOne),
+				args.state,
+				messages,
+				{
+					records: args.records,
+					streams: args.streams,
+				},
+			),
 		);
 	} finally {
 		mock.restoreAll();
@@ -4681,4 +4693,118 @@ test("collectAmazon: a short overlap page proves no boundary, so the year restar
 	assert.deepEqual(startIndexes(pass2.log).slice(0, 2), ["10", "0"]);
 	assert.equal(pass2.cursor.years?.[String(year)]?.resume, undefined);
 	assert.equal(pass2.cursor.years?.[String(year)]?.order_count, 15);
+});
+
+// ─── A source that serves page 1 again at offset 10 ──────────────────────
+
+function skipReasonsForYear(
+	messages: EmittedMessage[],
+	year: number,
+): string[] {
+	return messages
+		.filter(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				JSON.stringify(m.diagnostics ?? {}).includes(`"year":${year}`),
+		)
+		.map((m) => (m.type === "SKIP_RESULT" ? String(m.reason) : ""));
+}
+
+test("collectAmazon: a source that repeats page 1 at offset 10 never holds the current year back, and the stuck year reports a non-complete reason every run", async () => {
+	const year = new Date().getFullYear();
+	const stuckYear = year - 2;
+	const stuck = listingOrderIds("222", 45);
+	const current = listingOrderIds("111", 3);
+	const records: Array<{ stream: string; id: unknown }> = [];
+	const listings = (): Record<number, string[]> => ({
+		[year]: current,
+		[stuckYear]: stuck,
+	});
+
+	// Run 1 reads page 1 of the stuck year and saves a resume point at 10.
+	let pass = await runPass({
+		listings: listings(),
+		pageLimit: 3,
+		records,
+		repeatPageOne: [stuckYear],
+		state: {},
+	});
+	assert.equal(resumeOf(pass.cursor, stuckYear).startIndex, 10);
+
+	for (let run = 2; run <= 4; run += 1) {
+		// A new order arrives on top of the current year before each run.
+		const fresh = `333-${String(run).padStart(7, "0")}-0000000`;
+		current.unshift(fresh);
+		// The walk budget is spent after the stuck year's guaranteed pages.
+		pass = await runPass({
+			listings: listings(),
+			pageLimit: 2,
+			records,
+			repeatPageOne: [stuckYear],
+			state: { orders: pass.cursor },
+		});
+		if (run === 2) {
+			// The discovery run: the restart gets nowhere, and the point is marked.
+			assert.equal(
+				(
+					resumeOf(pass.cursor, stuckYear) as {
+						startIndex: number;
+						stalledAt?: number;
+					}
+				).stalledAt,
+				10,
+			);
+		} else {
+			// From the next run on the stuck year no longer runs first, so every
+			// order added so far (this run's and the discovery run's) is read.
+			for (const id of current) {
+				assert.ok(
+					emittedOrderIds(records).includes(id),
+					`run ${run}: the current year's order ${id} is read`,
+				);
+			}
+		}
+		const stuckEntry = pass.cursor.years?.[String(stuckYear)];
+		assert.equal(stuckEntry?.frozen, false, `run ${run}: not frozen`);
+		assert.ok(stuckEntry?.resume, `run ${run}: still not complete`);
+		const reasons = skipReasonsForYear(pass.messages, stuckYear);
+		assert.ok(
+			reasons.some(
+				(r) => r === "amazon_stopped_early" || r.includes("deferred"),
+			),
+			`run ${run}: the stuck year reports a non-complete reason (${reasons.join(",")})`,
+		);
+	}
+});
+
+test("collectAmazon: in one run, a repeat after a restart does not count the repeated orders again", async () => {
+	const year = new Date().getFullYear();
+	const listings = { [year]: listingOrderIds("111", 45) };
+	const pass1 = await runPass({
+		listings,
+		pageLimit: 1,
+		repeatPageOne: [year],
+		state: {},
+	});
+	assert.equal(resumeOf(pass1.cursor, year).startIndex, 10);
+
+	const pass2 = await runPass({
+		listings,
+		pageLimit: 50,
+		repeatPageOne: [year],
+		state: { orders: pass1.cursor },
+	});
+	const entry = pass2.cursor.years?.[String(year)];
+	assert.equal(entry?.order_count, 10, "page 1's orders are counted once");
+	assert.ok(entry?.resume, "the year is not complete");
+	assert.ok(
+		startIndexes(pass2.log, year).length <= 4,
+		`the year restarts at most once (${startIndexes(pass2.log, year).join(",")})`,
+	);
+	assert.ok(
+		skipReasonsForYear(pass2.messages, year).some((r) =>
+			r.includes("deferred"),
+		),
+		"the stopped year reports a deferred-style reason",
+	);
 });
