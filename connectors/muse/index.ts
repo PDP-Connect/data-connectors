@@ -742,14 +742,14 @@ async function readChatView(
 				`Muse's ${label} says more chats follow but gives no cursor to read them; nothing was checkpointed.`,
 			);
 		}
-		if (page.nextCursor === null) return out; // the source's end signal
-		// A page that says more follow must add chats: one that adds none
-		// (a moving list, a stuck page) cannot prove the list complete.
-		if (added === 0) {
+		// Only an empty terminal sentinel can complete without fresh chats.
+		if (added === 0 && (page.sessions.length > 0 || page.nextCursor !== null)) {
 			throw new StreamFailure(
-				`Muse's ${label} returned a page with no new chats while saying more follow; nothing was checkpointed.`,
+				`Muse's ${label} returned a page with no new chats; nothing was checkpointed.`,
 			);
 		}
+		if (page.nextCursor === null) return out;
+
 		if (cursors.has(cursorKey(page.nextCursor))) {
 			throw new StreamFailure(
 				`Muse's ${label} repeated a page cursor; nothing was checkpointed.`,
@@ -948,7 +948,10 @@ async function hydrateChat(
 			sinceMs !== null &&
 			page.events.length > 0 &&
 			page.events.every((e) => e.occurred_at_ms < sinceMs);
-		if (!page.hasMore || pastSince) {
+		if (
+			(!page.hasMore || pastSince) &&
+			(fresh.length > 0 || page.events.length === 0)
+		) {
 			// the source's end signal. When a continuation page did not report
 			// the revision, one more first-page read confirms the chat did not
 			// change while it was walked.
@@ -974,7 +977,7 @@ async function hydrateChat(
 			return {
 				kind: "gap",
 				errorClass: "muse_history_page_repeated",
-				message: "chat.history returned no new messages while has_more",
+				message: "chat.history returned no new messages",
 			};
 		}
 		let smallest: number | null = null;
@@ -1700,14 +1703,16 @@ export async function runActivities(
 				ceiling,
 			});
 			// No fresh identities on a full inclusive page does not prove the
-			// boundary bucket is exhausted: newer fractional timestamps can
-			// occupy its slots and hide another activity at the oldest time.
+			// boundary bucket is exhausted; newer fractional timestamps may hide a row.
 			if (
 				next === null ||
 				(items.length >= ACTIVITY_LIMIT && next === oldestRaw)
 			) {
 				throw new StreamFailure(
-					"Muse's activity log has more activities at one time than a page holds, or did not page back; nothing was checkpointed.",
+					tiedFullPage
+						? "Muse's activity log filled a single timestamp bucket without a continuation; the connector cannot recover the tail by retrying. No checkpoint saved."
+						: "Muse's activity log did not page back; nothing was checkpointed.",
+					!tiedFullPage,
 				);
 			}
 			before = next;
@@ -1783,6 +1788,14 @@ export async function runGoals(
 						buildGoalRecord(goal, variant.source ?? null),
 					);
 				}
+				// Progress is local to this variant: a goal may already have been
+				// emitted from another view. Repeated pages within this variant
+				// still fail, even with a new cursor.
+				if (added === 0 && (page.goals.length > 0 || page.hasNextPage)) {
+					throw new StreamFailure(
+						`Muse's ${label} goals returned a page with no new goals; nothing was checkpointed.`,
+					);
+				}
 				if (!page.hasNextPage) break; // the source's end signal
 				// The next page is asked with `cursor`, the parameter sessions.list
 				// uses. An answer that says more goals follow but carries no cursor
@@ -1790,16 +1803,8 @@ export async function runGoals(
 				// completeness, so the stream fails visibly instead.
 				if (page.nextCursor === null) {
 					throw new StreamFailure(
-						`Muse reports more ${label} goals than one page holds but gives no cursor for the next page; the goals list is not checkpointed as complete.`,
+						`Muse reports more ${label} goals than one page holds but gives no cursor; retrying the same request cannot recover the tail. No checkpoint saved.`,
 						false,
-					);
-				}
-				// Progress is local to this variant: a goal may already have been
-				// emitted from another view. Repeated pages within this variant
-				// still fail, even with a new cursor.
-				if (added === 0) {
-					throw new StreamFailure(
-						`Muse's ${label} goals returned a page with no new goals while saying more follow; nothing was checkpointed.`,
 					);
 				}
 				if (cursors.has(cursorKey(page.nextCursor))) {
@@ -1933,6 +1938,11 @@ async function walkLibrary(gateway: MuseGateway): Promise<LibraryWalk> {
 			seen.add(entry.path);
 			entries.push(entry);
 		}
+		if (fresh.length === 0 && (page.entries.length > 0 || page.hasMore)) {
+			throw new StreamFailure(
+				"Muse's file library returned no new files; nothing was checkpointed.",
+			);
+		}
 		if (!page.hasMore) {
 			if (total !== null && total !== entries.length) {
 				throw new StreamFailure(
@@ -1940,11 +1950,6 @@ async function walkLibrary(gateway: MuseGateway): Promise<LibraryWalk> {
 				);
 			}
 			return { entries, pages: pageIndex + 1 };
-		}
-		if (page.entries.length === 0 || fresh.length === 0) {
-			throw new StreamFailure(
-				"Muse's file library said it had more files but returned no new ones; nothing was checkpointed.",
-			);
 		}
 		const nextOffset = offset + page.entries.length;
 		if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {

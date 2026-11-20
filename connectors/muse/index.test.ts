@@ -1067,6 +1067,8 @@ test("activity watermark: a full tied boundary page is not completion proof", as
 		["activities"],
 	);
 	assert.equal(h.states("activities").length, 0);
+	assert.equal(h.retryable("activities"), false);
+	assert.match(h.failures[0]?.message ?? "", /cannot recover the tail/);
 });
 
 test("activity watermark: genuinely older activity remains a legitimate stop", async () => {
@@ -3414,4 +3416,70 @@ test("an activity cursor cycle refuses promptly even with fresh identities", asy
 	assert.ok(pages <= 3);
 	assert.equal(h.states("activities").length, 0);
 	assert.match(h.failures[0]?.message ?? "", /repeat|page back/);
+});
+
+test("a nonempty repeated terminal chat-list page withholds inventory completion", async () => {
+	const [first] = SESSIONS.sessions as Json[];
+	const { gateway } = fakeGateway({
+		"sessions.list": (p) =>
+			p.view === "archived"
+				? { sessions: [] }
+				: {
+						sessions: [first],
+						...(p.cursor === undefined ? { next_cursor: "next" } : {}),
+					},
+	});
+	const h = harness({ streams: ["conversations"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.match(h.failures[0]?.message ?? "", /no new chats/);
+	assert.equal(h.states("conversations").length, 0);
+});
+
+test("a nonempty repeated terminal history page leaves a detail gap, not a complete chat mark", async () => {
+	const { gateway } = fakeGateway({
+		"chat.history": (p) =>
+			historyFor(
+				String(p.session_id),
+				p.session_id === SIDE_CHAT && p.before_seq === undefined,
+			),
+	});
+	const h = harness({ streams: ["conversations", "messages"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.of("DETAIL_GAP", "messages")[0]?.m.record_key, SIDE_CHAT);
+	assert.deepEqual(Object.keys(assertCompleteChats(h, SESSION_IDS.length)), [
+		MAIN_CHAT,
+	]);
+});
+
+test("a nonempty repeated terminal goals page fails without STATE", async () => {
+	const { gateway } = fakeGateway({
+		"goals.list": (p) =>
+			p.source !== "assistant_tracking"
+				? { goals: [], pagination: { has_next_page: false } }
+				: {
+						...fixture("goals-tracking"),
+						pagination:
+							p.cursor === undefined
+								? { has_next_page: true, next_cursor: "next" }
+								: { has_next_page: false },
+					},
+	});
+	const h = harness({ streams: ["goals"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.match(h.failures[0]?.message ?? "", /no new goals/);
+	assert.equal(h.states("goals").length, 0);
+});
+
+test("a nonempty repeated terminal library page without a total fails without STATE", async () => {
+	const [entry] = fixture("library-recents").entries as Json[];
+	const { gateway } = fakeGateway({
+		"fs.library": (p) => ({
+			entries: [entry],
+			has_more: Number(p.offset) === 0,
+		}),
+	});
+	const h = harness({ streams: ["files"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.match(h.failures[0]?.message ?? "", /no new/);
+	assert.equal(h.states("files").length, 0);
 });
