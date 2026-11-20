@@ -489,7 +489,7 @@ test("a closed browser page ends the run at once", async () => {
 			["reactions", "collection_interrupted"],
 		],
 	);
-	assert.equal(h.messages.filter((m) => m.type === "STATE").length, 0);
+	assert.deepEqual(h.messages.filter((m) => m.type === "STATE").map(m=>m.stream), ["messages"]);
 });
 
 test("a later run reads from a week before each conversation's cursor and re-emits nothing unchanged", async () => {
@@ -755,7 +755,7 @@ test("an optional stream Slack refuses is skipped with a reason; the rest contin
 	assert.equal(h.of("reminders").length, 1);
 });
 
-test("a lost session ends the run: every stream is skipped and no cursor moves", async () => {
+test("a lost session ends the run: every stream is skipped while completed message marks remain", async () => {
 	const h = harness(ALL_STREAMS);
 	await run(
 		h,
@@ -771,7 +771,7 @@ test("a lost session ends the run: every stream is skipped and no cursor moves",
 		ALL_STREAMS,
 	);
 	assert.ok(h.skips().every((s) => s.reason === "sign_in_required"));
-	assert.equal(h.messages.filter((m) => m.type === "STATE").length, 0);
+	assert.deepEqual(h.messages.filter((m) => m.type === "STATE").map(m=>m.stream), ["messages"]);
 	assert.equal(h.of("users").length, 3, "what was read stays read");
 	assert.ok(h.of("messages").length > 0);
 });
@@ -2441,3 +2441,46 @@ for (const surface of ["history", "replies"] as const) {
 		});
 	}
 }
+
+test("interrupted history preserves completed channel marks and a time-only resume", async () => {
+	const a = "C0123456789", b = "C0987654321", key = `${TEAM.id}:${b}`;
+	const stamp = (age: number) => `${FIXTURE_NOW_SECONDS - age}.000001`;
+	const page = (ts?: string, cursor = "") => ({
+		ok: true, messages: ts ? [{type: "message", user: "U0987654321", text: "fixture", ts}] : [],
+		has_more: cursor !== "", response_metadata: {next_cursor: cursor},
+	});
+	const options = {lookbackDays: 0, channelAllowlist: [a,b]};
+	const first = harness(["messages"]);
+	const api = fakeApi(call => {
+		if (call.method !== "conversations.history") return undefined;
+		if (call.params.channel === a) return page(stamp(1));
+		if (call.params.cursor === undefined) return page(stamp(2), "page-two");
+		if (call.params.cursor === "page-two") return page(stamp(3), "page-three");
+		return new SlackApiError("conversations.history", "page_gone", false, null);
+	});
+	await run(first,api,options);
+	const checkpoint = first.state("messages");
+	assert.ok(checkpoint);
+	assert.deepEqual(checkpoint.channel_last_ts,{[a]:stamp(1)});
+	assert.deepEqual(checkpoint.channel_resume,{[key]:{v:1,newest_ts:stamp(2),oldest_ts:stamp(3)}});
+	assert.equal(first.coverage().some(row => row.stream === "messages"),false);
+	assert.equal(first.skips()[0]?.reason,"collection_interrupted");
+	const next = harness(["messages"],{state:{messages:checkpoint}});
+	const resumedApi = fakeApi(call => {
+		if (call.method !== "conversations.history") return undefined;
+		if (call.params.channel === a) return page();
+		if (call.params.oldest === stamp(2) && call.params.latest === undefined) return page(stamp(1));
+		if (call.params.latest === stamp(3) && call.params.oldest === undefined) return page(stamp(4));
+		return page();
+	});
+	await run(next,resumedApi,options);
+	assert.deepEqual(historyCalls(resumedApi,b).slice(0,2).map(({params})=>[params.oldest,params.latest,params.cursor]),[
+		[stamp(2),undefined,undefined],[undefined,stamp(3),undefined],
+	]);
+	assert.equal(next.state("messages")?.channel_resume,undefined);
+	assert.equal((next.state("messages")?.channel_last_ts as Record<string,string>)?.[b],stamp(1));
+	const bad = harness(["messages"],{state:{messages:{...checkpoint,channel_resume:{[key]:{v:1,newest_ts:stamp(2),oldest_ts:"invalid"}}}}});
+	const badApi = fakeApi(call => call.method === "conversations.history" ? page() : undefined);
+	await run(bad,badApi,options);
+	assert.deepEqual(historyCalls(badApi,b).map(({params}) => [params.oldest,params.latest,params.cursor]),[[undefined,undefined,undefined]]);
+});

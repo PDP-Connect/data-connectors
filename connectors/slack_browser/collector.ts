@@ -42,8 +42,8 @@
  * channel kinds now leave it out) is resolved, so it does not stay open for
  * good; only gaps of the workspace being read are resolved this way. A
  * session rejection, the browser leaving app.slack.com, or the page being
- * closed ends the run with a SKIP_RESULT on every requested stream and no
- * cursor moves.
+ * closed ends the run with a SKIP_RESULT on every requested stream. Only
+ * completed channels and validated timestamp resume bands are checkpointed.
  */
 
 import type { ZodType } from "zod";
@@ -233,10 +233,14 @@ interface Run {
 	options: SlackBrowserOptions;
 }
 
+interface HistoryResume { v: 1; newest_ts: string; oldest_ts: string }
+
 interface MessagesPlan {
 	/** The oldest the owner's max backfill lets a read from a cursor start; 0 for no limit. */
 	backfillFloorSec: number;
 	channelLastTs: Record<string, string>;
+	channelResume: Record<string, HistoryResume>;
+	checkpointChanged: boolean;
 	/** Where a conversation's first read starts; 0 for its whole history. */
 	floorSec: number;
 	nextFloorSec: number;
@@ -280,8 +284,8 @@ interface MessagesCoverage {
 interface HistoryWindow {
 	/** Only parents with a reply at or after this are treated as active threads. */
 	activeSince: number;
-	latest: number | null;
-	oldest: number;
+	latest: number | string | null;
+	oldest: number | string;
 	/** Keep only active thread parents, and do not move the cursor. */
 	threadsOnly: boolean;
 }
@@ -540,9 +544,26 @@ async function collectChannels(
 
 // ─── Messages: plan and discovery ───────────────────────────────────────
 
-function readMessagesCursor(raw: unknown): MessagesCursor | null {
-	const parsed = messagesCursorSchema.safeParse(raw);
-	return parsed.success ? parsed.data : null;
+const resumeStamp = (value: unknown): value is string =>
+	typeof value === "string" && /^[1-9]\d{0,9}\.\d{6}$/.test(value);
+const resumeKey = (teamId: string, channelId: string) => `${teamId}:${channelId}`;
+
+function readMessagesCursor(raw: unknown): (MessagesCursor & { channel_resume: Record<string, HistoryResume> }) | null {
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+	const { channel_resume, ...base } = raw as Record<string, unknown>;
+	const parsed = messagesCursorSchema.safeParse(base);
+	if (!parsed.success) return null;
+	const entries: Record<string, HistoryResume> = {};
+	if (channel_resume && typeof channel_resume === "object" && !Array.isArray(channel_resume)) {
+		for (const [key, value] of Object.entries(channel_resume)) {
+			if (!/^[A-Z0-9]+:[A-Z0-9]+$/.test(key) || !value || typeof value !== "object") continue;
+			const { v, newest_ts, oldest_ts } = value as Record<string, unknown>;
+			if (v === 1 && resumeStamp(newest_ts) && resumeStamp(oldest_ts) && Number(oldest_ts) <= Number(newest_ts)) {
+				entries[key] = { v, newest_ts, oldest_ts };
+			}
+		}
+	}
+	return { ...parsed.data, channel_resume: entries };
 }
 
 /**
@@ -573,6 +594,8 @@ function planMessages(run: Run): MessagesPlan {
 	return {
 		backfillFloorSec: backfillFloor,
 		channelLastTs: covers ? { ...stored.channel_last_ts } : {},
+		channelResume: covers ? { ...stored.channel_resume } : {},
+		checkpointChanged: false,
 		floorSec,
 		nextFloorSec: covers ? Math.min(stored.floor_ts, floorSec) : floorSec,
 		repliesCheckedSec: covers ? (stored.replies_checked_ts ?? null) : null,
@@ -871,7 +894,7 @@ function historyParams(
 		channel: channelId,
 		limit: HISTORY_PAGE_LIMIT,
 	};
-	if (window.oldest > 0) {
+	if (Number(window.oldest) > 0) {
 		params.oldest = String(window.oldest);
 	}
 	if (window.latest !== null) {
@@ -890,6 +913,7 @@ async function walkHistory(
 	conversation: SlackConversationObject,
 	window: HistoryWindow,
 	fetchedThreads: Set<string>,
+	onPage?: (timestamps: string[]) => void,
 ): Promise<string | null> {
 	let cursor = "";
 	let newestTs: string | null = null;
@@ -931,6 +955,7 @@ async function walkHistory(
 			`${conversationLabel(conversation)}: ${run.messagesEmitted} messages read this run`,
 			{ count: run.messagesEmitted, stream: "messages" },
 		);
+		onPage?.((answer.messages ?? []).map((message) => message.ts));
 		cursor = answer.response_metadata?.next_cursor ?? "";
 		if (!answer.has_more && (hasNewTs || !answer.messages?.length)) {
 			return newestTs;
@@ -996,18 +1021,66 @@ async function walkConversation(
 	const last = plan.channelLastTs[conversation.id];
 	const { headOldest, repliesSince } = window;
 	const fetchedThreads = new Set<string>();
-	const newest = await walkHistory(
-		run,
-		team,
-		conversation,
-		{
-			activeSince: headOldest,
-			latest: null,
-			oldest: headOldest,
-			threadsOnly: false,
-		},
-		fetchedThreads,
-	);
+	const key = resumeKey(team.id, conversation.id);
+	const pending = plan.channelResume[key];
+	const headIsPending = pending !== undefined && Number(pending.newest_ts) >= headOldest;
+	let progress: HistoryResume | undefined;
+	let ordered = true;
+	const checkpointPage = (times: string[]) => {
+		let newer = progress?.oldest_ts;
+		let newest = progress?.newest_ts;
+		for (const ts of times) {
+			if (!resumeStamp(ts) || (newer !== undefined && Number(ts) > Number(newer))) {
+				ordered = false;
+				return;
+			}
+			newest ??= ts;
+			newer = ts;
+		}
+		if (newest !== undefined && newer !== undefined) progress = {v: 1, newest_ts: newest, oldest_ts: newer};
+	};
+	const saveInterrupted = (newestOverride?: string) => {
+		if (!ordered || !progress) return;
+		plan.channelResume[key] = { ...progress, newest_ts: newestOverride ?? progress.newest_ts };
+		plan.checkpointChanged = true;
+	};
+	let newest: string | null;
+	if (headIsPending) {
+		// Slack cursors expire; each band starts with a fresh cursor and uses
+		// the exact timestamp string as an exclusive boundary (already read).
+		newest = await walkHistory(run, team, conversation, {
+			activeSince: repliesSince, latest: null, oldest: pending.newest_ts, threadsOnly: false,
+		}, fetchedThreads);
+		const joinedNewest = newest ?? pending.newest_ts;
+		if (Number(pending.oldest_ts) > headOldest) {
+			try {
+				await walkHistory(run, team, conversation, {
+					activeSince: repliesSince, latest: pending.oldest_ts, oldest: headOldest, threadsOnly: false,
+				}, fetchedThreads, checkpointPage);
+			} catch (error) {
+				saveInterrupted(joinedNewest);
+				throw error;
+			}
+		}
+		// Without thread search, revisit the already-listed middle for replies
+		// that arrived during the interruption. It does not move the message mark.
+		if (threadsByChannel === null && Number(pending.newest_ts) > Math.max(headOldest, Number(pending.oldest_ts))) {
+			await walkHistory(run, team, conversation, {
+				activeSince: repliesSince, latest: pending.newest_ts,
+				oldest: Number(pending.oldest_ts) > headOldest ? pending.oldest_ts : headOldest, threadsOnly: true,
+			}, fetchedThreads);
+		}
+		newest = joinedNewest;
+	} else {
+		try {
+			newest = await walkHistory(run, team, conversation, {
+				activeSince: headOldest, latest: null, oldest: headOldest, threadsOnly: false,
+			}, fetchedThreads, checkpointPage);
+		} catch (error) {
+			saveInterrupted();
+			throw error;
+		}
+	}
 	let boundHit = false;
 	if (threadsByChannel !== null) {
 		// Threads search saw a reply in: their parents may be far below the floor.
@@ -1046,6 +1119,11 @@ async function walkConversation(
 		(last === undefined || slackTsSeconds(newest) > slackTsSeconds(last))
 	) {
 		plan.channelLastTs[conversation.id] = newest;
+		plan.checkpointChanged = true;
+	}
+	if (pending !== undefined) {
+		delete plan.channelResume[key];
+		plan.checkpointChanged = true;
 	}
 	return { boundHit };
 }
@@ -1318,7 +1396,8 @@ async function collectMessages(
 	// look for. A conversation read from its very beginning finds every thread
 	// on the way and owes none.
 	const owed = [...windows.values()]
-		.filter((window) => window.headOldest > 0)
+		.filter((window, index) => window.headOldest > 0 ||
+			plan.channelResume[resumeKey(team.id, conversations[index]?.id ?? "")] !== undefined)
 		.map((window) => window.repliesSince);
 	const threadsByChannel =
 		owed.length === 0
@@ -1647,12 +1726,25 @@ function classifyAbort(error: unknown): Abort {
 	throw error;
 }
 
+async function emitMessagesState(run: Run, plan: MessagesPlan, incomplete: boolean): Promise<void> {
+	const repliesChecked = incomplete ? plan.repliesCheckedSec : plan.runSec;
+	await run.ctx.emit({
+		type: "STATE", stream: "messages", cursor: {
+			channel_last_ts: plan.channelLastTs,
+			...(Object.keys(plan.channelResume).length > 0 ? { channel_resume: plan.channelResume } : {}),
+			floor_ts: plan.nextFloorSec, format: 1,
+			...(repliesChecked === null ? {} : { replies_checked_ts: repliesChecked }),
+		},
+	});
+}
+
 async function finish(
 	run: Run,
 	plan: MessagesPlan | null,
 	abort: Abort | null,
 ): Promise<void> {
 	if (abort !== null) {
+		if (plan?.checkpointChanged) await emitMessagesState(run, plan, true);
 		for (const stream of run.ctx.requested.keys()) {
 			if (run.failed.has(stream)) {
 				continue;
@@ -1697,16 +1789,7 @@ async function finish(
 	// that read messages only to hang files (or reactions) off them still
 	// moved the per-conversation cursors, and the next run reads from there.
 	if (plan !== null) {
-		await run.ctx.emit({
-			type: "STATE",
-			stream: "messages",
-			cursor: {
-				channel_last_ts: plan.channelLastTs,
-				floor_ts: plan.nextFloorSec,
-				format: 1,
-				replies_checked_ts: plan.runSec,
-			},
-		});
+		await emitMessagesState(run, plan, Object.keys(plan.channelResume).length > 0);
 		if (wants(run, "files") && !run.filesIncomplete) {
 			await run.ctx.emit({
 				type: "STATE",
