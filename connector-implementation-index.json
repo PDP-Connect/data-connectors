@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.2.22",
+				"version": "0.2.28",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -82,13 +82,13 @@
 					{
 						"name": "orders",
 						"required": true,
-						"description": "Amazon retail orders scraped from Your Orders.",
+						"description": "Amazon retail orders scraped from Your Orders, on the Amazon store the account shops on (amazon.com, amazon.ca, amazon.co.uk, ...), every year the store lists.",
 						"compaction_fingerprint": {
 							"exclude_keys": ["fetched_at"]
 						},
 						"display": {
 							"label": "Your Amazon orders",
-							"detail": "Order IDs, dates, totals, delivery status, shipping summaries, payment method summary, recipient name. Per-item breakdowns live in the order_items stream."
+							"detail": "Order IDs, dates, totals, delivery status, shipping summaries, the shipping address postal code (ZIP or postal code only), payment method summary, recipient name, and the Amazon store. Per-item breakdowns live in the order_items stream."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -122,6 +122,10 @@
 								"shipping_address_summary": {
 									"type": ["string", "null"]
 								},
+								"shipping_postal_code": {
+									"type": ["string", "null"],
+									"description": "Postal code of the order's shipping address (ZIP, Canadian or UK postcode, ...), in the store country's format. Null when the order shows no shipping address."
+								},
 								"payment_method_summary": {
 									"type": ["string", "null"]
 								},
@@ -133,6 +137,10 @@
 								},
 								"item_count": {
 									"type": ["integer", "null"]
+								},
+								"store": {
+									"type": ["string", "null"],
+									"description": "The Amazon store the order was placed on, such as amazon.com or amazon.ca."
 								}
 							},
 							"required": ["id", "order_date"]
@@ -171,10 +179,12 @@
 									"status_detail",
 									"recipient_name",
 									"shipping_address_summary",
+									"shipping_postal_code",
 									"payment_method_summary",
 									"gift_order",
 									"digital_order",
-									"item_count"
+									"item_count",
+									"store"
 								]
 							}
 						],
@@ -292,10 +302,10 @@
 					},
 					{
 						"name": "profile",
-						"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership).",
+						"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership, default delivery postal code, store).",
 						"display": {
 							"label": "Your Amazon account",
-							"detail": "Display name and Prime membership status, as shown in the Amazon nav bar. Both are null when not observable, never guessed."
+							"detail": "Display name, Prime membership status, the postal code of the default delivery address (no street address), and the Amazon store, as shown in the Amazon nav bar. Each is null when not observable, never guessed."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -310,6 +320,14 @@
 								},
 								"is_prime": {
 									"type": ["boolean", "null"]
+								},
+								"postal_code": {
+									"type": ["string", "null"],
+									"description": "Postal code of the account's default delivery address, from the nav bar's Deliver to location. Null when not shown."
+								},
+								"store": {
+									"type": ["string", "null"],
+									"description": "The Amazon store the profile was read on, such as amazon.ca."
 								}
 							},
 							"required": ["id"]
@@ -361,7 +379,9 @@
 					"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
 					"selector_drift": "The page layout changed and we couldn't find what we needed",
 					"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
-					"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+					"unparseable_order_date": "We skipped some orders because their dates couldn't be read",
+					"amazon_no_orders_on_store": "This Amazon account shows no orders on the store we read. If you shop on another Amazon store, pick that store and connect again",
+					"amazon_stopped_early": "Amazon stopped showing older orders part way. We kept the orders read so far; connect again later to read the rest"
 				}
 			}
 		},
@@ -27381,7 +27401,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.48",
+				"version": "0.1.49",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -30586,7 +30606,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.48",
+				"version": "0.3.49",
 				"display_name": "Whole Foods",
 				"brand": {
 					"icon": "icon.svg",
