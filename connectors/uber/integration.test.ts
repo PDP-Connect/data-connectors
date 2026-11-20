@@ -554,7 +554,7 @@ test("fetchAllActivities: a new trip resets the duplicate-only page streak", asy
 	assert.equal(delays.length, 6);
 });
 
-test("fetchAllActivities: three duplicate-only pages in a row stop as truncated", async () => {
+test("fetchAllActivities: sixteen duplicate-only pages in a row stop as truncated", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
 		activitiesPages: Array.from({ length: 200 }, (_, i) => ({
 			body: activitiesBody([{ uuid: "trip-a" }], `fresh-${i}`),
@@ -569,13 +569,31 @@ test("fetchAllActivities: three duplicate-only pages in a row stop as truncated"
 		truncated: true,
 		stopReason: "duplicate_only_pages",
 	});
-	assert.equal(calls.length, 4);
-	assert.equal(delays.length, 3);
+	assert.equal(calls.length, 17);
+	assert.equal(delays.length, 16);
+});
+
+test("fetchAllActivities: overlap pages past the old limit of three still reach later trips", async () => {
+	const overlap = Array.from({ length: 10 }, (_, i) => ({
+		body: activitiesBody([{ uuid: "trip-a" }], `overlap-${i}`),
+	}));
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-a" }], "first") },
+			...overlap,
+			{ body: activitiesBody([{ uuid: "trip-b" }], null) },
+		],
+	});
+	assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+		activities: [{ uuid: "trip-a" }, { uuid: "trip-b" }],
+		truncated: false,
+	});
+	assert.equal(calls.length, 12);
 });
 
 test("collectAllStreams: a duplicate-only page streak reports trips as stopped early", async () => {
 	const { fetchPath } = makeScriptedFetch({
-		activitiesPages: Array.from({ length: 4 }, (_, i) => ({
+		activitiesPages: Array.from({ length: 17 }, (_, i) => ({
 			body: activitiesBody([{ uuid: "trip-a" }], `fresh-${i}`),
 		})),
 	});
@@ -583,14 +601,23 @@ test("collectAllStreams: a duplicate-only page streak reports trips as stopped e
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	const skips = messages.filter(
 		(m) => (m as { type?: string }).type === "SKIP_RESULT",
-	) as { reason?: string; message?: string; diagnostics?: unknown }[];
+	) as {
+		reason?: string;
+		message?: string;
+		diagnostics?: unknown;
+		recovery_hint?: unknown;
+	}[];
 	assert.equal(skips.length, 1);
 	assert.equal(skips[0]?.reason, "trips_deferred_page_budget");
+	assert.deepEqual(skips[0]?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
 	assert.deepEqual(skips[0]?.diagnostics, {
-		duplicate_only_page_limit: 3,
+		duplicate_only_page_limit: 16,
 		stop_reason: "duplicate_only_pages",
 	});
-	assert.match(skips[0]?.message ?? "", /3 pages in a row with no new trips/);
+	assert.match(skips[0]?.message ?? "", /16 pages in a row with no new trips/);
 });
 
 // ─── Records-before-DETAIL_COVERAGE ordering ────────────────────────────────
@@ -738,7 +765,7 @@ test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying
 
 test("fetchAllActivities: id-less pages behind fresh cursors refuse rather than truncate", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({
-		activitiesPages: Array.from({ length: 5 }, (_, i) => ({
+		activitiesPages: Array.from({ length: 20 }, (_, i) => ({
 			body: activitiesBody([{ title: "no id" }], `fresh-${i}`),
 		})),
 	});
@@ -746,7 +773,7 @@ test("fetchAllActivities: id-less pages behind fresh cursors refuse rather than 
 		message:
 			"uber_graphql_error [endpoint Activities]: no activity carried a trip id",
 	});
-	assert.equal(calls.length, 3);
+	assert.equal(calls.length, 16);
 });
 
 test("collectAllStreams: id-less-only activity history refuses without emitting", async () => {

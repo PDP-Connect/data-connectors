@@ -98,10 +98,12 @@ const GRAPHQL_PATH = "/graphql";
 const ACTIVITIES_PAGE_SIZE = 5;
 /**
  * Fresh cursors over pages with no new trip ids are not progress. After this
- * many in a row the walk stops and reports the history as truncated, rather
- * than walking forever through a feed that repeats itself.
+ * many in a row the walk stops and reports the history as incomplete, rather
+ * than walking forever through a feed that repeats itself. This bounds pages
+ * without progress, not history: at five trips a page, Uber can overlap
+ * several pages at a boundary before the next new trip.
  */
-const MAX_DUPLICATE_ONLY_PAGES = 3;
+const MAX_DUPLICATE_ONLY_PAGES = 16;
 const PAGE_DELAY_MS = 500;
 const DETAIL_DELAY_MS = 500;
 
@@ -544,7 +546,7 @@ export async function collectAllStreams(
 			type: "SKIP_RESULT",
 			stream: wantTrips ? "trips" : "receipts",
 			reason: "trips_deferred_page_budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `Uber activity feed stopped after ${MAX_DUPLICATE_ONLY_PAGES} pages in a row with no new trips, with more trip history possibly available`,
 			diagnostics: {
 				duplicate_only_page_limit: MAX_DUPLICATE_ONLY_PAGES,
