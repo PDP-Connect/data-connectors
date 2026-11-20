@@ -20,9 +20,9 @@
  *   - issues via `since` + updated_at
  *   - pull_requests via updated_at (search ordered desc)
  *   - gists via `since` + updated_at
- *   - events via created_at (emit-side skip; the Events API has no `since`
- *     param). Provider-side 90-day rolling window: history older than that
- *     is genuinely unavailable, not a connector gap.
+ *   - events via created_at (the Events API has no `since` parameter). GitHub returns at most
+ *     300 events in a rolling window: 30 days on github.com, 90 days in older Enterprise
+ *     Server docs. See https://docs.github.com/en/rest/activity/events.
  *   - contributions via date (daily counts, GraphQL `contributionsCollection`)
  *   - pinned_repositories, organizations: no cursor. Both are small
  *     (pins capped at 6 by GitHub; org membership lists are typically small)
@@ -1766,11 +1766,10 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 			diagnostics: { dropped: droppedTotal, total_seen: totalSeen },
 		});
 	}
-	// The provider's own window is the honest boundary here (there is no
-	// larger inventory to compare against — everything older than 90 days is
-	// unavailable to any caller, not just this connector), so a full,
-	// non-early-stopped walk of the window can declare `considered` against
-	// what was actually enumerated this run.
+	// GitHub returns up to 300 events in a rolling window (30 days on github.com; 90 days in older
+	// Enterprise Server docs): https://docs.github.com/en/rest/activity/events.
+	// Follow next links until they end or a page crosses the saved cursor. `considered` counts
+	// the events enumerated this run, not all historical activity.
 	await declareListConsidered(
 		ctx,
 		"events",
@@ -1804,8 +1803,8 @@ query($login: String!, $from: DateTime!, $to: DateTime!) {
 }`;
 
 /**
- * GitHub's `contributionsCollection` accepts at most a one-year `from`/`to`
- * window per call. A full resync (no stored cursor) walks back to the
+ * The GitHub GraphQL API rejects a `contributionsCollection` if `from` to `to` spans more
+ * than a year. A full resync (no stored cursor) walks back to the
  * account's creation year, one calendar-year window per request, newest
  * first — mirroring `resolvePrSearchWindows`'s per-year partitioning for the
  * same reason (a provider-side window cap, not a search-result cap here, but
