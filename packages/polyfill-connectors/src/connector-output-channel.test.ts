@@ -265,7 +265,9 @@ for (const [label, make] of [
 	});
 }
 
-test("plain data, dates, arrays and private buffers are admitted as clones", async () => {
+const SHARED = { same: "ref" };
+
+test("plain JSON data, dates, nested arrays and shared references are admitted as clones", async () => {
 	const sent: EmittedMessage[] = [];
 	const channel = createOutputChannel(async (message) => {
 		sent.push(message);
@@ -277,11 +279,10 @@ test("plain data, dates, arrays and private buffers are admitted as clones", asy
 		z: null,
 		u: undefined,
 		d: new Date(0),
-		a: [1, { k: "v" }],
+		a: [1, { k: "v" }, [2, [3]]],
+		shared1: SHARED,
+		shared2: SHARED,
 		o: { k: 1 },
-		bytes: new Uint8Array([1, 2]),
-		view: new DataView(new ArrayBuffer(2)),
-		buf: new ArrayBuffer(2),
 	};
 	const frame = {
 		type: "RECORD",
@@ -325,3 +326,84 @@ test("after a refused frame no later frame is written", async () => {
 	await channel.write(progress("later")).catch(() => undefined);
 	assert.equal(sent.length, 0);
 });
+
+// What crosses the wire is JSON: admission accepts only what reaches JSON
+// unchanged. These frames are refused, and no producer code runs for them.
+let sideEffects = 0;
+const cycle: Record<string, unknown> = { name: "loop" };
+cycle.self = cycle;
+const sparse: unknown[] = [1];
+sparse[2] = 3;
+const hidden = Object.defineProperty({ shown: 1 }, "h", {
+	value: 2,
+	enumerable: false,
+});
+const nodeProxy = new Proxy(
+	{},
+	{
+		getPrototypeOf: () => {
+			sideEffects++;
+			return Object.prototype;
+		},
+		ownKeys: () => {
+			sideEffects++;
+			return [];
+		},
+		getOwnPropertyDescriptor: () => {
+			sideEffects++;
+			return undefined;
+		},
+		get: () => {
+			sideEffects++;
+			return undefined;
+		},
+	},
+);
+
+for (const [label, make] of [
+	[
+		"a spoofed toStringTag posing as an ArrayBuffer",
+		() => ({ [Symbol.toStringTag]: "ArrayBuffer" }),
+	],
+	[
+		"a getter",
+		() =>
+			Object.defineProperty({}, "g", {
+				enumerable: true,
+				get: () => {
+					sideEffects++;
+					return 1;
+				},
+			}),
+	],
+	["a cycle", () => cycle],
+	["a symbol key", () => ({ [Symbol("k")]: 1 })],
+	["a non-enumerable property", () => hidden],
+	["a sparse array", () => sparse],
+	["NaN", () => ({ n: Number.NaN })],
+	["Infinity", () => ({ n: Number.POSITIVE_INFINITY })],
+	["undefined in an array", () => [1, undefined]],
+	["a typed array", () => new Uint8Array([1])],
+	["an ArrayBuffer", () => new ArrayBuffer(1)],
+	["a Node proxy whose traps must not run", () => nodeProxy],
+] as const) {
+	test(`JSON policy: a frame holding ${label} is refused and runs no producer code`, async () => {
+		sideEffects = 0;
+		const sent: EmittedMessage[] = [];
+		const channel = createOutputChannel(async (message) => {
+			sent.push(message);
+		});
+		const frame = {
+			type: "RECORD",
+			stream: "s",
+			key: "k",
+			data: { value: make() },
+		} as unknown as EmittedMessage;
+		await assert.rejects(channel.write(frame), (e: unknown) =>
+			String((e as Error).message).includes("cannot be serialized"),
+		);
+		await sleep(10);
+		assert.equal(sent.length, 0);
+		assert.equal(sideEffects, 0);
+	});
+}

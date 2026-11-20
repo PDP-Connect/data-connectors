@@ -2203,51 +2203,132 @@ export function createOutputChannel(
 }
 
 /**
- * Allowlist: true only when every value reachable from a frame is plain data
- * with no hidden reference. Admitted: primitives (no bigint: the transports
- * serialize JSON), plain objects and arrays (own enumerable string keys, data
- * properties only), Date, and ArrayBuffers, typed arrays and DataViews over a
- * non-shared ArrayBuffer. Anything else (Error, RegExp, Map, Set, class
- * instances, WebAssembly.Memory, accessors, shared memory) is refused: it can
- * hide a reference to storage the producer can still change. `undefined` is
- * admitted because records drop it. Iterative, with a seen set.
+ * Wire policy: what crosses the wire is JSON. Admission accepts only what
+ * reaches JSON unchanged and refuses everything else (the caller raises
+ * `frame_not_serializable`). Admitted: string, boolean, finite number, null;
+ * `undefined` as an object property only (JSON drops it, but turns it into
+ * null inside an array); Date with a valid time; arrays without holes; plain
+ * objects (prototype `Object.prototype` or null). Refused: bigint, symbol,
+ * function, NaN and Infinity, sparse arrays, cycles, accessors, symbol keys,
+ * non-enumerable own properties, and every other object (Error, RegExp, Map,
+ * Set, buffers and views, class instances, WebAssembly.Memory).
+ *
+ * The walk never runs producer code on an ordinary object: it reads
+ * prototypes with `Object.getPrototypeOf`, keys with `Reflect.ownKeys`, and
+ * takes values only from `Object.getOwnPropertyDescriptor` (no getter runs).
+ * No `toStringTag`, `instanceof` or constructor name is evidence of
+ * anything; a Date is proven by calling the intrinsic `Date.prototype.getTime`
+ * through `Reflect.apply`, which throws on a non-Date. Where Node's
+ * `util.types.isProxy` exists, a proxy is refused before any reflection on it.
+ * A browser has no intrinsic proxy test, so a proxy's traps can run during the
+ * walk; that is an accepted limit: trap code is the connector's own in-process
+ * code, which could block anyway, and `structuredClone` still refuses a proxy,
+ * so one is never admitted.
+ *
+ * Cycles are found by tracking the ancestor path; a reference shared without a
+ * cycle is allowed, because JSON duplicates it. Iterative.
  */
+const isProxyValue: ((value: unknown) => boolean) | undefined = (() => {
+	try {
+		const getBuiltin = (
+			globalThis as {
+				process?: { getBuiltinModule?: (id: string) => unknown };
+			}
+		).process?.getBuiltinModule;
+		const util = getBuiltin?.("node:util") as
+			| { types?: { isProxy?: (value: unknown) => boolean } }
+			| undefined;
+		return util?.types?.isProxy;
+	} catch {
+		return undefined;
+	}
+})();
+const ARRAY_INDEX = /^(?:0|[1-9]\d*)$/;
+
+/** The values of a Date, array or plain object, or null when it is refused. */
+function readJsonContainer(
+	value: object,
+): { values: unknown[]; isArray: boolean } | null {
+	const proto = Object.getPrototypeOf(value);
+	const keys = Reflect.ownKeys(value);
+	if (proto === Date.prototype) {
+		try {
+			const time = Reflect.apply(Date.prototype.getTime, value, []);
+			return Number.isFinite(time) && keys.length === 0
+				? { values: [], isArray: false }
+				: null;
+		} catch {
+			return null;
+		}
+	}
+	const isArray = proto === Array.prototype && Array.isArray(value);
+	if (!isArray && proto !== Object.prototype && proto !== null) return null;
+	const values: unknown[] = [];
+	let indexed = 0;
+	for (const key of keys) {
+		if (typeof key === "symbol") return null;
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (descriptor === undefined || !("value" in descriptor)) return null;
+		if (isArray && key === "length") continue;
+		if (!descriptor.enumerable) return null;
+		if (isArray) {
+			if (!ARRAY_INDEX.test(key)) return null;
+			indexed++;
+		}
+		values.push(descriptor.value);
+	}
+	if (isArray) {
+		const length = Object.getOwnPropertyDescriptor(value, "length")?.value;
+		if (indexed !== length) return null; // a hole
+	}
+	return { values, isArray };
+}
+
 function isPlainSnapshotData(root: unknown): boolean {
-	const tag = (value: object): string => Object.prototype.toString.call(value);
-	const seen = new Set<object>();
-	const stack: unknown[] = [root];
-	while (stack.length > 0) {
-		const value = stack.pop();
+	const onPath = new Set<object>();
+	const done = new Set<object>();
+	interface Frame {
+		node: object;
+		values: unknown[];
+		isArray: boolean;
+		next: number;
+	}
+	const stack: Frame[] = [];
+	const visit = (value: unknown, inArray: boolean): boolean => {
 		switch (typeof value) {
-			case "undefined":
-			case "boolean":
-			case "number":
 			case "string":
-				continue;
+			case "boolean":
+				return true;
+			case "undefined":
+				return !inArray;
+			case "number":
+				return Number.isFinite(value);
 			case "object":
 				break;
 			default:
 				return false;
 		}
-		if (value === null) continue;
-		if (seen.has(value)) continue;
-		seen.add(value);
-		const proto = Object.getPrototypeOf(value);
-		if (ArrayBuffer.isView(value)) {
-			if (tag(value.buffer) !== "[object ArrayBuffer]") return false;
+		if (value === null || done.has(value)) return true;
+		if (onPath.has(value)) return false;
+		if (isProxyValue?.(value)) return false;
+		const container = readJsonContainer(value);
+		if (container === null) return false;
+		onPath.add(value);
+		stack.push({ node: value, ...container, next: 0 });
+		return true;
+	};
+	if (!visit(root, false)) return false;
+	while (stack.length > 0) {
+		const frame = stack[stack.length - 1];
+		if (frame === undefined) break;
+		if (frame.next >= frame.values.length) {
+			onPath.delete(frame.node);
+			done.add(frame.node);
+			stack.pop();
 			continue;
 		}
-		const kind = tag(value);
-		if (kind === "[object ArrayBuffer]") continue;
-		if (kind === "[object Date]" && value instanceof Date) continue;
-		const isArray = Array.isArray(value);
-		const isPlain = proto === null || Object.getPrototypeOf(proto) === null;
-		if (!isArray && !(isPlain && kind === "[object Object]")) return false;
-		for (const key of Object.keys(value)) {
-			const descriptor = Object.getOwnPropertyDescriptor(value, key);
-			if (descriptor === undefined || !("value" in descriptor)) return false;
-			stack.push(descriptor.value);
-		}
+		const child = frame.values[frame.next++];
+		if (!visit(child, frame.isArray)) return false;
 	}
 	return true;
 }
