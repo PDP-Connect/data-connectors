@@ -266,7 +266,12 @@ function harness(
 	return { ctx, messages, of, cursor, skips };
 }
 
-const FAST = { pageDelayMs: 0, activityDelayMs: 0, rateLimitDelayMs: 0 };
+const FAST = {
+	pageDelayMs: 0,
+	activityDelayMs: 0,
+	rateLimitDelayMs: 0,
+	transientRetryDelayMs: 0,
+};
 const BOTH = ["activities"];
 
 test("shares the strava source and its stream names", () => {
@@ -714,8 +719,100 @@ test("off strava.com, collection navigates to the training page first", async ()
 		() => collectStravaBrowser(h.ctx, FAST),
 		"https://example.com",
 	);
-	assert.deepEqual(visits, [TRAINING_URL]);
+	// Once before the walk, then before each of the two retries.
+	assert.deepEqual(visits, [TRAINING_URL, TRAINING_URL, TRAINING_URL]);
 	assert.equal(h.of("activities").length, 0);
+	assert.equal(h.skips()[0]?.reason, "collection_interrupted");
+});
+
+test("a list read that fails in transport is retried, and the walk completes", async () => {
+	// Mobile WebViews report a fetch cut off by a navigation or by the app
+	// going to the background as "Load failed" (WebKit) or "Failed to fetch".
+	const log: string[] = [];
+	const serve = listFetcher(PAGES, log);
+	let failures = 0;
+	const h = harness(["activities"]);
+	await withStrava(
+		(url, init) => {
+			if (url.searchParams.get("page") === "1" && failures < 2) {
+				failures += 1;
+				throw new TypeError("Load failed");
+			}
+			return serve(url, init);
+		},
+		() => collectStravaBrowser(h.ctx, FAST),
+	);
+	assert.equal(failures, 2);
+	assert.equal(h.of("activities").length, 5);
+	assert.deepEqual(h.skips(), []);
+	assert.equal((h.cursor() as { list_complete: boolean }).list_complete, true);
+});
+
+test("an evaluate that throws (a PageShim bridge timeout) is retried like a failed fetch", async () => {
+	const h = harness(["activities"]);
+	const page = h.ctx.page as unknown as {
+		evaluate: (fn: (arg: unknown) => unknown, arg: unknown) => unknown;
+	};
+	const evaluate = page.evaluate;
+	let thrown = 0;
+	page.evaluate = async (fn, arg) => {
+		const isListRead =
+			typeof arg === "object" && arg !== null && "pageNumber" in arg;
+		if (isListRead && thrown === 0) {
+			thrown += 1;
+			throw new Error("PageShim bridge call evaluate timed out after 30000ms");
+		}
+		return evaluate(fn, arg);
+	};
+	await withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST));
+	assert.equal(thrown, 1);
+	assert.equal(h.of("activities").length, 5);
+	assert.deepEqual(h.skips(), []);
+});
+
+test("a list read that never gets an answer fails as collection_interrupted, not a raw error", async () => {
+	const h = harness(["activities"]);
+	let reads = 0;
+	await assert.rejects(
+		withStrava(
+			() => {
+				reads += 1;
+				throw new TypeError("Failed to fetch");
+			},
+			() =>
+				collectStravaBrowser(h.ctx, {
+					...FAST,
+					failRunOnIncompleteList: true,
+				}),
+		),
+		(error: unknown) => {
+			assert.match(String((error as Error).message), /Failed to fetch/);
+			assert.equal(
+				(error as { code?: string; reason?: string }).code ??
+					(error as { reason?: string }).reason,
+				"collection_interrupted",
+			);
+			return true;
+		},
+	);
+	assert.equal(reads, 3, "the first read and two retries");
+	assert.equal(h.of("activities").length, 0);
+});
+
+test("an answer Strava gave is not retried as a transport failure", async () => {
+	const h = harness(["activities"]);
+	let reads = 0;
+	await withStrava(
+		() => {
+			reads += 1;
+			return new Response("<html>busy</html>", {
+				status: 503,
+				headers: { "content-type": "text/html" },
+			});
+		},
+		() => collectStravaBrowser(h.ctx, FAST),
+	);
+	assert.equal(reads, 1);
 	assert.equal(h.skips()[0]?.reason, "collection_interrupted");
 });
 
