@@ -80,6 +80,29 @@ test("chats list is invoked with global flags before the subcommand, plus an exp
 	}
 });
 
+test("a GMCLI_MAX_CHATS below 1 falls back to the default instead of a zero limit", async () => {
+	const priorMaxChats = process.env.GMCLI_MAX_CHATS;
+	process.env.GMCLI_MAX_CHATS = "0.5";
+	try {
+		const seenInvocations: string[][] = [];
+		const invoker: GmcliInvoker = (args) => {
+			seenInvocations.push([...args]);
+			if (args[0] === "--json") {
+				return Promise.resolve(ok(buildEmptyChatsJsonFixture()));
+			}
+			return Promise.resolve(ok(buildMessagesJsonFixture()));
+		};
+		await fetchAndParseGmcliMessages(invoker);
+		assert.equal(seenInvocations[0]?.at(-1), "1000001");
+	} finally {
+		if (priorMaxChats === undefined) {
+			delete process.env.GMCLI_MAX_CHATS;
+		} else {
+			process.env.GMCLI_MAX_CHATS = priorMaxChats;
+		}
+	}
+});
+
 test("messages list is invoked with --conv <chat-id> and per-chat bounding/order flags", async () => {
 	const seenInvocations: string[][] = [];
 	const invoker: GmcliInvoker = (args) => {

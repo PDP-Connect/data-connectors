@@ -448,14 +448,14 @@ const DEFAULT_MAX_CHATS = 1_000_000;
 
 function resolveMessagesPerChatLimit(): number {
 	const raw = Number(process.env.GMCLI_MESSAGES_PER_CHAT_LIMIT);
-	return Number.isFinite(raw) && raw > 0
+	return Number.isFinite(raw) && raw >= 1
 		? Math.floor(raw)
 		: DEFAULT_MESSAGES_PER_CHAT_LIMIT;
 }
 
 function resolveMaxChats(): number {
 	const raw = Number(process.env.GMCLI_MAX_CHATS);
-	return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_CHATS;
+	return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : DEFAULT_MAX_CHATS;
 }
 
 /**
