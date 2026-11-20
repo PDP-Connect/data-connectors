@@ -19,7 +19,7 @@ const replay = JSON.parse(readFileSync(new URL("./fixtures/api-v2-replay.json", 
   daily_activity: Array<Record<string, unknown>>;
 };
 
-type Answer = { data?: Array<Record<string, unknown>>; next_token?: string | null; status?: number };
+type Answer = { data?: Array<Record<string, unknown>>; next_token?: string | null; status?: number; error?: Error };
 function harness(options: {
   streams?: string[];
   since?: string;
@@ -40,6 +40,7 @@ function harness(options: {
       calls.push({ endpoint, start: url.searchParams.get("start_date"), end: url.searchParams.get("end_date"), token });
       const window = { start: url.searchParams.get("start_date"), end: url.searchParams.get("end_date") };
       const answer = options.answers?.(endpoint, token, window) ?? { data: replay[endpoint as keyof typeof replay] ?? [], next_token: null };
+      if (answer.error) throw answer.error;
       const status = answer.status ?? 200;
       return { ok: () => status >= 200 && status < 300, status: () => status, json: async () => answer, dispose: async () => {} };
     } } }),
@@ -303,4 +304,59 @@ test("an explicit range wins over the full-history floor and stored cursor", asy
   assert.deepEqual(h.calls.map(({ start, end }) => [start, end]),
     [["2026-08-01", "2026-08-31"], ["2026-08-31", "2026-09-01"]]);
   noSkip(h);
+});
+
+test("terminal page after 50 continuing pages completes instead of truncating", async () => {
+  let requests = 0;
+  const h = harness({ streams: ["activity"], answers: () => {
+    requests += 1;
+    assert.ok(requests <= 51);
+    return {
+      data: [{ ...replay.daily_activity[0], id: id(1000 + requests) }],
+      next_token: requests === 51 ? null : `synthetic-page-${requests}`,
+    };
+  } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(requests, 51);
+  assert.equal(h.records.length, 51);
+  assert.equal(h.messages.some((m) => m.type === "STATE"), true);
+});
+
+test("a fresh activity token with no new IDs refuses the window", async () => {
+  const h = harness({ streams: ["activity"], answers: (_endpoint, token) =>
+    ({ data: replay.daily_activity, next_token: token === null ? "first" : token === "first" ? "second" : null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.messages.some((m) => m.type === "STATE"), false);
+});
+
+test("a second-page 429 reports retryable source pressure and no STATE", async () => {
+  const h = harness({ streams: ["readiness"], answers: (_endpoint, token) =>
+    token ? { status: 429 } : { data: replay.daily_readiness, next_token: "next" } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  const skip = h.messages.find((m) => m.type === "SKIP_RESULT");
+  assert.equal(skip?.reason, "upstream_pressure");
+  assert.deepEqual(skip?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+  assert.equal(h.messages.some((m) => m.type === "STATE"), false);
+});
+
+test("a default scan after a narrower since cursor starts full history", async () => {
+  const h = harness({ streams: ["activity"], openRange: true, state: { activity: {
+    account: ACCESS.account, api_v2: true, next_day: "2026-09-25",
+    refresh_from: DAY, requested_since: DAY,
+  } }, answers: () => ({ data: [], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls[0]?.start, initialStartDate());
+});
+
+test("a second-page request timeout is disclosed as retryable source pressure", async () => {
+  const timeout = new Error("synthetic request deadline");
+  timeout.name = "TimeoutError";
+  const h = harness({ streams: ["activity"], answers: (_endpoint, token) =>
+    token ? { error: timeout } : { data: replay.daily_activity, next_token: "next" } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  const skip = h.messages.find((m) => m.type === "SKIP_RESULT");
+  assert.equal(skip?.reason, "upstream_pressure");
+  assert.equal(skip?.recovery_hint?.retryable, true);
+  assert.equal(h.messages.some((m) => m.type === "STATE"), false);
 });
