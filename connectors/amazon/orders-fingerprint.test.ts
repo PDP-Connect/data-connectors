@@ -53,6 +53,14 @@ import {
 import { validateRecord } from "./schemas.ts";
 import type { ListPageOrder, OrderDetail } from "./types.ts";
 
+// The runtime fails a rejected emit with a fixed message; the connector's own
+// error text must not reach the output.
+const isFixedDeliveryFailure = (error: unknown, leaked: string): boolean =>
+	error instanceof Error &&
+	error.message === "A record could not be delivered; the run is incomplete" &&
+	!error.message.includes(leaked);
+
+
 const RUN1_AT = "2026-06-01T10:00:00.000Z";
 const RUN2_AT = "2026-06-02T10:00:00.000Z";
 
@@ -411,7 +419,7 @@ for (const rejection of ["selection", "schema", "throw", "item"] as const) {
 			makeDetail(),
 			"2026-01-05",
 		);
-		if (rejection === "throw") await assert.rejects(run, /write failed/);
+		if (rejection === "throw") await assert.rejects(run, (error: unknown) => isFixedDeliveryFailure(error, "write failed"));
 		else await run;
 		assert.deepEqual(
 			cursor.toState(),
@@ -501,7 +509,7 @@ for (const scenario of ["parent-resource", "parent-time", "child-resource", "chi
   const run = processResolvedListOrder(deps, makeListOrder(), "2026-01-05", {
    detail:makeDetail(), detailGapReason:"temporary_unavailable", detailFailureKind:null,
   });
-  if (scenario === "child-throw") await assert.rejects(run,/child write failed/);
+  if (scenario === "child-throw") await assert.rejects(run, (error: unknown) => isFixedDeliveryFailure(error, "child write failed"));
   else await run;
   const excluded = scenario === "child-resource" || scenario === "child-time";
   const debt = scenario === "child-schema" || scenario === "child-throw";
