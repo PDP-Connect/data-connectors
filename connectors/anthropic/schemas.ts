@@ -220,6 +220,13 @@ export const accountPlanSchema = z.object({
 		})
 		.strict()
 		.nullable(),
+	// Declared so the export and live artifacts share one account_plan contract
+	// (see anthropic_live). An export has no payment data: never emitted here.
+	payment_country: z
+		.string()
+		.regex(/^[A-Z]{2}$/)
+		.nullable()
+		.optional(),
 });
 
 /**
