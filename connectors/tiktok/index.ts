@@ -986,6 +986,17 @@ async function walkItemList(
 			await onItem(item);
 			read += 1;
 		}
+		// A short count is refused by assertComplete and settleCount, which keep
+		// what was read; only a list with no total has nothing else to prove it.
+		if (
+			added === 0 &&
+			(page.hasMore || (page.items.length > 0 && total === null))
+		) {
+			throw new TikTokStop(
+				page.unreadable > 0 ? "unreadable" : "incomplete",
+				`${path} returned a page that added nothing new without proving the end`,
+			);
+		}
 		if (!page.hasMore || stopAfterPage?.(page) === true) {
 			return {
 				entries,
@@ -996,12 +1007,6 @@ async function walkItemList(
 				failedFields: [...failedFields],
 				pages: pages + 1,
 			};
-		}
-		if (added === 0) {
-			throw new TikTokStop(
-				page.unreadable > 0 ? "unreadable" : "incomplete",
-				`${path} said it had more but its page added nothing new`,
-			);
 		}
 		const next = page.cursor;
 		if (next === null || next === "" || seenCursors.has(next)) {
