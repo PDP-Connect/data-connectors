@@ -27,9 +27,6 @@ import type {
 
 export const API_BASE = "https://api.github.com";
 const NEXT_LINK_PATTERN = /<([^>]+)>; rel="next"/;
-const BODY_MAX_CHARS = 20_000;
-const TRAILING_HIGH_SURROGATE = /[\uD800-\uDBFF]$/;
-const GIST_FILES_CAP = 10;
 
 // ─── Link header parsing ────────────────────────────────────────────────
 
@@ -96,9 +93,7 @@ export function repoFullFromUrl(url: string | null | undefined): string | null {
 }
 
 export function truncateBody(body: string | null | undefined): string | null {
-	return typeof body === "string"
-		? body.slice(0, BODY_MAX_CHARS).replace(TRAILING_HIGH_SURROGATE, "")
-		: null;
+	return typeof body === "string" ? body : null;
 }
 
 // ─── Record builders ────────────────────────────────────────────────────
@@ -312,12 +307,13 @@ export function pullRequestRecord(
 export function gistRecord(g: GitHubGist): Record<string, unknown> {
 	const fileEntries =
 		g.files && typeof g.files === "object" ? Object.values(g.files) : [];
-	const capped = fileEntries.slice(0, GIST_FILES_CAP);
-	const files = capped.map((f) => ({
+	const files = fileEntries.map((f) => ({
 		filename: f.filename ?? null,
 		language: f.language ?? null,
 		size: typeof f.size === "number" ? f.size : null,
 		raw_url: f.raw_url ?? null,
+		// GitHub may truncate large file content in the gist response.
+		...("truncated" in f ? { truncated: f.truncated === true } : {}),
 	}));
 	return {
 		id: String(g.id),
@@ -325,7 +321,7 @@ export function gistRecord(g: GitHubGist): Record<string, unknown> {
 		public: Boolean(g.public),
 		html_url: g.html_url ?? null,
 		files,
-		files_truncated: fileEntries.length > GIST_FILES_CAP,
+		files_truncated: "truncated" in g && g.truncated === true,
 		files_total_count: fileEntries.length,
 		comments_count: g.comments ?? null,
 		created_at: g.created_at ?? null,
