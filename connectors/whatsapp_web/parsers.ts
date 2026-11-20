@@ -641,8 +641,12 @@ export function parseStoresReadiness(raw: unknown): StoresReadiness | null {
 }
 
 /** The on-demand history request's own answer: whether it was sent. */
-export function parseHistoryAck(raw: unknown): { sent: boolean } | null {
-	const parsed = z.object({ sent: z.boolean() }).safeParse(raw);
+export function parseHistoryAck(
+	raw: unknown,
+): { sent: boolean; reason?: string | undefined } | null {
+	const parsed = z
+		.object({ sent: z.boolean(), reason: z.string().max(300).optional() })
+		.safeParse(raw);
 	return parsed.success ? parsed.data : null;
 }
 
