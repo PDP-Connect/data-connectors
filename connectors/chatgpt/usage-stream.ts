@@ -81,6 +81,9 @@ export const CHATGPT_USAGE_DETAIL_ENV = "PDPP_CHATGPT_USAGE_DETAIL";
 /** Set by hosts that never persist STATE (PageShim): emit without fingerprints. */
 export const CHATGPT_USAGE_STATELESS_ENV = "PDPP_CHATGPT_USAGE_STATELESS";
 
+// Progress guard against endless fresh cursors, not a listing-size limit.
+const NO_PROGRESS_PAGE_GUARD = 16;
+
 export const DEFAULT_DETAIL_SAMPLE = 30;
 export const LIST_PAGE_LIMIT = 100;
 const LIST_WORKERS = 4;
@@ -300,21 +303,20 @@ interface ProjectPass {
 }
 
 /**
- * Decide what a cursor page means. Terminal when the page says so (explicit
- * `has_more: false`, no cursor) or is empty. A cursor already used is also
- * terminal, so nothing is fetched twice: done when it echoes the cursor just
- * used (a last page that repeats its own cursor) or the page brought nothing
- * new; partial when it points back to an earlier page after new items (a
- * loop that may hide more).
+ * A page ends when has_more is not true, even if empty. With has_more true,
+ * follow a fresh cursor even for an empty page; a missing cursor is partial.
+ * A seen cursor ends successfully when it echoes the current cursor or adds
+ * no new items; a loop back after new items is partial. Callers separately
+ * guard consecutive fresh-cursor pages that add no items.
  */
 export function nextCursorStep(
 	j: Record<string, unknown>,
 	seen: ReadonlySet<string>,
 	current: string | null,
-	pageItems: number,
+	_pageItems: number,
 	newItems: number,
 ): { next: string } | { done: "ok" | "partial" } {
-	if (pageItems === 0 || j.has_more !== true) return { done: "ok" };
+	if (j.has_more !== true) return { done: "ok" };
 	const next =
 		typeof j.cursor === "string"
 			? j.cursor
@@ -358,6 +360,7 @@ export async function walkProjectConversations(
 	const walkOne = async (projectId: string): Promise<void> => {
 		const seenCursors = new Set<string>();
 		let cursor = "0";
+		let noProgressPages = 0;
 		for (;;) {
 			if (deps.runBudget?.reason() === "max_wall_clock") {
 				failed += 1;
@@ -399,6 +402,11 @@ export async function walkProjectConversations(
 			);
 			if ("done" in step) {
 				if (step.done === "partial") failed += 1;
+				return;
+			}
+			noProgressPages = added === 0 ? noProgressPages + 1 : 0;
+			if (noProgressPages > NO_PROGRESS_PAGE_GUARD) {
+				failed += 1;
 				return;
 			}
 			cursor = step.next;
@@ -630,6 +638,7 @@ async function readPagedCounts(
 	};
 	let cursor: string | null = null;
 	const seen = new Set<string>();
+	let noProgressPages = 0;
 	for (let page = 0; ; page += 1) {
 		if (deps.runBudget?.reason() === "max_wall_clock")
 			return { value: acc, status: "partial" };
@@ -682,6 +691,9 @@ async function readPagedCounts(
 				: n;
 		const step = nextCursorStep(j, seen, cursor, n, fresh);
 		if ("done" in step) return { value: acc, status: step.done };
+		noProgressPages = fresh === 0 ? noProgressPages + 1 : 0;
+		if (noProgressPages > NO_PROGRESS_PAGE_GUARD)
+			return { value: acc, status: "partial" };
 		cursor = step.next;
 	}
 }
@@ -886,6 +898,10 @@ async function runUsageSummary(
 		};
 	});
 
+	const listingComplete =
+		projectPass.failed === 0 &&
+		!projectPass.truncated &&
+		(projectPass.sidebar === "ok" || projectPass.sidebar === "not_available");
 	const summary = buildUsageSummaryRecord({
 		conversations,
 		sharedIds,
@@ -894,11 +910,7 @@ async function runUsageSummary(
 			archived_listing: archivedRead ? "read" : "not_available",
 			list_pages: main.pages + archived.pages,
 			detail_mode: plan.size > 0 ? "sample" : "none",
-			listing_complete:
-				projectPass.failed === 0 &&
-				!projectPass.truncated &&
-				(projectPass.sidebar === "ok" ||
-					projectPass.sidebar === "not_available"),
+			listing_complete: listingComplete,
 			project_listing: {
 				sidebar: projectPass.sidebar,
 				projects: projectPass.projects,
@@ -914,6 +926,11 @@ async function runUsageSummary(
 			(id) => outcomes.get(id)?.status === "fetched",
 		),
 	});
+	if (!listingComplete) {
+		// Keep the partial observation, but do not checkpoint or certify a full scan.
+		await deps.emitRecord("usage_summary", summary);
+		return;
+	}
 	await emitGated(deps, state, "usage_summary", stateless, [summary]);
 	await deps.emit(buildFullScanCoverageMessage("usage_summary", 1));
 }
