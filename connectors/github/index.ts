@@ -1630,16 +1630,11 @@ async function emitGistsPage(
 }
 
 /**
- * GitHub's Events API is a rolling window: the docs state it returns "the
- * most recent 90 days" of a user's public activity, capped at 300 events /
- * 10 pages of 100 (in practice 3 pages cover the whole window). There is no
- * `since` query param, so incrementality is emit-side: skip any event whose
- * `created_at` is at or before the stored cursor rather than asking the API
- * to filter. History older than 90 days is genuinely unavailable — this is
- * stated honestly in the manifest description, not silently truncated.
+ * The rolling public activity window and its Link continuation are GitHub's
+ * boundary. No `since` request parameter exists, so the stored timestamp is
+ * applied to the returned events instead of passed to the provider.
  */
-const GITHUB_EVENTS_MAX_PAGES = 3;
-const GITHUB_EVENTS_PER_PAGE = 100;
+const GITHUB_EVENTS_PER_PAGE = 100; // GitHub's maximum events per REST page.
 
 function emitEventsPage(
 	ctx: StreamCtx,
@@ -1686,12 +1681,12 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 	let latestCreatedAt: string | null | undefined = priorCreatedAt;
 	let droppedTotal = 0;
 	let totalSeen = 0;
-	let stop = false;
-	for (
-		let pageIndex = 0;
-		pageIndex < GITHUB_EVENTS_MAX_PAGES && !stop;
-		pageIndex += 1
-	) {
+	const visited = new Set<string>();
+	const seenIds = new Set<string>();
+	let path: string | null =
+		`/users/${me.login}/events/public?per_page=${String(GITHUB_EVENTS_PER_PAGE)}&page=1`;
+	for (let pageIndex = 0; path !== null; pageIndex += 1) {
+		visited.add(githubPageKey(path));
 		const pageExtra = {
 			stream: "events",
 			phase: "fetch",
@@ -1700,14 +1695,20 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 			cursor_present: pageIndex > 0 || Boolean(priorCreatedAt),
 		};
 		await ctx.progress("Fetching GitHub events page", pageExtra);
-		const { data } = await gh<unknown>(
-			ctx,
-			`/users/${me.login}/events/public?per_page=${String(GITHUB_EVENTS_PER_PAGE)}&page=${String(pageIndex + 1)}`,
-			{},
-			pageExtra,
-		);
-		const items = parseGithubListResponse<GitHubEvent>(data, "events");
-		totalSeen += items.length;
+		const page: GhResult<unknown> = await gh<unknown>(ctx, path, {}, pageExtra);
+		const items = parseGithubListResponse<GitHubEvent>(page.data, "events");
+		if (page.nextUrl && visited.has(githubPageKey(page.nextUrl)))
+			return failGithubPagination(ctx, "events", "repeated_next", pageIndex + 1);
+		const before = seenIds.size;
+		const fresh = items.filter((item) => {
+			if (!item.id) return true; // The existing malformed-item diagnostic accounts for it.
+			if (seenIds.has(item.id)) return false;
+			seenIds.add(item.id);
+			return true;
+		});
+		if (seenIds.size === before && (page.nextUrl || items.length > 0))
+			return failGithubPagination(ctx, "events", "no_new_ids", pageIndex + 1);
+		totalSeen += fresh.length;
 		await ctx.progress("Fetched GitHub events page", {
 			stream: "events",
 			phase: "page",
@@ -1715,14 +1716,11 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 			item_count: items.length,
 			total_seen: totalSeen,
 		});
-		const result = emitEventsPage(ctx, items, priorCreatedAt, latestCreatedAt);
+		const result = emitEventsPage(ctx, fresh, priorCreatedAt, latestCreatedAt);
 		await Promise.all(result.emitted);
 		latestCreatedAt = result.latest;
 		droppedTotal += result.droppedMalformed;
-		({ stop } = result);
-		if (items.length < GITHUB_EVENTS_PER_PAGE) {
-			break;
-		}
+		path = result.stop ? null : page.nextUrl;
 	}
 	if (droppedTotal > 0) {
 		await ctx.emit({
@@ -1773,22 +1771,21 @@ query($login: String!, $from: DateTime!, $to: DateTime!) {
  * account's creation year, one calendar-year window per request, newest
  * first — mirroring `resolvePrSearchWindows`'s per-year partitioning for the
  * same reason (a provider-side window cap, not a search-result cap here, but
- * the same "one window per calendar year" shape applies). An incremental run
- * uses a single window from the stored cursor date to now.
+ * the same "one window per calendar year" shape applies). Incremental runs
+ * use the same partition, clipped to the cursor date and the current instant.
  */
 export function resolveContributionWindows(
 	sinceDate: string | null,
 	accountCreatedAt: string | null | undefined,
 	now: Date = new Date(),
 ): Array<{ from: string; to: string }> {
-	if (sinceDate) {
-		return [{ from: `${sinceDate}T00:00:00Z`, to: now.toISOString() }];
-	}
+	const today = now.toISOString();
+	if (sinceDate && sinceDate > today.slice(0, 10)) return [];
 	const currentYear = now.getUTCFullYear();
-	const floorYear = isoYear(accountCreatedAt) ?? currentYear;
+	const floorYear = Math.min(currentYear, isoYear(sinceDate ?? accountCreatedAt) ?? currentYear);
 	return prCreatedWindows(currentYear, floorYear).map(({ from, to }) => ({
-		from: `${from}T00:00:00Z`,
-		to: `${to}T23:59:59Z`,
+		from: `${sinceDate && sinceDate > from ? sinceDate : from}T00:00:00Z`,
+		to: to >= today.slice(0, 10) ? today : `${to}T23:59:59Z`,
 	}));
 }
 
