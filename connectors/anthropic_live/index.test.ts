@@ -3,19 +3,26 @@
 
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
-import {
-	collectAnthropicLive,
-	MAX_CONVERSATIONS_PER_RUN,
-	selectChatOrganization,
-} from "./index.ts";
+import { collectAnthropicLive, selectChatOrganization } from "./index.ts";
 import {
 	buildAccountPlanRecord,
-	paymentCountryOf,
 	buildMessageRecord,
 	buildUsageLimitRecords,
+	paymentCountryOf,
 	planTypeOf,
 } from "./parsers.ts";
-import { at, conv, harness, ORG, ORGS, SUBSCRIPTION, uuid } from "./test-support.ts";
+import {
+	at,
+	CAP_ENV,
+	conv,
+	harness,
+	ORG,
+	ORGS,
+	SUBSCRIPTION,
+	TEST_CAP,
+	uuid,
+	withEnv,
+} from "./test-support.ts";
 
 /** The update time a STATE cursor has read through. */
 const through = (cursor: Record<string, unknown> | undefined) =>
@@ -166,16 +173,18 @@ test("conversations alone are read from the list without detail requests", async
 	);
 });
 
-test("the list is paged and a backlog over the per-run cap is deferred", async () => {
-	const total = MAX_CONVERSATIONS_PER_RUN + 5;
+test("the list is paged and a backlog over the opt-in per-run count cap is deferred", async () => {
+	const total = TEST_CAP + 5;
 	const convs = Array.from({ length: total }, (_, i) => {
 		const c = conv(i + 1, 0);
 		c.updated_at = new Date(Date.UTC(2026, 0, 15, 9, 0, i)).toISOString();
 		return c;
 	});
 	const h = harness(convs, { streams: ["conversations"] });
-	await collectAnthropicLive(h.ctx);
-	assert.equal(h.of("conversations").length, MAX_CONVERSATIONS_PER_RUN);
+	await withEnv({ [CAP_ENV]: String(TEST_CAP) }, () =>
+		collectAnthropicLive(h.ctx),
+	);
+	assert.equal(h.of("conversations").length, TEST_CAP);
 	assert.equal(
 		h.calls.filter((c) => c.includes("/chat_conversations?limit=50")).length,
 		// Read twice: a list of several pages is used only when two reads agree.
@@ -186,14 +195,14 @@ test("the list is paged and a backlog over the per-run cap is deferred", async (
 			type: "SKIP_RESULT",
 			stream: "conversations",
 			reason: "anthropic_live_backlog_deferred",
-			message: `Read ${MAX_CONVERSATIONS_PER_RUN} of ${total} changed conversations; the rest remain for the next run.`,
+			message: `Read ${TEST_CAP} of ${total} changed conversations; the rest remain for the next run.`,
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		},
 	]);
 	// The cursor sits at the newest conversation read, so the next run resumes.
 	assert.equal(
 		through(h.states("conversations").at(-1)),
-		convs[MAX_CONVERSATIONS_PER_RUN - 1]?.updated_at,
+		convs[TEST_CAP - 1]?.updated_at,
 	);
 
 	const full = harness(convs, {
@@ -300,7 +309,9 @@ test("account_plan is skipped, not nulled, when subscription_details fails trans
 	assert.equal(free.of("account_plan")[0]?.renews_at, null);
 });
 
-describe("payment_country is the card country when valid, otherwise null", { concurrency: false }, () => {
+describe("payment_country is the card country when valid, otherwise null", {
+	concurrency: false,
+}, () => {
 	const withPayment = (payment_method: unknown) =>
 		harness([], {
 			streams: ["account_plan"],
@@ -335,7 +346,9 @@ describe("payment_country is the card country when valid, otherwise null", { con
 	});
 });
 
-describe("payment_country is null when subscription_details is unreadable", { concurrency: false }, () => {
+describe("payment_country is null when subscription_details is unreadable", {
+	concurrency: false,
+}, () => {
 	[403, 404].forEach((status) => {
 		test(`HTTP ${status}`, async () => {
 			const h = harness([], {
@@ -346,7 +359,11 @@ describe("payment_country is null when subscription_details is unreadable", { co
 						: undefined,
 			});
 			await collectAnthropicLive(h.ctx);
-			assert.equal(h.of("account_plan")[0]?.payment_country, null, String(status));
+			assert.equal(
+				h.of("account_plan")[0]?.payment_country,
+				null,
+				String(status),
+			);
 			assert.deepEqual(h.skips(), []);
 		});
 	});
@@ -468,11 +485,21 @@ test("organization selection follows the export connector's rule", () => {
 	assert.equal(selectChatOrganization({}), null);
 });
 
-describe("account_plan rejects malformed raw secondary organizations before certifying inventory", { concurrency: false }, () => {
-	const cases = [{ uuid: "team" }, { uuid: "team", capabilities: "raven" }, { capabilities: ["raven"] }, null];
+describe("account_plan rejects malformed raw secondary organizations before certifying inventory", {
+	concurrency: false,
+}, () => {
+	const cases = [
+		{ uuid: "team" },
+		{ uuid: "team", capabilities: "raven" },
+		{ capabilities: ["raven"] },
+		null,
+	];
 	cases.forEach((malformed, i) => {
 		test(`malformed input ${i + 1}`, async () => {
-			const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed] });
+			const h = harness([], {
+				streams: ["account_plan"],
+				orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed],
+			});
 			await collectAnthropicLive(h.ctx);
 			assert.deepEqual(h.of("account_plan"), []);
 			assert.deepEqual(h.states("account_plan"), []);
@@ -488,7 +515,13 @@ describe("account_plan rejects malformed raw secondary organizations before cert
 });
 
 test("account_plan treats a valid empty-capabilities secondary as a clean snapshot", async () => {
-	const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, { uuid: "api", capabilities: [] }] });
+	const h = harness([], {
+		streams: ["account_plan"],
+		orgs: [
+			{ uuid: ORG, capabilities: ["chat"] },
+			{ uuid: "api", capabilities: [] },
+		],
+	});
 	await collectAnthropicLive(h.ctx);
 	assert.equal(h.of("account_plan").length, 1);
 	assert.equal(h.skips().length, 0);

@@ -19,6 +19,29 @@ import { validateRecord } from "./schemas.ts";
 
 process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS = "1";
 
+/** Run `fn` with env vars set, restoring them afterwards. */
+export async function withEnv<T>(
+	vars: Record<string, string>,
+	fn: () => Promise<T>,
+): Promise<T> {
+	const saved = Object.keys(vars).map((k) => [k, process.env[k]] as const);
+	Object.assign(process.env, vars);
+	try {
+		return await fn();
+	} finally {
+		for (const [k, v] of saved) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	}
+}
+
+export const CAP_ENV = "PDPP_ANTHROPIC_LIVE_MAX_CONVERSATIONS_PER_RUN";
+export const BYTES_ENV = "PDPP_ANTHROPIC_LIVE_MAX_RUN_BYTES";
+export const WALL_ENV = "PDPP_ANTHROPIC_LIVE_MAX_RUN_WALL_CLOCK_MS";
+/** The cap the opt-in count env is set to in the tests that need a backlog. */
+export const TEST_CAP = 200;
+
 export const ORG = "00000000-0000-4000-8000-0000000000f1";
 export const O = `/api/organizations/${ORG}`;
 export const uuid = (n: number) =>
@@ -344,6 +367,7 @@ export function harness(convs: Conv[], options: HarnessOptions = {}) {
 		ids,
 		nextState,
 		of,
+		records,
 		skips,
 		states,
 	};

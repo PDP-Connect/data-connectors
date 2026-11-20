@@ -43,10 +43,14 @@
  *     conversations left out. account_plan covers every chat organization.
  *   - A conversation deleted on claude.ai is not retracted. Temporary chats
  *     are not listed by claude.ai and are not collected.
- *   - At most MAX_CONVERSATIONS_PER_RUN conversations are read per run; a
- *     first run on a large account finishes over several runs. A list longer
- *     than MAX_LIST_PAGES pages fails the run instead of skipping its oldest
- *     conversations.
+ *   - A run reads changed conversations until it has spent a budget, then
+ *     stops between conversations and the next run resumes from the
+ *     checkpoint. The budget is 15 minutes of reading and 40 MB of emitted
+ *     records, because the collection service fails a whole run, losing
+ *     everything, at 30 minutes (sign-in included) or 64 MB of emitted JSON.
+ *     There is no count cap by default, so a typical account is read in one
+ *     run. A list longer than MAX_LIST_PAGES pages fails the run instead of
+ *     skipping its oldest conversations.
  *   - The list is paged by offset. A list of more than one page is read
  *     again until two reads agree, at most LIST_PASSES reads; then the run
  *     fails, retryable, with no checkpoint (see listConversations). An owner
@@ -70,18 +74,19 @@ import {
 	runConnector,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { RunBudget } from "../../packages/polyfill-connectors/src/run-budget.ts";
 import {
 	isOutsideTimeRange,
 	parseIsoInstant,
 } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	buildAccountPlanRecord,
-	hasReadablePlanOrganizationInventory,
-	usablePlanOrganizations,
 	buildConversationRecord,
 	buildMessageRecord,
 	buildUsageLimitRecords,
+	hasReadablePlanOrganizationInventory,
 	omissionsOf,
+	usablePlanOrganizations,
 } from "./parsers.ts";
 import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 import { validateRecord } from "./schemas.ts";
@@ -107,7 +112,27 @@ const LIST_PAGE_SIZE = 50;
 const MAX_LIST_PAGES = 400;
 /** Reads of the whole list per run before a changing list fails the run. */
 const LIST_PASSES = 4;
-export const MAX_CONVERSATIONS_PER_RUN = 200;
+// Per-run budget (see the header). Read per call so tests can shorten them
+// (the repo's timeout-override convention; see connectors/anthropic/index.ts).
+const positiveEnv = (name: string, fallback: number): number => {
+	const value = Number(process.env[name]);
+	return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+const DEFAULT_MAX_RUN_WALL_CLOCK_MS = 15 * 60 * 1000;
+const DEFAULT_MAX_RUN_BYTES = 40 * 1024 * 1024;
+const maxRunWallClockMs = () =>
+	positiveEnv(
+		"PDPP_ANTHROPIC_LIVE_MAX_RUN_WALL_CLOCK_MS",
+		DEFAULT_MAX_RUN_WALL_CLOCK_MS,
+	);
+const maxRunBytes = () =>
+	positiveEnv("PDPP_ANTHROPIC_LIVE_MAX_RUN_BYTES", DEFAULT_MAX_RUN_BYTES);
+/** Opt-in; unset means no count cap. */
+const maxConversationsPerRun = () =>
+	positiveEnv(
+		"PDPP_ANTHROPIC_LIVE_MAX_CONVERSATIONS_PER_RUN",
+		Number.POSITIVE_INFINITY,
+	);
 // Read per call so tests can shorten it (the repo's timeout-override
 // convention; see connectors/anthropic/index.ts).
 const detailDelayMs = () =>
@@ -289,7 +314,27 @@ type Ctx = Pick<
 	| "reportStreamFailure"
 	| "requested"
 	| "state"
->;
+> & {
+	/** UTF-8 JSON bytes of the records this run has emitted so far. */
+	emittedBytes?: () => number;
+};
+
+/**
+ * Counts the JSON bytes of every record the run emits, the measure the
+ * collection service limits. Counted before the runtime's scope gate, so a
+ * record the gate withholds still counts: the budget errs on the safe side.
+ */
+function meterEmits(ctx: Ctx): Ctx {
+	let bytes = 0;
+	return {
+		...ctx,
+		emitRecord: (stream, data) => {
+			bytes += Buffer.byteLength(JSON.stringify(data), "utf8");
+			return ctx.emitRecord(stream, data);
+		},
+		emittedBytes: () => bytes,
+	};
+}
 
 async function skip(
 	ctx: Ctx,
@@ -325,7 +370,13 @@ export async function runAccountPlanStream(
 ): Promise<void> {
 	await ctx.progress("Fetching account plans", { stream: ACCOUNT_PLAN_STREAM });
 	if (!hasReadablePlanOrganizationInventory(organizations)) {
-		await skip(ctx, ACCOUNT_PLAN_STREAM, "parse_error", "The organization list contains an unreadable entry.", true);
+		await skip(
+			ctx,
+			ACCOUNT_PLAN_STREAM,
+			"parse_error",
+			"The organization list contains an unreadable entry.",
+			true,
+		);
 		return;
 	}
 	const usable = usablePlanOrganizations(organizations);
@@ -949,11 +1000,13 @@ function readDetail(
 
 /**
  * conversations + messages, each with its own cursor (see ChatCursor). One
- * list read serves both. Conversations are read oldest change first, at most
- * MAX_CONVERSATIONS_PER_RUN per run, and each stream's cursor moves past a
- * conversation only after it was read. A changed conversation emits only the
- * messages changed after `emitted_through`, so a message keeps the model it
- * was first collected with unless a selection change makes the run reread it.
+ * list read serves both. Conversations are read oldest change first until the
+ * run budget is spent (checked between conversations, so each is emitted
+ * whole; the first is always read, so a run makes progress), and each
+ * stream's cursor moves past a conversation only after it was read. A changed
+ * conversation emits only the messages changed after `emitted_through`, so a
+ * message keeps the model it was first collected with unless a selection
+ * change makes the run reread it.
  */
 export async function runConversationStreams(
 	ctx: Ctx,
@@ -980,6 +1033,11 @@ export async function runConversationStreams(
 	});
 	let changed: ListedConversation[] = [];
 	let batch: ListedConversation[] = [];
+	let readCount = 0;
+	// Anchored before the list read: the budget covers the conversation phase.
+	const budget = new RunBudget({ maxWallClockMs: maxRunWallClockMs() });
+	budget.tripReason();
+	const byteLimit = maxRunBytes();
 	// Text fields left absent for passing the inline cap, counted for one
 	// aggregate disclosure (no ids, no titles).
 	const omitted = {
@@ -991,14 +1049,19 @@ export async function runConversationStreams(
 		changed = listedItems
 			.filter((item) => plans.some((plan) => needs(plan, item)))
 			.sort(compareKeys);
-		// A full refresh ignores the cursor, so a cap would re-read the same
-		// oldest conversations on every run.
-		batch =
-			ctx.collectionMode === "full_refresh"
-				? changed
-				: changed.slice(0, MAX_CONVERSATIONS_PER_RUN);
+		// A full refresh ignores the cursor, so a cap or budget would re-read
+		// the same oldest conversations on every run.
+		const bounded = ctx.collectionMode !== "full_refresh";
+		batch = bounded ? changed.slice(0, maxConversationsPerRun()) : changed;
 
 		for (const [index, item] of batch.entries()) {
+			if (
+				bounded &&
+				index > 0 &&
+				(budget.shouldStop() || (ctx.emittedBytes?.() ?? 0) >= byteLimit)
+			) {
+				break;
+			}
 			let detail: ConversationDetail | null = null;
 			if (messages) {
 				if (index > 0) await politeDelay(detailDelayMs());
@@ -1070,6 +1133,7 @@ export async function runConversationStreams(
 					plan.readThrough = { update_time: item.update_time, id: item.id };
 				}
 			}
+			readCount = index + 1;
 			await saveState();
 		}
 	} catch (error) {
@@ -1109,13 +1173,13 @@ export async function runConversationStreams(
 		}
 	}
 
-	if (changed.length > batch.length) {
+	if (changed.length > readCount) {
 		for (const plan of plans) {
 			await skip(
 				ctx,
 				plan.stream,
 				"anthropic_live_backlog_deferred",
-				`Read ${batch.length} of ${changed.length} changed conversations; the rest remain for the next run.`,
+				`Read ${readCount} of ${changed.length} changed conversations; the rest remain for the next run.`,
 				true,
 			);
 		}
@@ -1131,6 +1195,7 @@ export async function runConversationStreams(
 export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
 	const { page, requested } = ctx;
 	if (requested.size === 0) return;
+	const meter = meterEmits(ctx);
 	if (!(await isOnClaude(page))) {
 		await page.goto(CLAUDE_HOME_URL, {
 			waitUntil: "domcontentloaded",
@@ -1160,16 +1225,16 @@ export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
 	const orgPath = `/api/organizations/${String(org.uuid)}`;
 	if (requested.has(ACCOUNT_PLAN_STREAM)) {
 		await runAccountPlanStream(
-			ctx,
+			meter,
 			org,
 			Array.isArray(orgs.json) ? orgs.json : [org],
 		);
 	}
 	if (requested.has(USAGE_LIMITS_STREAM)) {
-		await runUsageLimitsStream(ctx, orgPath);
+		await runUsageLimitsStream(meter, orgPath);
 	}
 	if (requested.has(CONVERSATIONS_STREAM) || requested.has(MESSAGES_STREAM)) {
-		await runConversationStreams(ctx, String(org.uuid), orgPath);
+		await runConversationStreams(meter, String(org.uuid), orgPath);
 	}
 }
 
