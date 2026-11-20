@@ -26,10 +26,9 @@
  *
  * Pagination: DoorDash's orders page infinite-scrolls, firing a repeat
  * `getConsumerOrdersWithDetails` request as the owner (or an automated
- * scroll) nears the bottom. Same approach as the legacy scraper: scroll,
- * capture, repeat, stop after two consecutive zero-add responses, no response, or a page-count
- * ceiling is hit (`MAX_SCROLL_PAGES`, mirrors Reddit's `MAX_PAGES` safety
- * cap pattern from src/page-ceiling.ts).
+ * scroll) nears the bottom. Scroll until an observed, structurally valid
+ * empty orders response; stop as partial on silence, unreadable responses,
+ * or two consecutive responses with no new IDs.
  *
  * ## Incremental cursor — NOT implemented; full refresh only
  *
@@ -42,9 +41,9 @@
  * ("don't invent cursors where the platform has none") and the task's
  * explicit instruction to default to full refresh when a stable stop
  * condition can't be justified, this connector performs a FULL REFRESH every
- * run: it walks the order list from the top on every invocation, bounded by
- * `MAX_SCROLL_PAGES`, and does not persist or consult a STATE cursor.
- * `manifests/doordash.json` reflects this (`incremental: false`,
+ * run: it walks the order list from the top on every invocation and does
+ * not persist or consult a STATE cursor. An interrupted run starts over.
+ * The connector manifest reflects this (`incremental: false`,
  * `coverage_strategy: full_inventory`). Re-evaluate this once a live capture
  * shows the real request/response shape.
  *
@@ -105,7 +104,6 @@ import {
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
 	orderItemRecords,
 	orderRecord,
@@ -118,12 +116,6 @@ const SESSION_COOKIE = /^(session_id|dd_login|_cfuvid)$/;
 const ORDERS_GRAPHQL_URL_RE = /getConsumerOrdersWithDetails/i;
 const ORDERS_URL = "https://www.doordash.com/orders";
 
-/** Scroll-triggered pagination safety ceiling. Mirrors Reddit's MAX_PAGES —
- *  a generous bound for one run, not a claim about how many pages DoorDash
- *  actually has. See the full-refresh note in the header comment: there is
- *  no evidenced cursor to resume from, so this only bounds a single run's
- *  work, not cross-run continuation. */
-export const MAX_SCROLL_PAGES = 20;
 const SCROLL_SETTLE_MS = 3000;
 const RESPONSE_WAIT_TIMEOUT_MS = 12_000;
 
@@ -134,8 +126,8 @@ export const DOORDASH_RETRYABLE_PATTERN =
 
 /**
  * Wait for the next `getConsumerOrdersWithDetails` response after triggering
- * `action` (a navigation or scroll). Absence on timeout can end the list;
- * an observed response whose JSON is unreadable must not certify exhaustion.
+ * `action` (a navigation or scroll). Neither a timeout nor unreadable JSON
+ * certifies exhaustion.
  */
 export type OrdersResponse =
 	| { kind: "none" }
@@ -165,9 +157,44 @@ export async function waitForOrdersResponse(
 
 // ─── Collect ─────────────────────────────────────────────────────────────
 
+type IncompleteReason =
+	| "response_not_observed"
+	| "unreadable_response"
+	| "no_new_order_ids";
+
 export interface CollectOrdersResult {
 	nodes: DoorDashOrderNode[];
 	truncated: boolean;
+	stopReason: IncompleteReason | null;
+}
+
+// Require the known fixture envelope for empty-list evidence. The parser's
+// [] fallback also covers malformed/unrecognized inputs, so [] alone is
+// not proof. Keep using the parser for nonempty responses.
+function isObservedEmptyOrders(body: unknown): boolean {
+	const envelope = body as {
+		data?: { consumer?: { ordersWithDetails?: { orders?: unknown } } };
+	} | null;
+	const orders = envelope?.data?.consumer?.ordersWithDetails?.orders;
+	return Array.isArray(orders) && orders.length === 0;
+}
+
+function readOrdersPage(
+	response: OrdersResponse,
+):
+	| { kind: "orders"; orders: DoorDashOrderNode[] }
+	| { kind: IncompleteReason } {
+	if (response.kind === "none") return { kind: "response_not_observed" };
+	if (response.kind === "unreadable") return { kind: "unreadable_response" };
+	const errors = (response.body as { errors?: unknown } | null)?.errors;
+	if (errors != null && (!Array.isArray(errors) || errors.length > 0)) {
+		return { kind: "unreadable_response" };
+	}
+	const orders = parseOrdersResponse(response.body);
+	if (orders.length > 0 || isObservedEmptyOrders(response.body)) {
+		return { kind: "orders", orders };
+	}
+	return { kind: "unreadable_response" };
 }
 
 /**
@@ -180,8 +207,7 @@ export interface CollectOrdersResult {
 export async function collectOrderNodes(args: {
 	page: Page;
 	/** Pacing delay between scroll pages. Defaults to politeDelay(3000ms).
-	 *  Tests inject a no-op so they don't sleep through MAX_SCROLL_PAGES
-	 *  iterations. */
+	 *  Tests can inject a no-op. */
 	delay?: (ms: number) => Promise<void>;
 	progress?: (
 		message: string,
@@ -208,63 +234,61 @@ export async function collectOrderNodes(args: {
 			const id = node.orderUuid;
 			// A node with no orderUuid can't be deduped across pages — keep it
 			// (don't drop it silently here); collectAllStreams reports it as a
-			// shape anomaly via SKIP_RESULT rather than swallowing it at this
+			// shape anomaly via PROGRESS rather than swallowing it at this
 			// layer. Only an already-seen id is a true duplicate to skip.
 			if (id && seen.has(id)) {
 				continue;
 			}
 			if (id) {
 				seen.add(id);
+				added += 1;
 			}
 			nodes.push(node);
-			added += 1;
 		}
 		return added;
 	};
 
-	// Page 1: the orders page's own initial load fires the query.
-	const initialBody = await waitForResponseFn(page, async () => {
-		await page
-			.goto(ORDERS_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
-			.catch((): undefined => undefined);
-	});
-	if (initialBody.kind === "body") {
-		addNodes(parseOrdersResponse(initialBody.body));
-	}
-	await progress?.("Fetched DoorDash orders page", {
-		phase: "page",
-		page_index: 0,
-		item_count: nodes.length,
-	});
-
-	let unreadable = false;
 	let zeroAddResponses = 0;
-	const walk = await walkPagesWithCeiling({
-		maxPages: MAX_SCROLL_PAGES,
-		fetchPage: async (pageNumber) => {
-			const body = await waitForResponseFn(page, async () => {
+	const collectPage = async (
+		pageIndex: number,
+	): Promise<"advance" | "exhausted" | IncompleteReason> => {
+		const response = await waitForResponseFn(page, async () => {
+			if (pageIndex === 0) {
+				await page
+					.goto(ORDERS_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
+					.catch((): undefined => undefined);
+			} else {
 				await scrollFn(page);
-			});
-			if (body.kind === "none") return false;
-			if (body.kind === "unreadable") {
-				unreadable = true;
-				return false;
 			}
-			const added = addNodes(parseOrdersResponse(body.body));
-			await progress?.("Fetched DoorDash orders page", {
-				phase: "page",
-				page_index: pageNumber,
-				item_count: nodes.length,
-			});
-			zeroAddResponses = added === 0 ? zeroAddResponses + 1 : 0;
-			// One refetch may overlap before new rows render; require a repeat.
-			if (zeroAddResponses >= 2) return false;
-			await delay(SCROLL_SETTLE_MS);
-			return true;
-		},
-	});
+		});
+		const parsed = readOrdersPage(response);
+		if (parsed.kind !== "orders") return parsed.kind;
+		if (parsed.orders.length === 0) return "exhausted";
 
-	return { nodes, truncated: unreadable || walk.truncated };
+		const added = addNodes(parsed.orders);
+		await progress?.("Fetched DoorDash orders page", {
+			phase: "page",
+			page_index: pageIndex,
+			item_count: nodes.length,
+		});
+		// The initial navigation isn't a repeat; one later fetch may overlap.
+		if (pageIndex > 0) {
+			zeroAddResponses = added === 0 ? zeroAddResponses + 1 : 0;
+			if (zeroAddResponses >= 2) return "no_new_order_ids";
+			await delay(SCROLL_SETTLE_MS);
+		}
+		return "advance";
+	};
+
+	for (let pageIndex = 0; ; pageIndex += 1) {
+		const result = await collectPage(pageIndex);
+		if (result === "exhausted") {
+			return { nodes, truncated: false, stopReason: null };
+		}
+		if (result !== "advance") {
+			return { nodes, truncated: true, stopReason: result };
+		}
+	}
 }
 
 export async function collectAllStreams(
@@ -281,7 +305,7 @@ export async function collectAllStreams(
 		return;
 	}
 
-	const { nodes, truncated } = await collectOrderNodes({
+	const { nodes, stopReason } = await collectOrderNodes({
 		page,
 		progress,
 		...(delay ? { delay } : {}),
@@ -336,62 +360,26 @@ export async function collectAllStreams(
 		}
 	}
 
-	if (truncated) {
-		const message = `DoorDash orders stopped before all history could be read (an unreadable response or the ${MAX_SCROLL_PAGES}-scroll limit)`;
-		if (wantsOrders) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "orders",
-				reason: "older_pages_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message,
-				diagnostics: { page_limit: MAX_SCROLL_PAGES, total_seen: nodes.length },
-			});
-		}
-		if (wantsItems) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "order_items",
-				reason: "older_pages_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message,
-				diagnostics: { page_limit: MAX_SCROLL_PAGES, total_seen: nodes.length },
-			});
-		}
-	}
-
-	if (nodes.length === 0) {
-		// Zero orders observed across the whole walk is a drift signal, not
-		// necessarily "no data" — the GraphQL response for the order list never
-		// arrived (or arrived empty). Report it so a selector/endpoint break is
-		// visible instead of looking like a quiet, complete, empty run.
-		const reportEmpty = async (stream: string): Promise<void> => {
+	if (stopReason !== null) {
+		const reportPartial = async (stream: string): Promise<void> => {
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: "doordash_orders_response_not_observed",
-				// Both causes (endpoint drift, or an account with no orders) look
-				// the same on every run, so a rerun cannot clear this.
+				reason:
+					nodes.length === 0 && stopReason === "response_not_observed"
+						? "doordash_orders_response_not_observed"
+						: "older_pages_deferred_page_budget",
 				recovery_hint: {
 					action: "retry_on_connector_upgrade",
 					retryable: false,
 				},
 				message:
-					"No getConsumerOrdersWithDetails response was observed on the orders page; the account may have no orders, or DoorDash's endpoint/shape has changed.",
+					"We couldn't verify that all DoorDash orders were read. A new run will start at the newest orders.",
+				diagnostics: { total_seen: nodes.length, stop_reason: stopReason },
 			});
 		};
-		if (wantsOrders) {
-			await reportEmpty("orders");
-		}
-		if (wantsItems) {
-			await reportEmpty("order_items");
-		}
+		if (wantsOrders) await reportPartial("orders");
+		if (wantsItems) await reportPartial("order_items");
 	}
 
 	if (wantsOrders) {
