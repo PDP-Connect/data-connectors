@@ -369,10 +369,11 @@ export async function collectAllStreams(
 					nodes.length === 0 && stopReason === "response_not_observed"
 						? "doordash_orders_response_not_observed"
 						: "older_pages_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
+				// Silence and stalls are transient; an unreadable body may be a changed response shape.
+				recovery_hint:
+					stopReason === "unreadable_response"
+						? { action: "retry_on_connector_upgrade", retryable: false }
+						: { action: "retry_by_runtime", retryable: true },
 				message:
 					"We couldn't verify that all DoorDash orders were read. A new run will start at the newest orders.",
 				diagnostics: { total_seen: nodes.length, stop_reason: stopReason },

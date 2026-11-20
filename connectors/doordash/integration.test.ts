@@ -492,12 +492,19 @@ const prefixResponse = {
 	body: graphqlEnvelope([makeOrderNode("synthetic-1")]),
 };
 
-for (const [tail, stopReason] of [
-	[["none"], "response_not_observed"],
-	[[prefixResponse, prefixResponse], "no_new_order_ids"],
+const RUNTIME_RETRY = { action: "retry_by_runtime", retryable: true };
+const UPGRADE_RETRY = {
+	action: "retry_on_connector_upgrade",
+	retryable: false,
+};
+
+for (const [tail, stopReason, hint] of [
+	[["none"], "response_not_observed", RUNTIME_RETRY],
+	[[prefixResponse, prefixResponse], "no_new_order_ids", RUNTIME_RETRY],
 	[
 		[{ body: { errors: [{ message: "synthetic error" }] } }],
 		"unreadable_response",
+		UPGRADE_RETRY,
 	],
 ] as const) {
 	test(`collectAllStreams: ${stopReason} after a prefix is partial without STATE`, async () => {
@@ -508,15 +515,15 @@ for (const [tail, stopReason] of [
 			async () => undefined,
 		);
 		assert.equal(harness.emitted.length, 1);
-		assert.ok(
-			harness.protocolMessages.some(
-				(message) =>
-					message.type === "SKIP_RESULT" &&
-					message.reason === "older_pages_deferred_page_budget" &&
-					(message.diagnostics as { stop_reason?: unknown } | undefined)
-						?.stop_reason === stopReason,
-			),
+		const skip = harness.protocolMessages.find(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "older_pages_deferred_page_budget" &&
+				(message.diagnostics as { stop_reason?: unknown } | undefined)
+					?.stop_reason === stopReason,
 		);
+		assert.ok(skip);
+		assert.deepEqual((skip as { recovery_hint?: unknown }).recovery_hint, hint);
 		assert.equal(
 			harness.protocolMessages.some((message) => message.type === "STATE"),
 			false,
