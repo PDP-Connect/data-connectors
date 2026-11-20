@@ -349,7 +349,7 @@ test("collect(): zero attachments across both parent streams proves a verified-e
 });
 
 test("collect(): nonzero attachments with no blob-upload backend configured proves considered > 0, covered: 0 — never false-complete, and emits STATE", async () => {
-	// No PDPP_RS_URL/PDPP_OWNER_TOKEN in this test process env, so
+	// No PDPP_RS_URL/PDPP_BLOB_UPLOAD_TOKEN in this test process env, so
 	// makeUploader() returns undefined and every attachment with a URL stays
 	// hydration_status: "deferred" (attempted this run, but not retained).
 	const restore = stubFetchByPath({
@@ -635,5 +635,75 @@ test("collect(): a transient attachment failure stays uncovered so the parent cu
 		// The first stub is already restored before pass two. Calling it again is
 		// harmless and protects cleanup if pass one throws early.
 		restoreFirst();
+	}
+});
+
+test("collect(): reports once per run that attachment bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const streams: StreamScope[] = [
+		{ name: "groups" },
+		{ name: "group_messages" },
+		{ name: "attachments" },
+	];
+	const harness = makeRecordingEmit(validateRecord);
+	const ctx: CollectContext = {
+		assist: () => Promise.resolve("asst_test"),
+		capture: null,
+		completeAssistance: () => Promise.resolve(),
+		credentials: { GROUPME_ACCESS_TOKEN: TOKEN },
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: "2026-08-10T00:00:00.000Z",
+		progress: () => Promise.resolve(),
+		requestDetailGapPage: () => Promise.resolve([]),
+		requested: new Map(streams.map((s) => [s.name, s])),
+		scope: { streams },
+		sendInteraction: () =>
+			Promise.resolve({
+				request_id: "int_test",
+				status: "cancelled" as const,
+				type: "INTERACTION_RESPONSE" as const,
+			}),
+		state: {},
+	};
+	const savedEnv = {
+		PDPP_BLOB_UPLOAD_TOKEN: process.env.PDPP_BLOB_UPLOAD_TOKEN,
+		PDPP_OWNER_TOKEN: process.env.PDPP_OWNER_TOKEN,
+		PDPP_RS_URL: process.env.PDPP_RS_URL,
+		RS_URL: process.env.RS_URL,
+	};
+	process.env.PDPP_BLOB_UPLOAD_TOKEN = "";
+	process.env.PDPP_OWNER_TOKEN = "legacy-owner-secret";
+	process.env.PDPP_RS_URL = "http://rs.local";
+	process.env.RS_URL = "";
+	const restore = stubFetchByPath({
+		"/v3/groups": [GROUP],
+		"/v3/groups/group-1/messages": {
+			count: 2,
+			messages: [
+				groupMessageWithAttachment("gmsg-1"),
+				groupMessageWithAttachment("gmsg-2"),
+			],
+		},
+	});
+	try {
+		await collect(ctx);
+		const gaps = harness.protocolMessages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per attachment");
+		assert.ok(
+			!JSON.stringify(harness.protocolMessages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
+		);
+	} finally {
+		restore();
+		for (const [key, value] of Object.entries(savedEnv)) {
+			if (value === undefined) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
+		}
 	}
 });

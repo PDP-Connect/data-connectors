@@ -147,7 +147,7 @@ async function run(dir: string, opts: RunOpts = {}) {
 		entrypoint: ENTRYPOINT,
 		env: {
 			APPLE_HEALTH_EXPORT_DIR: dir,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			TZ: "UTC",

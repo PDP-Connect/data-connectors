@@ -111,7 +111,7 @@ function runImessage(
 		entrypoint: ENTRYPOINT,
 		env: {
 			IMESSAGE_DB_PATH: dbPath,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			...env,
@@ -577,7 +577,7 @@ test("iMessage hydrates a local attachment through the reference blob endpoint",
 
 		await withBlobServer(
 			async (req) => {
-				assert.equal(req.headers.authorization, "Bearer owner-token");
+				assert.equal(req.headers.authorization, "Bearer upload-token");
 				assert.equal(req.headers["content-type"], "application/octet-stream");
 				const url = new URL(req.url ?? "", "http://127.0.0.1");
 				assert.equal(url.searchParams.get("mime_type"), "image/jpeg");
@@ -606,7 +606,7 @@ test("iMessage hydrates a local attachment through the reference blob endpoint",
 			async (baseUrl) => {
 				const result = await runImessage(dbPath, ["attachments"], {
 					IMESSAGE_ATTACHMENTS_ROOT: attachmentsRootFor(dir),
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				const attachments = records(result.messages, "attachments");
@@ -815,7 +815,7 @@ test("iMessage marks an attachment failed when blob upload fails, without losing
 			async (baseUrl) => {
 				const result = await runImessage(dbPath, ["attachments"], {
 					IMESSAGE_ATTACHMENTS_ROOT: attachmentsRootFor(dir),
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				const [a] = records(result.messages, "attachments");
@@ -1210,7 +1210,7 @@ test("iMessage's production hydration path routes the fd-based read through read
 			async (baseUrl) => {
 				const result = await runImessage(dbPath, ["attachments"], {
 					IMESSAGE_ATTACHMENTS_ROOT: root,
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				const [a] = records(result.messages, "attachments");
@@ -1455,4 +1455,60 @@ test("imessage.json declares incremental:false for attachments and participants,
 		true,
 		"messages IS genuinely incremental via the date cursor — unlike attachments/participants",
 	);
+});
+
+test("iMessage reports once per run that attachment bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-"));
+	const dbPath = join(dir, "chat.db");
+	const t0 = appleSecFromUnixMs(Date.parse("2024-06-05T13:00:00.000Z"));
+	try {
+		const first = await writeAttachmentFile(dir, "a.txt", Buffer.from("one"));
+		const second = await writeAttachmentFile(dir, "b.txt", Buffer.from("two"));
+		buildChatDbFixture(dbPath, {
+			attachments: [
+				{
+					filename: first,
+					messageRowid: 1,
+					mimeType: "text/plain",
+					rowid: 100,
+				},
+				{
+					filename: second,
+					messageRowid: 1,
+					mimeType: "text/plain",
+					rowid: 101,
+				},
+			],
+			chatIds: [1],
+			handles: [{ id: "+15551234567", rowid: 10 }],
+			messages: [
+				{
+					chatId: 1,
+					dateAppleSec: t0,
+					guid: "MSG-1",
+					handleRowid: 10,
+					isFromMe: false,
+					rowid: 1,
+					text: null,
+				},
+			],
+		});
+		const result = await runImessage(dbPath, ["attachments"], {
+			IMESSAGE_ATTACHMENTS_ROOT: attachmentsRootFor(dir),
+			PDPP_OWNER_TOKEN: "legacy-owner-secret",
+			PDPP_RS_URL: "http://rs.local",
+		});
+		assert.equal(records(result.messages, "attachments").length, 2);
+		const gaps = skips(result.messages).filter(
+			(s) => s.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per attachment");
+		assert.equal(gaps[0]?.stream, "attachments");
+		assert.ok(
+			!JSON.stringify(result.messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
 });

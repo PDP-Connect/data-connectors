@@ -72,7 +72,7 @@ function runApplePhotos(
 		entrypoint: ENTRYPOINT,
 		env: {
 			APPLE_PHOTOS_EXPORT_DIR: exportDir,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 		},

@@ -94,7 +94,7 @@ async function runNetflixImport(
 		entrypoint: NETFLIX_ENTRYPOINT,
 		env: {
 			NETFLIX_EXPORT_DIR: importRoot,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			TZ: "America/Chicago",

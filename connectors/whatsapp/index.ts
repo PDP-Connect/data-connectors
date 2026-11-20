@@ -29,6 +29,7 @@ import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
+import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import {
 	buildDetailCoverageMessage,
 	type EmittedMessage,
@@ -138,13 +139,13 @@ function uploadBlob(args: {
 	stream: string;
 }): Promise<ReferenceBlobRef | null> {
 	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-	const ownerToken = process.env.PDPP_OWNER_TOKEN;
-	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
+	const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && uploadToken)) {
 		return Promise.resolve(null);
 	}
 	const uploader = makeReferenceBlobUploader({
 		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-		ownerToken,
+		uploadToken,
 		rsUrl,
 	});
 	return uploader({
@@ -767,6 +768,7 @@ async function buildAttachmentRecord(
 	chatId: string,
 	attachment: ParsedWhatsAppAttachment,
 	attachmentLinkIndex: AttachmentMessageLinkIndex,
+	reportBlobUploadGap: () => Promise<void>,
 ): Promise<Record<string, unknown> | null> {
 	let bytes: Buffer;
 	try {
@@ -781,6 +783,7 @@ async function buildAttachmentRecord(
 	let hydrationStatus: "deferred" | "failed" | "hydrated" = "deferred";
 	let hydrationError: string | null = null;
 	try {
+		await reportBlobUploadGap();
 		blobRef = await uploadBlob({
 			bytes,
 			connectorId: "https://registry.pdpp.dev/connectors/whatsapp",
@@ -820,6 +823,7 @@ async function emitAttachmentRecords(
 	exportOrdinal: number,
 	exportTotal: number,
 	emit: EmitEvent,
+	reportBlobUploadGap: () => Promise<void>,
 ): Promise<{ covered: number; emitted: number; processed: number }> {
 	let emitted = 0;
 	let skipped = 0;
@@ -832,6 +836,7 @@ async function emitAttachmentRecords(
 			chatId,
 			attachment,
 			attachmentLinkIndex,
+			reportBlobUploadGap,
 		);
 		if (!record) {
 			skipped += 1;
@@ -1150,6 +1155,7 @@ async function emitParsedExport(
 	progress: EmitProgress,
 	exportOrdinal: number,
 	exportTotal: number,
+	reportBlobUploadGap: () => Promise<void>,
 ): Promise<{
 	attachments: number;
 	attachmentsCovered: number;
@@ -1200,6 +1206,7 @@ async function emitParsedExport(
 				exportOrdinal,
 				exportTotal,
 				emit,
+				reportBlobUploadGap,
 			);
 			records += attachmentSummary.emitted;
 			attachmentsCovered += attachmentSummary.covered;
@@ -1323,6 +1330,12 @@ runConnector({
 		const cursors = openWhatsAppCursors(state);
 		const identityCursor = openChatIdentityCursor(state);
 		const skipStream = firstRequestedStream(requested);
+		// One gap per run, across every chat export, not one per attachment.
+		const reportBlobUploadGap = makeBlobUploadGapReporter({
+			connector: "whatsapp",
+			emit,
+			stream: "attachments",
+		});
 
 		const files = await discoverImportFilesOrThrow(importDir);
 		await progress(
@@ -1406,6 +1419,7 @@ runConnector({
 					progress,
 					exportOrdinal,
 					files.length,
+					reportBlobUploadGap,
 				);
 				importedExports += 1;
 				totalAttachments += emitSummary.attachments;

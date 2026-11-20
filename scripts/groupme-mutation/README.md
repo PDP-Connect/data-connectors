@@ -73,14 +73,14 @@ Measured with this runner on `index.ts` lines 1487–1495 and 1528–1529 at `ba
 | Mutant (line:col) | Operator and replacement | Status | Disposition |
 | --- | --- | --- | --- |
 | 1488:18–37 | `i < messages.length` → `i <= messages.length` | Survived | Equivalent for JSON arrays: `messages[messages.length]` is `undefined`, so `prev && curr` is false and nothing changes. A non-array JSON object with an own key equal to its length can differ. Both versions then fail before any record is emitted, though the error type differs. Argued by reading the code, not tested. |
-| 1491:7–19 | `prev && curr` → `true` | Survived | Unresolved malformed-input boundary. Equivalent when page elements are objects. By reading the code (not executed), a JSON `null` element makes the original skip the comparison, emit earlier valid records, and fail at conversion. The mutant fails during the order check, before any emission. Both fail the walk; they differ in partial emission. The later native null-prefix test now pins the existing partial emission without endorsing it; manual fault checks fail for both replacements. This historical Stryker status is unchanged; no fresh official campaign kill is claimed. |
-| 1491:7–19 | `prev && curr` → `prev \|\| curr` | Survived | Same unresolved null boundary as the row above. |
+| 1492:7–19 | `prev && curr` → `true` | Survived | Unresolved malformed-input boundary. Equivalent when page elements are objects. By reading the code (not executed), a JSON `null` element makes the original skip the comparison, emit earlier valid records, and fail at conversion. The mutant fails during the order check, before any emission. Both fail the walk; they differ in partial emission. The later native null-prefix test now pins the existing partial emission without endorsing it; manual fault checks fail for both replacements. This historical Stryker status is unchanged; no fresh official campaign kill is claimed. |
+| 1492:7–19 | `prev && curr` → `prev \|\| curr` | Survived | Same unresolved null boundary as the row above. |
 | 1488:18–37 | `i < messages.length` → `i >= messages.length` | Timeout | Not a kill. On a one-message page the loop never ends. Stryker's timeout is nontermination evidence. |
 | 1488:39–45 | `i += 1` → `i -= 1` | Timeout | Not a kill. The index descends forever. |
 
 Killed mutants, one line each, by the tests that fail them:
-- The canary `<=` at 1491:23–56 is killed only by `ordinary resume: equal timestamps with advancing IDs collect and advance across pages`.
-- The `>=` at 1491:23–56 is killed by five tests, including the same owner.
+- The canary `<=` at 1492:23–56 is killed only by `ordinary resume: equal timestamps with advancing IDs collect and advance across pages`.
+- The `>=` at 1492:23–56 is killed by five tests, including the same owner.
 - The empty progress string at 1529:29–54 is killed by `ordinary resume: forward-fetch progress remains nonblank without pinning copy`.
 - The other 10 kills are killed by existing tests, including the >200-page regression `>old-cap discriminator: …` and the forward-walk cursor and non-progress tests.
 

@@ -147,7 +147,7 @@ const DEFAULT_ATTACHMENT_MIME_TYPE = "application/octet-stream";
 // BEFORE the request rather than after — see `normalizeAttachmentMimeType`.
 const VALID_MEDIA_TYPE_PATTERN = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 const BLOB_UPLOAD_ENV_ERROR =
-	"blob upload unavailable: PDPP_RS_URL and PDPP_OWNER_TOKEN must be provided by the runtime";
+	"blob upload unavailable: PDPP_RS_URL and PDPP_BLOB_UPLOAD_TOKEN must be provided by the runtime";
 // Conservative default chosen to align with Gmail's per-message attachment
 // cap (25 MiB). Operators can raise/lower with PDPP_GMAIL_MAX_ATTACHMENT_BYTES;
 // the value is enforced both before download (when source size is known) and
@@ -4227,13 +4227,13 @@ async function* failIncompleteTransfer(
 
 function buildRuntimeBlobUploader(): ReferenceBlobUploadFn {
 	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-	const ownerToken = process.env.PDPP_OWNER_TOKEN;
-	if (!(rsUrl && ownerToken)) {
+	const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+	if (!(rsUrl && uploadToken)) {
 		return () => Promise.reject(new Error(BLOB_UPLOAD_ENV_ERROR));
 	}
 	return makeSharedReferenceBlobUploader({
 		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-		ownerToken,
+		uploadToken,
 		rsUrl,
 	});
 }
