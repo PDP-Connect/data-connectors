@@ -2130,7 +2130,7 @@ export function createOutputChannel(
 		message: EmittedMessage,
 		open: () => boolean,
 	): Promise<void> => {
-		// Allowlist first, on the producer's own object, then the clone: both
+		// Allowlist first, on the producer's own object, then the JSON snapshot: both
 		// run here, so a refused frame is never queued and the run ends in one
 		// failed DONE. Every admitted frame is a full snapshot.
 		// Once a frame was refused the run is failed: later frames from a
@@ -2140,7 +2140,12 @@ export function createOutputChannel(
 		let snapshot: EmittedMessage;
 		try {
 			if (!isPlainSnapshotData(message)) throw new Error("not plain data");
-			snapshot = structuredClone(message);
+			// Without the Node proxy intrinsic the walk cannot see a proxy;
+			// structuredClone refuses one, so it runs here as a guard only.
+			if (isProxyValue === undefined) structuredClone(message);
+			// The one canonical serialization: the snapshot is exactly what the
+			// wire sends. A throw here (engine limits) refuses the frame.
+			snapshot = JSON.parse(JSON.stringify(message)) as EmittedMessage;
 		} catch {
 			unserializable = true;
 			return Promise.reject(new FixedFailure("frame_not_serializable"));
@@ -2224,6 +2229,15 @@ export function createOutputChannel(
  * walk; that is an accepted limit: trap code is the connector's own in-process
  * code, which could block anyway, and `structuredClone` still refuses a proxy,
  * so one is never admitted.
+ *
+ * After the walk admits a frame, the queued snapshot is one
+ * `JSON.parse(JSON.stringify(value))`: the canonical wire form, so "admitted"
+ * equals "sent". A finite -0 becomes 0 and a Date becomes its ISO string,
+ * exactly as on the wire. If that step throws (for example RangeError on an
+ * engine depth limit) the frame is refused with `frame_not_serializable` and
+ * no frame text is kept. Where Node's proxy intrinsic is missing (browsers),
+ * `structuredClone` runs only as the proxy-refusal guard; it is not the
+ * snapshot. There is no size cap.
  *
  * Cycles are found by tracking the ancestor path; a reference shared without a
  * cycle is allowed, because JSON duplicates it. Iterative.

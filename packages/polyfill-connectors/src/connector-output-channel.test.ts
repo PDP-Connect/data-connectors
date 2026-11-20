@@ -267,7 +267,7 @@ for (const [label, make] of [
 
 const SHARED = { same: "ref" };
 
-test("plain JSON data, dates, nested arrays and shared references are admitted as clones", async () => {
+test("plain JSON data, dates, nested arrays and shared references are admitted as wire-form copies", async () => {
 	const sent: EmittedMessage[] = [];
 	const channel = createOutputChannel(async (message) => {
 		sent.push(message);
@@ -293,7 +293,95 @@ test("plain JSON data, dates, nested arrays and shared references are admitted a
 	await channel.write(frame);
 	assert.equal(sent.length, 1);
 	assert.notEqual((sent[0] as unknown as { data: object }).data, data);
-	assert.deepEqual(sent[0], frame);
+	// The snapshot is the wire form: JSON.parse(JSON.stringify(frame)).
+	assert.deepEqual(sent[0], JSON.parse(JSON.stringify(frame)));
+});
+
+test("a finite -0 is queued as 0, as the wire sends it", async () => {
+	const sent: EmittedMessage[] = [];
+	const channel = createOutputChannel(async (message) => {
+		sent.push(message);
+	});
+	await channel.write({
+		type: "RECORD",
+		stream: "s",
+		key: "k",
+		data: { z: -0, list: [-0] },
+	} as unknown as EmittedMessage);
+	const data = (sent[0] as unknown as { data: { z: number; list: number[] } })
+		.data;
+	assert.equal(Object.is(data.z, 0), true);
+	assert.equal(Object.is(data.list[0], 0), true);
+});
+
+test("a Date field is queued as its ISO string, as the wire sends it", async () => {
+	const sent: EmittedMessage[] = [];
+	const channel = createOutputChannel(async (message) => {
+		sent.push(message);
+	});
+	await channel.write({
+		type: "RECORD",
+		stream: "s",
+		key: "k",
+		data: { d: new Date(0) },
+	} as unknown as EmittedMessage);
+	assert.equal(
+		(sent[0] as unknown as { data: { d: unknown } }).data.d,
+		"1970-01-01T00:00:00.000Z",
+	);
+});
+
+test("a valid deep record is admitted as exactly what JSON sends", async () => {
+	const sent: EmittedMessage[] = [];
+	const channel = createOutputChannel(async (message) => {
+		sent.push(message);
+	});
+	// structuredClone refuses this depth on V8; JSON sends it.
+	let nested: Record<string, unknown> = { leaf: "deep" };
+	for (let i = 0; i < 5000; i++) nested = { n: nested };
+	const frame = {
+		type: "RECORD",
+		stream: "s",
+		key: "k",
+		data: nested,
+	} as unknown as EmittedMessage;
+	await channel.write(frame);
+	assert.equal(sent.length, 1);
+	assert.equal(JSON.stringify(sent[0]), JSON.stringify(frame));
+});
+
+test("a throw from the JSON snapshot step refuses the frame with no text leak", async () => {
+	const sent: EmittedMessage[] = [];
+	const channel = createOutputChannel(async (message) => {
+		sent.push(message);
+	});
+	const realStringify = JSON.stringify;
+	JSON.stringify = () => {
+		throw new RangeError("Maximum call stack size exceeded SECRET-DEEP-TEXT");
+	};
+	try {
+		await assert.rejects(
+			channel.write({
+				type: "RECORD",
+				stream: "s",
+				key: "k",
+				data: { leaf: "SECRET-DEEP-TEXT" },
+			} as unknown as EmittedMessage),
+			(e: unknown) => {
+				const message = String((e as Error).message);
+				return (
+					message.includes("cannot be serialized") &&
+					!message.includes("SECRET-DEEP-TEXT") &&
+					!message.includes("Maximum call stack")
+				);
+			},
+		);
+	} finally {
+		JSON.stringify = realStringify;
+	}
+	assert.equal(channel.flags().unserializable, true);
+	await channel.write(progress("later")).catch(() => undefined);
+	assert.equal(sent.length, 0);
 });
 
 test("a null-prototype object is plain data", async () => {
