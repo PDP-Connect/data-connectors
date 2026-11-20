@@ -49,6 +49,7 @@ async function run(
 	const messages: EmittedMessage[] = [];
 	const records: RecordData[] = [];
 	const failures: string[] = [];
+	const recoveryHints: unknown[] = [];
 	const page: TikTokPage = {
 		evaluate: async (script: string) => {
 			const match = /session\.get\(("[^"]+"), (\{.*?\}), \d+\)/s.exec(script);
@@ -145,8 +146,9 @@ async function run(
 			assert.equal(validateRecord(_stream, data).ok, true);
 			records.push(data);
 		},
-		reportStreamFailure: async (_stream, message) => {
+		reportStreamFailure: async (_stream, message, options) => {
 			failures.push(message);
+			recoveryHints.push(options?.recoveryHint);
 		},
 	};
 	await collectTikTok(ctx, {
@@ -154,7 +156,7 @@ async function run(
 		random: () => 0,
 		...options,
 	});
-	return { reads, messages, records, failures };
+	return { reads, messages, records, failures, recoveryHints };
 }
 
 for (const stream of ["videos", "following", "favorite_collections"] as const) {
@@ -200,12 +202,15 @@ test("videos: a duplicate-only terminal page without a total refuses without STA
 	);
 });
 
-test("favorite_collections: a duplicate-only last page without a total refuses without STATE", async () => {
+test("favorite_collections: a duplicate-only last page without a total is retryable without STATE", async () => {
 	const result = await run("favorite_collections", 2, "terminal-ids");
 	assert.equal(result.reads, 2);
 	assert.equal(result.failures.length, 1);
 	assert.match(result.failures[0]!, /^tiktok_list_incomplete:/);
 	assert.match(result.failures[0]!, /added nothing new/);
+	assert.deepEqual(result.recoveryHints, [
+		{ action: "retry_by_runtime", retryable: true },
+	]);
 	assert.equal(
 		result.messages.some((message) => message.type === "STATE"),
 		false,

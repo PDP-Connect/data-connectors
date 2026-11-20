@@ -322,6 +322,7 @@ type StopClass =
 	| "status_error"
 	| "missing_param"
 	| "scope"
+	| "unstable_collection_list"
 	| "incomplete";
 
 const RUN_STOPS: ReadonlySet<StopClass> = new Set([
@@ -339,6 +340,7 @@ const RETRYABLE_STOPS: ReadonlySet<StopClass> = new Set([
 	"server_error",
 	"interrupted",
 	"request_limit",
+	"unstable_collection_list",
 ]);
 
 /** The error class each stop reports, as the message prefix. */
@@ -354,6 +356,7 @@ const STOP_CODES: Record<StopClass, string> = {
 	status_error: "tiktok_api_error",
 	missing_param: "tiktok_app_value_not_seen",
 	scope: "tiktok_parent_stream_required",
+	unstable_collection_list: "tiktok_list_incomplete",
 	incomplete: "tiktok_list_incomplete",
 };
 
@@ -384,6 +387,8 @@ export const STOP_HINTS: Record<
 	status_error: { action: "unknown", retryable: false },
 	// The person selects favorite_collections together with collection_items.
 	scope: { action: "manual_action_required", retryable: false },
+	// Offset paging can repeat the terminal page when the list changes.
+	unstable_collection_list: { action: "retry_by_runtime", retryable: true },
 	// The list did not show its end (a repeated cursor, no new IDs, fewer
 	// entries than counted): not known to clear on a retry.
 	incomplete: { action: "unknown", retryable: false },
@@ -1868,7 +1873,7 @@ export async function collectTikTok(
 				total === null
 			) {
 				throw new TikTokStop(
-					"incomplete",
+					"unstable_collection_list",
 					"/api/user/collection_list/ returned a last page that added nothing new without proving the end",
 				);
 			}
