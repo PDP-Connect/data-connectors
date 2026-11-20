@@ -3,10 +3,13 @@
 .DS_Store
 .fetch-cache.json
 .env
+.env.local
 node_modules/
 
-# Test runner output
+# Test runner output and scratch space that tests write
 test-results/
+.tmp/
+packages/polyfill-connectors/tmp/
 
 # Non-connector projects (stray checkouts)
 clearcut/

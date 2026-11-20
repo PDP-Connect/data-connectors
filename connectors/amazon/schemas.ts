@@ -20,20 +20,26 @@
 
 import { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
+import { MONEY_VALUE_RE } from "./parsers.ts";
 
 // Module-level regexes (Biome useTopLevelRegex) — compiled once, reused
 // across every record validated by this module.
 const PAYMENT_CRUFT_RE = /Unable to display|Buy it again|View your item/i;
 const PAYMENT_DOLLAR_RE = /\$\d/;
 const RECIPIENT_FORBIDDEN_RE = /[$\t\n]|Buy it again|View your item/i;
-const CURRENCY_STRING_RE = /^\$\d+(,\d{3})*\.\d{2}$/;
+// Any store's money format ("$12.34", "£12.34", "12,34 €", "R$ 1.234,56",
+// "￥1,234"): see parsers.ts MONEY_VALUE_RE. A cents-less dollar amount
+// ("$10") is still refused: it means a price span was cut short.
+const CURRENCY_STRING_RE = MONEY_VALUE_RE;
 const ASIN_RE = /^[A-Z0-9]{10}$/;
 const ITEM_NAME_CRUFT_RE =
 	/Buy it again|View your item|Get product support|Write a product review/i;
 const ITEM_NAME_SOLD_BY_RE = /^Sold by/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const AMAZON_ORDER_ID_RE = /^\d{3}-\d{7}-\d{7}$/;
-const LIST_PAGE_TOTAL_RE = /^\$[\d,]+\.\d{2}$/;
+const LIST_PAGE_TOTAL_RE = MONEY_VALUE_RE;
+const POSTAL_CODE_RE = /^[0-9A-Z][0-9A-Z -]{1,10}[0-9A-Z]$/;
+const STORE_NAME_RE = /^amazon\.[a-z.]{2,8}$/;
 
 // Payment summary must either be null, a card/digital-wallet style string,
 // or an explicit mixed-payment line ("Amazon gift card balance Visa ending
@@ -62,7 +68,7 @@ const recipientNameSchema = z
 
 const currencyStringSchema = z
 	.string()
-	.regex(CURRENCY_STRING_RE, "not a $N.NN formatted currency string")
+	.regex(CURRENCY_STRING_RE, "not a money amount with two decimals")
 	.nullable();
 
 const centsSchema = z
@@ -100,6 +106,8 @@ export const orderSchema = z.object({
 	status_detail: z.string().max(200).nullable(),
 	recipient_name: recipientNameSchema,
 	shipping_address_summary: z.string().max(500).nullable(),
+	shipping_postal_code: z.string().regex(POSTAL_CODE_RE).nullable(),
+	store: z.string().regex(STORE_NAME_RE).nullable(),
 	payment_method_summary: paymentMethodSchema,
 	gift_order: z.boolean(),
 	digital_order: z.boolean(),
@@ -136,7 +144,7 @@ export const listPageOrderShape = z.object({
 	orderDateRaw: z.string().min(4).max(60).nullable(),
 	orderTotal: z
 		.string()
-		.regex(LIST_PAGE_TOTAL_RE, "orderTotal must be $N.NN when present")
+		.regex(LIST_PAGE_TOTAL_RE, "orderTotal must be a money amount when present")
 		.nullable(),
 	deliveryStatus: z.string().max(200).nullable(),
 	items: z.array(
@@ -146,6 +154,7 @@ export const listPageOrderShape = z.object({
 			asin: asinSchema,
 		}),
 	),
+	store: z.string().regex(STORE_NAME_RE).nullable().optional(),
 });
 
 // profile: a best-effort nav-bar snapshot (name, Prime status). Both fields
@@ -154,6 +163,8 @@ export const profileSchema = z.object({
 	id: z.string().min(1).max(40),
 	name: z.string().min(1).max(200).nullable(),
 	is_prime: z.boolean().nullable(),
+	postal_code: z.string().regex(POSTAL_CODE_RE).nullable(),
+	store: z.string().regex(STORE_NAME_RE).nullable(),
 });
 
 // Map stream name → schema. Single source of truth for what streams this

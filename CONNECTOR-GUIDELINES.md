@@ -1,23 +1,16 @@
-# Connector authoring guidelines
+# Browser connector guidelines
 
-How to write a connector that runs **unchanged on desktop and mobile**.
+These rules apply to browser connectors, which read data through a signed-in page and can run in the desktop app and in the mobile app. API and file-import connectors skip this page.
 
-Connectors are written against the [`page` API](README.md#page-api-reference), not
-against a specific browser. Desktop implements `page` with Playwright + Chromium;
-mobile implements it with a native WebView shim. A connector that only assumes the
-`page` contract runs on both. A connector that assumes *Chromium on a laptop*
-does not.
-
-These rules come from running real connectors on both runtimes. Each one is a
-failure we actually hit, not a hypothetical.
+A browser connector's `collect()` receives a `BrowserCollectContext`, and reads the site through `ctx.page`. In the desktop app `ctx.page` is a Playwright page in Chromium. In the mobile app (PageShim, a native WebView) it is a small subset of that page: `goto`, `content`, `evaluate`, `waitForFunction` and `context().request.get`. Every other member is missing on mobile, and the PageShim harness fails a run that calls one. A connector that stays inside this subset, and follows the rules below, can be added to the mobile build.
 
 ---
 
 ## The rules
 
-### 1. Detect state from APIs, not from page chrome
+### 1. Read data and state from the site's API, not from the page layout
 
-The single most common portability break.
+A check on the page layout breaks when the site shows a different layout on a phone, and when the site is redesigned.
 
 ```js
 // BAD - assumes the desktop layout
@@ -27,9 +20,7 @@ const loggedIn = await page.evaluate(`
 `)
 ```
 
-The sidebar, the profile button and the "Log in" text are **desktop layout**. On a
-phone viewport the app collapses them into a drawer, so the check returns `false`
-forever and the connector waits for a login that already happened.
+The sidebar and the profile button belong to the desktop layout. On a phone the site collapses them into a drawer, so the check always returns `false` and the connector waits for a sign-in that already happened.
 
 ```js
 // GOOD - layout independent
@@ -43,133 +34,79 @@ const loggedIn = await page.evaluate(`
 `)
 ```
 
-Prefer, in order: a session/auth endpoint, an authenticated API call that 401s when
-logged out, a durable token in storage. Use DOM selectors only when nothing else
-exists, and then pick structural, layout-neutral ones.
+Detect the sign-in state with the first of these that the site offers.
 
-This is more robust on desktop too - it survives redesigns.
+1. A session or auth endpoint.
+2. An authenticated API call that returns 401 when the user is signed out.
+3. A durable token in storage.
+
+Use DOM selectors only when none of these exists, and then pick structural selectors that do not depend on fixed positions, an open sidebar or hover. The same order applies to the data itself.
 
 ### 2. Make the run resumable
 
-Mobile can lose the runtime mid-run: the OS kills the WebView under memory
-pressure, or the user backgrounds the app. There is no "pause the JS and continue"
-- the context is gone. The only thing that survives is what you wrote down.
+The mobile app can lose the page in the middle of a run, when the OS ends the WebView under memory pressure or the user leaves the app. The mobile runtime commits a run's `STATE` only after `collect()` ends and the host accepts the stream, so an interrupted run starts again from the `STATE` of the last finished run.
 
-Checkpoint progress durably (IndexedDB on the source origin) and resume from the
-cursor on the next run:
+1. Emit `STATE` only after every record it covers has been emitted, and key it by a stable cursor (offset, page token or last ID), not by array position.
+2. Use a `primary_key` that stays the same across runs, because a resumed run emits some records again and the store replaces them by key.
+3. Do not keep a separate list of what was fetched, for example in the page's IndexedDB, to skip items on the next run. The runtime may not have committed the records that list names, so skipping them can lose data.
 
-- key checkpoints by a stable cursor (offset, page token, last id), not by array position
-- make writes idempotent - a resumed run will re-see some items
-- record what is already fetched so a resume does not re-download it
+### 3. Fetch from inside the page, do not observe the network
 
-A resumable connector turns "the import broke" into "the import continues where it
-left off". A non-resumable one restarts from zero every time the user switches apps.
+`page.evaluate` with `fetch` runs in the page, carries the page's cookies, and works in both apps.
 
-### 3. Fetch from inside the page, do not intercept the network
+Reading the bodies of the site's own responses (`page.waitForResponse` or `page.on("response")`, manifest feature `page_response_observation`) works in the desktop app only. The mobile app does not provide it yet; support is planned. Use it only as a fallback, or leave the connector out of the mobile build (rule 6).
 
-`page.evaluate` + `fetch` runs in the page, carries its cookies and its TLS
-fingerprint, and works on every runtime.
+### 4. Pass `page.evaluate` a complete script as a string
 
-Reading **response bodies** off the app's own traffic (`page.captureNetwork` +
-`page.getCapturedResponse`) is desktop-only in practice: iOS WKWebView has no API
-for it and Android can only intercept partially. Use capture as a **fallback**, never
-as the primary data path, or declare the connector desktop-only (rule 6).
-
-### 4. Keep `page.evaluate` payloads self-contained
-
-Pass a complete expression - usually an IIFE - and let the runner evaluate it:
+Pass a complete expression in a string, such as an immediately invoked async function.
 
 ```js
 await page.evaluate(`(async () => { /* ... */ return result })()`)
 ```
 
-Do not depend on `eval()` or `new Function()` **inside the page**. Sites with a
-strict CSP (`script-src` without `'unsafe-eval'`) reject those, and the runner
-cannot work around it for you. Desktop hides this because it evaluates over the
-debugger protocol, which CSP does not gate; mobile does not have that escape hatch.
+A function passed to `page.evaluate` is sent as its `toString()`. The desktop loader and the PageShim bundler each rewrite function bodies, so a function that works in one app can call a helper the page does not have in the other. A string reaches the page as written.
 
-### 5. Never require credentials from the driver
+Do not call `eval()` or `new Function()` inside the page. Sites with a strict Content Security Policy (`script-src` without `'unsafe-eval'`) reject both. A test in the desktop app does not show the problem, because the desktop app evaluates over the debugger protocol, which the policy does not gate.
 
-`page.requestInput` is **optional** and absent on mobile by design - we do not want
-the app handling a user's password for a third-party service. Always probe for it
-and keep a browser-login fallback:
+### 5. Let the user sign in on the site
 
-```js
-if (typeof page.requestInput === 'function' && hasLoginForm) {
-  // optional fast path
-}
-// always support this
-const { headed } = await page.showBrowser('https://example.com/login')
-if (headed) {
-  await page.promptUser('Log in, then continue.', checkLoginStatus, 2000)
-}
-```
+When the session probe finds no sign-in, hand the sign-in to the user with `manualBrowserLogin` from `packages/polyfill-connectors/src/browser-handoff.ts`, as the browser scaffold does. The user signs in on the site itself, and the connector never sees a password.
 
-Also: treat the URL you pass to `showBrowser` as a **hint**. On mobile the browser
-is already visible and may already be on the login page; the runner may ignore the
-URL rather than navigate away from a form the user is filling in.
+Some desktop connectors sign in for the user with a stored password, through a module in `packages/polyfill-connectors/src/auto-login/`. That types into the page (`page_input`), which the mobile app does not provide, so keep it an optional first attempt and keep `manualBrowserLogin` as the fallback.
 
-### 6. Declare what you need; degrade to desktop handoff
+### 6. Declare what the connector needs
 
-If a connector genuinely needs a capability the mobile runtime does not have -
-binary downloads and archive extraction (`page.captureDownload`,
-`page.extractZipEntries`), cross-origin iframe access (`page.frame_*`), network
-response bodies - say so in the manifest and check at runtime:
+List each binding and feature the connector uses under `runtime_requirements.bindings` in the manifest. [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md#declare-runtime-binding-features) lists the feature names.
 
-```js
-if (typeof page.extractZipEntries !== 'function') {
-  await page.setData('error', 'This source needs the desktop app.')
-  return { error: 'requires desktop runtime' }
-}
-```
-
-Failing cleanly with a reason routes the user to desktop handoff. Failing silently
-looks like a broken app.
+The mobile build takes every connector whose declared bindings pass the admission rules in that guide. A connector that uses a feature the mobile app lacks, such as `page_input` for clicks and typing, declares it and so stays desktop-only. No feature name covers cross-origin iframes yet, so ask a maintainer how to keep such a connector out of the mobile build.
 
 ### 7. Report progress, and bound the work
 
-Runtime scales with the user's data: a small account can finish in under a minute
-while a large one runs for an hour. The UI can only show that honestly if you tell
-it.
+Run time grows with the size of the account. The app shows true progress only if the connector reports it.
 
-- call `page.setProgress` with `count` and, when known, the total
-- emit progress at every page of pagination, not once at the end
-- keep going through partial failures and record them in `errors[]` rather than
-  aborting the whole export
-
-### 8. Do not assume desktop layout or viewport
-
-Beyond login checks: no fixed pixel positions, no "the sidebar is open", no hover-only
-interactions. Prefer data over DOM wherever the site exposes it.
+1. Call `ctx.progress(message, { stream, count, total })`, with `total` only when the site tells you.
+2. Report progress on each page of results, not once at the end.
+3. Continue after a failure on one item and report it, as a detail gap or with `ctx.reportStreamFailure`. Do not stop the whole run for it.
 
 ---
 
-## Capability matrix
+## What runs on desktop and on mobile
 
-| Capability | Desktop (Playwright) | Mobile (WebView shim) |
-|---|---|---|
-| `page.evaluate`, `goto`, `sleep`, `setData`, `setProgress` | yes | yes |
-| in-page `fetch` of private APIs | yes | yes |
-| cookies incl. HttpOnly, localStorage, IndexedDB | yes | yes |
-| `showBrowser` / `promptUser` | yes | yes (always headed) |
-| `httpFetch` (native HTTP with session cookies) | yes | yes |
-| `requestInput` | yes | **no** (deliberate) |
-| `captureNetwork` response bodies | yes | **iOS no, Android partial** |
-| `captureDownload`, `extractZipEntries` | yes | **not yet** |
-| cross-origin `page.frame_*` | yes | **no** |
-| true headless | yes | n/a (hidden instead) |
+| What the connector does | Desktop app | Mobile app | In the mobile app, do this instead |
+|---|---|---|---|
+| `page.goto`, `page.content`, `page.evaluate`, `page.waitForFunction` | yes | yes | Nothing |
+| `fetch` inside `page.evaluate` (`same_origin_page_fetch`) | yes | yes | Nothing |
+| `page.context().request.get` (`host_http_request`) | yes, with the page's cookies | yes, but do not rely on the page's cookies | Use `fetch` inside the page for signed-in requests (rule 3) |
+| Locators, `click`, `fill`, `waitForSelector` (`page_input`) | yes | no | Read through the site's API (rule 1), and use `waitForFunction` to wait |
+| Read response bodies of the site's own traffic (`page_response_observation`) | yes | no, support is planned | Call the same API with `fetch` inside the page (rule 3) |
+| Read the cookie jar (`cookie_read`) | yes | no | Send requests with `fetch` inside the page, which carries the cookies |
+| Cross-origin iframes | yes | no | Keep the connector desktop-only (rule 6) |
+| Downloads and archive reads (`host_download_capture`, `host_archive_extraction`) | yes | only through an adapter written for one connector (`connectors/anthropic/` has the only one) | Ask a maintainer before you depend on them |
 
-Plan against iOS: it is the narrower of the two mobile runtimes.
+`scripts/pageshim/capabilities.mjs` is the current list of features the mobile app provides, and `playwrightPageFacade` in `scripts/pageshim/runtime.ts` is the page subset.
 
 ---
 
-## Checklist before you open a PR
+## Before you open a PR
 
-- [ ] Login/state detection uses an API or session signal, not layout selectors
-- [ ] The run resumes from a checkpoint instead of restarting
-- [ ] The primary data path is in-page `fetch`, not network capture
-- [ ] `page.evaluate` payloads are self-contained expressions, no in-page `eval`
-- [ ] `requestInput` is optional, with a browser-login fallback
-- [ ] Desktop-only capabilities are declared and checked, with a clean failure
-- [ ] Progress is reported with counts; partial failures land in `errors[]`
-- [ ] Verified on a phone-sized viewport, not only on a laptop
+Check the connector against the rules above. To add it to the mobile build, follow [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md). Its harness runs the mobile bundle against fixtures.

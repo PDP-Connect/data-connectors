@@ -323,7 +323,7 @@ test("scenario-record + scenario-verify: record against a stub connector's loopb
 		assert.match(recordResult.stdout, /complete: true/);
 		assert.match(
 			recordResult.stdout,
-			/recorded_replay candidate scenario captured .+ \(candidate oracle - see docs\/reference\/connector-evidence-claims\.md\)/,
+			/recorded_replay candidate scenario captured .+ \(candidate oracle - see packages\/polyfill-connectors\/docs\/connector-authoring-guide\.md#92-scenario-replay-evidence-claimjson\)/,
 		);
 
 		const scenario = JSON.parse(
