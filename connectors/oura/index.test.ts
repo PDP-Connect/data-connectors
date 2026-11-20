@@ -506,3 +506,37 @@ test("changing tokens with no new IDs refuses without STATE", async () => {
 	);
 	assert.equal(lastStateCursor(messages, "activity"), undefined);
 });
+
+test("page envelope must prove exhaustion before advancing the activity checkpoint", async () => {
+	const exercise = async (page: OuraPageFixture) => {
+		const { ctx, messages } = makeContext({
+			state: { activity: { last_day: "2026-08-01" } },
+		});
+		await withOuraPages(
+			[
+				{ data: [{ id: "synthetic-row", day: "2026-08-02" }], next_token: "next" },
+				page,
+			],
+			() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+		);
+		return messages;
+	};
+	const emptyWithContinuation = await exercise({ data: [], next_token: "older" });
+	const malformedWithContinuation = await exercise({
+		data: { unexpected: true },
+		next_token: "older",
+	} as unknown as OuraPageFixture);
+	const malformedWithoutContinuation = await exercise({
+		data: null,
+	} as unknown as OuraPageFixture);
+	assert.match(truncationSkip(emptyWithContinuation, "activity")?.message ?? "", /empty_page_with_next_token/);
+	assert.match(truncationSkip(malformedWithContinuation, "activity")?.message ?? "", /invalid_page_data/);
+	assert.match(truncationSkip(malformedWithoutContinuation, "activity")?.message ?? "", /invalid_page_data/);
+	assert.equal(lastStateCursor(emptyWithContinuation, "activity"), undefined);
+	assert.equal(lastStateCursor(malformedWithContinuation, "activity"), undefined);
+	assert.equal(lastStateCursor(malformedWithoutContinuation, "activity"), undefined);
+
+	const observedEnd = await exercise({ data: [], next_token: null });
+	assert.equal(truncationSkip(observedEnd, "activity"), undefined);
+	assert.deepEqual(lastStateCursor(observedEnd, "activity"), { last_day: "2026-08-02" });
+});
