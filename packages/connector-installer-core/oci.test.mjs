@@ -14,6 +14,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -258,6 +259,53 @@ test("A-T1 resolves a version tag to a digest and refuses to re-resolve once pin
     assert.equal(artifact.oci.digest, digest);
     const tagRequests = registry.requests.filter((url) => url.includes("/manifests/0.3.0"));
     assert.deepEqual(tagRequests, [], "a pinned install must not request the version tag");
+  });
+});
+
+test("A-T1d one prepare asks for one token and sends one anonymous request", async () => {
+  await withRegistry({ challenge: true }, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    registry.requests.length = 0;
+    registry.requestHeaders.length = 0;
+
+    const artifact = await fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer));
+
+    assert.equal(artifact.oci.digest, digest);
+    const tokens = registry.requestHeaders.filter((h) => h.url.startsWith("/token")).length;
+    const anonymous = registry.requestHeaders.filter((h) => !h.url.startsWith("/token") && !h.authorization).length;
+    assert.equal(tokens, 1, "every later request reuses the first token");
+    assert.equal(anonymous, 1, "only the first request is sent without a token");
+    assert.ok(registry.requestHeaders.length > 6, "the prepare really made many registry requests");
+  });
+});
+
+test("A-T1e one prepare fetches independent blobs a few at a time, and still verifies each", async () => {
+  await withRegistry({ challenge: true }, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, { signer });
+    let inFlight = 0;
+    let peak = 0;
+    const fetchImpl = async (url, init) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await fetch(url, init);
+      } finally {
+        inFlight -= 1;
+      }
+    };
+
+    const artifact = await fetchResolvedArtifact(
+      null,
+      ociLockEntry(registry, digest),
+      fixtureOptions(registry, signer, { fetchImpl })
+    );
+
+    assert.equal(artifact.oci.digest, digest);
+    assert.ok(peak > 1, `requests ran serially (peak ${peak})`);
+    assert.ok(peak <= 4, `more than the fixed concurrency was in flight (peak ${peak})`);
   });
 });
 
@@ -1169,6 +1217,33 @@ test("legacy layer and source declaration referrer with different bytes are refu
 
     await assert.rejects(
       () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer)),
+      (error) => {
+        assert.equal(error.reason, "tampered");
+        assert.match(error.message, /bytes disagree/);
+        return true;
+      }
+    );
+  });
+});
+
+test("a declaration mismatch is reported ahead of a provenance fetch failure, as in the sequential order", async () => {
+  await withRegistry({}, async (registry) => {
+    const signer = createSigner();
+    const { digest } = publishArtifact(registry, {
+      signer,
+      withSourceDeclarationReferrer: true,
+      sourceDeclarationReferrerBytes: canonicalJson({ different: true }),
+    });
+    const provenance = createHash("sha256")
+      .update(canonicalJson({ connector_key: "ynab", version: "0.3.0" }))
+      .digest("hex");
+    const fetchImpl = async (url, init) =>
+      String(url).includes(`/blobs/sha256:${provenance}`)
+        ? new Response("gone", { status: 404 })
+        : fetch(url, init);
+
+    await assert.rejects(
+      () => fetchResolvedArtifact(null, ociLockEntry(registry, digest), fixtureOptions(registry, signer, { fetchImpl })),
       (error) => {
         assert.equal(error.reason, "tampered");
         assert.match(error.message, /bytes disagree/);

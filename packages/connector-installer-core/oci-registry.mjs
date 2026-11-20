@@ -811,6 +811,49 @@ async function requestToken(
 }
 
 /**
+ * Bearer tokens for the registry requests of ONE prepare.
+ *
+ * Every request to a GHCR repository starts anonymous, is answered 401 and
+ * pays its own token exchange before the retry. A prepare makes dozens of
+ * requests to one repository, so a cache created per prepare and passed down as
+ * `tokenCache` removes all but the first handshake. It is keyed by registry,
+ * repository and scope, holds the pending exchange (so concurrent requests share
+ * one), and never outlives the prepare that made it. Without a `tokenCache`
+ * every request keeps its own handshake, as before.
+ */
+export function createRegistryTokenCache() {
+  return {
+    // `${registry}\n${repository}\n${scope}` -> Promise<{ token } | { error }>
+    exchanges: new Map(),
+    // `${registry}\n${repository}` -> the scope the registry last challenged for.
+    scopes: new Map(),
+  };
+}
+
+function tokenCacheKey(registry, repository, scope) {
+  return `${registry}\n${repository}\n${scope}`;
+}
+
+/** Run `work` over `items`, at most `limit` at a time, and settle every item. */
+export async function settleWithConcurrency(items, limit, work) {
+  const settled = new Array(items.length);
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      try {
+        settled[index] = { status: "fulfilled", value: await work(items[index], index) };
+      } catch (reason) {
+        settled[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return settled;
+}
+
+/**
  * GET one registry path, completing a Bearer handshake if challenged.
  *
  * Returns the raw response so the caller can classify it. Token failures are
@@ -829,48 +872,77 @@ async function registryGet(
     fetchImpl = fetch,
     allowInsecureLoopback = false,
     retryOptions = {},
+    tokenCache,
   }
 ) {
   const url = `${scheme}://${registry}/v2/${repository}/${path}`;
   const headers = accept ? { accept } : {};
+  const fetchWith = (extra) =>
+    fetchOnce(url, {
+      headers: { ...headers, ...extra },
+      timeoutMs,
+      maxBytes,
+      fetchImpl,
+      retryOptions,
+    });
 
-  let response = await fetchOnce(url, {
-    headers,
-    timeoutMs,
-    maxBytes,
-    fetchImpl,
-    retryOptions,
-  });
+  // A token this prepare already holds goes out on the first request. The
+  // registry stays the judge: a 401 drops the token and falls through to a
+  // fresh handshake.
+  const heldScope = tokenCache?.scopes.get(`${registry}\n${repository}`);
+  if (heldScope !== undefined) {
+    const key = tokenCacheKey(registry, repository, heldScope);
+    const held = await tokenCache.exchanges.get(key);
+    if (held?.token) {
+      const response = await fetchWith({ authorization: `Bearer ${held.token}` });
+      if (response.status !== 401) return { response };
+      if ((await tokenCache.exchanges.get(key)) === held) tokenCache.exchanges.delete(key);
+    }
+  }
+
+  let response = await fetchWith({});
   if (response.status !== 401) return { response };
 
   const challenge = parseBearerChallenge(response.headers["www-authenticate"]);
   if (!challenge) {
     return { tokenFailure: "the registry returned 401 without a usable Bearer challenge" };
   }
-  const { token, error } = await requestToken(challenge, {
-    registry,
-    repository,
-    timeoutMs,
-    fetchImpl,
-    retryOptions,
-    // `scheme` is ALREADY the explicit, caller-supplied hook this module uses to
-    // reach a test registry: production never sets it, so it is `https` on every
-    // real path and a plaintext realm is refused there whatever this resolves
-    // to. Deriving the waiver from it keeps one hook instead of two that must be
-    // set together, and no artifact, lock entry or registry challenge can reach
-    // it. The destination check still runs either way, so even under `http` the
-    // realm must be the test registry's own origin, port included.
-    allowInsecureLoopback: allowInsecureLoopback || scheme === "http",
-  });
+  const exchange = () =>
+    requestToken(challenge, {
+      registry,
+      repository,
+      timeoutMs,
+      fetchImpl,
+      retryOptions,
+      // `scheme` is ALREADY the explicit, caller-supplied hook this module uses to
+      // reach a test registry: production never sets it, so it is `https` on every
+      // real path and a plaintext realm is refused there whatever this resolves
+      // to. Deriving the waiver from it keeps one hook instead of two that must be
+      // set together, and no artifact, lock entry or registry challenge can reach
+      // it. The destination check still runs either way, so even under `http` the
+      // realm must be the test registry's own origin, port included.
+      allowInsecureLoopback: allowInsecureLoopback || scheme === "http",
+    });
+  let pending;
+  if (tokenCache) {
+    const scope = challenge.scope ?? `repository:${repository}:pull`;
+    const key = tokenCacheKey(registry, repository, scope);
+    pending = tokenCache.exchanges.get(key);
+    if (pending === undefined) {
+      pending = exchange();
+      tokenCache.exchanges.set(key, pending);
+      tokenCache.scopes.set(`${registry}\n${repository}`, scope);
+    }
+    const settled = await pending;
+    // A failed exchange is the caller's failure this time and nothing to reuse.
+    if (settled.error && tokenCache.exchanges.get(key) === pending) tokenCache.exchanges.delete(key);
+  } else {
+    pending = exchange();
+  }
+  const { token, error } = await pending;
   if (error) return { tokenFailure: error };
 
-  response = await fetchOnce(url, {
-    headers: { ...headers, authorization: `Bearer ${token}` },
-    timeoutMs,
-    maxBytes,
-    fetchImpl,
-    retryOptions,
-  });
+  response = await fetchWith({ authorization: `Bearer ${token}` });
   return { response };
 }
 
@@ -891,6 +963,7 @@ export async function lookupManifest({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
   let result;
   try {
@@ -904,6 +977,7 @@ export async function lookupManifest({
       maxBytes: MAX_MANIFEST_BYTES,
       fetchImpl,
       retryOptions,
+      tokenCache,
     });
   } catch (error) {
     return { outcome: "unknown", reason: `manifest request failed: ${error.message}` };
@@ -936,6 +1010,7 @@ export async function lookupReferrers({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
   const manifests = [];
   const seenPaths = new Set();
@@ -958,6 +1033,7 @@ export async function lookupReferrers({
         maxBytes: MAX_MANIFEST_BYTES,
         fetchImpl,
         retryOptions,
+        tokenCache,
       });
     } catch (error) {
       return { outcome: "unknown", reason: `referrers request failed: ${error.message}` };
@@ -1010,6 +1086,7 @@ export async function resolveVersionToDigest({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
   const result = await lookupManifest({
     registry,
@@ -1019,6 +1096,7 @@ export async function resolveVersionToDigest({
     timeoutMs,
     fetchImpl,
     retryOptions,
+    tokenCache,
   });
 
   if (result.outcome === "present") return result.digest;
@@ -1050,6 +1128,7 @@ export async function fetchManifestByDigest({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
   if (!isValidDigest(digest)) {
     throw new OciRegistryError(`Invalid OCI manifest digest "${digest}"`, "invalid-reference");
@@ -1067,6 +1146,7 @@ export async function fetchManifestByDigest({
       maxBytes: MAX_MANIFEST_BYTES,
       fetchImpl,
       retryOptions,
+      tokenCache,
     });
   } catch (error) {
     throw new OciRegistryError(
@@ -1127,6 +1207,7 @@ export async function fetchBlob({
   maxBytes = MAX_BLOB_BYTES,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
   if (!isValidDigest(digest)) {
     throw new OciRegistryError(`Invalid OCI blob digest "${digest}"`, "invalid-reference");
@@ -1143,6 +1224,7 @@ export async function fetchBlob({
       maxBytes,
       fetchImpl,
       retryOptions,
+      tokenCache,
     });
   } catch (error) {
     throw new OciRegistryError(
@@ -1191,6 +1273,7 @@ export async function fetchSignatureManifest({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
   const tag = cosignSignatureTag(digest);
   const result = await lookupManifest({
@@ -1201,6 +1284,7 @@ export async function fetchSignatureManifest({
     timeoutMs,
     fetchImpl,
     retryOptions,
+    tokenCache,
   });
 
   if (result.outcome === "absent") return null;
@@ -1264,8 +1348,9 @@ export async function discoverCosignBundleReferrers({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
-  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions };
+  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions, tokenCache };
 
   const apiResult = await lookupReferrers({
     ...shared,
@@ -1318,8 +1403,9 @@ export async function discoverSourceDeclarationReferrers({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
-  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions };
+  const shared = { registry, repository, scheme, timeoutMs, fetchImpl, retryOptions, tokenCache };
   const result = await lookupReferrers({ ...shared, digest, artifactType });
   if (result.outcome === "unknown") {
     throw new OciRegistryError(
@@ -1414,6 +1500,7 @@ export async function fetchCandidateBundleManifest({
   timeoutMs = 30000,
   fetchImpl = fetch,
   retryOptions = {},
+  tokenCache,
 }) {
   const { manifest } = await fetchManifestByDigest({
     registry,
@@ -1423,6 +1510,7 @@ export async function fetchCandidateBundleManifest({
     timeoutMs,
     fetchImpl,
     retryOptions,
+    tokenCache,
   });
 
   const subject = manifest?.subject?.digest;

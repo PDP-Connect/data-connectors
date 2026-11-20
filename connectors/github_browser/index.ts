@@ -14,6 +14,8 @@ import type { BrowserPageObservation } from "./page-evidence.ts";
 import { probeGitHubBrowserSession } from "./probe.ts";
 import { validateRecord } from "./schemas.ts";
 
+const GITHUB_API_USER_AGENT = "pdp-connect-github-browser";
+const GITHUB_API_TIMEOUT_MS = 30_000;
 const CONTRIBUTION_CALENDAR_SELECTOR =
 	"td.ContributionCalendar-day[data-date], rect.day[data-date]";
 const CONTRIBUTION_CALENDAR_MINIMUM_DAYS = 365;
@@ -143,24 +145,39 @@ export async function collect({
 	| "state"
 >): Promise<void> {
 	const services = {
-		fetchPublicJson: async (url: string) =>
-			page.evaluate(async (target) => {
-				const response = await fetch(target, {
-					headers: {
-						Accept: "application/vnd.github+json",
-						"X-GitHub-Api-Version": "2022-11-28",
-					},
-				});
-				if (!response.ok)
-					throw new Error(`github_browser_http_${response.status}`);
-				return {
-					requestedUrl: target,
-					responseUrl: response.url,
-					status: response.status,
-					link: response.headers.get("Link"),
-					data: await response.json(),
-				};
-			}, url),
+		// Runs in Node, not on the run's page: the runtime allows a run one page,
+		// and history runs beside the browser streams, so a fetch on that page
+		// would race their navigations. It stays cookie-less, as it was.
+		fetchPublicJson: async (url: string) => {
+			const response = await fetch(url, {
+				headers: {
+					Accept: "application/vnd.github+json",
+					"User-Agent": GITHUB_API_USER_AGENT,
+					"X-GitHub-Api-Version": "2022-11-28",
+				},
+				signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+			});
+			const header = (name: string): number | null => {
+				const value = response.headers.get(name);
+				return value !== null && /^\d+$/u.test(value) ? Number(value) : null;
+			};
+			const rateLimit = {
+				remaining: header("x-ratelimit-remaining"),
+				resetEpochSeconds: header("x-ratelimit-reset"),
+				retryAfterSeconds: header("retry-after"),
+			};
+			// The collector classifies on the message; the pacer reads the headers.
+			if (!response.ok)
+				throw Object.assign(new Error(`github_browser_http_${response.status}`), { rateLimit });
+			return {
+				requestedUrl: url,
+				responseUrl: response.url,
+				status: response.status,
+				link: response.headers.get("Link"),
+				rateLimit,
+				data: await response.json(),
+			};
+		},
 		now: () => new Date(),
 		openPage: async (url: string) => openGitHubPage(page, url),
 		openContributionPage: async (url: string) =>

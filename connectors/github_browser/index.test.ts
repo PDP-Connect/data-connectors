@@ -208,3 +208,34 @@ test("ready contribution windows remain complete with loading overlay calendars 
  assert.ok(messages.some(message => message.type === "STATE"));
  assert.ok(messages.some(message => message.type === "DETAIL_COVERAGE"));
 });
+
+test("API calls leave the run page: cookie-less, with the rate-limit headers read", async () => {
+ const { collect } = await import("./index.ts");
+ const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+ const realFetch = globalThis.fetch;
+ globalThis.fetch = (async (url: string, init: { headers: Record<string, string> }) => {
+  requests.push({ url, headers: init.headers });
+  return new Response("[]", { status: 403, headers: { "x-ratelimit-remaining": "7" } });
+ }) as typeof fetch;
+ let pageEvaluations = 0;
+ let currentUrl = "";
+ const page = {
+  goto: async (url: string) => { currentUrl = url; },
+  waitForFunction: async () => undefined,
+  evaluate: async () => { pageEvaluations += 1; return currentUrl; },
+  content: async () => owner,
+ };
+ const messages: Array<{ type: string; diagnostics?: Record<string, unknown> }> = [];
+ try {
+  await collect({
+   emit: async message => { messages.push(message as never); }, emitRecord: async () => {},
+   page: page as never, progress: async () => {}, requested: new Map([["events", {}]]) as never, state: {},
+  });
+ } finally { globalThis.fetch = realFetch; }
+ assert.equal(requests.length, 1);
+ assert.match(requests[0]!.url, /^https:\/\/api\.github\.com\/users\/[^/]+\/events\/public/u);
+ assert.equal(Object.keys(requests[0]!.headers).some(name => /^(cookie|authorization)$/iu.test(name)), false);
+ assert.equal(pageEvaluations, 1, "only the homepage check touched the page");
+ const skip = messages.find(message => message.type === "SKIP_RESULT");
+ assert.equal(skip?.diagnostics?.source_error, "http_403");
+});
