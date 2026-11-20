@@ -234,6 +234,8 @@ const DEEP_PROBE_WAIT_MS = 15_000;
 const DETAIL_WAIT_MS = 15_000;
 const PAGE_CONTENT_TIMEOUT_MS = 10_000;
 const LIST_PAGE_WAIT_MS = 10_000;
+// Pages per year in one run: a scheduling slice so other years get a turn, not a history
+// limit; a longer year saves its place and continues on the next run.
 const PAGE_LIMIT = 50;
 const START_INDEX_STEP = 10;
 const POLITE_DELAY_MS = 300;
@@ -2444,7 +2446,7 @@ async function runYear(
 					orders.length < anchorSize ||
 					!orders.some((o) => anchorIds.has(o.orderId))
 				) {
-					restartYear();
+					restartYear(resume?.startIndex);
 					return true;
 				}
 				repeatGuard = new Set(orders.map((o) => o.orderId));
