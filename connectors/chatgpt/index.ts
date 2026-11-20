@@ -3417,6 +3417,7 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 		message: "Fetching custom GPTs",
 	});
 	const seenCursors = new Set<string>();
+	const seenIds = new Set<string>();
 	let cursor: string | null = null;
 	let pages = 0;
 	let anyError = false;
@@ -3455,10 +3456,14 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 			break;
 		}
 		considered += page.items.length;
+		const previousSize = seenIds.size;
 		for (const raw of page.items) {
 			const rec = buildGizmoRecord(raw);
 			if (rec) {
-				await deps.emitRecord("custom_gpts", rec);
+				if (!seenIds.has(String(rec.id))) {
+					seenIds.add(String(rec.id));
+					await deps.emitRecord("custom_gpts", rec);
+				}
 				covered += 1;
 			} else {
 				emitChatGptShapeCheckFailed("custom_gpts", raw, "missing id");
@@ -3485,6 +3490,18 @@ export async function runCustomGptsStream(deps: StreamDeps): Promise<void> {
 			break;
 		}
 		if (cursor !== null) seenCursors.add(cursor);
+		if (page.items.length > 0 && seenIds.size === previousSize) {
+			deps.emit({
+				type: "SKIP_RESULT",
+				stream: "custom_gpts",
+				reason: "pagination_cap_truncated",
+				message: "gizmos/mine pagination repeated a page with no new ids",
+				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+				diagnostics: { pages, considered },
+			});
+			anyError = true;
+			break;
+		}
 		if (!page.items.length) {
 			break;
 		}
@@ -3593,12 +3610,9 @@ export async function runSharedConversationsStream(
 				await deps.emitRecord("shared_conversations", rec);
 			}
 		}
-		if (items.length < limit) {
-			break;
-		}
 		offset += items.length;
 		if (newIds === 0) {
-			// A full page with no new identity cannot advance this walk.
+			// No nonempty page, including a short page, proves an end without progress.
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "shared_conversations",
@@ -3613,6 +3627,7 @@ export async function runSharedConversationsStream(
 			sawError = true;
 			break;
 		}
+		if (items.length < limit) break;
 	}
 	if (!sawError) {
 		// Only prune after a clean full pass — an aborted/errored scan never saw
@@ -3654,6 +3669,7 @@ export async function runSharedConversationsStream(
  * numeric position is only a hint that is replayed with overlap and confirmed.
  */
 interface ConversationListResult {
+	refused?: true;
 	backfill: ConversationBackfill | null;
 	backfillItems?: ConversationListItem[];
 	items: ConversationListItem[];
@@ -3709,7 +3725,7 @@ const CONVERSATION_ENUMERATION_VERSION = 1;
 
 /** Independent offset walk. `total` can be offset + count + 1: a lower bound,
  * never a snapshot size. Only a repeated empty page ends this walk. */
-async function listPrimaryConversations(
+export async function listPrimaryConversations(
 	deps: StreamDeps,
 	resume: ConversationBackfill | null,
 ): Promise<ConversationListResult> {
@@ -3738,7 +3754,7 @@ async function listPrimaryConversations(
 	});
 	let emptyReads = 0;
 	let pages = 0;
-	while (pages * PRIMARY_CONVERSATION_PAGE_SIZE < PAGINATION_SAFETY_LIMIT) {
+	while (true) {
 		let response: ChatGptFetchResult;
 		try {
 			response = await recovery.fetch(offset);
@@ -3814,8 +3830,17 @@ async function listPrimaryConversations(
 			return { items: [...rows.values()], truncated: false, backfill: null };
 		}
 		emptyReads = 0;
+		const previousSize = rows.size;
 		for (const item of pageRows) {
 			rows.set(item.id, item);
+		}
+		if (rows.size === previousSize) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT primary list returned a page with no new IDs",
+				{ offset },
+			);
+			return { ...incomplete(), refused: true };
 		}
 		if (resume && conversationBackfillBoundarySeen(rows.values(), resume)) {
 			boundarySeen = true;
@@ -3823,12 +3848,6 @@ async function listPrimaryConversations(
 		offset += pageRows.length;
 		pages += 1;
 	}
-	emitConversationListUnstable(
-		deps,
-		"ChatGPT primary list reached the per-run pagination cap",
-		{ offset },
-	);
-	return incomplete();
 }
 
 function logConversationListPageShape(
@@ -7752,6 +7771,7 @@ async function walkConversationsAndMessages(
 		savedBackfill !== null && !primaryCatchup
 			? { items: [], truncated: true, backfill: null }
 			: await listPrimaryConversations(deps, primaryBackfill);
+	if (primaryList.refused) return;
 	// Existing search-only completed ranges do not establish primary history.
 	// Reopen that range once, then persist ordinary exact-key/detail progress on
 	// every checkpoint. Budgeted runs continue from independent source anchors.
