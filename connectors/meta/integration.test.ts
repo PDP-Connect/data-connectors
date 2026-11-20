@@ -1892,7 +1892,7 @@ test("collectAllStreams: a first-page following failure emits nothing and report
 
 // ─── Invariant 5: ads merges three DOM-scraped lists with a kind discriminator ──
 
-test("collectAllStreams: ads completes independently when profile web_info is unavailable", async () => {
+test("collectAllStreams: ads completes independently when profile web_info is unavailable, with every surface reached", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { calls, page, waitConditions } = makeFakePage({
 		categoriesAvailable: true,
@@ -1955,10 +1955,10 @@ test("collectAllStreams: ads completes independently when profile web_info is un
 	);
 	assert.deepEqual(streamFailures(harness), ["profile"]);
 	assert.equal(calls.includes("/accounts/web_info/"), true);
-	assertAdsUnproven(harness);
+	assertAdsComplete(harness, 3);
 });
 
-test("collectAllStreams: ads all reached with empty lists stays unproven without a source total", async () => {
+test("collectAllStreams: ads with every surface reached and verified empty is proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -2003,9 +2003,9 @@ test("collectAllStreams: ads all reached with empty lists stays unproven without
 	);
 
 	assert.equal(harness.emitted.length, 0);
-	// Every section read as empty, but the dialogs state no exact total and no
-	// end signal, so the empty list is not proven.
-	assertAdsUnproven(harness);
+	// Every section shows its source-authored empty message, so each surface is
+	// reached and the empty ads inventory is proven complete.
+	assertAdsComplete(harness, 0);
 });
 
 test("collectAllStreams: positive advertiser source count vetoes stale empty copy", async () => {
@@ -2033,7 +2033,7 @@ test("collectAllStreams: positive advertiser source count vetoes stale empty cop
 	assertAdsStreamFailure(harness, "advertisers");
 });
 
-test("collectAllStreams: nonempty ads without source total emits records but is not proven complete", async () => {
+test("collectAllStreams: nonempty ads with one surface unreached emits records but skips as not proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -2081,8 +2081,9 @@ test("collectAllStreams: nonempty ads without source total emits records but is 
 		"ad_topic",
 		"advertiser",
 	]);
-	// The rows upsert; without a source total the list is not proven.
-	assertAdsUnproven(harness);
+	// The rows upsert; a surface that was not reached keeps the list unproven.
+	const skip = assertAdsUnproven(harness);
+	assert.match(String((skip.diagnostics as { reason?: string } | undefined)?.reason), /sections not reached/);
 });
 
 test("scrapeAdvertisers waits for items that arrive after the list shell", async () => {
@@ -2691,8 +2692,36 @@ function assertAdsUnproven(
 		),
 		false,
 	);
-	assert.equal(adsCoverage(harness), undefined, "layout never earns coverage");
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"an unreached ads surface never earns coverage",
+	);
 	return skip;
+}
+
+/** Every ads surface reached: coverage and STATE are emitted, and no skip. */
+function assertAdsComplete(
+	harness: ReturnType<typeof makeRecordingEmit>,
+	read: number,
+): void {
+	const coverage = adsCoverage(harness);
+	assert.ok(coverage, "every ads surface reached must emit DETAIL_COVERAGE");
+	assert.equal(coverage.type === "DETAIL_COVERAGE" && coverage.considered, read);
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "STATE" && m.stream === "ads",
+		),
+		true,
+		"every ads surface reached must emit STATE",
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "ads",
+		),
+		false,
+		"a proven ads scan must not skip the stream",
+	);
 }
 
 function assertAdsStreamFailure(
@@ -3572,7 +3601,9 @@ test("collectAllStreams: category View all ignores hidden page-wide buttons afte
 		),
 	});
 
-	assertAdsUnproven(harness);
+	// Advertisers and ad topics are verified empty and categories load every
+	// row after "View all" is gone, so all three surfaces are reached.
+	assertAdsComplete(harness, 2);
 	assert.deepEqual(
 		harness.emitted
 			.filter((record) => record.stream === "ads")
