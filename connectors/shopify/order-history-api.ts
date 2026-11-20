@@ -21,8 +21,8 @@ import type { ApolloCache } from "./types.ts";
 
 export const ORDER_HISTORY_API_PAGE_SIZE = 10;
 const MAX_CONSECUTIVE_PAGE_FAILURES = 3;
+// Per-call scheduling slice; the same reader keeps its in-memory continuation.
 const DEFAULT_READ_BUDGET_MS = 1_500;
-
 export interface OrderHistoryPageIdentity {
 	url: string;
 	navigation: string;
@@ -31,7 +31,7 @@ export interface OrderHistoryPageIdentity {
 // Provenance is kept outside Apollo's entity namespace and survives cached reads.
 const cacheIdentities = new WeakMap<ApolloCache, Readonly<OrderHistoryPageIdentity>>();
 
-export type OrderHistoryStopReason = "repeated_cursor" | "missing_cursor" | "no_new_order_ids";
+export type OrderHistoryStopReason = "repeated_cursor" | "missing_cursor" | "no_new_order_ids" | "unusable_page_limit";
 const cacheStopReasons = new WeakMap<ApolloCache, OrderHistoryStopReason>();
 
 export function orderHistoryCacheStopReason(cache: ApolloCache | null): OrderHistoryStopReason | null {
@@ -306,7 +306,7 @@ export function createOrderHistoryApiReader({
 				if (!(await ownsPage())) return null;
 				const connection = readOrderHistoryConnection(reply);
 				if (!connection) {
-					consecutiveFailures += 1;
+					if (++consecutiveFailures === MAX_CONSECUTIVE_PAGE_FAILURES) stopReason = "unusable_page_limit";
 					break;
 				}
 				consecutiveFailures = 0;
@@ -323,8 +323,8 @@ export function createOrderHistoryApiReader({
 				const more = connection.pageInfo.hasNextPage;
 				if (more && (typeof cursor !== "string" || cursor.length === 0)) stopReason = "missing_cursor";
 				else if (more && cursors.has(cursor as string)) stopReason = "repeated_cursor";
-				else if ((more && connection.nodes.length === 0) ||
-					(connection.nodes.length >= ORDER_HISTORY_API_PAGE_SIZE && newOrderIds === 0)) stopReason = "no_new_order_ids";
+				else if (newOrderIds === 0 && (more || connection.nodes.length > 0))
+					stopReason = "no_new_order_ids";
 				// A refused page cannot supply terminal evidence, even if it claims an end.
 				pages.push({ after: nextAfter, connection: stopReason === null ? connection
 					: { ...connection, pageInfo: { ...connection.pageInfo, hasNextPage: true } },
