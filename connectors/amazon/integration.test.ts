@@ -4421,6 +4421,23 @@ test("collectAmazon: a five-page year read two new pages per pass is finished by
 
 	const pass1 = await runPass({ listings, pageLimit: 2, records, state: {} });
 	assert.deepEqual(startIndexes(pass1.log), ["0", "10"]);
+	assert.ok(
+		pass1.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "amazon_stopped_early",
+		),
+		"the third page was not reached",
+	);
+	assert.equal(emittedOrderIds(records).length, 20);
+	assert.equal(
+		pass1.messages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "orders",
+		),
+		false,
+		"the 20 observed orders are not full history",
+	);
 	const pass2 = await runPass({
 		listings,
 		pageLimit: 3,
@@ -4451,6 +4468,15 @@ test("collectAmazon: a five-page year read two new pages per pass is finished by
 	);
 	assert.equal(pass3.cursor.years?.[String(year)]?.resume, undefined);
 	assert.equal(pass3.cursor.years?.[String(year - 1)]?.order_count, 7);
+	const coverage = pass3.messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "orders",
+	);
+	assert.ok(
+		coverage?.type === "DETAIL_COVERAGE",
+		"finishing the year sweep still emits coverage",
+	);
+	assert.equal(coverage.considered, coverage.covered);
 
 	const ids = emittedOrderIds(records);
 	assert.equal(new Set(ids).size, 52, "every order of both years is recorded");
@@ -4570,6 +4596,14 @@ test("collectAmazon: a run that read only duplicates or only items and then hits
 		"the items-only run ends as a kept partial run",
 	);
 	assert.ok(lastOrdersCursor(items.messages).store);
+	assert.equal(
+		items.messages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "order_items",
+		),
+		false,
+		"unlisted orders cannot contribute a complete detail denominator",
+	);
 });
 
 // ─── Resume point: overlap page, guaranteed forward page, resume years first ─
@@ -4831,4 +4865,12 @@ test("collectAmazon: a restart for a missing anchor that then stalls keeps the e
 		stalledAt?: number;
 	};
 	assert.equal(resume.stalledAt, 20, "the stalled restart is marked");
+	assert.equal(
+		pass2.messages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "orders",
+		),
+		false,
+		"a stalled year is not a completed year sweep",
+	);
 });

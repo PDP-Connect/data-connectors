@@ -2902,6 +2902,7 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 		...years.filter(runsFirst),
 		...years.filter((y) => !runsFirst(y)),
 	];
+	let yearSweepFinished = true;
 	for (const year of yearsInRunOrder) {
 		const prior = yearsState[String(year)];
 		// Year-freezing: skip if already frozen
@@ -2943,6 +2944,7 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 			) {
 				throw error;
 			}
+			yearSweepFinished = false;
 			// A recognized stop after any row was handled: keep the partial run.
 			// The year is not complete; the cursor says where to pick it up.
 			saveYearResume(newYearsState, year, prior, walkProgress);
@@ -2971,6 +2973,7 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 			break;
 		}
 		if (yearResult.stalled) {
+			yearSweepFinished = false;
 			// Not complete, not failed: keep the saved point (marked stalled) and
 			// let the remaining years run.
 			saveYearResume(newYearsState, year, prior, walkProgress);
@@ -3002,6 +3005,7 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 			yearOrderCount,
 		});
 		if (truncated) {
+			yearSweepFinished = false;
 			// Cut at the page ceiling: not complete, resume where it ended.
 			saveYearResume(newYearsState, year, prior, walkProgress);
 		} else if (newYearsState[String(year)]?.resume) {
@@ -3058,13 +3062,13 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 	// the console can tell a fully-hydrated run from one that degraded some
 	// order-detail fetches without inferring it from gaps alone. No-ops when
 	// order_items is out of scope or no order was considered.
-	if (orderItemsCoverage) {
+	if (yearSweepFinished && orderItemsCoverage) {
 		await emitOrderItemsCoverage(deps, orderItemsCoverage);
 	}
 	// Same honesty posture as order_items: emit once the year sweep
 	// completes, including the zero-considered steady-state case, so the
 	// `orders` list stream is never left permanently unmeasured.
-	if (ordersCoverage) {
+	if (yearSweepFinished && ordersCoverage) {
 		await emitOrdersCoverage(deps, ordersCoverage);
 	}
 }

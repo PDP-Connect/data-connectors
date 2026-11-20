@@ -273,7 +273,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/amazon/index.ts",
-			line: 2910,
+			line: 2911,
 			column: 4,
 			category: "dependent_pagination",
 			note: "collectAmazon(): progress(): next request depends on the prior page's cursor/offset/response",
@@ -287,14 +287,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/amazon/integration.test.ts",
-			line: 4627,
+			line: 4661,
 			column: 10,
 			category: "test_assertion_sequencing",
 			note: "runPass(): test drives/asserts an ordered per-case side effect",
 		},
 		{
 			path: "connectors/amazon/integration.test.ts",
-			line: 4739,
+			line: 4773,
 			column: 10,
 			category: "test_assertion_sequencing",
 			note: "runPass(): test drives/asserts an ordered per-case side effect",
