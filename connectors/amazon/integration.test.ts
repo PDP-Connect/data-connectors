@@ -4808,3 +4808,27 @@ test("collectAmazon: in one run, a repeat after a restart does not count the rep
 		"the stopped year reports a deferred-style reason",
 	);
 });
+
+test("collectAmazon: a restart for a missing anchor that then stalls keeps the earlier index as stalledAt", async () => {
+	const year = new Date().getFullYear();
+	const pass1 = await runPass({
+		listings: { [year]: listingOrderIds("111", 45) },
+		pageLimit: 2,
+		state: {},
+	});
+	assert.equal(resumeOf(pass1.cursor, year).startIndex, 20);
+
+	// The list changed under the saved point (no anchor id is left), and the
+	// source now serves page 1 for every offset, so the restart gets nowhere.
+	const pass2 = await runPass({
+		listings: { [year]: listingOrderIds("444", 45) },
+		pageLimit: 50,
+		repeatPageOne: [year],
+		state: { orders: pass1.cursor },
+	});
+	const resume = resumeOf(pass2.cursor, year) as {
+		startIndex: number;
+		stalledAt?: number;
+	};
+	assert.equal(resume.stalledAt, 20, "the stalled restart is marked");
+});

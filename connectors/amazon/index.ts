@@ -2444,7 +2444,7 @@ async function runYear(
 					orders.length < anchorSize ||
 					!orders.some((o) => anchorIds.has(o.orderId))
 				) {
-					restartYear();
+					restartYear(resume?.startIndex);
 					return true;
 				}
 				repeatGuard = new Set(orders.map((o) => o.orderId));
