@@ -238,9 +238,13 @@ test("repoFullFromUrl: null in → null out", () => {
 
 // ─── truncateBody ────────────────────────────────────────────────────────
 
-test("truncateBody: caps at 20_000 chars", () => {
+test("issue and PR records keep a 30,000-character body", () => {
 	const long = "x".repeat(30_000);
-	assert.equal(truncateBody(long)?.length, 20_000);
+	assert.equal(issueRecord({ ...ISSUE_FIXTURE, body: long }).body, long);
+	assert.equal(
+		pullRequestRecord({ ...PR_FIXTURE, body: long }, null, null).body,
+		long,
+	);
 });
 
 test("truncateBody: non-string → null", () => {
@@ -537,15 +541,15 @@ test("gistRecord: maps files and counts", () => {
 	assert.equal(r.files_total_count, 2);
 });
 
-test("gistRecord: truncates at 10 files", () => {
+test("gistRecord emits all twelve file entries", () => {
 	const files: Record<string, { filename: string; size: number }> = {};
-	for (let i = 0; i < 15; i += 1) {
+	for (let i = 0; i < 12; i += 1) {
 		files[`f${i}.txt`] = { filename: `f${i}.txt`, size: i };
 	}
 	const r = gistRecord({ id: "x", public: true, files });
-	assert.equal((r.files as unknown[]).length, 10);
-	assert.equal(r.files_truncated, true);
-	assert.equal(r.files_total_count, 15);
+	assert.equal((r.files as unknown[]).length, 12);
+	assert.equal(r.files_truncated, false);
+	assert.equal(r.files_total_count, 12);
 });
 
 // ─── laterIso / isBeforeSince / isAtOrAfterUntil ─────────────────────────

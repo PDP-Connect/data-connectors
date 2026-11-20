@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-	"version": "0.7.10",
+	"version": "0.7.11",
 	"display_name": "GitHub",
 	"brand": {
 		"icon": "icon.svg",
@@ -451,7 +451,7 @@
 			"description": "Issues and pull requests across all repos the user has access to, authored by or assigned to them. GitHub's /issues endpoint returns both issues and PRs; the is_pull_request flag lets downstream consumers split them.",
 			"display": {
 				"label": "Your issues and PRs",
-				"detail": "Issue/PR number, title, body (capped at 20000 chars), labels, assignees, milestone, reactions, comment count, repository, state, timestamps, and a flag indicating which are pull requests."
+				"detail": "Issue/PR number, title, body, labels, assignees, milestone, reactions, comment count, repository, state, timestamps, and a flag indicating which are pull requests."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -779,6 +779,9 @@
 								},
 								"raw_url": {
 									"type": ["string", "null"]
+								},
+								"truncated": {
+									"type": "boolean"
 								}
 							}
 						}
