@@ -44,7 +44,7 @@ Each new promotion to `preview` needs all three rules below. A connector that wa
 2. The pilot fixture rule applies to any connector that has a schema. The rows are synthetic with real field formats, and `connector-init` writes a starter set. Never commit real account rows there.
 3. The mock-mutation rule applies to any connector with a mock that asserts request paths.
 
-A connector that makes no HTTP requests, such as a file import like WhatsApp or Google Takeout, is exempt from the mock-mutation rule. Its `mock mutation` step reports `UNKNOWN`. Write that reason in the connector's header comment and in the PR. `UNKNOWN` with a written reason is the correct final state for such a connector. Do not try to silence it.
+A connector that makes no HTTP requests, such as a file import like WhatsApp or Google Takeout, is exempt from the mock-mutation rule. Its `mock mutation` step reports `UNKNOWN`. Write that reason in the connector's leading header comment as `* @conformance-no-http <reason>` and in the PR. The JSON report preserves this author assertion; it exempts only UNKNOWN, never WEAK or FAIL. An optional network binding does not establish this exemption. `UNKNOWN` with a written reason is the correct final state for such a connector. Do not try to silence it.
 
 ## Supported, a maintainer ran it against a real account
 

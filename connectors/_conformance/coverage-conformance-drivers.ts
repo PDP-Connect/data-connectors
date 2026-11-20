@@ -1241,6 +1241,11 @@ export interface ConnectorDriver {
 }
 
 export const CONNECTOR_DRIVERS: Record<string, ConnectorDriver> = {
+	readwise: {
+		coveredStreams: ["books", "highlights"],
+		run: async () =>
+			(await import("../readwise/coverage-driver.ts")).runCoverageDriver(),
+	},
 	amazon: { coveredStreams: ["orders"], run: driveAmazon },
 	apple_contacts: {
 		coveredStreams: ["address_books", "contacts", "contact_groups"],
