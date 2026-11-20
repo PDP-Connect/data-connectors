@@ -899,7 +899,8 @@
 			"reason_display_messages": {
 				"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
 				"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit",
-				"receipts_deferred_detail_budget": "Some Uber receipts were deferred and remain unread"
+				"receipts_deferred_detail_budget": "Some Uber receipts were deferred and remain unread",
+				"receipts_unavailable_detail": "Some Uber receipt details were unavailable and remain unread"
 			}
 		}
 	},
