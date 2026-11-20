@@ -147,9 +147,13 @@ export function trainingSummaryRequest(id: number): PolarRequest {
  * day asked is never past `today`, as the web app never asks for one; [today-2, today+1] still
  * covers a short last window that ends today.
  */
-export function activityRequest(window: Window, today?: string): PolarRequest {
+function activityDay(window: Window, today?: string): string {
 	const third = addDays(window.from, 2);
-	const day = today !== undefined && third > today ? today : third;
+	return today !== undefined && third > today ? today : third;
+}
+
+export function activityRequest(window: Window, today?: string): PolarRequest {
+	const day = activityDay(window, today);
 	return {
 		url: `/api/activity-timeline/loadFour?day=${day}&maxSampleCount=${MAX_SAMPLE_COUNT}`,
 		method: "GET",
@@ -157,9 +161,13 @@ export function activityRequest(window: Window, today?: string): PolarRequest {
 }
 
 /** Widened back to the report's 30-day floor when the window is shorter; rows outside it are dropped. */
-export function sleepRequest(window: Window): PolarRequest {
+function sleepFrom(window: Window): string {
 	const floor = addDays(window.to, -SLEEP_MIN_SPAN_DAYS);
-	const from = window.from < floor ? window.from : floor;
+	return window.from < floor ? window.from : floor;
+}
+
+export function sleepRequest(window: Window): PolarRequest {
+	const from = sleepFrom(window);
 	return {
 		url: `${SLEEP_ORIGIN}/api/sleep/report?from=${from}&to=${window.to}`,
 		method: "GET",
@@ -684,6 +692,7 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 	const rows = trainingHistoryRows(list.json);
 	if (rows === null) return { failure: unreadableAnswer(), unreadable: 0 };
 	let unreadable = 0;
+	let outside = 0;
 	for (const raw of rows) {
 		const row = parseTrainingRow(raw);
 		const start = row === null ? null : localTime(row.startDate);
@@ -693,7 +702,10 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 			continue;
 		}
 		// Held to the window asked for: a row dated outside it is left to its own window.
-		if (!within(start.slice(0, 10), w)) continue;
+		if (!within(start.slice(0, 10), w)) {
+			outside += 1;
+			continue;
+		}
 		await p.sleep(p.requestDelayMs);
 		const detail = await fetchJson(
 			ctx.page,
@@ -722,7 +734,7 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 		);
 		if (undelivered || summaryUnreadable) unreadable += 1;
 	}
-	return { failure: null, unreadable };
+	return windowResult(rows.length, outside, unreadable);
 }
 
 async function readActivity(run: Run, w: Window): Promise<WindowRead> {
@@ -733,14 +745,20 @@ async function readActivity(run: Run, w: Window): Promise<WindowRead> {
 	const days = activityDays(outcome.json);
 	if (days === null) return { failure: unreadableAnswer(), unreadable: 0 };
 	let unreadable = 0;
-	for (const [day, value] of Object.entries(days).sort(([a], [b]) =>
-		a < b ? -1 : 1,
-	)) {
+	let outside = 0;
+	const requestedDay = activityDay(w, run.today);
+	const requested = {
+		from: addDays(requestedDay, -2),
+		to: addDays(requestedDay, 1),
+	};
+	const entries = Object.entries(days);
+	for (const [day, value] of entries.sort(([a], [b]) => (a < b ? -1 : 1))) {
 		if (!isDay(day)) {
 			run.issues.daily_activity.add("(day key)");
 			unreadable += 1;
 			continue;
 		}
+		if (!within(day, requested)) outside += 1;
 		if (!within(day, w)) continue;
 		if (
 			await deliver(
@@ -753,7 +771,7 @@ async function readActivity(run: Run, w: Window): Promise<WindowRead> {
 			unreadable += 1;
 		}
 	}
-	return { failure: null, unreadable };
+	return windowResult(entries.length, outside, unreadable);
 }
 
 async function readRows(
@@ -775,6 +793,8 @@ async function readRows(
 	const rows = sleep ? sleepRows(outcome.json) : nightlyRows(outcome.json);
 	if (rows === null) return { failure: unreadableAnswer(), unreadable: 0 };
 	let unreadable = 0;
+	let outside = 0;
+	const requested = sleep ? { ...w, from: sleepFrom(w) } : w;
 	for (const row of rows) {
 		const date = rowDate(row);
 		if (date === null) {
@@ -782,11 +802,32 @@ async function readRows(
 			unreadable += 1;
 			continue;
 		}
+		if (!within(date, requested)) outside += 1;
 		if (!within(date, w)) continue;
 		const built = sleep ? sleepRecord(row) : nightlyRechargeRecord(row);
 		if (await deliver(ctx, stream, built, run.issues[stream])) unreadable += 1;
 	}
-	return { failure: null, unreadable };
+	return windowResult(rows.length, outside, unreadable);
+}
+
+// Rows in provider-required padding are legitimate; only reject a response
+// wholly outside the range actually sent to the source.
+function windowResult(
+	rows: number,
+	outside: number,
+	unreadable: number,
+): WindowRead {
+	return rows > 0 && outside === rows
+		? {
+				failure: {
+					ok: false,
+					reason: "source_unreadable",
+					message:
+						"All rows returned were outside the requested window; this window will be retried.",
+				},
+				unreadable,
+			}
+		: { failure: null, unreadable };
 }
 
 function readWindow(
@@ -800,6 +841,7 @@ function readWindow(
 }
 
 interface Walk {
+	held: boolean;
 	failure: Failure | null;
 	deferred: boolean;
 	progressed: number;
@@ -810,9 +852,8 @@ interface Walk {
  * Reads a stream's windows oldest first, without an artificial history cap. A window read in full moves
  * `next_day` past it, until the first window holding an unreadable record: from there the cursor
  * stays, so the next run reads that window again, while this run still delivers what reads. The
- * hold is retried once: with `release` (the previous run held at this same `next_day`), an
- * unreadable record no longer holds the cursor, so one record Polar keeps serving in a shape the
- * connector cannot read does not pin the stream for good. `held_at` records a hold for that.
+ * hold is retried once, only for the window containing the previous held day.
+ * Later unreadable windows establish their own holds.
  */
 async function walkStream(
 	run: Run,
@@ -820,16 +861,16 @@ async function walkStream(
 	cursor: Cursor,
 	from: string,
 	to: string,
-	release: boolean,
+	releaseDay: string | undefined,
 ): Promise<Walk> {
 	const plan = PLANS[stream];
 	const walk: Walk = {
+		held: false,
 		failure: null,
 		deferred: false,
 		progressed: 0,
 		unreadable: 0,
 	};
-	let held = false;
 	for (const w of windows(from, to, plan.windowDays)) {
 		const read = await readWindow(run, stream, w);
 		walk.unreadable += read.unreadable;
@@ -838,8 +879,9 @@ async function walkStream(
 			return walk;
 		}
 		walk.progressed += 1;
-		if (read.unreadable > 0 && !release) held = true;
-		if (!held && w.to >= cursor.next_day) {
+		if (read.unreadable > 0 && !(releaseDay && within(releaseDay, w)))
+			walk.held = true;
+		if (!walk.held && w.to >= cursor.next_day) {
 			cursor.next_day = addDays(w.to, 1);
 		}
 	}
@@ -847,8 +889,8 @@ async function walkStream(
 }
 
 /** After a walk: a hold remembers its day, anything else clears it. */
-function markHold(cursor: Cursor, walk: Walk, release: boolean): void {
-	if (walk.unreadable > 0 && !release) cursor.held_at = cursor.next_day;
+function markHold(cursor: Cursor, walk: Walk): void {
+	if (walk.held) cursor.held_at = cursor.next_day;
 	else delete cursor.held_at;
 }
 
@@ -933,6 +975,7 @@ export async function collectPolarFlow(
 	const run: Run = { ctx, p, user: user ?? 0, today, issues };
 	for (const stream of streams) {
 		const empty: Walk = {
+			held: false,
 			failure: stop,
 			deferred: false,
 			progressed: 0,
@@ -961,8 +1004,11 @@ export async function collectPolarFlow(
 			ctx.collectionMode === "full_refresh",
 			PLANS[stream],
 		);
-		const release =
-			prev.held_at !== undefined && prev.held_at === planned.cursor.next_day;
+		const releaseDay =
+			ctx.collectionMode !== "full_refresh" &&
+			prev.held_at === planned.cursor.next_day
+				? prev.held_at
+				: undefined;
 		const walk = stop
 			? empty
 			: await walkStream(
@@ -971,9 +1017,9 @@ export async function collectPolarFlow(
 					planned.cursor,
 					planned.from,
 					planned.to,
-					release,
+					releaseDay,
 				);
-		if (!stop) markHold(planned.cursor, walk, release);
+		if (!stop) markHold(planned.cursor, walk);
 		await finish(ctx, stream, walk, planned.cursor, issues[stream]);
 		if (walk.failure?.reason === "sign_in_required") stop = walk.failure;
 	}

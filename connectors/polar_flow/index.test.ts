@@ -982,3 +982,107 @@ HISTORY_CASES.forEach(([stream, maxDays, overlap]) => {
 		});
 	});
 });
+
+// Window A gets its single retry, but that cannot forgive new corruption in B.
+test("a retried training window does not release a newly unreadable window", async () => {
+	const data = fixtureData();
+	const row = data.training[0]!;
+	data.training = [
+		{
+			...row,
+			startDate: "2026-10-20" + String(row.startDate).slice(10),
+			duration: "bad",
+		},
+		{ ...row, duration: "bad" },
+	];
+	const { ctx, out } = context(site({ data }), ["training_sessions"], {
+		training_sessions: {
+			next_day: "2026-10-15",
+			floor: "2026-10-01",
+			held_at: "2026-10-15",
+		},
+	});
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.deepEqual(stateOf(out, "training_sessions"), {
+		next_day: "2026-11-01",
+		floor: "2026-10-01",
+		held_at: "2026-11-01",
+	});
+	assert.equal(skipsOf(out)[0]?.reason, "source_unreadable");
+});
+
+test("sleep rows only in the report's widened 30-day span are not a wrongly dated answer", async () => {
+	const data = fixtureData();
+	data.sleep = [{ ...data.sleep[0], date: "2026-10-20" }];
+	const ranges = { sleep: { since: "2026-11-01" } };
+	const { ctx, out } = context(site({ data }), ["sleep"], {}, ranges);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.deepEqual(skipsOf(out), []);
+	assert.equal(recordsOf(out, "sleep").length, 0);
+	assert.deepEqual(stateOf(out, "sleep"), {
+		next_day: "2026-11-06",
+		floor: "2026-11-01",
+	});
+});
+
+test("loadFour answering only the padding days of today's request is not a wrongly dated answer", async () => {
+	const data = fixtureData();
+	const api = polarApi(data);
+	const s = site({
+		data,
+		override: (url, init) => {
+			if (!url.startsWith("/api/activity-timeline/loadFour")) return undefined;
+			const days = JSON.parse(api(url, init, true).body) as Record<
+				string,
+				unknown
+			>;
+			delete days["2026-11-05"];
+			delete days["2026-11-06"];
+			return Response.json(days);
+		},
+	});
+	const ranges = { daily_activity: { since: "2026-11-05" } };
+	const { ctx, out } = context(s, ["daily_activity"], {}, ranges);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.deepEqual(skipsOf(out), []);
+	assert.deepEqual(stateOf(out, "daily_activity"), {
+		next_day: "2026-11-06",
+		floor: "2026-11-05",
+	});
+});
+
+test("a repeated training response cannot checkpoint past its requested window", async () => {
+	const data = fixtureData();
+	const row = data.training[0]!;
+	data.training = [
+		{ ...row, startDate: "2026-10-05" + String(row.startDate).slice(10) },
+	];
+	const s = site({
+		data,
+		override: (url) =>
+			url === "/api/training/history"
+				? Response.json(data.training)
+				: undefined,
+	});
+	const ranges = { training_sessions: { since: "2026-10-01" } };
+	const first = context(s, ["training_sessions"], {}, ranges);
+	await collectPolarFlow(first.ctx, { sleep: instant }, NOW);
+	assert.equal(recordsOf(first.out, "training_sessions").length, 1);
+	const checkpoint = { next_day: "2026-11-01", floor: "2026-10-01" };
+	assert.deepEqual(stateOf(first.out, "training_sessions"), checkpoint);
+	assert.equal(skipsOf(first.out)[0]?.reason, "source_unreadable");
+	assert.match(
+		String(skipsOf(first.out)[0]?.message),
+		/outside the requested window/,
+	);
+
+	const replay = context(
+		s,
+		["training_sessions"],
+		{ training_sessions: checkpoint },
+		ranges,
+	);
+	await collectPolarFlow(replay.ctx, { sleep: instant }, NOW);
+	assert.equal(stateOf(replay.out, "training_sessions"), undefined);
+	assert.equal(skipsOf(replay.out)[0]?.reason, "source_unreadable");
+});
