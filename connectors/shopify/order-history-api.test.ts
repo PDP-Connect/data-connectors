@@ -402,6 +402,51 @@ test("an empty continuation page refuses rather than chasing fresh cursors", asy
 	assert.equal(calls, 2);
 });
 
+for (const terminal of [false, true]) {
+	test(`a short repeated page refuses with or without continuation (${terminal})`, async () => {
+		let calls = 0;
+		const nodes = [orderNode(ORDER_A)];
+		const reader = createOrderHistoryApiReader({
+			now: () => 0,
+			fetchPage: async () => {
+				calls += 1;
+				if (calls > 2) return reply([], { hasNextPage: false });
+				return reply(nodes, calls === 1 || !terminal
+					? { hasNextPage: true, endCursor: `cursor-${calls}` }
+					: { hasNextPage: false });
+			},
+		});
+		const cache = await reader.read();
+		assert.ok(cache);
+		assert.equal(orderHistoryCacheStopReason(cache), "no_new_order_ids");
+		assert.equal(hasVerifiedOrdersEnd(cache), false);
+		const result = await collectReader(reader);
+		assert.equal(calls, 2);
+		assert.equal(result.messages.some((m) => m.type === "STATE"), false);
+	});
+}
+
+test("three unusable follow-ups record a distinct partial stop", async () => {
+	let calls = 0;
+	const reader = createOrderHistoryApiReader({
+		now: () => 0,
+		fetchPage: async ({ after }) => {
+			calls += 1;
+			return after === null
+				? reply([orderNode(ORDER_A)], { hasNextPage: true, endCursor: "cursor-1" })
+				: { status: 503, body: null };
+		},
+	});
+	for (let attempt = 0; attempt < 3; attempt += 1) await reader.read();
+	const cache = await reader.read();
+	assert.ok(cache);
+	assert.equal(orderHistoryCacheStopReason(cache), "unusable_page_limit");
+	assert.equal(hasVerifiedOrdersEnd(cache), false);
+	const result = await collectReader(reader);
+	assert.equal(calls, 4);
+	assert.equal(result.messages.some((m) => m.type === "STATE"), false);
+});
+
 test("a repeated full page cannot claim terminal evidence", async () => {
 	let calls = 0;
 	const nodes = Array.from({ length: 10 }, (_, i) => orderNode(`terminal-repeat-${i}`));

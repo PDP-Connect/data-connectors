@@ -23054,7 +23054,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.40",
+				"version": "0.2.41",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
