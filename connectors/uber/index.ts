@@ -102,7 +102,7 @@ const ACTIVITIES_PAGE_SIZE = 5;
  * than walking forever through a feed that repeats itself.
  */
 const MAX_DUPLICATE_ONLY_PAGES = 3;
-// Bounds one run's detail work; the checkpoint lets deferred trips continue next run.
+// Bound detail work per run; the shared checkpoint lets later runs pick up deferred IDs.
 const MAX_DETAIL_FETCHES = 200;
 const PAGE_DELAY_MS = 500;
 const DETAIL_DELAY_MS = 500;
@@ -493,12 +493,11 @@ export async function collectAllStreams(
 		? tripIds.filter((id) => !hydratedReceipts.has(id) && (!receiptResources || receiptResources.has(id)))
 		: [];
 	const tripBatch = new Set(tripsRequired.slice(0, MAX_DETAIL_FETCHES));
-	// Without a parent cursor a receipts-only run cannot advance a budgeted
-	// prefix, so scan in feed order instead of permanently starving its tail.
-	const receiptBatch = new Set(
-		canWriteCheckpoint ? receiptsRequired.slice(0, MAX_DETAIL_FETCHES) : receiptsRequired,
-	);
-	const detailIds = tripIds.filter((id) => tripBatch.has(id) || receiptBatch.has(id));
+	const receiptBatch = new Set(receiptsRequired.slice(0, MAX_DETAIL_FETCHES));
+	const detailIds = tripIds
+		.filter((id) => tripBatch.has(id) || receiptBatch.has(id))
+		.slice(0, MAX_DETAIL_FETCHES);
+	const attemptedDetailIds = new Set(detailIds);
 
 	for (const [index, tripId] of detailIds.entries()) {
 		if (tripBatch.has(tripId)) {
@@ -584,6 +583,39 @@ export async function collectAllStreams(
 				covered: tripsHydrated.length,
 			}),
 		);
+	}
+
+	const deferredReceiptIds = receiptsRequired.filter(
+		(id) => !attemptedDetailIds.has(id),
+	);
+	if (deferredReceiptIds.length > 0) {
+		// Do not persist a locator under a time bound until its eligibility is proven.
+		if (!receiptScope?.time_range) {
+			for (const id of deferredReceiptIds) {
+				await emit(
+					buildDetailGap({
+						stream: "receipts",
+						parentStream: "trips",
+						recordKey: id,
+						reason: "temporary_unavailable",
+						locator: { kind: "uber.receipt", trip_id: id },
+					}),
+				);
+			}
+		}
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "receipts",
+			reason: "receipts_deferred_detail_budget",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			message: canWriteCheckpoint
+				? "The receipt detail limit was reached. Receipts remain to be collected."
+				: "The receipt detail limit was reached without a saved checkpoint. Receipts remain to be collected.",
+			diagnostics: {
+				detail_fetch_limit: MAX_DETAIL_FETCHES,
+				deferred_receipts: deferredReceiptIds.length,
+			},
+		});
 	}
 
 	if (canWriteCheckpoint && !truncated) {
