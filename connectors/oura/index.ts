@@ -204,15 +204,15 @@ async function fetchAll<T extends OuraRow>(
 		if (startDate) params.start_date = startDate;
 		if (nextToken) params.next_token = nextToken;
 		const json = await oura<T>(governor, endpoint, token, params);
-		const rows = Array.isArray(json.data) ? json.data : [];
+		const rows = Array.isArray(json?.data) ? json.data : null;
 		const before = seenIds.size;
-		for (const row of rows) {
+		for (const row of rows ?? []) {
 			if (row.id && seenIds.has(row.id)) continue;
 			if (row.id) seenIds.add(row.id);
 			all.push(row);
 		}
-		nextToken = json.next_token || undefined;
-		if (!nextToken || rows.length === 0) return { rows: all, truncated: false };
+		nextToken = json?.next_token || undefined;
+		if (!nextToken || !rows?.length) return settleOuraPage(all, rows, nextToken);
 		if (seenTokens.has(nextToken)) {
 			return { rows: all, truncated: true, cause: "repeated_next_token" };
 		}
@@ -525,4 +525,19 @@ if (isMainModule(import.meta.url)) {
 		auth: { kind: "env", required: ["OURA_PERSONAL_ACCESS_TOKEN"] },
 		collect: (ctx) => collectOura(ctx),
 	});
+}
+
+/** An unknown envelope or an empty page claiming more data does not prove EOF. */
+function settleOuraPage<T extends OuraRow>(
+	all: T[],
+	page: T[] | null,
+	nextToken: string | undefined,
+): { rows: T[]; truncated: boolean; cause?: string } {
+	if (page === null) {
+		return { rows: all, truncated: true, cause: "invalid_page_data" };
+	}
+	if (nextToken) {
+		return { rows: all, truncated: true, cause: "empty_page_with_next_token" };
+	}
+	return { rows: all, truncated: false };
 }
