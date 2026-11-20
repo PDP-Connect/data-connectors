@@ -1092,14 +1092,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/chatgpt/usage-stream.ts",
-			line: 994,
+			line: 999,
 			column: 28,
 			category: "ordered_protocol_emission",
 			note: "emitGated(): emit usage records in order (stateless host).",
 		},
 		{
 			path: "connectors/chatgpt/usage-stream.ts",
-			line: 999,
+			line: 1004,
 			column: 29,
 			category: "ordered_protocol_emission",
 			note: "emitGated(): emit usage records in order behind the fingerprint gate.",

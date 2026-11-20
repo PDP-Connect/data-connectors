@@ -2081,6 +2081,7 @@ function progressPagerHarness(
 	target: ProgressPagerTarget,
 	pageAt: (page: number) => { ids: number[]; has_more: boolean; cursor?: string },
 	maxPages: number,
+	options: { profileOnly?: boolean; wallClockAfter?: number } = {},
 ) {
 	const fake = fakeApi(siteRoutes({ conversations: [] }));
 	const harness = makeRecordingEmit(validateRecord);
@@ -2113,7 +2114,10 @@ function progressPagerHarness(
 	const deps: StreamDeps = {
 		api, emit: harness.emit, emitRecord: harness.emitRecord,
 		progress: () => Promise.resolve(),
-		requested: new Map(["account_profile", "usage_summary"].map((name) => [name, { name }])),
+		requested: new Map((options.profileOnly ? ["account_profile"] : ["account_profile", "usage_summary"]).map((name) => [name, { name }])),
+		...(options.wallClockAfter === undefined ? {} : { runBudget: {
+			reason: () => pages >= options.wallClockAfter! ? "max_wall_clock" : null,
+		} as NonNullable<StreamDeps["runBudget"]> }),
 	};
 	return {
 		harness, pages: () => pages,
@@ -2126,6 +2130,23 @@ function progressPagerHarness(
 function assertUsageCheckpoint(h: ReturnType<typeof makeRecordingEmit>, complete: boolean) {
 	assert.equal(h.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"), complete);
 	assert.equal(h.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE" && m.stream === "usage_summary"), complete);
+}
+
+for (const partial of [false, true]) {
+	test(`account profile checkpoints only complete sidebar walks (wall clock=${partial})`, async () => {
+		const h = progressPagerHarness("sidebar", () => ({ ids: [1], has_more: partial,
+			...(partial ? { cursor: "next" } : {}),
+		}), 1, { profileOnly: true, ...(partial ? { wallClockAfter: 1 } : {}) });
+		await h.run();
+		assert.equal(h.pages(), 1);
+		const [profile] = records(h.harness, "account_profile");
+		assert.ok(profile, "retain observable profile record after a partial walk");
+		assert.equal(sub(profile, "source_status").projects, partial ? "partial" : "ok");
+		for (const kind of ["STATE", "DETAIL_COVERAGE"]) {
+			assert.equal(h.harness.protocolMessages.some((message) =>
+				message.type === kind && "stream" in message && message.stream === "account_profile"), !partial, kind);
+		}
+	});
 }
 
 test("cursor progress treats empty missing continuation as partial and absent has_more as end", () => {
