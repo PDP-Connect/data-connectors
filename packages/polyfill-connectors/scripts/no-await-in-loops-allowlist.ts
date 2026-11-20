@@ -259,21 +259,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/amazon/index.ts",
-			line: 2420,
+			line: 2453,
 			column: 5,
 			category: "dependent_pagination",
 			note: "runYear(): deps.progress(): next request depends on the prior page's cursor/offset/response",
 		},
 		{
 			path: "connectors/amazon/index.ts",
-			line: 2737,
+			line: 2770,
 			column: 4,
 			category: "dependent_pagination",
 			note: "collectAmazon(): progress(): next request depends on the prior page's cursor/offset/response",
 		},
 		{
 			path: "connectors/amazon/index.ts",
-			line: 2817,
+			line: 2857,
 			column: 4,
 			category: "dependent_pagination",
 			note: "collectAmazon(): progress(): next request depends on the prior page's cursor/offset/response",
@@ -284,6 +284,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			column: 19,
 			category: "test_assertion_sequencing",
 			note: "processListOrder(): test drives/asserts an ordered per-case side effect",
+		},
+		{
+			path: "connectors/amazon/integration.test.ts",
+			line: 4615,
+			column: 10,
+			category: "test_assertion_sequencing",
+			note: "runPass(): test drives/asserts an ordered per-case side effect",
 		},
 		{
 			path: "connectors/anthropic/index.ts",

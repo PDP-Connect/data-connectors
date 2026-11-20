@@ -4149,9 +4149,14 @@ function collectContextFor(
 			streams: (options.streams ?? ["orders"]).map((name) => ({ name })),
 		},
 		state,
-		emitRecord: (stream: string, data: { id?: unknown }) => {
+		emitRecord: async (
+			stream: string,
+			data: { id?: unknown },
+			emitOptions?: { beforeEmit?: () => Promise<void> | void },
+		) => {
+			// Like the host: accepted locally, then the fingerprint is recorded.
+			await emitOptions?.beforeEmit?.();
 			options.records?.push({ stream, id: data.id });
-			return Promise.resolve();
 		},
 		emit: (message: EmittedMessage) => {
 			messages.push(message);
@@ -4553,4 +4558,127 @@ test("collectAmazon: a run that read only duplicates or only items and then hits
 		"the items-only run ends as a kept partial run",
 	);
 	assert.ok(lastOrdersCursor(items.messages).store);
+});
+
+// ─── Resume point: overlap page, guaranteed forward page, resume years first ─
+
+function resumeOf(cursor: OrdersCursor, year: number): { startIndex: number } {
+	const resume = cursor.years?.[String(year)]?.resume as
+		| { startIndex: number }
+		| undefined;
+	assert.ok(resume, `year ${year} keeps a resume point`);
+	return resume;
+}
+
+test("collectAmazon: one deletion before the overlap page pulls an unread order onto it; the anchor is still there and that order is recorded", async () => {
+	const year = new Date().getFullYear();
+	const original = listingOrderIds("111", 45);
+	const records: Array<{ stream: string; id: unknown }> = [];
+
+	const pass1 = await runPass({
+		listings: { [year]: original },
+		pageLimit: 2,
+		records,
+		state: {},
+	});
+	// Order 4 is deleted: every later order moves up one place, so the first
+	// unread order (index 20) now sits at the end of the overlap page.
+	const deleted = original[3] as string;
+	const unread = original[20] as string;
+	const afterDeletion = original.filter((id) => id !== deleted);
+	await runPass({
+		listings: { [year]: afterDeletion },
+		pageLimit: 50,
+		records,
+		state: { orders: pass1.cursor },
+	});
+	const ids = emittedOrderIds(records);
+	assert.ok(
+		ids.includes(unread),
+		"the order pulled onto the overlap page is recorded",
+	);
+	for (const id of afterDeletion) {
+		assert.ok(ids.includes(id), `order ${id} was recorded`);
+	}
+});
+
+test("collectAmazon: a budget that the overlap page alone uses up still moves the resume point forward one page per run until the year is finished", async () => {
+	const year = new Date().getFullYear();
+	const listings = { [year]: listingOrderIds("111", 45) };
+	const records: Array<{ stream: string; id: unknown }> = [];
+
+	let pass = await runPass({ listings, pageLimit: 2, records, state: {} });
+	let last = resumeOf(pass.cursor, year).startIndex;
+	assert.equal(last, 20);
+	for (let run = 0; run < 10; run += 1) {
+		// The walk clock is spent after one page: the overlap page alone.
+		pass = await runPass({
+			listings,
+			pageLimit: 1,
+			records,
+			state: { orders: pass.cursor },
+		});
+		const resume = pass.cursor.years?.[String(year)]?.resume as
+			| { startIndex: number }
+			| undefined;
+		if (!resume) {
+			break;
+		}
+		assert.equal(
+			resume.startIndex,
+			last + 10,
+			"each run moves forward one page",
+		);
+		last = resume.startIndex;
+	}
+	assert.equal(
+		pass.cursor.years?.[String(year)]?.resume,
+		undefined,
+		"the year is finished",
+	);
+	const ids = emittedOrderIds(records);
+	assert.equal(new Set(ids).size, 45);
+	assert.equal(ids.length, 45);
+});
+
+test("collectAmazon: a revisit of a newer year that would use up the budget does not stop the older resume year from moving forward", async () => {
+	const year = new Date().getFullYear();
+	const listings = {
+		[year]: listingOrderIds("111", 3),
+		[year - 2]: listingOrderIds("222", 45),
+	};
+	const pass1 = await runPass({ listings, pageLimit: 4, state: {} });
+	assert.equal(resumeOf(pass1.cursor, year - 2).startIndex, 20);
+
+	const pass2 = await runPass({
+		listings,
+		pageLimit: 2,
+		state: { orders: pass1.cursor },
+	});
+	assert.deepEqual(
+		startIndexes(pass2.log, year - 2).slice(0, 2),
+		["10", "20"],
+		"the resume year is read first: its overlap page and a page beyond it",
+	);
+	assert.equal(resumeOf(pass2.cursor, year - 2).startIndex, 30);
+});
+
+test("collectAmazon: a short overlap page proves no boundary, so the year restarts from page 1", async () => {
+	const year = new Date().getFullYear();
+	const original = listingOrderIds("111", 45);
+	const pass1 = await runPass({
+		listings: { [year]: original },
+		pageLimit: 2,
+		state: {},
+	});
+	// The list shrank to 15 orders: the overlap page still holds anchor ids but
+	// only five of the ten a full page holds.
+	const pass2 = await runPass({
+		listings: { [year]: original.slice(0, 15) },
+		pageLimit: 50,
+		state: { orders: pass1.cursor },
+	});
+	assert.deepEqual(startIndexes(pass2.log).slice(0, 2), ["10", "0"]);
+	assert.equal(pass2.cursor.years?.[String(year)]?.resume, undefined);
+	assert.equal(pass2.cursor.years?.[String(year)]?.order_count, 15);
 });

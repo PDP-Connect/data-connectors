@@ -2339,16 +2339,28 @@ async function runYear(
 	progressOut: YearWalkProgress,
 	tally: { rows: number },
 ): Promise<YearRunResult> {
-	// A saved resume point is used from one page BEFORE its startIndex, and
-	// only once an anchor id is seen on that overlap page.
+	// A saved resume point is used from one page BEFORE its startIndex (the
+	// overlap page). The overlap page is read in full like any other: the
+	// order-id dedupe drops what was already read, so an order a deletion
+	// pulled onto it is still recorded. The anchor only decides resume or
+	// restart.
 	let overlapPending =
 		resume !== undefined && resume.startIndex >= START_INDEX_STEP;
 	let resumedFromSaved = overlapPending;
 	const anchorIds = new Set(overlapPending ? resume?.anchor : []);
+	const anchorSize = overlapPending && resume ? resume.anchor.length : 0;
 	let pageCount =
 		overlapPending && resume ? resume.startIndex / START_INDEX_STEP - 1 : 0;
-	let yearOrderCount = overlapPending && resume ? resume.counted : 0;
+	// The overlap page's count was already in `counted`; it is added back as
+	// that page is read again.
+	let yearOrderCount =
+		overlapPending && resume ? resume.counted - anchorSize : 0;
 	let unparseableDateCount = overlapPending && resume ? resume.dateDrops : 0;
+	// Pages read before the time budget may stop the walk. A run with a resume
+	// point always reads the overlap page and one page beyond it, so each run
+	// moves the saved point forward at least one page.
+	let guaranteedPages = overlapPending ? 2 : 0;
+	let overlapIds: Set<string> | undefined;
 	Object.assign(
 		progressOut,
 		overlapPending && resume
@@ -2360,10 +2372,29 @@ async function runYear(
 				}
 			: { anchor: [], counted: 0, startIndex: 0, dateDrops: 0 },
 	);
+	// The saved position cannot be trusted: read the year again from page 1.
+	// That first page is itself guaranteed, so the restart saves progress.
+	const restartYear = (): void => {
+		connectorDiagnostic("amazon", "year_resume_anchor_missing", { year });
+		resumedFromSaved = false;
+		pageCount = 0;
+		yearOrderCount = 0;
+		unparseableDateCount = 0;
+		overlapIds = undefined;
+		guaranteedPages = 1;
+		Object.assign(progressOut, {
+			anchor: [],
+			counted: 0,
+			startIndex: 0,
+			dateDrops: 0,
+		});
+	};
 	const walk = await walkPagesWithCeiling({
 		maxPages: PAGE_LIMIT,
 		fetchPage: async () => {
-			if (walkTimeSpent(flags)) {
+			if (guaranteedPages > 0) {
+				guaranteedPages -= 1;
+			} else if (walkTimeSpent(flags)) {
 				throw new Error("amazon_walk_time_budget");
 			}
 			await deps.progress(
@@ -2381,25 +2412,27 @@ async function runYear(
 			);
 			if (overlapPending) {
 				overlapPending = false;
-				if (orders.some((o) => anchorIds.has(o.orderId))) {
-					// The list still holds what this run last read: continue after it.
-					pageCount += 1;
+				// A short overlap page or one without the anchor proves no
+				// boundary: the list moved under the saved position.
+				if (
+					orders.length < anchorSize ||
+					!orders.some((o) => anchorIds.has(o.orderId))
+				) {
+					restartYear();
 					return true;
 				}
-				// The list moved under the saved position (orders removed): the
-				// pages after it cannot be trusted. Read the year again from page 1.
-				connectorDiagnostic("amazon", "year_resume_anchor_missing", { year });
-				resumedFromSaved = false;
-				pageCount = 0;
-				yearOrderCount = 0;
-				unparseableDateCount = 0;
-				Object.assign(progressOut, {
-					anchor: [],
-					counted: 0,
-					startIndex: 0,
-					dateDrops: 0,
-				});
-				return true;
+				overlapIds = new Set(orders.map((o) => o.orderId));
+			} else if (overlapIds) {
+				const overlapSeen = overlapIds;
+				overlapIds = undefined;
+				if (
+					orders.length > 0 &&
+					orders.every((o) => overlapSeen.has(o.orderId))
+				) {
+					// The page after the overlap page repeats it: no boundary.
+					restartYear();
+					return true;
+				}
 			}
 			if (orders.length === 0) {
 				// EXIT A — honest completion: the year is exhausted.
@@ -2809,7 +2842,14 @@ export async function collectAmazon(ctx: BrowserCollectContext): Promise<void> {
 		},
 	};
 
-	for (const year of years) {
+	// Years with a saved resume point go first, so revisits of years already
+	// finished cannot spend the shared walk budget before an older year moves
+	// forward. A finished year's page-1 check for new orders comes after.
+	const yearsInRunOrder = [
+		...years.filter((y) => yearsState[String(y)]?.resume),
+		...years.filter((y) => !yearsState[String(y)]?.resume),
+	];
+	for (const year of yearsInRunOrder) {
 		const prior = yearsState[String(year)];
 		// Year-freezing: skip if already frozen
 		if (prior?.frozen) {
