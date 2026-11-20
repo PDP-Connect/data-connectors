@@ -31,7 +31,7 @@ const ALLOWED_PATHS = [
 	"^/users/@me$",
 	"^/users/@me/guilds$",
 	"^/users/@me/connections$",
-	"^/guilds/[0-9]{1,20}/messages/search\\?author_id=[0-9]{1,20}&sort_by=timestamp&sort_order=desc&offset=[0-9]{1,5}$",
+	"^/guilds/[0-9]{1,20}/messages/search\\?author_id=[0-9]{1,20}&sort_by=timestamp&sort_order=desc&offset=[0-9]{1,5}(?:&max_id=[0-9]{1,20})?$",
 ];
 
 /**

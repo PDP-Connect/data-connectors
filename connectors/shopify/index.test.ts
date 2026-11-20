@@ -1888,3 +1888,289 @@ test("real Shop navigation preserves read failures alongside withheld rows", asy
 		});
 	}
 });
+
+
+
+// Default single-order pages expose exact budget boundaries; ten-order pages
+// also exercise real API pagination and heads located in the middle of a page.
+async function runResumableShopifyFixture({
+	ids = ["5", "4", "3", "2", "1"], state = {}, maxPages = 2,
+	requested = requestedMap(["orders"]), collectionMode,
+	cursorVersion = "v1", runBudgetMs, wait, pageSize = 1, statuses = {},
+}: {
+	ids?: string[]; state?: Record<string, unknown>; maxPages?: number;
+	requested?: Map<string, StreamScope>; collectionMode?: "full_refresh" | "incremental";
+	cursorVersion?: string; runBudgetMs?: number; wait?: (ms: number) => Promise<void>;
+	pageSize?: number; statuses?: Record<string, string>;
+} = {}) {
+	const requests: Array<string | null> = [];
+	const reader = createOrderHistoryApiReader({
+		maxPages, readBudgetMs: 0,
+		fetchPage: async ({ after }) => {
+			requests.push(after);
+			if (after !== null && !after.startsWith(`${cursorVersion}:`)) {
+				return { status: 400, body: { error: "expired cursor" } };
+			}
+			const index = after === null ? 0 : ids.indexOf(after.slice(cursorVersion.length + 1)) + 1;
+			const pageIds = ids.slice(index, index + pageSize);
+			const id = pageIds.at(-1);
+			return { status: 200, body: { deliveriesOrdersList: {
+				nodes: pageIds.map((id) => ({
+					__typename: "Order", id: `gid://shopify/Order/${id}`,
+					createdAt: "2024-05-01T18:22:05.000Z", displayStatus: statuses[id] ?? "FULFILLED",
+					shop: { name: "Acme Goods" },
+					effectiveTotalPrice: { amount: "10.00", currencyCode: "USD" },
+					totalItemCount: 1, lineItems: { nodes: [] },
+				})),
+				pageInfo: { hasNextPage: index + pageSize < ids.length,
+					endCursor: id === undefined ? null : `${cursorVersion}:${id}` },
+				totalCount: ids.length,
+			} } };
+		},
+	});
+	const run = makeRecordingEmit(validateRecord);
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested, state, collectionMode,
+		orderHistoryApi: reader, readCache: () => reader.read(),
+		readVerifiedEmptyState: () => reader.provesEmptyHistory(),
+		scroll: async () => undefined, cacheWaitTimeoutMs: 0,
+		...(runBudgetMs === undefined ? {} : { runBudgetMs }),
+		...(wait === undefined ? {} : { wait }),
+	});
+	const message = run.protocolMessages.findLast(
+		(item): item is Extract<EmittedMessage, { type: "STATE" }> => item.type === "STATE",
+	);
+	assert.ok(message, "the last validated API cursor must be saved");
+	const cursor = message.cursor as {
+		fingerprints: Record<string, string>; backfill_version: number;
+		head: string | null; backfill: Array<{ after: string | null; stopAt: string | null }> | null;
+		backfill_scope: { since: string | null; until: string | null; resources: string[] | null };
+	};
+	return { run, cursor, requests, state: { orders: message.cursor } };
+}
+
+test("resumable Shopify budget saves a backfill position without terminal evidence", async () => {
+	const first = await runResumableShopifyFixture();
+	assert.equal(first.cursor.head, "gid://shopify/Order/5");
+	assert.deepEqual(first.cursor.backfill, [{ after: "v1:4", stopAt: null }]);
+	const skip = first.run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip?.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "older_pages_deferred_page_budget");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+	assert.equal((skip.diagnostics as Record<string, unknown>).terminal_evidence, false);
+});
+
+test("resumable Shopify second run reads new head and older orders without duplicate records", async () => {
+	const first = await runResumableShopifyFixture();
+	const second = await runResumableShopifyFixture({
+		state: first.state, ids: ["6", "5", "4", "3", "2", "1"], maxPages: 4,
+	});
+	assert.deepEqual(second.requests, [null, "v1:6", "v1:4", "v1:3"]);
+	const records = [...first.run.emitted, ...second.run.emitted].map((item) => item.data.id);
+	assert.deepEqual(records, ["5", "4", "6", "3", "2"].map((id) => `gid://shopify/Order/${id}`));
+	assert.equal(new Set(records).size, records.length);
+	assert.equal(Object.keys(second.cursor.fingerprints).length, 5);
+});
+
+test("resumable Shopify changed scope and full_refresh ignore the saved position", async () => {
+	const first = await runResumableShopifyFixture();
+	for (const requested of [
+		new Map<string, StreamScope>([["orders", { name: "orders", resources: ["merchant"] }]]),
+		new Map<string, StreamScope>([["orders", { name: "orders", time_range: { since: "2024-01-01" } }]]),
+		new Map<string, StreamScope>([["orders", { name: "orders", time_range: { until: "2025-01-01" } }]]),
+	]) {
+		const changed = await runResumableShopifyFixture({ state: first.state, requested });
+		assert.deepEqual(changed.requests, [null, "v1:5"]);
+		assert.notDeepEqual(changed.cursor.backfill_scope, first.cursor.backfill_scope);
+	}
+	const refreshed = await runResumableShopifyFixture({ state: first.state, collectionMode: "full_refresh" });
+	assert.deepEqual(refreshed.requests, [null, "v1:5"]);
+	assert.deepEqual(refreshed.cursor.backfill, [{ after: "v1:4", stopAt: null }]);
+});
+
+test("resumable Shopify source EOF clears the backfill position and completes", async () => {
+	const first = await runResumableShopifyFixture();
+	const last = await runResumableShopifyFixture({ state: first.state, maxPages: 5 });
+	assert.equal(last.cursor.backfill, null);
+	assert.equal(last.run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+	assert.equal(Object.keys(last.cursor.fingerprints).length, 5);
+	const unchanged = await runResumableShopifyFixture({ state: last.state, maxPages: 5 });
+	assert.deepEqual(unchanged.requests, [null, "v1:5", "v1:4", "v1:3", "v1:2"]);
+	assert.equal(unchanged.run.emitted.length, 0);
+	assert.equal(unchanged.cursor.backfill, null);
+});
+
+test("resumable Shopify loads legacy fingerprint STATE as backfill not started", async () => {
+	const first = await runResumableShopifyFixture();
+	const legacy = await runResumableShopifyFixture({
+		state: { orders: { fingerprints: first.cursor.fingerprints } },
+	});
+	assert.deepEqual(legacy.requests, [null, "v1:5"]);
+	assert.equal(legacy.run.emitted.length, 0);
+	assert.equal(legacy.cursor.backfill_version, 1);
+	assert.deepEqual(legacy.cursor.backfill, [{ after: "v1:4", stopAt: null }]);
+});
+
+test("resumable Shopify rejected saved cursor restarts at head within the page budget", async () => {
+	const first = await runResumableShopifyFixture();
+	const restarted = await runResumableShopifyFixture({ state: first.state, cursorVersion: "v2", maxPages: 4 });
+	assert.deepEqual(restarted.requests, [null, "v1:4", null, "v2:5"]);
+	assert.deepEqual(restarted.cursor.backfill, [{ after: "v2:4", stopAt: null }]);
+	const last = await runResumableShopifyFixture({ state: restarted.state, cursorVersion: "v2", maxPages: 5 });
+	assert.equal(last.cursor.backfill, null);
+	assert.equal(last.run.emitted.length, 3);
+});
+
+test("resumable Shopify interrupted head catch-up retains every pending segment", async () => {
+	const first = await runResumableShopifyFixture();
+	const ids = ["9", "8", "7", "6", "5", "4", "3", "2", "1"];
+	const second = await runResumableShopifyFixture({ state: first.state, ids });
+	assert.deepEqual(second.cursor.backfill, [
+		{ after: "v1:8", stopAt: "gid://shopify/Order/5" },
+		{ after: "v1:4", stopAt: null },
+	]);
+	const last = await runResumableShopifyFixture({ state: second.state, ids, maxPages: 10 });
+	assert.equal(last.cursor.backfill, null);
+	const records = [...first.run.emitted, ...second.run.emitted, ...last.run.emitted].map((item) => item.data.id);
+	assert.equal(records.length, 9);
+	assert.equal(new Set(records).size, 9);
+});
+
+test("resumable Shopify run deadline saves the last successful API position", async () => {
+	const result = await runResumableShopifyFixture({
+		runBudgetMs: 25, maxPages: 100,
+		wait: async () => { await new Promise((resolve) => setTimeout(resolve, 50)); },
+	});
+	assert.deepEqual(result.cursor.backfill, [{ after: "v1:4", stopAt: null }]);
+	assert.equal(result.run.protocolMessages.some((message) =>
+		message.type === "SKIP_RESULT" && message.reason === "older_pages_deferred_page_budget"), true);
+});
+
+
+test("resumable Shopify commits a token reset on the final allowed request", async () => {
+	const first = await runResumableShopifyFixture();
+	const rejected = await runResumableShopifyFixture({
+		state: first.state, cursorVersion: "v2", maxPages: 2,
+	});
+	assert.deepEqual(rejected.requests, [null, "v1:4"]);
+	assert.equal(rejected.cursor.head, null);
+	assert.deepEqual(rejected.cursor.backfill, [{ after: null, stopAt: null }]);
+	const next = await runResumableShopifyFixture({
+		state: rejected.state, cursorVersion: "v2", maxPages: 4,
+	});
+	assert.equal(next.requests.includes("v1:4"), false);
+	assert.deepEqual(next.cursor.backfill, [{ after: "v2:2", stopAt: null }]);
+	assert.deepEqual(next.run.emitted.map((item) => item.data.id),
+		["3", "2"].map((id) => `gid://shopify/Order/${id}`));
+});
+
+test("resumable Shopify refreshes changed old orders on two ten-order API pages", async () => {
+	const ids = Array.from({ length: 20 }, (_, index) => String(20 - index));
+	const first = await runResumableShopifyFixture({ ids, pageSize: 10, maxPages: 2 });
+	const changed = await runResumableShopifyFixture({
+		ids, pageSize: 10, maxPages: 2, state: first.state, statuses: { "1": "DELIVERED" },
+	});
+	assert.deepEqual(changed.requests, [null, "v1:11"]);
+	assert.deepEqual(changed.run.emitted.map((item) => [item.data.id, item.data.status]),
+		[["gid://shopify/Order/1", "DELIVERED"]]);
+	assert.equal(changed.cursor.backfill, null);
+});
+
+test("resumable Shopify rolling sweep finds old changes within one sweep", async () => {
+	const ids = Array.from({ length: 40 }, (_, index) => String(40 - index));
+	const first = await runResumableShopifyFixture({ ids, pageSize: 10, maxPages: 4 });
+	let state = first.state;
+	const emitted: RecordData[] = [];
+	// Two pages initially, then one head page plus one older page per run.
+	for (let run = 0; run < 3; run += 1) {
+		const next = await runResumableShopifyFixture({
+			ids, pageSize: 10, maxPages: 2, state, statuses: { "1": "DELIVERED" },
+		});
+		state = next.state;
+		emitted.push(...next.run.emitted.map((item) => item.data));
+		if (run === 2) assert.equal(next.cursor.backfill, null);
+	}
+	assert.deepEqual(emitted.map((record) => [record.id, record.status]),
+		[["gid://shopify/Order/1", "DELIVERED"]]);
+});
+
+test("resumable Shopify prunes absent fingerprints only when a rolling sweep completes", async () => {
+	const ids = Array.from({ length: 40 }, (_, index) => String(40 - index));
+	const first = await runResumableShopifyFixture({ ids, pageSize: 10, maxPages: 4 });
+	const remaining = ids.filter((id) => id !== "1");
+	let state = first.state;
+	for (let run = 0; run < 3; run += 1) {
+		const next = await runResumableShopifyFixture({
+			ids: remaining, pageSize: 10, maxPages: 2, state,
+		});
+		assert.equal(Object.hasOwn(next.cursor.fingerprints, "gid://shopify/Order/1"), run < 2);
+		assert.equal(Object.keys(next.cursor.fingerprints).length, run < 2 ? 40 : 39);
+		state = next.state;
+	}
+});
+
+test("resumable Shopify keeps cursors across normalized saved scopes and requested resource order", async () => {
+	const requested = (resources: string[]) => new Map<string, StreamScope>([
+		["orders", { name: "orders", resources }],
+	]);
+	const first = await runResumableShopifyFixture({ requested: requested(["a", "b"]) });
+	for (const backfill_scope of [
+		{ resources: ["b", "a", "a"], until: null, since: null },
+		{ resources: ["b", "a"] },
+	]) {
+		const next = await runResumableShopifyFixture({
+			state: { orders: { ...first.cursor, backfill_scope } },
+			requested: requested(["a", "b"]),
+		});
+		assert.deepEqual(next.requests, [null, "v1:4"]);
+	}
+	const reordered = await runResumableShopifyFixture({
+		state: first.state, requested: requested(["b", "a"]),
+	});
+	assert.deepEqual(reordered.requests, [null, "v1:4"]);
+	const unrestricted = await runResumableShopifyFixture();
+	const missingNulls = await runResumableShopifyFixture({
+		state: { orders: { ...unrestricted.cursor, backfill_scope: {} } },
+	});
+	assert.deepEqual(missingNulls.requests, [null, "v1:4"]);
+});
+
+test("resumable Shopify catches up when the saved head is inside a ten-order page", async () => {
+	const ids = Array.from({ length: 30 }, (_, index) => String(30 - index));
+	const first = await runResumableShopifyFixture({ ids, pageSize: 10, maxPages: 2 });
+	const next = await runResumableShopifyFixture({
+		ids: ["35", "34", "33", "32", "31", ...ids],
+		pageSize: 10, maxPages: 2, state: first.state,
+	});
+	assert.deepEqual(next.requests, [null, "v1:11"]);
+	assert.equal(next.cursor.backfill, null);
+	const all = [...first.run.emitted, ...next.run.emitted].map((item) => item.data.id);
+	assert.equal(all.length, 35);
+	assert.equal(new Set(all).size, 35);
+});
+
+test("resumable Shopify sends no restart request after a late cursor rejection", async () => {
+	let now = 0;
+	const requests: Array<string | null> = [];
+	const reader = createOrderHistoryApiReader({
+		readBudgetMs: 0, maxPages: 4, now: () => now,
+		fetchPage: async ({ after }) => {
+			requests.push(after);
+			if (after !== null) {
+				now = 101;
+				return { status: 400, body: { error: "expired cursor" } };
+			}
+			return { status: 200, body: { deliveriesOrdersList: {
+				nodes: [{ __typename: "Order", id: "gid://shopify/Order/5" }],
+				pageInfo: { hasNextPage: true, endCursor: "v2:5" },
+			} } };
+		},
+	});
+	reader.resume({ head: "gid://shopify/Order/5", backfill: [{ after: "v1:4", stopAt: null }] }, 100);
+	await reader.read();
+	await reader.read();
+	await reader.read();
+	assert.deepEqual(requests, [null, "v1:4"]);
+	assert.ok(reader.snapshot(), "the reset retains the successful head snapshot");
+});

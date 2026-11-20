@@ -11,17 +11,16 @@
  *     requested_at, completed_at, pickup/dropoff addresses, product_type,
  *     driver, distance, duration, fare_total). The Activities list feed
  *     carries only a trip UUID — see parsers.ts's module doc. `trips` does
- *     its own hydration, so it is self-mapped, and it emits its own
- *     DETAIL_COVERAGE. It declares `incremental: false` /
- *     `coverage_strategy: "full_inventory"` in manifests/uber.json: the
- *     Activities list has no date/status field to filter or stop on (only a
- *     trip UUID; see parsers.ts), so `fetchAllActivities` walks the full
- *     feed every run with no STATE-consulted cursor. A stop-at-seen boundary
- *     keyed on trip id is plausible (the audit's cut-semantics-pass report
- *     item #1) but assumes the Activities feed is fetched newest-first,
- *     which no code or fixture in this connector confirms — that requires a
- *     live-account run to verify before implementing; tracked as a
- *     follow-up, not implemented here.
+ *     its own hydration and emits its own DETAIL_COVERAGE. STATE keeps a
+ *     head marker, scoped page continuations, pending detail IDs, and the
+ *     successfully hydrated IDs while backfill is open. The source's
+ *     nextPageToken resumes history after each per-run budget; only actual
+ *     budget deferral emits a budget skip. Failed details retire after
+ *     three permanent failures without being marked hydrated; STATE keeps
+ *     up to 100 retired IDs per stream, and every later run reports them as
+ *     a non-retryable gap until full_refresh or a scope change.
+ *     The head boundary assumes Activities is newest-first. The prior
+ *     connector flagged live confirmation of that ordering as outstanding.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
  *     totals), fetched from `GetReceipt` only. Declared `state_stream:
  *     "trips"` in the manifest — it rides trips' checkpoint rather than
@@ -98,6 +97,8 @@ import { validateRecord } from "./schemas.ts";
 import type {
 	UberActivitiesResponse,
 	UberActivity,
+	UberActivityPosition,
+	UberCursor,
 	UberGetReceiptResponse,
 	UberGetTripResponse,
 	UberGetTripResult,
@@ -111,6 +112,8 @@ const ACTIVITIES_PAGE_SIZE = 5;
 /** Safety ceiling, not an observed Uber limit — mirrors venmo's page-cap precedent. */
 const MAX_ACTIVITY_PAGES = 200;
 const MAX_DETAIL_FETCHES = 200;
+/** Retired IDs kept per stream so later runs keep reporting the gap. */
+const MAX_RETIRED_IDS = 100;
 const PAGE_DELAY_MS = 500;
 const DETAIL_DELAY_MS = 500;
 
@@ -300,19 +303,45 @@ function makePageFetch(page: Page): UberPageFetch {
 	};
 }
 
+class UberHttpError extends Error {
+	readonly status: number;
+	constructor(status: number, message: string) {
+		super(message);
+		this.status = status;
+	}
+}
+
+function isPermanentDetailFailure(error: unknown): boolean {
+	return (
+		error instanceof SyntaxError ||
+		(error instanceof UberHttpError &&
+			error.status >= 400 &&
+			error.status < 500 &&
+			error.status !== 408 &&
+			error.status !== 429)
+	);
+}
+
 function assertUberOk(
 	status: number,
 	body: string,
 	operationName: string,
 ): void {
 	if (status === 401 || status === 403) {
-		throw new Error(`uber_session_expired [endpoint ${operationName}]`);
+		throw new UberHttpError(
+			status,
+			`uber_session_expired [endpoint ${operationName}]`,
+		);
 	}
 	if (status === 429) {
-		throw new Error(`uber_rate_limited [endpoint ${operationName}]`);
+		throw new UberHttpError(
+			status,
+			`uber_rate_limited [endpoint ${operationName}]`,
+		);
 	}
 	if (status < 200 || status >= 300) {
-		throw new Error(
+		throw new UberHttpError(
+			status,
 			`uber_http_${String(status)} [endpoint ${operationName}]: ${redactTransportDetail(body).slice(0, 200)}`,
 		);
 	}
@@ -328,12 +357,28 @@ function assertUberOk(
 export async function fetchAllActivities(
 	fetchPath: UberPageFetch,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ activities: UberActivity[]; truncated: boolean }> {
+	options: {
+		nextPageToken?: string | undefined;
+		stopAtTripId?: string | undefined;
+		maxPages?: number;
+	} = {},
+): Promise<{
+	activities: UberActivity[];
+	truncated: boolean;
+	nextPageToken?: string | undefined;
+	pages: number;
+	reachedEnd: boolean;
+}> {
 	const all: UberActivity[] = [];
 	const seenIds = new Set<string>();
-	let nextPageToken: string | undefined;
+	const seenTokens = new Set<string>();
+	let nextPageToken = options.nextPageToken;
+	let pages = 0;
+	let reachedEnd = false;
+	if (nextPageToken) seenTokens.add(nextPageToken);
+	const maxPages = options.maxPages ?? MAX_ACTIVITY_PAGES;
 	const walk = await walkPagesWithCeiling({
-		maxPages: MAX_ACTIVITY_PAGES,
+		maxPages,
 		fetchPage: async (pageNumber) => {
 			const { status, body } = await fetchPath("Activities", ACTIVITIES_QUERY, {
 				includePast: true,
@@ -345,28 +390,48 @@ export async function fetchAllActivities(
 			});
 			assertUberOk(status, body, "Activities");
 			const parsed = JSON.parse(body) as UberActivitiesResponse;
-			const page = parsed.data?.activities?.past?.activities ?? [];
-			let newOnPage = 0;
-			for (const activity of page) {
+			const past = parsed.data?.activities?.past;
+			if (!past || !Array.isArray(past.activities)) {
+				throw new Error("uber_activity_resume_failed: missing Activities page");
+			}
+			pages += 1;
+			for (const activity of past.activities) {
 				const id = activityTripId(activity);
+				if (id && id === options.stopAtTripId) {
+					nextPageToken = undefined;
+					return false;
+				}
 				if (id && !seenIds.has(id)) {
 					seenIds.add(id);
 					all.push(activity);
-					newOnPage += 1;
 				}
 			}
-			const token = parsed.data?.activities?.past?.nextPageToken;
-			if (!token || newOnPage === 0) {
+			const token = past.nextPageToken;
+			if (!token) {
+				nextPageToken = undefined;
+				reachedEnd = true;
 				return false;
 			}
+			if (seenTokens.has(token)) {
+				throw new Error(
+					"uber_activity_resume_failed: repeated Activities cursor",
+				);
+			}
+			seenTokens.add(token);
 			nextPageToken = token;
-			if (pageNumber < MAX_ACTIVITY_PAGES) {
+			if (pageNumber < maxPages) {
 				await delay(PAGE_DELAY_MS);
 			}
 			return true;
 		},
 	});
-	return { activities: all, truncated: walk.truncated };
+	return {
+		activities: all,
+		truncated: walk.truncated,
+		nextPageToken,
+		pages,
+		reachedEnd,
+	};
 }
 
 /** One trip's raw GetTrip result, kept as-is so the caller decides how to turn it into a trips RECORD. */
@@ -382,7 +447,7 @@ async function fetchGetTrip(
 	return parsed.data?.getTrip;
 }
 
-/** One trip's fare-breakdown lines from GetReceipt. Never throws; an empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
+/** One trip's fare-breakdown lines; transport and JSON failures remain distinguishable from absent receipt evidence. */
 async function fetchFareBreakdown(
 	fetchPath: UberPageFetch,
 	tripId: string,
@@ -417,26 +482,118 @@ export async function collectAllStreams(
 		return;
 	}
 
-	const { activities, truncated } = await fetchAllActivities(fetchPath, delay);
-	const tripIds = activities
-		.map((a) => activityTripId(a))
-		.filter((id): id is string => Boolean(id))
-		.slice(0, MAX_DETAIL_FETCHES);
-	const detailTruncated = activities.length > MAX_DETAIL_FETCHES;
+	const scope = JSON.stringify(
+		[...requested.values()]
+			.filter((stream) => stream.name === "trips" || stream.name === "receipts")
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map((stream) => ({
+				name: stream.name,
+				since: stream.time_range?.since ?? null,
+				until: stream.time_range?.until ?? null,
+				resources: [...(stream.resources ?? [])].sort(),
+			})),
+	);
+	const saved = ctx.state.trips as UberCursor | undefined;
+	const previous =
+		ctx.collectionMode !== "full_refresh" &&
+		saved?.version === 1 &&
+		saved.scope === scope &&
+		(!saved.backfill || saved.backfill.scope === scope)
+			? saved
+			: undefined;
+	const hydratedTrips = new Set(previous?.hydrated_trip_ids ?? []);
+	const hydratedReceipts = new Set(previous?.hydrated_receipt_ids ?? []);
+	const detailFailureCounts = new Map(
+		Object.entries(previous?.backfill?.detail_failure_counts ?? {}),
+	);
+	const retired = {
+		trips: new Set(previous?.retired_trip_ids?.trips ?? []),
+		receipts: new Set(previous?.retired_trip_ids?.receipts ?? []),
+	};
+	const head = await fetchAllActivities(fetchPath, delay, {
+		stopAtTripId: previous?.head_trip_id,
+	});
+	const activities = [...head.activities];
+	let pagesRemaining = MAX_ACTIVITY_PAGES - head.pages;
+	const positions: UberActivityPosition[] = head.reachedEnd
+		? []
+		: (previous?.backfill?.pages ?? []).map((position) => ({ ...position }));
+	if (head.truncated && head.nextPageToken) {
+		positions.unshift({
+			next_page_token: head.nextPageToken,
+			...(previous?.head_trip_id
+				? { stop_at_trip_id: previous.head_trip_id }
+				: {}),
+		});
+	}
+	// A head burst can itself exceed the page limit. Keep that unfinished
+	// segment ahead of the older backfill rather than losing either position.
+	while (positions.length > 0 && pagesRemaining > 0) {
+		const position = positions[0];
+		if (!position) break;
+		await delay(PAGE_DELAY_MS);
+		const page = await fetchAllActivities(fetchPath, delay, {
+			nextPageToken: position.next_page_token,
+			stopAtTripId: position.stop_at_trip_id,
+			maxPages: pagesRemaining,
+		});
+		activities.push(...page.activities);
+		pagesRemaining -= page.pages;
+		if (page.truncated && page.nextPageToken) {
+			position.next_page_token = page.nextPageToken;
+		} else {
+			positions.shift();
+		}
+	}
+	const headIds = head.activities
+		.map((activity) => activityTripId(activity))
+		.filter((id): id is string => Boolean(id));
+	const discoveredIds = activities
+		.map((activity) => activityTripId(activity))
+		.filter((id): id is string => Boolean(id));
+	const needsTrip = (id: string) =>
+		wantTrips && !hydratedTrips.has(id) && !retired.trips.has(id);
+	const needsReceipt = (id: string) =>
+		wantReceipts && !hydratedReceipts.has(id) && !retired.receipts.has(id);
+	const needsDetail = (id: string) => needsTrip(id) || needsReceipt(id);
+	const candidates = [
+		...new Set([
+			...headIds,
+			...(previous?.backfill?.pending_trip_ids ?? []),
+			...discoveredIds,
+		]),
+	].filter((id) => needsDetail(id) && (detailFailureCounts.get(id) ?? 0) < 3);
+	const tripIds = candidates.slice(0, MAX_DETAIL_FETCHES);
+	const truncated = positions.length > 0;
 
 	const tripsRequired: string[] = [];
 	const tripsHydrated: string[] = [];
+	const attemptedTripIds = new Set<string>();
+	let rateLimit: UberHttpError | undefined;
 	for (const [index, tripId] of tripIds.entries()) {
-		if (wantTrips) {
-			tripsRequired.push(tripId);
-		}
+		attemptedTripIds.add(tripId);
+		let permanentFailure = false;
+		let transientFailure = false;
+		const recordFailure = (error: unknown) => {
+			if (isPermanentDetailFailure(error)) {
+				permanentFailure = true;
+			} else {
+				transientFailure = true;
+			}
+			if (error instanceof UberHttpError && error.status === 429) {
+				rateLimit = error;
+			}
+		};
 
-		let getTrip: UberGetTripResult | undefined;
-		if (wantTrips) {
+		if (needsTrip(tripId)) {
+			tripsRequired.push(tripId);
+			let getTrip: UberGetTripResult | undefined;
+			let fetched = false;
 			try {
 				getTrip = await fetchGetTrip(fetchPath, tripId);
-			} catch {
-				getTrip = undefined;
+				fetched = true;
+			} catch (error) {
+				recordFailure(error);
 			}
 			const record = getTrip
 				? tripRecord(tripId, getTrip.trip, getTrip.receipt)
@@ -444,37 +601,113 @@ export async function collectAllStreams(
 			if (record) {
 				await emitRecord("trips", record);
 				tripsHydrated.push(tripId);
+				hydratedTrips.add(tripId);
+			} else if (fetched) {
+				permanentFailure = true;
 			}
 		}
 
-		if (wantReceipts) {
+		if (!rateLimit && needsReceipt(tripId)) {
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
+			let fetched = false;
 			try {
 				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
-			} catch {
-				fareBreakdown = [];
+				fetched = true;
+			} catch (error) {
+				recordFailure(error);
 			}
 			const receipt = receiptRecord(tripId, fareBreakdown);
 			if (receipt) {
 				await emitRecord("receipts", receipt);
+				hydratedReceipts.add(tripId);
+			} else if (fetched) {
+				permanentFailure = true;
 			}
 		}
 
+		// A transient failure in either requested stream must not retire the ID.
+		if (!needsDetail(tripId)) {
+			detailFailureCounts.delete(tripId);
+		} else if (permanentFailure && !transientFailure) {
+			detailFailureCounts.set(
+				tripId,
+				(detailFailureCounts.get(tripId) ?? 0) + 1,
+			);
+		}
+		if (rateLimit) break;
+
 		const isLast = index === tripIds.length - 1;
-		if (!isLast && (wantTrips || wantReceipts)) {
+		if (!isLast) {
 			await delay(DETAIL_DELAY_MS);
 		}
 	}
 
-	if (wantTrips) {
+	// Retire IDs that used their third permanent failure. Each stream keeps
+	// the IDs it still lacks, so later runs report the gap without fetching.
+	for (const id of attemptedTripIds) {
+		if ((detailFailureCounts.get(id) ?? 0) < 3) continue;
+		const lacking = [
+			...(needsTrip(id) ? [retired.trips] : []),
+			...(needsReceipt(id) ? [retired.receipts] : []),
+		];
+		if (lacking.every((ids) => ids.size < MAX_RETIRED_IDS)) {
+			for (const ids of lacking) ids.add(id);
+			detailFailureCounts.delete(id);
+		}
+	}
+	const retiredTripIds = {
+		...(retired.trips.size > 0 ? { trips: [...retired.trips] } : {}),
+		...(retired.receipts.size > 0 ? { receipts: [...retired.receipts] } : {}),
+	};
+
+	// Unattempted IDs, including work stopped by a rate limit, remain pending.
+	// Only permanent failures consume the three-run retirement allowance.
+	const pendingTripIds = [
+		...candidates.filter((id) => !attemptedTripIds.has(id)),
+		...tripIds.filter(
+			(id) =>
+				attemptedTripIds.has(id) &&
+				needsDetail(id) &&
+				(detailFailureCounts.get(id) ?? 0) < 3,
+		),
+	];
+	const detailTruncated =
+		attemptedTripIds.size === MAX_DETAIL_FETCHES &&
+		candidates.length > MAX_DETAIL_FETCHES;
+	const backfillIncomplete = truncated || pendingTripIds.length > 0;
+	const headTripId = headIds[0] ?? previous?.head_trip_id;
+	const cursor: UberCursor = {
+		version: 1,
+		scope,
+		...(headTripId ? { head_trip_id: headTripId } : {}),
+		// These sets only guard overlap while historical work remains open.
+		hydrated_trip_ids: backfillIncomplete ? [...hydratedTrips] : [],
+		hydrated_receipt_ids: backfillIncomplete ? [...hydratedReceipts] : [],
+		...(backfillIncomplete
+			? {
+					backfill: {
+						scope,
+						pages: positions,
+						pending_trip_ids: pendingTripIds,
+						detail_failure_counts: Object.fromEntries(detailFailureCounts),
+					},
+				}
+			: {}),
+		...(Object.keys(retiredTripIds).length > 0
+			? { retired_trip_ids: retiredTripIds }
+			: {}),
+	};
+	await emit({ type: "STATE", stream: "trips", cursor });
+
+	if (wantTrips || wantReceipts) {
 		if (truncated) {
 			await emit({
 				type: "SKIP_RESULT",
-				stream: "trips",
+				stream: wantTrips ? "trips" : "receipts",
 				reason: "trips_deferred_page_budget",
 				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
+					action: "retry_by_runtime",
+					retryable: true,
 				},
 				message: `Uber activity feed stopped at the ${MAX_ACTIVITY_PAGES}-page limit with more trip history possibly available`,
 				diagnostics: { page_limit: MAX_ACTIVITY_PAGES },
@@ -483,29 +716,55 @@ export async function collectAllStreams(
 		if (detailTruncated) {
 			await emit({
 				type: "SKIP_RESULT",
-				stream: "trips",
+				stream: wantTrips ? "trips" : "receipts",
 				reason: "trips_deferred_detail_budget",
 				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
+					action: "retry_by_runtime",
+					retryable: true,
 				},
 				message: `Uber trip detail stopped at the ${MAX_DETAIL_FETCHES}-trip detail-fetch limit for this run`,
 				diagnostics: {
 					detail_fetch_limit: MAX_DETAIL_FETCHES,
-					total_trips: activities.length,
+					total_trips: candidates.length,
 				},
 			});
 		}
-		// `trips` is full_inventory / incremental: false (no source-side date
-		// or stop-at-seen filter is proven — see the manifest and this
-		// connector's header comment): it emits no STATE, matching the
-		// fleet's full_inventory convention (e.g. meta's `following`), rather
-		// than a `cursor: {}` that claimed a bookkeeping cursor with nothing
-		// in it. `trips` does its own hydration (GetTrip per id), so it is
-		// self-mapped and emits its own DETAIL_COVERAGE. `receipts` is
-		// declared `state_stream: "trips"` in the manifest and must NEVER
-		// construct one — see the fleet-wide
-		// detail-coverage-state-stream-manifest-honesty guard.
+		// A failed detail is not a budget stop. Report each stream whose
+		// attempted or retired trips still lack detail, so no run looks complete.
+		if (!rateLimit) {
+			const gaps: Array<["trips" | "receipts", Set<string>, Set<string>]> = [];
+			if (wantTrips) gaps.push(["trips", hydratedTrips, retired.trips]);
+			if (wantReceipts) {
+				gaps.push(["receipts", hydratedReceipts, retired.receipts]);
+			}
+			for (const [stream, hydrated, retiredIds] of gaps) {
+				const missing = [
+					...new Set([
+						...[...attemptedTripIds].filter((id) => !hydrated.has(id)),
+						...retiredIds,
+					]),
+				];
+				if (missing.length === 0) continue;
+				const retrying = missing.filter((id) =>
+					pendingTripIds.includes(id),
+				).length;
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "trip_details_unavailable",
+					recovery_hint:
+						retrying > 0
+							? { action: "retry_by_runtime", retryable: true }
+							: { action: "retry_on_connector_upgrade", retryable: false },
+					message: `Uber did not return ${stream} detail for ${String(missing.length)} trip(s)`,
+					diagnostics: { missing: missing.length, retrying },
+				});
+			}
+		}
+	}
+	if (wantTrips) {
+		// Receipts keeps using trips' checkpoint and has no independent
+		// DETAIL_COVERAGE. Emit only this run's attempted trip hydration.
 		await emit(
 			buildDetailCoverageMessage({
 				stream: "trips",
@@ -517,6 +776,8 @@ export async function collectAllStreams(
 			}),
 		);
 	}
+	// Save retryable work and emit coverage before propagating the named fault.
+	if (rateLimit) throw rateLimit;
 }
 
 if (isMainModule(import.meta.url)) {

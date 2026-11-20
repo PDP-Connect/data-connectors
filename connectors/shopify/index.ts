@@ -105,7 +105,8 @@ import {
 } from "./parsers.ts";
 import {
 	createOrderHistoryApiReader, fetchOrderHistoryPageInPage, orderHistoryCacheIdentity,
-	sameOrderHistoryPage, type OrderHistoryPageIdentity,
+	sameOrderHistoryPage, orderHistoryResumeEvidence, type OrderHistoryPageIdentity,
+	type OrderHistoryApiReader, type OrderHistoryCheckpoint,
 } from "./order-history-api.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache, ParsedOrder } from "./types.ts";
@@ -741,7 +742,7 @@ export async function walkOrdersCache(
 			}
 		}
 		merge(coverage.orders, true);
-		if (hasDeclaredOrderTotal(snapshot)) {
+		if (orderHistoryResumeEvidence(snapshot) === null && hasDeclaredOrderTotal(snapshot)) {
 			countMismatch = hasOrderCountMismatch(snapshot);
 			if (hasVerifiedOrdersEnd(snapshot) && !countMismatch) unidentifiedIssues.clear();
 		}
@@ -845,7 +846,8 @@ export async function walkOrdersCache(
 
 	let unchanged = 0;
 	let previousSignature = orderWalkSignature(cache, orders, pageEvidence);
-	for (let round = 0; round < maxBootstrapScrolls && unchanged < MAX_UNCHANGED_BOOTSTRAP_ROUNDS; round += 1) {
+	for (let round = 0; round < maxBootstrapScrolls && unchanged < MAX_UNCHANGED_BOOTSTRAP_ROUNDS &&
+		!orderHistoryResumeEvidence(cache)?.complete && !orderHistoryResumeEvidence(cache)?.budgetHit; round += 1) {
 		await withBrowserOperationBudget("scroll", scroll, deadlineAt, operationTimeoutMs);
 		await withBrowserOperationBudget("bootstrap_wait", () => wait(BOOTSTRAP_SCROLL_DELAY_MS), deadlineAt, operationTimeoutMs);
 		if (!(await read())) {
@@ -858,7 +860,8 @@ export async function walkOrdersCache(
 
 	let continuationScrolls = 0;
 	let noProgress = 0;
-	while (cache && hasNextOrdersPage(cache) && continuationScrolls < maxContinuationScrolls) {
+	while (cache && !orderHistoryResumeEvidence(cache)?.budgetHit && (orderHistoryResumeEvidence(cache)?.complete === false ||
+		(orderHistoryResumeEvidence(cache) === null && hasNextOrdersPage(cache))) && continuationScrolls < maxContinuationScrolls) {
 		const before = orderWalkSignature(cache, orders, pageEvidence, false);
 		await withBrowserOperationBudget("scroll", scroll, deadlineAt, operationTimeoutMs);
 		await withBrowserOperationBudget("continuation_wait", () => wait(CONTINUATION_SCROLL_DELAY_MS), deadlineAt, operationTimeoutMs);
@@ -869,12 +872,13 @@ export async function walkOrdersCache(
 		const after = orderWalkSignature(cache, orders, pageEvidence, false);
 		noProgress = after === before ? noProgress + 1 : 0;
 		if (noProgress >= MAX_UNCHANGED_BOOTSTRAP_ROUNDS) {
-			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "no_progress", pageEvidence, domDiscardedRows, coverage: coverageSummary(), countMismatch };
+			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: orderHistoryResumeEvidence(cache)?.budgetHit ? "page_budget" : "no_progress", pageEvidence, domDiscardedRows, coverage: coverageSummary(), countMismatch };
 		}
 	}
 	const finalPageEvidence = currentPageEvidence();
 	const finalBoundPageIdentity = currentBoundPageIdentity();
-	const cacheEnd = Boolean(freshCache && hasVerifiedOrdersEnd(freshCache));
+	const apiEvidence = orderHistoryResumeEvidence(freshCache);
+	const cacheEnd = Boolean(freshCache && (apiEvidence?.complete ?? hasVerifiedOrdersEnd(freshCache)));
 	let verifiedEmptyEnd = false;
 	if (!cacheEnd && args.readVerifiedEmptyState) {
 		const before = readPageEvidence
@@ -899,8 +903,9 @@ export async function walkOrdersCache(
 	const coverage = coverageSummary();
 	const cacheSnapshotIsCurrent = cache === null || freshCache !== null;
 	const complete = cacheSnapshotIsCurrent && (cacheEnd || verifiedEmptyEnd) && !finalPageEvidence?.domHasContinuation &&
-		!(cache && hasNextOrdersPage(cache)) && !domDiscardedRows && coverage.discardedRows === 0 && !countMismatch;
-	const budgetHit = Boolean(cache && hasNextOrdersPage(cache) && continuationScrolls >= maxContinuationScrolls);
+		!(apiEvidence ? !apiEvidence.complete : cache && hasNextOrdersPage(cache)) && !domDiscardedRows && coverage.discardedRows === 0 && !countMismatch;
+	const budgetHit = Boolean(apiEvidence?.budgetHit ||
+		(cache && (apiEvidence ? !apiEvidence.complete : hasNextOrdersPage(cache)) && continuationScrolls >= maxContinuationScrolls));
 	return {
 		cache,
 		orders: [...orders.values()],
@@ -959,6 +964,8 @@ function resolveOrderIdentity(order: ParsedOrder): string | null {
 }
 
 export interface CollectShopifyArgs {
+	orderHistoryApi?: OrderHistoryApiReader;
+	collectionMode?: "full_refresh" | "incremental" | undefined;
 	emit: BrowserCollectContext["emit"];
 	emitRecord: BrowserCollectContext["emitRecord"];
 	progress: BrowserCollectContext["progress"];
@@ -1075,6 +1082,60 @@ async function waitForOrderHistoryEvidence({
 	return { kind: "deadline_expired", cache, orders: cache ? extractOrdersWithCoverage(cache).orders : [] };
 }
 
+interface ShopifyBackfillScope {
+	since: string | null;
+	until: string | null;
+	resources: string[] | null;
+}
+
+function normalizeShopifyScope(value: unknown): ShopifyBackfillScope | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const scope = value as Record<string, unknown>;
+	if ((scope.since != null && typeof scope.since !== "string") ||
+		(scope.until != null && typeof scope.until !== "string") ||
+		(scope.resources != null && (!Array.isArray(scope.resources) ||
+			!scope.resources.every((resource) => typeof resource === "string")))) return null;
+	return {
+		since: typeof scope.since === "string" ? scope.since : null,
+		until: typeof scope.until === "string" ? scope.until : null,
+		resources: Array.isArray(scope.resources) ? [...new Set(scope.resources as string[])].sort() : null,
+	};
+}
+
+function shopifyBackfillScope(args: CollectShopifyArgs): ShopifyBackfillScope {
+	const scope = args.requested.get(ORDERS_STREAM);
+	return normalizeShopifyScope({
+		since: scope?.time_range?.since ?? null, until: scope?.time_range?.until ?? null,
+		resources: scope?.resources ?? null,
+	}) ?? { since: null, until: null, resources: null };
+}
+
+function savedShopifyCheckpoint(value: unknown, scope: ShopifyBackfillScope): OrderHistoryCheckpoint | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const state = value as Record<string, unknown>;
+	const savedScope = normalizeShopifyScope(state.backfill_scope);
+	if (state.backfill_version !== 1 || savedScope === null ||
+		savedScope.since !== scope.since || savedScope.until !== scope.until ||
+		(savedScope.resources === null ? scope.resources !== null : scope.resources === null ||
+			savedScope.resources.length !== scope.resources.length ||
+			savedScope.resources.some((resource, index) => resource !== scope.resources?.[index])) ||
+		!(state.head === null || typeof state.head === "string")) return null;
+	const backfill = state.backfill;
+	if (backfill === null) return { head: state.head as string | null, backfill: null };
+	if (!Array.isArray(backfill) || backfill.length === 0) return null;
+	const positions: NonNullable<OrderHistoryCheckpoint["backfill"]> = [];
+	for (const value of backfill) {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+		const position = value as Record<string, unknown>;
+		if (!(position.after === null || (typeof position.after === "string" && position.after.length > 0)) ||
+			!(position.stopAt === null || (typeof position.stopAt === "string" && position.stopAt.length > 0))) return null;
+		positions.push({ after: position.after as string | null, stopAt: position.stopAt as string | null });
+	}
+	const seen = Array.isArray(state.sweep_seen) && state.sweep_seen.every((id) => typeof id === "string")
+		? [...new Set(state.sweep_seen as string[])] : null;
+	return { head: state.head as string | null, backfill: positions, seen };
+}
+
 /** The connector's whole `orders` stream logic, independent of Playwright —
  *  `readCache`/`scroll` are injected so integration tests can drive this with
  *  a fake page. `collect()` below binds them to a real `page`. */
@@ -1084,7 +1145,11 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	if (!requested.has(ORDERS_STREAM)) {
 		return;
 	}
+	const backfillScope = shopifyBackfillScope(args);
+	const savedCheckpoint = args.collectionMode === "full_refresh"
+		? null : savedShopifyCheckpoint(state[ORDERS_STREAM], backfillScope);
 	const runDeadlineAt = args.runDeadlineAt ?? Date.now() + (args.runBudgetMs ?? DEFAULT_RUN_BUDGET_MS);
+	args.orderHistoryApi?.resume(savedCheckpoint, runDeadlineAt);
 	const operationTimeoutMs = args.browserOperationTimeoutMs ?? DEFAULT_BROWSER_OPERATION_TIMEOUT_MS;
 	let cachedDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
 	const refreshDiagnostics = (): void => {
@@ -1198,10 +1263,24 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		});
 	} catch (cause) {
 		if (!isBrowserOperationTimeout(cause)) throw cause;
-		await emitBrowserTimeout(cause);
-		return;
+		const snapshot = args.orderHistoryApi?.snapshot() ?? null;
+		const resume = orderHistoryResumeEvidence(snapshot);
+		if (Date.now() < runDeadlineAt || !snapshot || !resume || resume.complete) {
+			await emitBrowserTimeout(cause);
+			return;
+		}
+		// A run deadline may interrupt a later read. Save only the last successful
+		// immutable snapshot, after the same row/schema checks below.
+		const coverage = extractOrdersWithCoverage(snapshot);
+		evidence = { kind: "orders", cache: snapshot, orders: coverage.orders };
+		walked = {
+			cache: snapshot, orders: coverage.orders, complete: false, truncated: true,
+			reason: "page_budget", pageEvidence: null, domDiscardedRows: 0,
+			coverage, countMismatch: false,
+		};
 	}
 	let { cache, truncated } = walked;
+	const resumeEvidence = orderHistoryResumeEvidence(cache);
 	const orders = walked.orders;
 	const cacheCoverage = walked.coverage;
 	if (evidence.kind === "deadline_expired") {
@@ -1235,13 +1314,24 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	const discardedRows = cacheCoverage.discardedRows + invalidShapeCount;
 	const pageComplete = walked.complete;
 	const pageBlocked = walked.reason === "page_blocked";
-	const mismatch = walked.countMismatch || Boolean(cache && hasOrderCountMismatch(cache));
+	const prior = state[ORDERS_STREAM];
+	const priorFingerprints = typeof prior === "object" && prior !== null && "fingerprints" in prior &&
+		typeof prior.fingerprints === "object" && prior.fingerprints !== null ? prior.fingerprints : {};
+	const sweepSeen = resumeEvidence?.resumed ? savedCheckpoint?.seen ?? null : [];
+	const knownIds = new Set([
+		...(resumeEvidence?.resumed ? sweepSeen ?? Object.keys(priorFingerprints) : []),
+		...validRecords.map((record) => String(record.id)),
+	]);
+	const mismatch = walked.countMismatch || (resumeEvidence
+		? resumeEvidence.invalidTotal || (resumeEvidence.complete && resumeEvidence.totalCount !== null &&
+			(resumeEvidence.resumed ? knownIds.size < resumeEvidence.totalCount : knownIds.size !== resumeEvidence.totalCount))
+		: Boolean(cache && hasOrderCountMismatch(cache)));
 	const allWithheldRows = [
 		...cacheCoverage.withheldRows,
 		...schemaIssues.flatMap((issue) => schemaWithheldRows([issue])),
 		...(mismatch ? [{ fields: [{ field: "total_count", reason: "invalid_or_unreconciled" }] }] : []),
 	];
-	const complete = pageComplete && !truncated && !pageBlocked && !mismatch && discardedRows === 0;
+	const complete = pageComplete && (resumeEvidence === null || resumeEvidence.complete) && !truncated && !pageBlocked && !mismatch && discardedRows === 0;
 	// A sign-in or block page during the walk is the session's failure, not a
 	// list that failed to prove its end: end the run as `ensureShopifySession`
 	// does.
@@ -1306,9 +1396,16 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		count: orders.length,
 	});
 
-	if (!complete) return;
-	// Pruning is safe only after positive end-of-list evidence and zero row loss.
-	cursor.dropUnseenIds();
+	const checkpointable = resumeEvidence !== null && !pageBlocked && !mismatch && discardedRows === 0 &&
+		(complete || (truncated && walked.reason === "page_budget"));
+	if (!complete && !checkpointable) return;
+	// A rolling sweep retains validated IDs from earlier runs. Legacy partial
+	// checkpoints without that proof wait for the next sweep before pruning.
+	if (complete && resumeEvidence === null) cursor.dropUnseenIds();
+	const fingerprints = cursor.toState();
+	const nextFingerprints = complete && resumeEvidence !== null && sweepSeen !== null
+		? Object.fromEntries(Object.entries(fingerprints).filter(([id]) => knownIds.has(id)))
+		: fingerprints;
 
 	await emit({
 		type: "STATE",
@@ -1317,7 +1414,16 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		// `decodePriorFingerprints` read shape (see docs/reference/
 		// connector-authoring-guide.md §6) — the cursor only recognizes its
 		// prior state nested under this key.
-		cursor: { fingerprints: cursor.toState() },
+		cursor: {
+			fingerprints: nextFingerprints,
+			...(resumeEvidence ? {
+				backfill_version: 1,
+				backfill_scope: backfillScope,
+				head: resumeEvidence.checkpoint.head,
+				backfill: resumeEvidence.checkpoint.backfill,
+				sweep_seen: complete ? null : sweepSeen === null ? null : [...knownIds],
+			} : {}),
+		},
 	});
 }
 
@@ -1486,6 +1592,8 @@ export async function collect(
 		requested,
 		reportStreamFailure: ctx.reportStreamFailure,
 		state,
+		collectionMode: ctx.collectionMode,
+		orderHistoryApi,
 		navigationStartedAt,
 		runDeadlineAt,
 		orderHistoryReady,

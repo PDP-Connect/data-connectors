@@ -46,6 +46,8 @@ export interface OrderHistoryApiRequest {
 	after: string | null;
 	pageSize: number;
 	identity?: Readonly<OrderHistoryPageIdentity>;
+	/** Absolute run deadline, serialized into the browser page. */
+	deadlineAt?: number;
 }
 
 export interface OrderHistoryApiReply {
@@ -84,12 +86,18 @@ export async function fetchOrderHistoryPageInPage(
 	];
 	let reply: { status: number; body: unknown } = { status: 0, body: null };
 	for (const attempt of attempts) {
+		if (request.deadlineAt !== undefined && Date.now() >= request.deadlineAt) break;
 		const beforeUrl = new URL(location.href);
 		if (`${beforeUrl.origin}${beforeUrl.pathname}` !== identity.url || String(performance.timeOrigin) !== identity.navigation) {
 			return { status: 0, body: null };
 		}
+		const controller = new AbortController();
+		const timer = request.deadlineAt === undefined ? undefined : setTimeout(
+			() => controller.abort(), Math.max(0, request.deadlineAt - Date.now()),
+		);
 		try {
 			const response = await fetch(attempt.url, {
+				signal: controller.signal,
 				method: attempt.method,
 				credentials: "same-origin",
 				headers: attempt.body === undefined
@@ -128,6 +136,8 @@ export async function fetchOrderHistoryPageInPage(
 			if (reply.status === 0) reply = { status: response.status, body };
 		} catch {
 			// A network failure is an unusable page; the next form may still work.
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
 		}
 	}
 	return reply;
@@ -242,7 +252,39 @@ export function orderHistoryPagesToCache(pages: readonly OrderHistoryApiPage[]):
 	return cache;
 }
 
+export interface OrderHistoryBackfillPosition {
+	after: string | null;
+	/** Stop when this already-collected head is reached; null means source EOF. */
+	stopAt: string | null;
+}
+
+export interface OrderHistoryCheckpoint {
+	head: string | null;
+	backfill: OrderHistoryBackfillPosition[] | null;
+	/** Validated record IDs observed in this sweep; absent on legacy state. */
+	seen?: string[] | null;
+}
+
+export interface OrderHistoryResumeEvidence {
+	checkpoint: OrderHistoryCheckpoint;
+	complete: boolean;
+	budgetHit: boolean;
+	resumed: boolean;
+	totalCount: number | null;
+	invalidTotal: boolean;
+}
+
+const cacheResumeEvidence = new WeakMap<ApolloCache, OrderHistoryResumeEvidence>();
+
+export function orderHistoryResumeEvidence(cache: ApolloCache | null): OrderHistoryResumeEvidence | null {
+	return cache === null ? null : cacheResumeEvidence.get(cache) ?? null;
+}
+
 export interface OrderHistoryApiReader {
+	/** Configure before the first read. Omitted by legacy reader callers. */
+	resume(checkpoint: OrderHistoryCheckpoint | null, deadlineAt?: number): void;
+	/** Last immutable successful snapshot, never an in-flight reply. */
+	snapshot(): ApolloCache | null;
 	/** Fetches further pages within a small time box and returns the cache read so far. */
 	read(): Promise<ApolloCache | null>;
 	/** True only when Shop's first page is an empty, terminal list that states no other total. */
@@ -262,6 +304,7 @@ export function createOrderHistoryApiReader({
 	maxPages = MAX_ORDER_HISTORY_API_PAGES,
 	readBudgetMs = DEFAULT_READ_BUDGET_MS,
 	now = Date.now,
+	runDeadlineAt = Number.POSITIVE_INFINITY,
 }: {
 	fetchPage: FetchOrderHistoryPage;
 	/** Required for browser-backed readers; omitted only by synthetic fetchers. */
@@ -269,6 +312,7 @@ export function createOrderHistoryApiReader({
 	maxPages?: number;
 	readBudgetMs?: number;
 	now?: () => number;
+	runDeadlineAt?: number;
 }): OrderHistoryApiReader {
 	const pages: OrderHistoryApiPage[] = [];
 	const cursors = new Set<string>();
@@ -277,6 +321,13 @@ export function createOrderHistoryApiReader({
 	let consecutiveFailures = 0;
 	let identity: Readonly<OrderHistoryPageIdentity> | null = null;
 	let invalidated = false;
+	let resumable = false;
+	let resumed = false;
+	let head: string | null = null;
+	let work: OrderHistoryBackfillPosition[] = [];
+	let lastCache: ApolloCache | null = null;
+	let restarted = false;
+	let fetches = 0;
 	const ownsPage = async (): Promise<boolean> => {
 		if (invalidated) return false;
 		if (!readPageIdentity) return true;
@@ -290,23 +341,80 @@ export function createOrderHistoryApiReader({
 		return true;
 	};
 	return {
+		resume(checkpoint, deadlineAt) {
+			if (deadlineAt !== undefined) runDeadlineAt = Math.min(runDeadlineAt, deadlineAt);
+			if (pages.length > 0 || fetches > 0) throw new Error("Shop history resume must be configured before reading");
+			resumable = true;
+			resumed = checkpoint?.backfill !== null && checkpoint?.backfill !== undefined;
+			head = checkpoint?.head ?? null;
+			work = [{ after: null, stopAt: head }, ...(checkpoint?.backfill ?? []).map((position) => ({ ...position }))];
+			// No prior head means no safe shortcut: scan from the first page to EOF.
+			// With no open segment, begin the next refresh sweep immediately.
+			// Reuse its first page for head catch-up rather than fetching it twice.
+			if (head === null || !resumed) work = [{ after: null, stopAt: null }];
+		},
+		snapshot() { return invalidated ? null : lastCache; },
 		async read() {
 			if (!(await ownsPage())) return null;
-			const deadline = now() + readBudgetMs;
-			while (!ended && pages.length < maxPages && consecutiveFailures < MAX_CONSECUTIVE_PAGE_FAILURES) {
+			const deadline = Math.min(runDeadlineAt, now() + readBudgetMs);
+			const initialFetches = fetches;
+			while (!ended && (resumable ? fetches : pages.length) < maxPages && consecutiveFailures < MAX_CONSECUTIVE_PAGE_FAILURES) {
+				if (now() >= runDeadlineAt || (fetches > initialFetches && now() >= deadline)) break;
 				if (!(await ownsPage())) return null;
+				if (now() >= runDeadlineAt) break;
+				const position = resumable ? work[0] : undefined;
+				if (resumable && !position) { ended = true; break; }
+				if (position) nextAfter = position.after;
+				fetches += 1;
 				const reply = await fetchPage({ after: nextAfter, pageSize: ORDER_HISTORY_API_PAGE_SIZE,
-					...(identity === null ? {} : { identity }) });
+					...(identity === null ? {} : { identity }),
+					...(Number.isFinite(runDeadlineAt) ? { deadlineAt: runDeadlineAt } : {}) });
 				if (!(await ownsPage())) return null;
 				const connection = readOrderHistoryConnection(reply);
 				if (!connection) {
+					// A rejected saved cursor gets one bounded restart, never an endless loop.
+					// Transient failures and authentication failures keep their existing handling.
+					if (resumable && resumed && nextAfter !== null && !restarted &&
+						([400, 404, 410, 422].includes(reply.status) ||
+							(reply.status === 200 && /(?:invalid|expired|rejected).*cursor|cursor.*(?:invalid|expired|rejected)/i.test(JSON.stringify(reply.body) ?? "")))) {
+						restarted = true;
+						work = [{ after: null, stopAt: null }];
+						// Keep validated pages so a reset checkpoint can be committed
+						// even if this rejection used the final request or deadline.
+						cursors.clear();
+						head = null;
+						resumed = false;
+						nextAfter = null;
+						continue;
+					}
 					consecutiveFailures += 1;
 					break;
 				}
 				consecutiveFailures = 0;
 				pages.push({ after: nextAfter, connection, ...(identity === null ? {} : { identity }) });
 				const cursor = connection.pageInfo.endCursor;
-				if (!connection.pageInfo.hasNextPage || typeof cursor !== "string" || cursor.length === 0 || cursors.has(cursor)) {
+				if (resumable && position) {
+					const ids = connection.nodes.flatMap((node) => {
+						const order = orderOf(node);
+						const id = order === null ? null : orderId(order.id);
+						return id === null ? [] : [id];
+					});
+					if (nextAfter === null && (pages.length === 1 || head === null)) head = ids[0] ?? head;
+					if (!connection.pageInfo.hasNextPage) {
+						// EOF from the head covers every pending segment. EOF while
+						// resuming a segment also makes older segments unnecessary.
+						work = [];
+					} else if (position.stopAt !== null && ids.includes(position.stopAt)) {
+						work.shift();
+						cursors.clear();
+					} else if (typeof cursor === "string" && cursor.length > 0 && !cursors.has(cursor)) {
+						position.after = cursor;
+					} else {
+						ended = true; // malformed/cyclic cursor is not a budget stop or EOF
+					}
+					if (work.length === 0) ended = true;
+					if (typeof cursor === "string" && work[0] === position) cursors.add(cursor);
+				} else if (!connection.pageInfo.hasNextPage || typeof cursor !== "string" || cursor.length === 0 || cursors.has(cursor)) {
 					// A page that says more exist but gives no new cursor ends the walk
 					// unproven: the chain check in the parser will not connect it.
 					ended = true;
@@ -319,6 +427,21 @@ export function createOrderHistoryApiReader({
 			if (!(await ownsPage()) || pages.length === 0) return null;
 			const cache = orderHistoryPagesToCache(pages);
 			if (identity !== null) cacheIdentities.set(cache, identity);
+			if (resumable) {
+				const totals = pages.map((page) => page.connection.totalCount).filter((total) => total !== undefined);
+				const invalidTotal = totals.some((total) =>
+					(total !== null && typeof total !== "number" && typeof total !== "string") ||
+					total === null || String(total).trim() === "" || !Number.isSafeInteger(Number(total)) || Number(total) < 0);
+				cacheResumeEvidence.set(cache, {
+					checkpoint: { head, backfill: work.length === 0 ? null : work.map((position) => ({ ...position })) },
+					complete: work.length === 0,
+					budgetHit: !ended && (fetches >= maxPages || now() >= runDeadlineAt),
+					resumed,
+					totalCount: totals.length === 0 || invalidTotal ? null : Math.max(...totals.map(Number)),
+					invalidTotal,
+				});
+			}
+			lastCache = cache;
 			return cache;
 		},
 		async provesEmptyHistory() {
