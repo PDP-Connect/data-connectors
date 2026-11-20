@@ -322,12 +322,38 @@ test("terminal page after 50 continuing pages completes instead of truncating", 
   assert.equal(h.messages.some((m) => m.type === "STATE"), true);
 });
 
-test("a fresh activity token with no new IDs refuses the window", async () => {
+test("empty page with fresh activity token reaches new rows and terminal coverage", async () => {
   const h = harness({ streams: ["activity"], answers: (_endpoint, token) =>
-    ({ data: replay.daily_activity, next_token: token === null ? "first" : token === "first" ? "second" : null }) });
+    token === null ? { data: [], next_token: "empty-first" }
+      : { data: replay.daily_activity, next_token: null } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.records.length, replay.daily_activity.length);
+  assert.equal(h.messages.some((m) => m.type === "STATE"), true);
+  assert.equal(h.messages.some((m) => m.type === "SKIP_RESULT"), false);
+});
+
+test("17 consecutive fresh activity tokens with no new IDs refuse the window retryably", async () => {
+  let pages = 0;
+  const h = harness({ streams: ["activity"], answers: () => {
+    if (++pages > 18) return { data: [], next_token: null };
+    return { data: replay.daily_activity, next_token: `activity-${pages}` };
+  } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(pages, 18, "one initial page plus 17 consecutive pages without a new ID");
+  assert.equal(h.messages.some((m) => m.type === "STATE"), false);
+  const skip = h.messages.find((m) => m.type === "SKIP_RESULT");
+  assert.equal(skip?.reason, "inventory_not_proven_complete");
+  assert.deepEqual(skip?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+});
+
+test("a last page that only repeats seen activity IDs does not complete the window", async () => {
+  const h = harness({ streams: ["activity"], answers: (_endpoint, token) =>
+    ({ data: replay.daily_activity, next_token: token === null ? "last" : null }) });
   await collectOuraBrowser(h.ctx, ACCESS);
   assert.equal(h.calls.length, 2);
   assert.equal(h.messages.some((m) => m.type === "STATE"), false);
+  assert.equal(h.messages.find((m) => m.type === "SKIP_RESULT")?.reason, "inventory_not_proven_complete");
 });
 
 test("a second-page 429 reports retryable source pressure and no STATE", async () => {

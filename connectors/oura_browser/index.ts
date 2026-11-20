@@ -121,12 +121,15 @@ interface CollectionResult<T> {
 
 // Bound one stalled transport request, not the number of history pages.
 const OURA_REQUEST_TIMEOUT_MS = 30_000;
+// Bound consecutive continuation pages that add no IDs; this is not a history cap.
+const NO_PROGRESS_PAGE_GUARD = 16;
 
 async function fetchCollection<T extends { id: string; day: string }>(page: BrowserCollectContext["page"], token: string,
   endpoint: string, start: string, end: string): Promise<CollectionResult<T>> {
   const rows: T[] = [];
   const seenTokens = new Set<string>();
   const seenIds = new Set<string>();
+  let noProgressPages = 0;
   let nextToken: string | null = null;
   while (true) {
     const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
@@ -165,11 +168,14 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       if (invalidRow) return { rows, complete: false };
       // A terminal next_token is Oura's only source evidence of a complete inventory.
       if (!("next_token" in payload)) return { rows, complete: false };
-      if (seenIds.size === previousSize && (payload.data.length > 0 || payload.next_token !== null))
+      // A last page that only repeats seen rows proves nothing about the end.
+      if (payload.next_token === null && payload.data.length > 0 && seenIds.size === previousSize)
         return { rows, complete: false };
       if (payload.next_token === null) return { rows, complete: true };
       if (typeof payload.next_token !== "string" || !payload.next_token || seenTokens.has(payload.next_token))
         return { rows, complete: false };
+      noProgressPages = seenIds.size === previousSize ? noProgressPages + 1 : 0;
+      if (noProgressPages > NO_PROGRESS_PAGE_GUARD) return { rows, complete: false };
       nextToken = payload.next_token;
       seenTokens.add(nextToken);
     } finally { await response.dispose().catch(() => {}); }
