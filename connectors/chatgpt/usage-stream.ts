@@ -766,6 +766,11 @@ async function runAccountProfile(
 		});
 		return;
 	}
+	if (projects.status === "partial" || tasks.status === "partial") {
+		// Keep the observed profile, but partial inventories cannot checkpoint it.
+		await deps.emitRecord("account_profile", record);
+		return;
+	}
 	await emitGated(deps, state, "account_profile", stateless, [record]);
 	await deps.emit(buildFullScanCoverageMessage("account_profile", 1));
 }

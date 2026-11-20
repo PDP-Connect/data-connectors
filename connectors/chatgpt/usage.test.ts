@@ -2027,3 +2027,72 @@ test("usage sidebar cursor cycle stops and remains partial", async () => {
 	assert.equal(sub(summary, "coverage").listing_complete, false);
 	assert.deepEqual(h.sidebarCursors, [0, 1, 2]);
 });
+
+type ProgressPagerTarget = "project" | "sidebar" | "tasks";
+function progressPagerHarness(
+	target: ProgressPagerTarget,
+	pageAt: (page: number) => { ids: number[]; has_more: boolean; cursor?: string },
+	maxPages: number,
+	options: { profileOnly?: boolean; wallClockAfter?: number } = {},
+) {
+	const fake = fakeApi(siteRoutes({ conversations: [] }));
+	const harness = makeRecordingEmit(validateRecord);
+	let pages = 0;
+	const api: ChatGptApi = {
+		...fake.api,
+		fetch(path, opts) {
+			const url = new URL(path, "https://synthetic.invalid");
+			const isSidebar = url.pathname === "/gizmos/snorlax/sidebar";
+			const isProject = url.pathname === "/gizmos/g-p-Progress/conversations";
+			const isTasks = url.pathname === "/tasks";
+			const selected = target === "sidebar" ? isSidebar : target === "project" ? isProject : isTasks;
+			if (selected) {
+				assert.ok(++pages <= maxPages, "fresh-cursor non-progress must stop");
+				const page = pageAt(pages - 1);
+				const body = target === "project"
+					? { items: page.ids.map((id) => listItem(rawConvId(id))) }
+					: target === "sidebar"
+						? { item_count: page.ids.length, file_count: 0, project_ids: page.ids.map((id) => "g-p-Progress" + id) }
+						: { task_count: page.ids.length, by_status: {} };
+				return Promise.resolve({ status: 200, json: { ...body, has_more: page.has_more, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) } });
+			}
+			if (isSidebar) return Promise.resolve({ status: 200, json: {
+				item_count: target === "project" ? 1 : 0, file_count: 0,
+				project_ids: target === "project" ? ["g-p-Progress"] : [], has_more: false,
+			} });
+			return fake.api.fetch(path, opts);
+		},
+	};
+	const deps: StreamDeps = {
+		api, emit: harness.emit, emitRecord: harness.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map((options.profileOnly ? ["account_profile"] : ["account_profile", "usage_summary"]).map((name) => [name, { name }])),
+		...(options.wallClockAfter === undefined ? {} : { runBudget: {
+			reason: () => pages >= options.wallClockAfter! ? "max_wall_clock" : null,
+		} as NonNullable<StreamDeps["runBudget"]> }),
+	};
+	return {
+		harness, pages: () => pages,
+		run: () => runUsageStreams(deps, {}, {
+			classifyError: () => "other", accountsCheckPath: "/accounts/check/v4-2023-04-27",
+			now: () => NOW_MS,
+		}),
+	};
+}
+
+for (const partial of [false, true]) {
+	test(`account profile checkpoints only complete sidebar walks (wall clock=${partial})`, async () => {
+		const h = progressPagerHarness("sidebar", () => ({ ids: [1], has_more: partial,
+			...(partial ? { cursor: "next" } : {}),
+		}), 1, { profileOnly: true, ...(partial ? { wallClockAfter: 1 } : {}) });
+		await h.run();
+		assert.equal(h.pages(), 1);
+		const [profile] = records(h.harness, "account_profile");
+		assert.ok(profile, "retain observable profile record after a partial walk");
+		assert.equal(sub(profile, "source_status").projects, partial ? "partial" : "ok");
+		for (const kind of ["STATE", "DETAIL_COVERAGE"]) {
+			assert.equal(h.harness.protocolMessages.some((message) =>
+				message.type === kind && "stream" in message && message.stream === "account_profile"), !partial, kind);
+		}
+	});
+}
