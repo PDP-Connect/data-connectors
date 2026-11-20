@@ -94,7 +94,10 @@ function makeScriptedFetch(script: {
 	return { calls, fetchPath };
 }
 
-function makeCtx(requestedStreams: string[]): {
+function makeCtx(
+	requestedStreams: string[],
+	state: BrowserCollectContext["state"] = {},
+): {
 	ctx: BrowserCollectContext;
 	emitted: ReturnType<typeof makeRecordingEmit>["emitted"];
 	messages: ReturnType<typeof makeRecordingEmit>["protocolMessages"];
@@ -110,7 +113,11 @@ function makeCtx(requestedStreams: string[]): {
 		credentials: {},
 		detailGaps: [],
 		emit: harness.emit,
-		emitRecord: harness.emitRecord,
+		emitRecord: async (stream, data, options) => {
+			const count = harness.emitted.length;
+			await harness.emitRecord(stream, data);
+			if (harness.emitted.length > count) await options?.beforeEmit?.();
+		},
 		emittedAt: EMITTED_AT,
 		page: {} as BrowserCollectContext["page"],
 		progress: () => Promise.resolve(),
@@ -118,7 +125,7 @@ function makeCtx(requestedStreams: string[]): {
 		requested,
 		scope: { streams: [] },
 		sendInteraction: () => Promise.reject(new Error("not used")),
-		state: {},
+		state,
 	} as BrowserCollectContext;
 	return {
 		ctx,
@@ -274,10 +281,29 @@ test("collectAllStreams: a GetReceipt failure is non-fatal — no receipts recor
 		// caught as non-fatal; receiptRecord sees an empty fareBreakdown and
 		// returns null (no fabricated all-null record).
 	});
-	const { ctx, emitted } = makeCtx(["trips", "receipts"]);
+	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(emitted.filter((r) => r.stream === "receipts").length, 0);
 	assert.equal(emitted.filter((r) => r.stream === "trips").length, 1);
+	const checkpoint = messages.find((message) => message.type === "STATE");
+	assert.ok(checkpoint?.type === "STATE");
+	assert.deepEqual(checkpoint.cursor, {
+		hydrated_trip_ids: ["trip-1"],
+		hydrated_receipt_ids: [],
+	});
+	const retry = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
+		getReceipt: { "trip-1": { body: getReceiptBody(RECEIPT_HTML("$10.00")) } },
+	});
+	const followup = makeCtx(["trips", "receipts"], { trips: checkpoint.cursor });
+	await collectAllStreams(followup.ctx, retry.fetchPath, NO_DELAY);
+	assert.deepEqual(retry.calls, ["Activities", "GetReceipt:trip-1"]);
+	const retried = followup.messages.find((message) => message.type === "STATE");
+	assert.ok(retried?.type === "STATE");
+	assert.deepEqual(retried.cursor, {
+		hydrated_trip_ids: ["trip-1"],
+		hydrated_receipt_ids: ["trip-1"],
+	});
 });
 
 test("collectAllStreams: trips DETAIL_COVERAGE is self-mapped (state_stream === trips)", async () => {
@@ -472,13 +498,11 @@ test("collectAllStreams: long activity history has no page-budget SKIP", async (
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(calls.filter((call) => call === "Activities").length, 202);
 	assert.equal(emitted.length, 200, "the separate detail limit is unchanged");
-	const skips = messages.filter((message) => message.type === "SKIP_RESULT");
-	assert.equal(skips.length, 1);
-	assert.equal(skips[0]?.reason, "trips_deferred_detail_budget");
-	assert.deepEqual(skips[0]?.diagnostics, {
-		detail_fetch_limit: 200,
-		total_trips: 201,
-	});
+	assert.equal(messages.some((message) => message.type === "SKIP_RESULT"), false);
+	assert.equal(messages.filter((message) => message.type === "DETAIL_GAP").length, 1);
+	const coverage = messages.find((message) => message.type === "DETAIL_COVERAGE");
+	assert.ok(coverage?.type === "DETAIL_COVERAGE");
+	assert.deepEqual(coverage.gap_keys, ["trip-200"]);
 });
 
 test("fetchAllActivities: two duplicate-only pages in a row still follow the cursor", async () => {
@@ -584,17 +608,18 @@ test("collectAllStreams: records emit before DETAIL_COVERAGE for trips", async (
 	);
 });
 
-test("collectAllStreams: trips (full_inventory) emits no STATE", async () => {
+test("collectAllStreams: trips checkpoints successfully hydrated trip IDs", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
 		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
 	});
 	const { ctx, messages } = makeCtx(["trips"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
-	assert.equal(
-		messages.some((m) => m.type === "STATE"),
-		false,
-		"trips is incremental: false / full_inventory — it must not claim a cursor via STATE",
+	const checkpoint = messages.find((m) => m.type === "STATE");
+	assert.ok(checkpoint?.type === "STATE");
+	assert.equal(checkpoint.stream, "trips");
+	assert.ok(
+		(checkpoint.cursor as { hydrated_trip_ids?: string[] }).hydrated_trip_ids?.includes("trip-1"),
 	);
 });
 
@@ -857,8 +882,7 @@ test("collectAllStreams: a genuinely empty feed emits zero-key coverage", async 
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.deepEqual(emitted, []);
 	assert.deepEqual(calls, ["Activities"]);
-	assert.equal(messages.length, 1);
-	const coverage = messages[0];
+	const coverage = messages.find((message) => message.type === "DETAIL_COVERAGE");
 	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
 	assert.equal(coverage.stream, "trips");
 	assert.equal(coverage.state_stream, "trips");
@@ -866,4 +890,80 @@ test("collectAllStreams: a genuinely empty feed emits zero-key coverage", async 
 	assert.equal(coverage.covered, 0);
 	assert.deepEqual(coverage.required_keys, []);
 	assert.deepEqual(coverage.hydrated_keys, []);
+});
+
+test("trips hydration progresses over three runs without refetching finalized trips", async () => {
+	const ids = Array.from({ length: 450 }, (_, index) => `synthetic-trip-${index}`);
+	const run = async (state: BrowserCollectContext["state"] = {}) => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [{ body: activitiesBody(ids.map((uuid) => ({ uuid }))) }],
+			getTrip: Object.fromEntries(
+				ids.map((id) => [id, { body: getTripBody({ status: "COMPLETED" }) }]),
+			),
+		});
+		const { ctx, messages, emitted } = makeCtx(["trips"], state);
+		await collectAllStreams(ctx, fetchPath, NO_DELAY);
+		const checkpoint = messages.find((message) => message.type === "STATE");
+		assert.ok(checkpoint?.type === "STATE");
+		return {
+			calls: calls.filter((call) => call.startsWith("GetTrip:")),
+			state: { trips: checkpoint.cursor },
+			messages,
+			emitted,
+		};
+	};
+	const first = await run();
+	const second = await run(first.state);
+	const third = await run(second.state);
+	assert.equal(first.calls.length, 200);
+	assert.equal(second.calls.length, 200);
+	assert.equal(third.calls.length, 50);
+	assert.deepEqual(
+		[...first.calls, ...second.calls, ...third.calls],
+		ids.map((id) => `GetTrip:${id}`),
+	);
+	assert.deepEqual(
+		[...first.emitted, ...second.emitted, ...third.emitted].map((record) => record.data.id),
+		ids,
+	);
+	assert.equal(first.messages.filter((message) => message.type === "DETAIL_GAP").length, 250);
+	assert.equal(third.messages.some((message) => message.type === "DETAIL_GAP"), false);
+});
+
+test("receipts can hydrate after trips have already checkpointed their details", async () => {
+	const activitiesPages = [{ body: activitiesBody([{ uuid: "synthetic-trip" }]) }];
+	const tripFetch = makeScriptedFetch({
+		activitiesPages,
+		getTrip: { "synthetic-trip": { body: getTripBody({ status: "COMPLETED" }) } },
+	});
+	const trips = makeCtx(["trips"]);
+	await collectAllStreams(trips.ctx, tripFetch.fetchPath, NO_DELAY);
+	assert.equal(tripFetch.calls.some((call) => call.startsWith("GetReceipt:")), false);
+	const checkpoint = trips.messages.find((message) => message.type === "STATE");
+	assert.ok(checkpoint?.type === "STATE");
+
+	const receiptFetch = makeScriptedFetch({
+		activitiesPages,
+		getReceipt: { "synthetic-trip": { body: getReceiptBody(RECEIPT_HTML("$12.00")) } },
+	});
+	const receipts = makeCtx(["receipts"], { trips: checkpoint.cursor });
+	await collectAllStreams(receipts.ctx, receiptFetch.fetchPath, NO_DELAY);
+	assert.deepEqual(receiptFetch.calls, ["Activities", "GetReceipt:synthetic-trip"]);
+	assert.equal(receipts.emitted.filter((record) => record.stream === "receipts").length, 1);
+	assert.equal(receipts.messages.some((message) => message.type === "DETAIL_COVERAGE"), false);
+});
+
+test("receipt-only run with no parent STATE hydrates the feed tail without writing trips STATE", async () => {
+	const ids = Array.from({ length: 201 }, (_, index) => `synthetic-receipt-${index}`);
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody(ids.map((uuid) => ({ uuid }))) }],
+		getReceipt: Object.fromEntries(
+			ids.map((id) => [id, { body: getReceiptBody(RECEIPT_HTML("$10.00")) }]),
+		),
+	});
+	const { ctx, messages, emitted } = makeCtx(["receipts"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.deepEqual(calls, ["Activities", ...ids.map((id) => `GetReceipt:${id}`)]);
+	assert.equal(emitted.length, 201);
+	assert.equal(messages.some((message) => message.type === "STATE"), false);
 });

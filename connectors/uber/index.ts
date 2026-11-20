@@ -12,25 +12,13 @@
  *     driver, distance, duration, fare_total). The Activities list feed
  *     carries only a trip UUID — see parsers.ts's module doc. `trips` does
  *     its own hydration, so it is self-mapped, and it emits its own
- *     DETAIL_COVERAGE. It declares `incremental: false` /
- *     `coverage_strategy: "full_inventory"` in manifests/uber.json: the
- *     Activities list has no date/status field to filter or stop on (only a
- *     trip UUID; see parsers.ts), so `fetchAllActivities` walks the full
- *     feed every run with no STATE-consulted cursor. A stop-at-seen boundary
- *     keyed on trip id is plausible (the audit's cut-semantics-pass report
- *     item #1) but assumes the Activities feed is fetched newest-first,
- *     which no code or fixture in this connector confirms — that requires a
- *     live-account run to verify before implementing; tracked as a
- *     follow-up, not implemented here.
+ *     DETAIL_COVERAGE. It uses checkpoint_window: the Activities feed is
+ *     walked from the top each run; trips STATE records successfully emitted
+ *     trip detail IDs to resume hydration without assuming feed order is stable.
  *   - receipts: 1:1 per-trip detail (`fare_breakdown`, `currency`, receipt
  *     totals), fetched from `GetReceipt` only. Declared `state_stream:
- *     "trips"` in the manifest — it rides trips' checkpoint rather than
- *     proving its own, because it is fetched in the SAME per-trip loop as
- *     trips and has no independent hydration lane (see the Collection
- *     Profile spec's checkpoint-dependency section). Per the fleet-wide
- *     `detail-coverage-state-stream-manifest-honesty` guard, a
- *     `state_stream`-declared stream must never construct a
- *     DETAIL_COVERAGE — this connector does not.
+ *     "trips"` in the manifest; it shares the checkpoint but tracks its own
+ *     successfully emitted receipt IDs. It does not emit DETAIL_COVERAGE.
  *   - A trips-only START (receipts absent from `requested`) makes ZERO
  *     GetReceipt calls — proven in integration.test.ts. It still calls
  *     GetTrip, because trips' own fields are hydrated from GetTrip.
@@ -77,13 +65,14 @@
  *   v0.1.0 — scaffold (manifest + probeSession only).
  */
 
-import { isMainModule } from "@pdpp/connector-protocol";
+import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import { redactTransportDetail } from "@pdpp/connector-protocol/http-retry";
 import type { Page } from "playwright";
 import { ensureUberSession } from "../../packages/polyfill-connectors/src/auto-login/uber.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
+	buildDetailGap,
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -113,6 +102,7 @@ const ACTIVITIES_PAGE_SIZE = 5;
  * than walking forever through a feed that repeats itself.
  */
 const MAX_DUPLICATE_ONLY_PAGES = 3;
+// Bounds one run's detail work; the checkpoint lets deferred trips continue next run.
 const MAX_DETAIL_FETCHES = 200;
 const PAGE_DELAY_MS = 500;
 const DETAIL_DELAY_MS = 500;
@@ -481,115 +471,143 @@ export async function collectAllStreams(
 		return;
 	}
 
-	const { activities, truncated, stopReason } = await fetchAllActivities(fetchPath, delay);
+	const { activities, truncated, stopReason } = await fetchAllActivities(
+		fetchPath,
+		delay,
+	);
 	const tripIds = activities
 		.map((a) => activityTripId(a))
-		.filter((id): id is string => Boolean(id))
-		.slice(0, MAX_DETAIL_FETCHES);
-	const detailTruncated = activities.length > MAX_DETAIL_FETCHES;
+		.filter((id): id is string => Boolean(id));
+	const parent = readUberCheckpoint(ctx.state.trips);
+	const canWriteCheckpoint = wantTrips || parent !== null;
+	const hydratedTrips = parent?.hydratedTrips ?? new Set<string>();
+	const hydratedReceipts = parent?.hydratedReceipts ?? new Set<string>();
+	const tripScope = requested.get("trips");
+	const receiptScope = requested.get("receipts");
+	const tripResources = tripScope ? resourceSet(tripScope) : null;
+	const receiptResources = receiptScope ? resourceSet(receiptScope) : null;
+	const tripsRequired = wantTrips
+		? tripIds.filter((id) => !hydratedTrips.has(id) && (!tripResources || tripResources.has(id)))
+		: [];
+	const receiptsRequired = wantReceipts
+		? tripIds.filter((id) => !hydratedReceipts.has(id) && (!receiptResources || receiptResources.has(id)))
+		: [];
+	const tripBatch = new Set(tripsRequired.slice(0, MAX_DETAIL_FETCHES));
+	// Without a parent cursor a receipts-only run cannot advance a budgeted
+	// prefix, so scan in feed order instead of permanently starving its tail.
+	const receiptBatch = new Set(
+		canWriteCheckpoint ? receiptsRequired.slice(0, MAX_DETAIL_FETCHES) : receiptsRequired,
+	);
+	const detailIds = tripIds.filter((id) => tripBatch.has(id) || receiptBatch.has(id));
 
-	const tripsRequired: string[] = [];
-	const tripsHydrated: string[] = [];
-	for (const [index, tripId] of tripIds.entries()) {
-		if (wantTrips) {
-			tripsRequired.push(tripId);
-		}
-
-		let getTrip: UberGetTripResult | undefined;
-		if (wantTrips) {
+	for (const [index, tripId] of detailIds.entries()) {
+		if (tripBatch.has(tripId)) {
+			let getTrip: UberGetTripResult | undefined;
 			try {
 				getTrip = await fetchGetTrip(fetchPath, tripId);
 			} catch (error) {
-				if (isRunLevelUberError(error)) {
-					throw error;
-				}
-				getTrip = undefined;
+				if (isRunLevelUberError(error)) throw error;
 			}
 			const record = getTrip
 				? tripRecord(tripId, getTrip.trip, getTrip.receipt)
 				: null;
 			if (record) {
-				await emitRecord("trips", record);
-				tripsHydrated.push(tripId);
+				await emitRecord("trips", record, {
+					beforeEmit: async () => {
+						hydratedTrips.add(tripId);
+					},
+				});
 			}
 		}
 
-		if (wantReceipts) {
+		if (receiptBatch.has(tripId)) {
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
 			try {
 				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
 			} catch (error) {
-				if (isRunLevelUberError(error)) {
-					throw error;
-				}
-				fareBreakdown = [];
+				if (isRunLevelUberError(error)) throw error;
 			}
 			const receipt = receiptRecord(tripId, fareBreakdown);
 			if (receipt) {
-				await emitRecord("receipts", receipt);
+				await emitRecord("receipts", receipt, {
+					beforeEmit: async () => {
+						hydratedReceipts.add(tripId);
+					},
+				});
 			}
 		}
 
-		const isLast = index === tripIds.length - 1;
-		if (!isLast && (wantTrips || wantReceipts)) {
+		if (index < detailIds.length - 1) {
 			await delay(DETAIL_DELAY_MS);
 		}
 	}
 
+	if (truncated) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: wantTrips ? "trips" : "receipts",
+			reason: "trips_deferred_page_budget",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+			message: `Uber activity feed stopped after ${MAX_DUPLICATE_ONLY_PAGES} pages in a row with no new trips, with more trip history possibly available`,
+			diagnostics: {
+				duplicate_only_page_limit: MAX_DUPLICATE_ONLY_PAGES,
+				stop_reason: stopReason,
+			},
+		});
+	}
+
 	if (wantTrips) {
-		if (truncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "trips",
-				reason: "trips_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message: `Uber activity feed stopped after ${MAX_DUPLICATE_ONLY_PAGES} pages in a row with no new trips, with more trip history possibly available`,
-				diagnostics: {
-					duplicate_only_page_limit: MAX_DUPLICATE_ONLY_PAGES,
-					stop_reason: stopReason,
-				},
-			});
+		const tripsHydrated = tripsRequired.filter((id) => hydratedTrips.has(id));
+		// The Activities feed has no timestamps. Do not persist a locator as
+		// within a time-bounded grant if detail could not prove its eligibility.
+		const gaps = tripScope?.time_range
+			? []
+			: tripsRequired.filter((id) => !hydratedTrips.has(id));
+		for (const id of gaps) {
+			await emit(
+				buildDetailGap({
+					stream: "trips",
+					recordKey: id,
+					reason: "temporary_unavailable",
+					locator: { kind: "uber.trip", trip_id: id },
+				}),
+			);
 		}
-		if (detailTruncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "trips",
-				reason: "trips_deferred_detail_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message: `Uber trip detail stopped at the ${MAX_DETAIL_FETCHES}-trip detail-fetch limit for this run`,
-				diagnostics: {
-					detail_fetch_limit: MAX_DETAIL_FETCHES,
-					total_trips: activities.length,
-				},
-			});
-		}
-		// `trips` is full_inventory / incremental: false (no source-side date
-		// or stop-at-seen filter is proven — see the manifest and this
-		// connector's header comment): it emits no STATE, matching the
-		// fleet's full_inventory convention (e.g. meta's `following`), rather
-		// than a `cursor: {}` that claimed a bookkeeping cursor with nothing
-		// in it. `trips` does its own hydration (GetTrip per id), so it is
-		// self-mapped and emits its own DETAIL_COVERAGE. `receipts` is
-		// declared `state_stream: "trips"` in the manifest and must NEVER
-		// construct one — see the fleet-wide
-		// detail-coverage-state-stream-manifest-honesty guard.
 		await emit(
 			buildDetailCoverageMessage({
 				stream: "trips",
 				stateStream: "trips",
 				requiredKeys: tripsRequired,
 				hydratedKeys: tripsHydrated,
+				gapKeys: gaps,
 				considered: tripsRequired.length,
 				covered: tripsHydrated.length,
 			}),
 		);
 	}
+
+	if (canWriteCheckpoint && !truncated) {
+		await emit({
+			type: "STATE",
+			stream: "trips",
+			cursor: {
+				hydrated_trip_ids: [...hydratedTrips],
+				hydrated_receipt_ids: [...hydratedReceipts],
+			},
+		});
+	}
+}
+
+function readUberCheckpoint(cursor: unknown): {
+	hydratedTrips: Set<string>;
+	hydratedReceipts: Set<string>;
+} | null {
+	if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) return null;
+	const values = cursor as { hydrated_trip_ids?: unknown; hydrated_receipt_ids?: unknown };
+	const ids = (list: unknown) => new Set(
+		Array.isArray(list) ? list.filter((id): id is string => typeof id === "string" && id.length > 0) : [],
+	);
+	return { hydratedTrips: ids(values.hydrated_trip_ids), hydratedReceipts: ids(values.hydrated_receipt_ids) };
 }
 
 if (isMainModule(import.meta.url)) {
