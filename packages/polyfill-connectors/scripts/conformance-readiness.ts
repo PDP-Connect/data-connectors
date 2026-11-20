@@ -25,6 +25,95 @@ export interface Step {
 	readonly verdict: Verdict;
 }
 
+/** Checklist requirements; old no-claim promotions keep their disclosed gaps. */
+export function requiredForReview(
+	step: Step,
+	context: {
+		readonly isKnownScaffold: boolean;
+		readonly promotedTier: boolean;
+		readonly legacyPromotion: boolean;
+		readonly noHttpExemption: boolean;
+	},
+): boolean {
+	if (!step.advisory && step.verdict === "FAIL") {
+		return true;
+	}
+	if (
+		[
+			"submission refresh",
+			"submission deletions",
+			"submission text",
+			"submission counts",
+		].includes(step.name)
+	) {
+		return !step.advisory;
+	}
+	if (["manifest", "tests"].includes(step.name)) {
+		return true;
+	}
+	if (step.name === "coverage") {
+		return !context.isKnownScaffold;
+	}
+	if (!context.promotedTier || context.legacyPromotion) {
+		return false;
+	}
+	return (
+		["evidence", "pilot fixture"].includes(step.name) ||
+		(step.name === "mock mutation" &&
+			!(step.verdict === "UNKNOWN" && context.noHttpExemption))
+	);
+}
+
+/** The bounded pilot covers required network bindings without other binding kinds. */
+export function isApiSubmissionPilot(manifest: unknown): boolean {
+	if (
+		!manifest ||
+		typeof manifest !== "object" ||
+		!("runtime_requirements" in manifest)
+	)
+		return false;
+	const runtime = manifest.runtime_requirements;
+	if (!runtime || typeof runtime !== "object" || !("bindings" in runtime))
+		return false;
+	const bindings = runtime.bindings;
+	if (!bindings || typeof bindings !== "object" || Array.isArray(bindings))
+		return false;
+	const entries = Object.entries(bindings);
+	return (
+		entries.some(
+			([key, binding]) =>
+				binding &&
+				typeof binding === "object" &&
+				(binding.kind ?? key) === "network" &&
+				binding.required === true,
+		) &&
+		entries.every(
+			([key, binding]) =>
+				binding &&
+				typeof binding === "object" &&
+				!Array.isArray(binding) &&
+				typeof binding.required === "boolean" &&
+				(binding.kind === undefined || typeof binding.kind === "string") &&
+				(binding.kind ?? key) === "network",
+		)
+	);
+}
+
+/** A disclosed author assertion in entrypoint comments, not an HTTP analysis. */
+export function declaredNoHttpExemption(source: string): string | undefined {
+	const header =
+		source.match(
+			/^(?:#![^\n]*(?:\n|$))?\s*(?:(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*)*/,
+		)?.[0] ?? "";
+	const reason = header
+		.match(
+			/(?:^|\n)[\t ]*(?:\*|\/\/)[\t ]*@conformance-no-http[\t ]+([^\r\n]+)/,
+		)?.[1]
+		?.replace(/\*\/\s*$/, "")
+		.trim();
+	return reason || undefined;
+}
+
 interface SchemaProperty {
 	readonly description?: unknown;
 	readonly format?: unknown;

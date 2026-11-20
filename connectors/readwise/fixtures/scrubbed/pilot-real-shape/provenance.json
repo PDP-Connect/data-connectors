@@ -1,0 +1,7 @@
+{
+	"format": "pdpp.fixture-provenance/1",
+	"class": "synthetic",
+	"labeled_by": "Readwise connector contributor",
+	"labeled_at": "2026-11-18",
+	"description": "Hand-authored representative Readwise records. All IDs, text, names, tags and URLs are synthetic. Includes optional nulls and transport escapes."
+}
