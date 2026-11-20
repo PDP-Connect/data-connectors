@@ -813,17 +813,20 @@ async function emitThread(
 			}
 		}
 		cursor = answer.response_metadata?.next_cursor ?? "";
-		if (!answer.has_more || cursor === "") {
+		if (!answer.has_more && (hasNewTs || !answer.messages?.length)) {
 			return;
 		}
-		const cause = cursors.has(cursor)
-			? "repeated_cursor"
-			: !hasNewTs
-				? "no_new_ts"
-				: null;
+		const cause =
+			answer.has_more && cursor.trim() === ""
+				? "missing_cursor"
+				: answer.has_more && cursors.has(cursor)
+					? "repeated_cursor"
+					: !hasNewTs
+						? "no_new_ts"
+						: null;
 		if (cause !== null) {
 			await run.ctx.progress(
-				`${channelId}: stopped thread after ${pageNo + 1} pages with more replies left (${cause})`,
+				`${channelId}: stopped thread after ${pageNo + 1} pages without proof that replies ended (${cause})`,
 				{ stream: "messages" },
 			);
 			throw new SlackApiError(
@@ -907,17 +910,20 @@ async function walkHistory(
 			{ count: run.messagesEmitted, stream: "messages" },
 		);
 		cursor = answer.response_metadata?.next_cursor ?? "";
-		if (!answer.has_more || cursor === "") {
+		if (!answer.has_more && (hasNewTs || !answer.messages?.length)) {
 			return newestTs;
 		}
-		const cause = cursors.has(cursor)
-			? "repeated_cursor"
-			: !hasNewTs
-				? "no_new_ts"
-				: null;
+		const cause =
+			answer.has_more && cursor.trim() === ""
+				? "missing_cursor"
+				: answer.has_more && cursors.has(cursor)
+					? "repeated_cursor"
+					: !hasNewTs
+						? "no_new_ts"
+						: null;
 		if (cause !== null) {
 			await run.ctx.progress(
-				`${conversationLabel(conversation)}: stopped after ${pageNo + 1} pages with more history left (${cause})`,
+				`${conversationLabel(conversation)}: stopped after ${pageNo + 1} pages without proof that history ended (${cause})`,
 				{ stream: "messages" },
 			);
 			// Do not return newestTs: the conversation has not been fully read,

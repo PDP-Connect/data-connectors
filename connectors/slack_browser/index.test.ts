@@ -2236,3 +2236,87 @@ test("thread non-progress refuses its conversation within a few pages", async ()
 		}),
 	);
 });
+
+for (const surface of ["history", "replies"] as const) {
+	for (const boundary of [
+		"missing",
+		"blank",
+		"repeat-terminal",
+		"empty-terminal",
+	] as const) {
+		test(`${surface}: ${boundary} preserves only proven completion`, async () => {
+			const h = harness(["messages"]);
+			const parentTs = `${FIXTURE_NOW_SECONDS - 500}.000001`;
+			const messageTs = `${FIXTURE_NOW_SECONDS - 1}.000001`;
+			const record = {
+				type: "message",
+				user: "U0987654321",
+				text: "synthetic",
+				ts: messageTs,
+				...(surface === "replies" ? { thread_ts: parentTs } : {}),
+			};
+			let pages = 0;
+			const api = fakeApi((call) => {
+				if (surface === "replies" && call.method === "conversations.history") {
+					return {
+						ok: true,
+						has_more: false,
+						messages: [
+							{
+								...record,
+								ts: parentTs,
+								thread_ts: undefined,
+								reply_count: 1,
+								latest_reply: messageTs,
+							},
+						],
+					};
+				}
+				if (call.method !== `conversations.${surface}`) return undefined;
+				pages += 1;
+				assert.ok(pages <= 2);
+				if (boundary === "missing" || boundary === "blank") {
+					return {
+						ok: true,
+						messages: [record],
+						has_more: true,
+						...(boundary === "blank"
+							? { response_metadata: { next_cursor: "" } }
+							: {}),
+					};
+				}
+				return {
+					ok: true,
+					messages:
+						pages === 2 && boundary === "empty-terminal" ? [] : [record],
+					has_more: pages === 1,
+					response_metadata: { next_cursor: pages === 1 ? "continuation" : "" },
+				};
+			});
+			await run(h, api, { lookbackDays: 0, channelAllowlist: ["C0987654321"] });
+			const marks = h.state("messages")?.channel_last_ts as
+				| Record<string, string>
+				| undefined;
+			if (boundary === "empty-terminal") {
+				assert.equal(pages, 2);
+				assert.deepEqual(h.gaps(), []);
+				assert.equal(
+					marks?.C0987654321,
+					surface === "history" ? messageTs : parentTs,
+				);
+			} else {
+				assert.equal(pages, boundary === "repeat-terminal" ? 2 : 1);
+				assert.equal(h.gaps()[0]?.record_key, "C0987654321");
+				assert.equal(h.gaps()[0]?.reason, "temporary_unavailable");
+				assert.equal(marks?.C0987654321, undefined);
+				assert.ok(
+					h.progress.some(({ message }) =>
+						message.includes(
+							boundary === "repeat-terminal" ? "no_new_ts" : "missing_cursor",
+						),
+					),
+				);
+			}
+		});
+	}
+}
