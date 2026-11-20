@@ -331,23 +331,42 @@ test("a Date field is queued as its ISO string, as the wire sends it", async () 
 	);
 });
 
-test("a valid deep record is admitted as exactly what JSON sends", async () => {
+test("a deep valid record is admitted exactly when JSON can send it, and never leaks when refused", async () => {
 	const sent: EmittedMessage[] = [];
 	const channel = createOutputChannel(async (message) => {
 		sent.push(message);
 	});
-	// structuredClone refuses this depth on V8; JSON sends it.
-	let nested: Record<string, unknown> = { leaf: "deep" };
-	for (let i = 0; i < 5000; i++) nested = { n: nested };
+	// Engines differ: Node 24 throws RangeError from JSON.stringify at this
+	// depth, Node 26 does not. structuredClone refuses it on both.
+	let nested: Record<string, unknown> = { leaf: "SECRET-DEEP-TEXT" };
+	for (let i = 0; i < 20_000; i++) nested = { n: nested };
 	const frame = {
 		type: "RECORD",
 		stream: "s",
 		key: "k",
 		data: nested,
 	} as unknown as EmittedMessage;
-	await channel.write(frame);
-	assert.equal(sent.length, 1);
-	assert.equal(JSON.stringify(sent[0]), JSON.stringify(frame));
+	let wire: string | undefined;
+	try {
+		wire = JSON.stringify(frame);
+	} catch {
+		wire = undefined;
+	}
+	if (wire === undefined) {
+		await assert.rejects(channel.write(frame), (e: unknown) => {
+			const message = String((e as Error).message);
+			return (
+				message.includes("cannot be serialized") &&
+				!message.includes("SECRET-DEEP-TEXT") &&
+				!message.includes("Maximum call stack")
+			);
+		});
+		assert.equal(sent.length, 0);
+	} else {
+		await channel.write(frame);
+		assert.equal(sent.length, 1);
+		assert.equal(JSON.stringify(sent[0]), wire);
+	}
 });
 
 test("a throw from the JSON snapshot step refuses the frame with no text leak", async () => {
