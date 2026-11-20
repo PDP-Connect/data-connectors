@@ -100,6 +100,7 @@ import {
 	createChatGptApi,
 	createOmittedMessageContentTally,
 	estimateChatGptDetailMinutesRemaining,
+	listPrimaryConversations,
 	normalizeChatGptTerminalError,
 	processConversationDetail,
 	readChatGptPersistedPacing,
@@ -13876,4 +13877,63 @@ test("pagination progress: a repeated gizmo cursor refuses without STATE", async
 	assert.equal(skip.reason, "pagination_cap_truncated");
 	assert.match(skip.message ?? "", /repeat/i);
 	assert.deepEqual(skip.recovery_hint, { action: "retry_on_connector_upgrade", retryable: false });
+});
+
+test("pagination progress: a short repeated share page refuses without STATE", async () => {
+	const items = Array.from({ length: 100 }, (_, index) => ({
+		share_id: `synthetic-share-${index}`,
+		conversation_id: `synthetic-conversation-${index}`,
+		title: "Synthetic share",
+		create_time: 1_700_000_000,
+	}));
+	const { deps, messages } = makeHarness({
+		fetchQueue: [
+			{ status: 200, json: { items } },
+			{ status: 200, json: { items: items.slice(0, 3) } },
+		],
+		requested: ["shared_conversations"],
+	});
+	await runSharedConversationsStream(deps);
+	assert.equal(messages.some((m) => m.type === "STATE"), false);
+	assert.equal(sharedConversationsCoverage(messages), undefined);
+	assert.ok(messages.some((m) => m.type === "SKIP_RESULT" && /no new ids/i.test(m.message ?? "")));
+});
+
+test("pagination progress: fresh gizmo tokens do not prove progress when IDs repeat", async () => {
+	const items = [{ id: "synthetic-gizmo" }];
+	const { deps, messages } = makeHarness({
+		fetchQueue: [
+			{ status: 200, json: { items, cursor: "first-cursor" } },
+			{ status: 200, json: { items, cursor: "second-cursor" } },
+			{ status: 200, json: { items: [] } },
+		],
+		requested: ["custom_gpts"],
+	});
+	await runCustomGptsStream(deps);
+	assert.equal(messages.some((m) => m.type === "STATE"), false);
+	assert.equal(customGptsCoverage(messages), undefined);
+	assert.ok(messages.some((m) => m.type === "SKIP_RESULT" && /no new ids/i.test(m.message ?? "")));
+});
+
+test("primary conversation listing reaches the provider end beyond 5000 records", async () => {
+	const fetchQueue = Array.from({ length: 51 }, (_, page) => ({
+		status: 200,
+		json: { items: Array.from({ length: 100 }, (_, row) => ({ id: `synthetic-${page}-${row}` })) },
+	}));
+	fetchQueue.push({ status: 200, json: { items: [] } }, { status: 200, json: { items: [] } });
+	const { deps } = makeHarness({ fetchQueue, requested: ["conversations"] });
+	const result = await listPrimaryConversations(deps, null);
+	assert.equal(result.truncated, false);
+	assert.equal(result.items.length, 5100);
+});
+
+test("repeated primary conversation page refuses before core STATE", async () => {
+	const items = [{ id: "synthetic-conversation" }];
+	const { deps, messages } = makeHarness({
+		fetchQueue: [{ status: 200, json: { items } }, { status: 200, json: { items } }],
+		requested: ["conversations", "messages"],
+	});
+	await runUnionStreams(deps, {});
+	assert.ok(messages.some((m) => m.type === "SKIP_RESULT" && m.reason === "conversation_list_unstable"));
+	assert.equal(messages.some((m) => m.type === "STATE"), false);
 });
