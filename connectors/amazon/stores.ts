@@ -264,52 +264,280 @@ export function absoluteStoreUrl(
 
 // ─── Postal codes ────────────────────────────────────────────────────────
 
-const ZERO_WIDTH_RE = /[​-‏⁠﻿]/g;
+const ZERO_WIDTH_RE = /[\u200b-\u200f\u2060\ufeff]/g;
+
+/**
+ * Postal-code shapes by country (lowercase ISO alpha-2). `loose` is the
+ * country's full shape, used when the address names that country or the store
+ * is in it. `strict` is a shape no other country's address can be mistaken for
+ * (a separator is required), tried on an address that names no country, so a
+ * Canadian address on amazon.com still yields its code. Countries whose codes
+ * are bare digit runs (US 5, DE/FR/IT/ES/MX 5, AU 4, IN 6) have no strict shape
+ * except the US ZIP+4: a bare number is only read when the country is known.
+ */
+interface PostalShape {
+	loose: RegExp;
+	strict?: RegExp;
+}
+
+const POSTAL_SHAPES: Readonly<Record<string, PostalShape>> = Object.freeze({
+	us: {
+		loose: /\b(\d{5}(?:-\d{4})?)\b/g,
+		strict: /\b(\d{5}-\d{4})\b/g,
+	},
+	ca: {
+		loose:
+			/\b([ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z])\s?(\d[ABCEGHJ-NPRSTV-Z]\d)\b/gi,
+		strict:
+			/\b([ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z])\s?(\d[ABCEGHJ-NPRSTV-Z]\d)\b/gi,
+	},
+	gb: {
+		loose: /\b([A-Z]{1,2}\d[A-Z\d]?)\s?(\d[A-Z]{2})\b/gi,
+		// Uppercase only: case-insensitive, "Apt B2 3rd Floor" reads as B2 3RD.
+		strict: /\b([A-Z]{1,2}\d[A-Z\d]?)\s?(\d[A-Z]{2})\b/g,
+	},
+	de: { loose: /\b(\d{5})\b/g },
+	fr: { loose: /\b(\d{5})\b/g },
+	it: { loose: /\b(\d{5})\b/g },
+	es: { loose: /\b(\d{5})\b/g },
+	mx: { loose: /\b(\d{5})\b/g },
+	au: { loose: /\b(\d{4})\b/g },
+	jp: {
+		loose: /(?:〒\s*)?\b(\d{3})-?(\d{4})\b/g,
+		// Outside Japan a bare 123-4567 is as likely a phone number's tail, so
+		// only the 〒 mark makes it a postal code.
+		strict: /〒\s*(\d{3})-?(\d{4})\b/g,
+	},
+	in: { loose: /\b(\d{3})\s?(\d{3})\b/g },
+	br: {
+		loose: /\b(\d{5})-?(\d{3})\b/g,
+		strict: /\b(\d{5})-(\d{3})\b/g,
+	},
+});
+
+// Tried in this order on an address that names no country; on a tie (two
+// shapes ending at the same place) the earlier one wins.
+const STRICT_FALLBACK_ORDER = ["ca", "gb", "br", "jp", "us"] as const;
+
+/** A country an address line names, in English or the country's language. */
+const COUNTRY_NAMES: readonly (readonly [string, RegExp])[] = [
+	["us", /\b(?:United States(?: of America)?|U\.?S\.?A\.?)(?![\w.])/i],
+	["ca", /\bCanada\b/i],
+	[
+		"gb",
+		/\b(?:United Kingdom|Great Britain|England|Scotland|Northern Ireland|(?<!South )Wales)\b|\bUK\b/,
+	],
+	["de", /\b(?:Germany|Deutschland)\b/i],
+	["fr", /\bFrance\b/i],
+	["it", /\b(?:Italy|Italia)\b/i],
+	["es", /\b(?:Spain|Espa[ñn]a)(?![\w])/i],
+	["au", /\bAustralia\b/i],
+	["jp", /\bJapan\b|日本/i],
+	["in", /\bIndia\b/i],
+	["mx", /(?<!New )\bM[ée]xico(?![\w])/i],
+	["br", /\b(?:Brazil|Brasil)\b/i],
+];
+
+// A phone line under the address ("Phone: 416-555-1234", or the bare number)
+// holds digit groups shaped like postal codes; it is never read for one.
+const PHONE_LINE_RE =
+	/\b(?:phone|mobile|mobil|cell|tel|telefon|t[ée]l[ée]phone|telefono|tel[ée]fono|telefone|celular|m[óo]vil|portable|handy)\b|電話|携帯/i;
+// A phone number: international (+44 20 7946 0000), North American
+// (416-555-1234, (416) 555-1234) or Japanese (03-1234-5678).
+const PHONE_NUMBER_RE =
+	/\+\d[\d\s().-]{7,}\d|\(?\b\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b|\b0\d{1,4}-\d{1,4}-\d{4}\b/;
+const PHONE_CHARS_ONLY_RE = /^[\d\s().+-]+$/;
+const NON_DIGIT_RE = /\D/g;
+// A line of only digits and phone separators is a phone number from 10 digits
+// on; 9 or fewer is a postal code on its own line (98101-1234, 01310-100).
+const MIN_BARE_PHONE_DIGITS = 10;
+
+function isPhoneLine(line: string): boolean {
+	return (
+		PHONE_LINE_RE.test(line) ||
+		PHONE_NUMBER_RE.test(line) ||
+		(PHONE_CHARS_ONLY_RE.test(line) &&
+			line.replace(NON_DIGIT_RE, "").length >= MIN_BARE_PHONE_DIGITS)
+	);
+}
+
+function cleanText(text: string | null | undefined): string {
+	return String(text ?? "")
+		.replace(ZERO_WIDTH_RE, "")
+		.trim();
+}
+
+function normalizePostal(country: string, m: RegExpExecArray): string | null {
+	const head = m[1]?.toUpperCase();
+	if (!head) {
+		return null;
+	}
+	const tail = m[2]?.toUpperCase();
+	if (!tail) {
+		return head;
+	}
+	if (country === "jp" || country === "br") {
+		return `${head}-${tail}`;
+	}
+	if (country === "in") {
+		return `${head}${tail}`;
+	}
+	return `${head} ${tail}`;
+}
+
+interface PostalHit {
+	code: string;
+	end: number;
+}
+
+/** The rightmost match of `re` in `text`: the code sits after the street and city, never before them. */
+function lastMatch(
+	text: string,
+	re: RegExp,
+	country: string,
+): PostalHit | null {
+	const pattern = new RegExp(
+		re.source,
+		re.flags.includes("g") ? re.flags : `${re.flags}g`,
+	);
+	let best: PostalHit | null = null;
+	for (const m of text.matchAll(pattern)) {
+		const code = normalizePostal(country, m);
+		if (code) {
+			best = { code, end: (m.index ?? 0) + m[0].length };
+		}
+	}
+	return best;
+}
+
+/** The rightmost code in `text` among the given (country, shape) pairs; earlier pairs win a tie. */
+function bestInLine(
+	text: string,
+	shapes: readonly (readonly [string, RegExp])[],
+): string | null {
+	let best: PostalHit | null = null;
+	for (const [country, re] of shapes) {
+		const hit = lastMatch(text, re, country);
+		if (hit && (!best || hit.end > best.end)) {
+			best = hit;
+		}
+	}
+	return best?.code ?? null;
+}
+
+/**
+ * The country the address names on its LAST line (a phone line below it is
+ * passed over), and that line. Amazon prints the country last; a country word
+ * on a street line ("12345 France St") is a street name, never the country.
+ */
+function addressCountry(
+	lines: readonly string[],
+	first: number,
+): { country: string; line: number } | null {
+	for (let index = lines.length - 1; index >= first; index -= 1) {
+		const line = lines[index] ?? "";
+		if (!line || isPhoneLine(line)) {
+			continue;
+		}
+		for (const [country, re] of COUNTRY_NAMES) {
+			if (re.test(line)) {
+				return { country, line: index };
+			}
+		}
+		return null;
+	}
+	return null;
+}
+
+function scanLines(
+	lines: readonly string[],
+	from: number,
+	first: number,
+	shapes: readonly (readonly [string, RegExp])[],
+): string | null {
+	for (let index = from; index >= first; index -= 1) {
+		const line = lines[index] ?? "";
+		if (!line || isPhoneLine(line)) {
+			continue;
+		}
+		const found = bestInLine(line, shapes);
+		if (found) {
+			return found;
+		}
+	}
+	return null;
+}
+
+/**
+ * The postal code of an address given as its lines, in the shape of the
+ * country the address is IN, which need not be the store's: an amazon.com
+ * order can ship to Toronto. Read from the last line upwards so the city/postal
+ * line wins over a street number of the same shape, and rightmost within a
+ * line (`12345 Main St Seattle, WA 98101` is 98101).
+ *
+ *   1. The address's last line names a country (`Canada`, `Deutschland`):
+ *      that country's shape, from that line upwards.
+ *   2. Otherwise the store country's shape, together with every shape that
+ *      cannot be mistaken for another country's (A1A 1A1, SW1A 1AA,
+ *      12345-678, 〒123-4567, 12345-6789).
+ *
+ * `skipFirst` skips line 0, the recipient on an order's shipping address.
+ */
+export function parsePostalCode(
+	lines: readonly string[],
+	s: AmazonStore = DEFAULT_AMAZON_STORE,
+	{ skipFirst = true }: { skipFirst?: boolean } = {},
+): string | null {
+	const clean = lines.map(cleanText);
+	const first = skipFirst ? 1 : 0;
+	if (clean.length <= first) {
+		return null;
+	}
+	const named = addressCountry(clean, first);
+	if (named) {
+		const shape = POSTAL_SHAPES[named.country];
+		if (shape) {
+			const found = scanLines(clean, named.line, first, [
+				[named.country, shape.loose],
+			]);
+			if (found) {
+				return found;
+			}
+		}
+	}
+	const own = POSTAL_SHAPES[s.country];
+	const shapes: [string, RegExp][] = own ? [[s.country, own.loose]] : [];
+	for (const country of STRICT_FALLBACK_ORDER) {
+		const strict = POSTAL_SHAPES[country]?.strict;
+		if (strict && country !== s.country) {
+			shapes.push([country, strict]);
+		}
+	}
+	return scanLines(clean, clean.length - 1, first, shapes);
+}
 
 /** One postal code in `text` in the store country's shape, normalized (`V6B 1A1`, `SW1A 1AA`, `123-4567`), or null. */
 export function matchPostalCode(
 	text: string | null | undefined,
 	s: AmazonStore = DEFAULT_AMAZON_STORE,
 ): string | null {
-	const clean = String(text ?? "")
-		.replace(ZERO_WIDTH_RE, "")
-		.trim();
+	const clean = cleanText(text);
 	if (!clean) {
 		return null;
 	}
-	const m = s.postal.exec(clean);
-	if (!m?.[1]) {
-		return null;
-	}
-	const head = m[1].toUpperCase();
-	const tail = m[2]?.toUpperCase();
-	if (!tail) {
-		return head;
-	}
-	if (s.id === "co.jp" || s.id === "com.br") {
-		return `${head}-${tail}`;
-	}
-	if (s.id === "in") {
-		return `${head}${tail}`;
-	}
-	return `${head} ${tail}`;
+	const m = new RegExp(s.postal.source, s.postal.flags.replace("g", "")).exec(
+		clean,
+	);
+	return m ? normalizePostal(s.country, m) : null;
 }
 
 /**
- * The postal code of an address given as its lines (recipient first, as Amazon
- * prints it). Read from the LAST line upwards, skipping the recipient line, so
- * the city/postal line wins over a street number that happens to have the same
- * shape (`12345 Main St` above `Seattle, WA 98101`).
+ * The postal code of an order's shipping address given as its lines
+ * (recipient first, as Amazon prints it). See `parsePostalCode`.
  */
 export function extractPostalCode(
 	lines: readonly string[],
 	s: AmazonStore = DEFAULT_AMAZON_STORE,
 ): string | null {
-	for (let index = lines.length - 1; index >= 1; index -= 1) {
-		const found = matchPostalCode(lines[index], s);
-		if (found) {
-			return found;
-		}
-	}
-	return null;
+	return parsePostalCode(lines, s, { skipFirst: true });
 }
