@@ -116,13 +116,21 @@ export const THREAD_SCAN_BOUND_REASON = "thread_scan_bound_reached";
 export const MAX_SEARCH_PAGES = 100;
 /** How many conversations are read at once. */
 export const DEFAULT_CONCURRENCY = 3;
-const MAX_OTHER_LIST_PAGES = 500;
-// A channel inventory progress guard, not a listing-size limit.
+// Consecutive nonempty inventory pages with no new id; a progress guard, not a listing-size limit.
 const NO_PROGRESS_PAGE_GUARD = 16;
-/** Slack allows up to 999 per history page; fewer round trips on busy channels. */
+// The page sizes below are per request, not history bounds. Slack's pagination
+// guide sets a maximum under 1000 and recommends 200 or fewer per page:
+// https://docs.slack.dev/apis/web-api/pagination/
+// A free workspace shows only its most recent 90 days of messages and files
+// (https://slack.com/help/articles/27204752526611), so a complete run there is
+// complete for what Slack shows.
+/** conversations.history and replies: under 1000 per page; fewer round trips on busy channels. */
 const HISTORY_PAGE_LIMIT = "999";
+/** users.conversations: Slack's recommended 200 per page. */
 const LIST_PAGE_LIMIT = "200";
+/** users.list: under Slack's 1000 maximum; above its 200 recommendation to save round trips. */
 const USERS_PAGE_LIMIT = "500";
+/** search.messages: Slack's documented maximum of 100 matches per page. */
 const SEARCH_PAGE_COUNT = "100";
 const THREAD_TS_IN_PERMALINK = /[?&]thread_ts=(\d{10}\.\d{1,6})/;
 /** A method answered `ok` with a body this connector's schema does not recognise. */
@@ -372,7 +380,8 @@ async function listAll<
 	const seenIds = new Set<string>();
 	let noProgress = 0;
 	let cursor = "";
-	for (let pageNo = 0; idsOf !== undefined || pageNo < MAX_OTHER_LIST_PAGES; pageNo += 1) {
+	// Slack's empty next_cursor ends the list; a repeated cursor is refused.
+	while (true) {
 		const answer = parseAnswer(
 			schema,
 			method,
@@ -385,20 +394,20 @@ async function listAll<
 		pages.push(answer);
 		cursor = answer.response_metadata?.next_cursor ?? "";
 		const before = seenIds.size;
-		for (const id of idsOf?.(answer) ?? []) seenIds.add(id);
+		const ids = idsOf?.(answer) ?? [];
+		for (const id of ids) seenIds.add(id);
 		if (cursor === "") {
 			return pages;
 		}
-		if (idsOf !== undefined) {
+		// Slack may answer a filtered list with an empty page and a next cursor,
+		// so an empty page neither counts toward the guard nor resets it.
+		if (ids.length > 0)
 			noProgress = seenIds.size === before ? noProgress + 1 : 0;
-			if (seenCursors.has(cursor) || noProgress > NO_PROGRESS_PAGE_GUARD) {
-				throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
-			}
-			seenCursors.add(cursor);
+		if (seenCursors.has(cursor) || noProgress > NO_PROGRESS_PAGE_GUARD) {
+			throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
 		}
+		seenCursors.add(cursor);
 	}
-	// Other list methods retain their existing bound; no partial checkpoint.
-	throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
 }
 
 /**
@@ -506,8 +515,11 @@ async function listConversations(
 	const allowed = new Set(
 		run.options.channelAllowlist.map((entry) => entry.toLowerCase()),
 	);
-	return pages
-		.flatMap((page) => page.channels ?? [])
+	// A channel repeated across pages is kept once, first row wins.
+	const byId = new Map<string, SlackConversationObject>();
+	for (const channel of pages.flatMap((page) => page.channels ?? []))
+		if (!byId.has(channel.id)) byId.set(channel.id, channel);
+	return [...byId.values()]
 		.filter(
 			(conversation) =>
 				allowed.size === 0 ||

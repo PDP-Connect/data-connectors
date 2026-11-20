@@ -33,6 +33,7 @@ import {
 	FIXTURE_NOW_SECONDS,
 	fakeApi,
 	fixture,
+	fixtureAnswer,
 	type Harness,
 	harness,
 	TEAM,
@@ -1079,6 +1080,125 @@ for (const mode of ["long", "no-progress", "repeat"] as const) {
 		}
 	});
 }
+
+test("channel inventory: empty pages with fresh cursors are followed to the end", async () => {
+	const h = harness(["channels"]);
+	let pages = 0;
+	await run(
+		h,
+		fakeApi((call) => {
+			if (call.method !== "users.conversations") return undefined;
+			pages += 1;
+			assert.ok(pages <= 22, "the inventory must end on Slack's empty cursor");
+			const last = pages === 22;
+			const channels =
+				pages === 1 || last
+					? [
+							{
+								id: `C${String(pages).padStart(10, "0")}`,
+								name: `synthetic-${pages}`,
+								is_channel: true,
+								is_member: true,
+							},
+						]
+					: [];
+			return {
+				ok: true,
+				channels,
+				response_metadata: { next_cursor: last ? "" : String(pages + 1) },
+			};
+		}),
+	);
+	assert.equal(pages, 22);
+	assert.equal(h.of("channels").length, 2);
+	assert.ok(h.state("channels"));
+});
+
+test("channel inventory: a channel repeated across pages is emitted and counted once", async () => {
+	const h = harness(["channels"]);
+	const row = (id: string, name: string) => ({
+		id,
+		name,
+		is_channel: true,
+		is_member: true,
+	});
+	await run(
+		h,
+		fakeApi((call) => {
+			if (call.method !== "users.conversations") return undefined;
+			return call.params.cursor === undefined
+				? {
+						ok: true,
+						channels: [
+							row("C0000000001", "first"),
+							row("C0000000002", "second"),
+						],
+						response_metadata: { next_cursor: "2" },
+					}
+				: {
+						ok: true,
+						channels: [row("C0000000002", "renamed")],
+						response_metadata: { next_cursor: "" },
+					};
+		}),
+	);
+	assert.deepEqual(
+		h.of("channels").map((c) => c.id),
+		["C0000000001", "C0000000002"],
+	);
+	const coverage = h.coverage().find((c) => c.stream === "channels");
+	assert.equal(coverage?.considered, 2);
+	assert.equal(coverage?.covered, 2);
+});
+
+test("users: a directory longer than 500 pages is read to Slack's last page", async () => {
+	const h = harness(["users"]);
+	const template = (
+		fixtureAnswer("users.list", {}) as {
+			members: Array<Record<string, unknown>>;
+		}
+	).members[0]!;
+	let pages = 0;
+	await run(
+		h,
+		fakeApi((call) => {
+			if (call.method !== "users.list") return undefined;
+			pages += 1;
+			assert.ok(pages <= 501, "the directory must end on Slack's empty cursor");
+			return {
+				ok: true,
+				members: [{ ...template, id: `U${String(pages).padStart(10, "0")}` }],
+				response_metadata: {
+					next_cursor: pages === 501 ? "" : String(pages + 1),
+				},
+			};
+		}),
+	);
+	assert.equal(pages, 501);
+	assert.equal(h.of("users").length, 501);
+	assert.ok(h.state("users"));
+});
+
+test("users: a repeated cursor still refuses the directory", async () => {
+	const h = harness(["users"]);
+	let pages = 0;
+	await run(
+		h,
+		fakeApi((call) => {
+			if (call.method !== "users.list") return undefined;
+			pages += 1;
+			assert.ok(pages <= 3, "a repeated cursor must stop the walk");
+			return {
+				ok: true,
+				members: [],
+				response_metadata: { next_cursor: "same" },
+			};
+		}),
+	);
+	assert.equal(pages, 2);
+	assert.equal(h.state("users"), undefined);
+	assert.ok(h.skips().some((entry) => entry.stream === "users"));
+});
 
 test("conversation kinds and the allowlist narrow what is asked for", async () => {
 	const kinds = harness(["messages"]);
