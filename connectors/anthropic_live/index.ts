@@ -137,6 +137,16 @@ const maxConversationsPerRun = () =>
 // convention; see connectors/anthropic/index.ts).
 const detailDelayMs = () =>
 	Number(process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS) || 400;
+const detailRetryDelayMs = () =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_DETAIL_RETRY_DELAY_MS) || 3000;
+/** Tries per conversation read before a network error ends the streams. */
+const DETAIL_ATTEMPTS = 3;
+/**
+ * The in-page fetch gives up before the PageShim bridge's 30 s per-call
+ * limit, so a slow answer is a status 0 this connector can retry instead of
+ * a bridge timeout that fails the whole run (see strava_browser).
+ */
+const API_FETCH_TIMEOUT_MS = 25_000;
 const DETAIL_QUERY = "tree=True&rendering_mode=messages&render_all_tools=true";
 const TRAILING_ZEROS_RE = /0+$/;
 
@@ -252,31 +262,60 @@ export async function ensureAnthropicLiveSession({
  * decides whether that means "signed out" or "not available on this plan".
  */
 async function apiGet(page: Page, path: string): Promise<ApiResult> {
-	return await page.evaluate(async (apiPath) => {
-		if (location.origin !== "https://claude.ai") {
-			return { status: 0, json: null };
-		}
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 60_000);
-		try {
-			const res = await fetch(apiPath, {
-				credentials: "include",
-				headers: { accept: "application/json" },
-				signal: controller.signal,
-			});
-			let json: unknown = null;
-			try {
-				json = await res.json();
-			} catch {
-				json = null;
+	try {
+		return await evaluateGet(page, path);
+	} catch {
+		// A throw from the evaluate itself (a host bridge timeout, a page that
+		// navigated away mid-call) is a network error, not the end of the run.
+		return { status: 0, json: null };
+	}
+}
+
+async function evaluateGet(page: Page, path: string): Promise<ApiResult> {
+	return await page.evaluate(
+		async ({ apiPath, timeoutMs }) => {
+			if (location.origin !== "https://claude.ai") {
+				return { status: 0, json: null };
 			}
-			return { status: res.status, json };
-		} catch {
-			return { status: 0, json: null };
-		} finally {
-			clearTimeout(timeout);
-		}
-	}, path);
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), timeoutMs);
+			try {
+				const res = await fetch(apiPath, {
+					credentials: "include",
+					headers: { accept: "application/json" },
+					signal: controller.signal,
+				});
+				let json: unknown = null;
+				try {
+					json = await res.json();
+				} catch {
+					json = null;
+				}
+				return { status: res.status, json };
+			} catch {
+				return { status: 0, json: null };
+			} finally {
+				clearTimeout(timeout);
+			}
+		},
+		{ apiPath: path, timeoutMs: API_FETCH_TIMEOUT_MS },
+	);
+}
+
+/**
+ * Reads one conversation, retrying a network error or timeout (status 0) a
+ * few times with a growing pause: on a busy proxy one read can stall while
+ * the next succeeds. Other statuses return at once.
+ */
+async function readConversation(
+	page: Page,
+	path: string,
+	attempt = 1,
+): Promise<ApiResult> {
+	const res = await apiGet(page, path);
+	if (res.status !== 0 || attempt >= DETAIL_ATTEMPTS) return res;
+	await politeDelay(detailRetryDelayMs() * attempt);
+	return await readConversation(page, path, attempt + 1);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1069,7 +1108,7 @@ export async function runConversationStreams(
 					`Reading conversation ${index + 1} of ${batch.length}`,
 					{ stream: MESSAGES_STREAM },
 				);
-				const res = await apiGet(
+				const res = await readConversation(
 					ctx.page,
 					`${orgPath}/chat_conversations/${item.id}?${DETAIL_QUERY}`,
 				);

@@ -18,6 +18,7 @@ import { CONSENT_TIME_FIELDS } from "../../packages/polyfill-connectors/src/gene
 import { validateRecord } from "./schemas.ts";
 
 process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS = "1";
+process.env.PDPP_ANTHROPIC_LIVE_DETAIL_RETRY_DELAY_MS = "1";
 
 /** Run `fn` with env vars set, restoring them afterwards. */
 export async function withEnv<T>(
