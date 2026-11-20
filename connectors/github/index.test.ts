@@ -19,6 +19,7 @@ import {
 	ingestRecord,
 } from "../../reference-implementation/server/records.ts";
 import {
+	collectContributions,
 	collectEvents,
 	collectGists,
 	collectIssues,
@@ -2113,6 +2114,70 @@ test("GitHub contributions split a multi-year incremental gap at UTC calendar bo
 			{ from: "2023-10-01T00:00:00Z", to: "2023-12-31T23:59:59Z" },
 		],
 	);
+});
+
+test("GitHub contributions resume after two completed yearly windows", async (t) => {
+	const year = new Date().getUTCFullYear();
+	const created = `${year - 4}-01-01T00:00:00Z`;
+	const calls: Array<{ from: string; to: string }> = [];
+	let stop = true;
+	mockFetch(t, async (input, init) => {
+		const url = new URL(String(input));
+		if (url.pathname === "/user")
+			return jsonResponse({ id: 1, login: "fixture", created_at: created });
+		const {
+			variables: { from, to },
+		} = JSON.parse(String(init?.body));
+		calls.push({ from, to });
+		if (stop && calls.length > 2)
+			return jsonResponse({ message: "fixture interrupted" }, { status: 400 });
+		return jsonResponse({
+			data: {
+				user: {
+					contributionsCollection: {
+						contributionCalendar: {
+							weeks: [
+								{
+									contributionDays: [
+										{ date: from.slice(0, 10), contributionCount: 1 },
+									],
+								},
+							],
+						},
+					},
+				},
+			},
+		});
+	});
+	const first = makeCtx(["contributions"]);
+	await assert.rejects(collectContributions(first.ctx));
+	const checkpoint = first.states.at(-1)?.cursor as {
+		last_date: string | null;
+		resume: { completed: unknown[] };
+	};
+	assert.equal(checkpoint.last_date, null);
+	assert.deepEqual(checkpoint.resume.completed, calls.slice(0, 2));
+	assert.equal(first.coverages.length, 0);
+	const completed = calls.slice(0, 2);
+	const failedWindow = calls[2];
+	stop = false;
+	calls.length = 0;
+	const second = makeCtx(["contributions"], { contributions: checkpoint });
+	await collectContributions(second.ctx);
+	assert.equal(calls.length, 3);
+	assert.deepEqual(calls[0], failedWindow);
+	assert.ok(
+		calls.every(
+			(window) => !completed.some((prior) => prior.from === window.from),
+		),
+	);
+	const terminal = second.states.at(-1)?.cursor as {
+		last_date: string;
+		resume?: unknown;
+	};
+	assert.equal(terminal.resume, undefined);
+	assert.equal(terminal.last_date, `${year}-01-01`);
+	assert.equal(second.coverages.at(-1)?.considered, 5);
 });
 
 test("GitHub incremental events evaluate the complete mixed cursor page", async (t: TestContext) => {

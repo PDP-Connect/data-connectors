@@ -1830,6 +1830,16 @@ export function resolveContributionWindows(
 	}));
 }
 
+type ContributionResume = {
+	v: 1;
+	userId: string;
+	sinceDate: string | null;
+	upper: string;
+	completed: Array<{ from: string; to: string }>;
+	latestDate: string | null;
+	considered: number;
+};
+
 export async function collectContributions(ctx: StreamCtx): Promise<void> {
 	await ctx.progress("Fetching contribution history", {
 		stream: "contributions",
@@ -1837,7 +1847,7 @@ export async function collectContributions(ctx: StreamCtx): Promise<void> {
 	});
 	const req = ctx.requested.get("contributions");
 	const contribState = ctx.state.contributions as
-		| { last_date?: string }
+		| { last_date?: string; resume?: ContributionResume }
 		| undefined;
 	const priorDate = contribState?.last_date;
 	const rawSince = req?.time_range?.since;
@@ -1848,11 +1858,45 @@ export async function collectContributions(ctx: StreamCtx): Promise<void> {
 
 	const { data: me } = await gh<GitHubUser>(ctx, "/user");
 	const userId = String(me.id);
-	const windows = resolveContributionWindows(sinceDate, me.created_at);
+	const resume = contribState?.resume;
+	const resumedAt =
+		typeof resume?.upper === "string" ? new Date(resume.upper) : null;
+	const resumedWindows =
+		resumedAt &&
+		Number.isFinite(resumedAt.getTime()) &&
+		resumedAt.getTime() <= Date.now()
+			? resolveContributionWindows(sinceDate, me.created_at, resumedAt)
+			: [];
+	const validResume =
+		resume?.v === 1 &&
+		resume.userId === userId &&
+		resume.sinceDate === sinceDate &&
+		Array.isArray(resume.completed) &&
+		resume.completed.length > 0 &&
+		resume.completed.length < resumedWindows.length &&
+		resume.completed.every(
+			(window, i) =>
+				window?.from === resumedWindows[i]?.from &&
+				window?.to === resumedWindows[i]?.to,
+		) &&
+		Number.isSafeInteger(resume.considered) &&
+		resume.considered >= 0 &&
+		(resume.latestDate === null ||
+			(typeof resume.latestDate === "string" &&
+				/^\d{4}-\d{2}-\d{2}$/.test(resume.latestDate) &&
+				resume.latestDate <= resume.upper.slice(0, 10)))
+			? resume
+			: null;
+	const upper = validResume?.upper ?? new Date().toISOString();
+	const windows = validResume
+		? resumedWindows
+		: resolveContributionWindows(sinceDate, me.created_at, new Date(upper));
+	const completed = validResume?.completed.slice() ?? [];
 
-	let latestDate: string | null | undefined = priorDate;
-	let totalConsidered = 0;
-	for (const window of windows) {
+	let latestDate: string | null | undefined =
+		validResume?.latestDate ?? priorDate;
+	let totalConsidered = validResume?.considered ?? 0;
+	for (const window of windows.slice(completed.length)) {
 		const pageExtra = {
 			stream: "contributions",
 			phase: "fetch",
@@ -1865,9 +1909,16 @@ export async function collectContributions(ctx: StreamCtx): Promise<void> {
 			{ login: me.login, from: window.from, to: window.to },
 			pageExtra,
 		);
-		const days = flattenContributionDays(
-			response.data?.user?.contributionsCollection,
-		);
+		const collection = response.data?.user?.contributionsCollection;
+		if (
+			!Array.isArray(collection?.contributionCalendar?.weeks) ||
+			collection.contributionCalendar.weeks.some(
+				(week) => !Array.isArray(week?.contributionDays),
+			)
+		) {
+			throw new Error("GitHub contributions window did not contain a calendar");
+		}
+		const days = flattenContributionDays(collection);
 		for (const day of days) {
 			if (priorDate && day.date <= priorDate) {
 				continue;
@@ -1879,6 +1930,25 @@ export async function collectContributions(ctx: StreamCtx): Promise<void> {
 			);
 			latestDate = laterIso(latestDate, day.date);
 		}
+		completed.push(window);
+		// Only a completely emitted window is resumable. The ordinary watermark stays unchanged.
+		if (completed.length < windows.length)
+			await ctx.emit({
+				type: "STATE",
+				stream: "contributions",
+				cursor: {
+					last_date: priorDate ?? null,
+					resume: {
+						v: 1,
+						userId,
+						sinceDate,
+						upper,
+						completed: completed.slice(),
+						latestDate: latestDate ?? null,
+						considered: totalConsidered,
+					},
+				},
+			});
 	}
 	await declareListConsidered(
 		ctx,

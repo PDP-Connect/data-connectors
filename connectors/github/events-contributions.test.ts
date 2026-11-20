@@ -349,7 +349,10 @@ test("collectContributions: emits one record per day and a STATE cursor", async 
 		records.map((r) => r.data.id),
 		["42:2026-06-01", "42:2026-06-02"],
 	);
-	const state = states.find((s) => s.stream === "contributions");
+	// A multi-window run saves a resume point after each finished window; the
+	// last STATE is the one that moves the watermark.
+	const contributionStates = states.filter((s) => s.stream === "contributions");
+	const state = contributionStates[contributionStates.length - 1];
 	assert.deepEqual(state?.cursor, { last_date: "2026-06-02" });
 });
 
