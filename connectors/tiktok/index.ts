@@ -1859,6 +1859,19 @@ export async function collectTikTok(
 				byId.set(collection.collectionId, collection);
 				added += 1;
 			}
+			// A last page that only repeats seen collections proves nothing when
+			// no count exists to check it; a known count is settled by the caller.
+			if (
+				!page.hasMore &&
+				added === 0 &&
+				page.collections.length > 0 &&
+				total === null
+			) {
+				throw new TikTokStop(
+					"incomplete",
+					"/api/user/collection_list/ returned a last page that added nothing new without proving the end",
+				);
+			}
 			if (!page.hasMore) {
 				return {
 					entries,

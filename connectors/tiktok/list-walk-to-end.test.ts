@@ -91,7 +91,7 @@ async function run(
 				} else if (stream === "favorite_collections") {
 					json = {
 						...collections,
-						total: pages * 30,
+						total: fault === "terminal-ids" ? undefined : pages * 30,
 						hasMore,
 						cursor: String(cursor),
 						collectionList: ids.map((collectionId) => ({
@@ -194,6 +194,18 @@ test("videos: a duplicate-only terminal page without a total refuses without STA
 	assert.equal(result.records.length, 30);
 	assert.equal(result.failures.length, 1);
 	assert.match(result.failures[0]!, /^tiktok_list_incomplete:/);
+	assert.equal(
+		result.messages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("favorite_collections: a duplicate-only last page without a total refuses without STATE", async () => {
+	const result = await run("favorite_collections", 2, "terminal-ids");
+	assert.equal(result.reads, 2);
+	assert.equal(result.failures.length, 1);
+	assert.match(result.failures[0]!, /^tiktok_list_incomplete:/);
+	assert.match(result.failures[0]!, /added nothing new/);
 	assert.equal(
 		result.messages.some((message) => message.type === "STATE"),
 		false,
