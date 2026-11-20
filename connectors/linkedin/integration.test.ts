@@ -2883,6 +2883,18 @@ test("skills walk: a first page is completed from the owner's skills collection"
 	assert.equal(paths.filter((path) => path.includes("/dash/profileSkills?")).length, 2);
 });
 
+test("skills walk: eleven short pages reach the proved total", async () => {
+	const skills = Array.from({ length: 22 }, (_, i) => ({
+		entityUrn: `urn:li:fsd_skill:(12,${i + 1})`, name: `Skill ${i + 1}`,
+	}));
+	const profile = skillsFirstPageProfile();
+	profile.profileSkills.paging.total = skills.length;
+	const { recording, paths } = await collectProof({ profile, skillsPage: skillsWalk(skills, skills.length, 2) });
+	assert.deepEqual(skillIds(recording), skills.map((skill) => skill.entityUrn));
+	assert.equal(claimsFullCoverage(recording, "skills"), true);
+	assert.equal(paths.filter((path) => path.includes("/dash/profileSkills?")).length, 11);
+});
+
 test("skills walk: anything unproven keeps the first page and the gap", async (t) => {
 	const cases: Record<string, (start: number) => unknown> = {
 		"endpoint missing": () => httpFailure(404),
@@ -2901,7 +2913,7 @@ test("skills walk: anything unproven keeps the first page and the gap", async (t
 	}
 });
 
-async function collectSizedConnections(total: number) {
+async function collectSizedConnections(total: number, advertiseContinuation = false) {
 	const recording = makeRecordingEmit(validateRecord);
 	const ctx = buildCtx(["connections"], recording);
 	const starts: number[] = [];
@@ -2918,7 +2930,9 @@ async function collectSizedConnections(total: number) {
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
 			starts.push(start);
-			return { elements: members.slice(start, start + 40), paging: { start, count: 40, total } };
+			return { elements: members.slice(start, start + 40), paging: { start, count: 40, total,
+				...(advertiseContinuation && start === 0 ? { links: [{ rel: "next" }] } : {}),
+			} };
 		}
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
 			const ids = new URL(path, "https://www.linkedin.com").searchParams.get("ids");
@@ -2951,6 +2965,19 @@ test("connections bound: 30,000 members, LinkedIn's limit, reach empty end and f
 	assert.deepEqual(recording.emitted.map(row => row.data.id), members.map(member => member.connectedMember));
 	assert.deepEqual(skipResults(recording), []);
 	assert.equal(claimsFullCoverage(recording, "connections"), true);
+});
+
+test("connections: unsupported continuation discloses restart on both runs", async () => {
+	const checkRun = async () => {
+		const { recording, starts } = await collectSizedConnections(80, true);
+		assert.deepEqual(starts, [0, 80]); // the second read independently checks the summary boundary
+		assert.equal(claimsFullCoverage(recording, "connections"), false);
+		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE"), false);
+		const gap = skipResults(recording).find((message) => message.stream === "connections");
+		assert.equal(diagnosticsOf(gap ?? {}).resume_supported, false);
+	};
+	await checkRun(); // each run reads from the start: continuation is unsupported
+	await checkRun();
 });
 
 test("connections bound: more than 30,000 members refuse page_budget", async () => {

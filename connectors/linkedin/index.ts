@@ -324,7 +324,7 @@ async function fetchDashProfile(
 }
 
 const SKILLS_PAGE_SIZE = 20;
-const SKILLS_MAX_PAGES = 10;
+// Walk until the stable reported total or a verified failure.
 
 interface SkillsWalk {
 	/** Every skill, when the walk proved the whole list; otherwise absent. */
@@ -355,7 +355,7 @@ async function walkProfileSkills(
 	// Each page starts where the last one's rows ended: a server may return
 	// fewer than asked for.
 	let start = 0;
-	for (let index = 0; index < SKILLS_MAX_PAGES; index += 1) {
+	while (total === null || seen.size < total) {
 		const result = await voyagerFetch<Record<string, unknown>>(page,
 			`/voyager/api/identity/dash/profileSkills?q=viewee&profileUrn=${urn}&start=${start}&count=${SKILLS_PAGE_SIZE}`,
 			capture, `skills-page-${String(start).padStart(4, "0")}`);
@@ -1060,6 +1060,7 @@ export async function collectLinkedIn(
 					summary_before: beforeSummary.total,
 					summary_after: afterSummary.total,
 					termination_reason: terminationReason,
+					...(terminationReason === "continuation_advertised" ? { resume_supported: false, resume_reason: "unsupported_provider_continuation" } : {}),
 					observed_count: connectionsResult.observed,
 					total: connectionsResult.total,
 					missing_urn_count: connectionsResult.missingUrnCount,
@@ -1082,7 +1083,6 @@ export async function collectLinkedIn(
 		);
 	}
 }
-
 /** Profile sections read from the dash profile, one stream each. */
 const PROFILE_SECTIONS: ReadonlyArray<{
 	build: (items: readonly unknown[]) => StreamRows<Record<string, unknown>>;
