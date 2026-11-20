@@ -138,6 +138,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
   let nextToken = resume?.nextToken ?? null;
   const seenTokens = new Set<string>(nextToken ? [nextToken] : []);
   const seenIds = new Set<string>(resume?.lastIds ?? []);
+  const overlapDay = addDays(end, 1);
   let checkingResume = resume !== undefined;
   let checkpoint = resume;
   let noProgressPages = 0;
@@ -176,8 +177,10 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       if (!Array.isArray(payload.data)) return { rows, complete: false };
       const pageRows: T[] = [];
       const pageIds = new Set<string>();
+      const overlapRows: T[] = [];
       let invalidRow = false;
       const previousSize = seenIds.size;
+      let hasInWindowRow = false;
       for (const row of payload.data) {
         // A row without an identity or a calendar day cannot be placed in the
         // inventory, so its page cannot prove the inventory complete.
@@ -186,6 +189,13 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
           invalidRow = true;
           continue;
         }
+        if (row.day < start || row.day > end) {
+          // The API may include the extra boundary day requested for the next
+          // chunk; retain it for dedupe/enrichment, never for inventory proof.
+          if (row.day === overlapDay) overlapRows.push(row as T);
+          continue;
+        }
+        hasInWindowRow = true;
         pageRows.push(row as T);
         pageIds.add(row.id);
       }
@@ -198,9 +208,10 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
         }
         checkingResume = false;
       }
-      rows.push(...pageRows);
+      rows.push(...pageRows, ...overlapRows);
       for (const id of pageIds) seenIds.add(id);
-      if (invalidRow) return { rows, complete: false };
+      // A page with rows but none inside this chunk cannot witness the chunk.
+      if (invalidRow || (payload.data.length > 0 && !hasInWindowRow)) return { rows, complete: false };
       // A terminal next_token is Oura's only source evidence of a complete inventory.
       if (!("next_token" in payload)) return { rows, complete: false };
       // A last page that only repeats seen rows proves nothing about the end.

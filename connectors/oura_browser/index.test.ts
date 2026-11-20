@@ -125,6 +125,32 @@ for (const status of [401, 403]) {
   });
 }
 
+for (const terminal of [false, true]) {
+  test(`a nonempty page wholly outside the inventory window is retryable (terminal=${terminal})`, async () => {
+    const h = harness({ streams: ["readiness"], since: "2026-06-01T00:00:00Z", until: "2026-06-30T00:00:00Z",
+      answers: (_endpoint, continuation) => ({
+        data: [{ ...replay.daily_readiness[0], id: id(continuation ? 702 : 701), day: "2026-07-10" }],
+        next_token: terminal || continuation ? null : "more-outside",
+      }),
+    });
+    await collectOuraBrowser(h.ctx, ACCESS);
+    assert.equal(h.records.length, 0);
+    assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+    assert.deepEqual(h.messages.filter((message) => message.type === "SKIP_RESULT").map((message) =>
+      [message.reason, message.recovery_hint]), [["inventory_not_proven_complete",
+        { action: "retry_by_runtime", retryable: true }]]);
+  });
+}
+
+test("an in-window page proves progress and the same window still completes", async () => {
+  const row = { ...replay.daily_readiness[0], id: id(703), day: "2026-06-15", timestamp: "2026-06-15T08:15:00+00:00" };
+  const h = harness({ streams: ["readiness"], since: "2026-06-01T00:00:00Z", until: "2026-06-30T00:00:00Z",
+    answers: () => ({ data: [row], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(703)]);
+  noSkip(h);
+});
+
 test("an exclusive until and a lower bound constrain requests and emitted records", async () => {
   const h = harness({ streams: ["readiness"], since: "2026-09-23T12:00:00Z", until: "2026-09-24T00:00:00Z",
     answers: () => ({ data: [...replay.daily_readiness, { ...replay.daily_readiness[0], id: id(302), day: "2026-09-25" }], next_token: null }) });
@@ -184,25 +210,26 @@ test("a boundary day returned by two chunks is emitted once per id", async () =>
 });
 
 test("a boundary day shared by sleep sessions and daily scores is emitted once per id", async () => {
-  const sessions = [{ ...replay.sleep[0], id: id(601), day: BOUNDARY }];
-  const scores = [{ ...replay.daily_sleep[0], id: id(602), day: BOUNDARY }];
+  const sessions = [{ ...replay.sleep[0], id: id(600), day: "2026-08-10" }, { ...replay.sleep[0], id: id(601), day: BOUNDARY }];
+  const scores = [{ ...replay.daily_sleep[0], id: id(603), day: "2026-08-10" }, { ...replay.daily_sleep[0], id: id(602), day: BOUNDARY }];
   const h = harness({ streams: ["sleep"], ...WINDOW, answers: (endpoint, token, window) =>
     inclusiveWindow(endpoint === "sleep" ? sessions : scores)(endpoint, token, window) });
   await collectOuraBrowser(h.ctx, ACCESS);
   assert.equal(h.calls.length, 4);
   assert.deepEqual(h.records.map(({ data }) => [data.record_type, data.id]),
-    [["sleep_session", id(601)], ["daily_score", id(602)]]);
+    [["sleep_session", id(600)], ["sleep_session", id(601)], ["daily_score", id(603)], ["daily_score", id(602)]]);
   noSkip(h);
 });
 
 test("of two copies of one id, the copy with more filled fields is kept", async () => {
   const sparse = { ...replay.daily_readiness[0], id: id(502), day: BOUNDARY, timestamp: `${BOUNDARY}T08:15:00+00:00`, score: null };
   const full = { ...sparse, score: 77 };
+  const inside = { ...sparse, id: id(503), day: "2026-08-10", timestamp: "2026-08-10T08:15:00+00:00", score: 61 };
   // The first chunk returns the sparse copy; the second chunk returns the full copy.
   const h = harness({ streams: ["readiness"], ...WINDOW, answers: (_endpoint, _token, window) =>
-    ({ data: [window.start === "2026-08-01" ? sparse : full], next_token: null }) });
+    ({ data: window.start === "2026-08-01" ? [inside, sparse] : [full], next_token: null }) });
   await collectOuraBrowser(h.ctx, ACCESS);
-  assert.deepEqual(h.records.map(({ data }) => [data.id, data.score]), [[id(502), 77]]);
+  assert.deepEqual(h.records.map(({ data }) => [data.id, data.score]), [[id(503), 61], [id(502), 77]]);
 });
 
 test("a window inside one chunk emits each row once, as before", async () => {
