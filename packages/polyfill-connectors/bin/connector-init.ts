@@ -597,7 +597,7 @@ if (isMainModule(import.meta.url)) {
   runConnector({
     name: "${name}",
     validateRecord,
-    retryablePattern: /ECONN|fetch failed/i,
+    retryablePattern: /ECONN|ETIMEDOUT|timeout|fetch failed|${name}_http_(?:408|429|5\\d\\d)\\b/i,
     auth: { kind: "env", required: ["${envVar}"] },
     async collect({ state, requested, credentials, emit, emitRecord, progress }) {
       const token = credentials.${envVar};
