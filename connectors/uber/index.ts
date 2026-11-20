@@ -102,8 +102,6 @@ const ACTIVITIES_PAGE_SIZE = 5;
  * than walking forever through a feed that repeats itself.
  */
 const MAX_DUPLICATE_ONLY_PAGES = 3;
-// Bound detail work per run; the shared checkpoint lets later runs pick up deferred IDs.
-const MAX_DETAIL_FETCHES = 200;
 const PAGE_DELAY_MS = 500;
 const DETAIL_DELAY_MS = 500;
 
@@ -492,12 +490,10 @@ export async function collectAllStreams(
 	const receiptsRequired = wantReceipts
 		? tripIds.filter((id) => !hydratedReceipts.has(id) && (!receiptResources || receiptResources.has(id)))
 		: [];
-	const tripBatch = new Set(tripsRequired.slice(0, MAX_DETAIL_FETCHES));
-	const receiptBatch = new Set(receiptsRequired.slice(0, MAX_DETAIL_FETCHES));
-	const detailIds = tripIds
-		.filter((id) => tripBatch.has(id) || receiptBatch.has(id))
-		.slice(0, MAX_DETAIL_FETCHES);
-	const attemptedDetailIds = new Set(detailIds);
+	const tripBatch = new Set(tripsRequired);
+	const receiptBatch = new Set(receiptsRequired);
+	const detailIds = tripIds.filter((id) => tripBatch.has(id) || receiptBatch.has(id));
+	const unreadReceipts: string[] = [];
 
 	for (const [index, tripId] of detailIds.entries()) {
 		if (tripBatch.has(tripId)) {
@@ -533,6 +529,8 @@ export async function collectAllStreams(
 						hydratedReceipts.add(tripId);
 					},
 				});
+			} else {
+				unreadReceipts.push(tripId);
 			}
 		}
 
@@ -585,13 +583,10 @@ export async function collectAllStreams(
 		);
 	}
 
-	const deferredReceiptIds = receiptsRequired.filter(
-		(id) => !attemptedDetailIds.has(id),
-	);
-	if (deferredReceiptIds.length > 0) {
+	if (unreadReceipts.length > 0) {
 		// Do not persist a locator under a time bound until its eligibility is proven.
 		if (!receiptScope?.time_range) {
-			for (const id of deferredReceiptIds) {
+			for (const id of unreadReceipts) {
 				await emit(
 					buildDetailGap({
 						stream: "receipts",
@@ -606,15 +601,10 @@ export async function collectAllStreams(
 		await emit({
 			type: "SKIP_RESULT",
 			stream: "receipts",
-			reason: "receipts_deferred_detail_budget",
+			reason: "receipts_unavailable_detail",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message: canWriteCheckpoint
-				? "The receipt detail limit was reached. Receipts remain to be collected."
-				: "The receipt detail limit was reached without a saved checkpoint. Receipts remain to be collected.",
-			diagnostics: {
-				detail_fetch_limit: MAX_DETAIL_FETCHES,
-				deferred_receipts: deferredReceiptIds.length,
-			},
+			message: "Some Uber receipt details were unavailable and remain unread.",
+			diagnostics: { unread_receipts: unreadReceipts.length },
 		});
 	}
 

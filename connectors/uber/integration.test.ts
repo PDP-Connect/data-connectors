@@ -488,7 +488,7 @@ test("collectAllStreams: long activity history has no page-budget SKIP", async (
 			{ body: activitiesBody([]) },
 		],
 		getTrip: Object.fromEntries(
-			Array.from({ length: 200 }, (_, i) => [
+			Array.from({ length: 201 }, (_, i) => [
 				`trip-${i}`,
 				{ body: getTripBody({ status: "COMPLETED" }) },
 			]),
@@ -497,20 +497,20 @@ test("collectAllStreams: long activity history has no page-budget SKIP", async (
 	const { ctx, messages, emitted } = makeCtx(["trips"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(calls.filter((call) => call === "Activities").length, 202);
-	assert.equal(emitted.length, 200, "the separate detail limit is unchanged");
+	assert.equal(emitted.length, 201, "every trip detail is hydrated");
 	assert.equal(
 		messages.some((message) => message.type === "SKIP_RESULT"),
 		false,
 	);
 	assert.equal(
 		messages.filter((message) => message.type === "DETAIL_GAP").length,
-		1,
+		0,
 	);
 	const coverage = messages.find(
 		(message) => message.type === "DETAIL_COVERAGE",
 	);
 	assert.ok(coverage?.type === "DETAIL_COVERAGE");
-	assert.deepEqual(coverage.gap_keys, ["trip-200"]);
+	assert.deepEqual(coverage.gap_keys, []);
 });
 
 test("fetchAllActivities: two duplicate-only pages in a row still follow the cursor", async () => {
@@ -904,18 +904,18 @@ test("collectAllStreams: a genuinely empty feed emits zero-key coverage", async 
 	assert.deepEqual(coverage.hydrated_keys, []);
 });
 
-test("trips hydration progresses over three runs without refetching finalized trips", async () => {
+test("trips hydrate beyond the old cap and retry only unfinished detail", async () => {
 	const ids = Array.from(
 		{ length: 450 },
 		(_, index) => `synthetic-trip-${index}`,
 	);
-	const run = async (state: BrowserCollectContext["state"] = {}) => {
+	const run = async (state: BrowserCollectContext["state"] = {}, omitOne = false) => {
 		const { fetchPath, calls } = makeScriptedFetch({
 			activitiesPages: [
 				{ body: activitiesBody(ids.map((uuid) => ({ uuid }))) },
 			],
 			getTrip: Object.fromEntries(
-				ids.map((id) => [id, { body: getTripBody({ status: "COMPLETED" }) }]),
+				ids.map((id, index) => [id, { body: getTripBody(omitOne && index === 300 ? null : { status: "COMPLETED" }) }]),
 			),
 		});
 		const { ctx, messages, emitted } = makeCtx(["trips"], state);
@@ -929,25 +929,20 @@ test("trips hydration progresses over three runs without refetching finalized tr
 			emitted,
 		};
 	};
-	const first = await run();
+	const first = await run({}, true);
 	const second = await run(first.state);
 	const third = await run(second.state);
-	assert.equal(first.calls.length, 200);
-	assert.equal(second.calls.length, 200);
-	assert.equal(third.calls.length, 50);
+	assert.deepEqual(first.calls, ids.map((id) => `GetTrip:${id}`));
+	assert.deepEqual(second.calls, ["GetTrip:synthetic-trip-300"]);
+	assert.deepEqual(third.calls, []);
 	assert.deepEqual(
-		[...first.calls, ...second.calls, ...third.calls],
-		ids.map((id) => `GetTrip:${id}`),
+		first.emitted.map((record) => record.data.id),
+		ids.filter((_, index) => index !== 300),
 	);
-	assert.deepEqual(
-		[...first.emitted, ...second.emitted, ...third.emitted].map(
-			(record) => record.data.id,
-		),
-		ids,
-	);
+	assert.deepEqual(second.emitted.map((record) => record.data.id), [ids[300]]);
 	assert.equal(
 		first.messages.filter((message) => message.type === "DETAIL_GAP").length,
-		250,
+		1,
 	);
 	assert.equal(
 		third.messages.some((message) => message.type === "DETAIL_GAP"),
@@ -996,7 +991,7 @@ test("receipts can hydrate after trips have already checkpointed their details",
 	);
 });
 
-test("receipt-only without parent STATE reports the unread tail as retryable deferred work", async () => {
+test("receipt-only without parent STATE hydrates a long history without inventing a checkpoint", async () => {
 	const ids = Array.from(
 		{ length: 201 },
 		(_, index) => `synthetic-receipt-${index}`,
@@ -1011,9 +1006,9 @@ test("receipt-only without parent STATE reports the unread tail as retryable def
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.deepEqual(calls, [
 		"Activities",
-		...ids.slice(0, 200).map((id) => `GetReceipt:${id}`),
+		...ids.map((id) => `GetReceipt:${id}`),
 	]);
-	assert.equal(emitted.length, 200);
+	assert.equal(emitted.length, 201);
 	assert.equal(
 		messages.some((message) => message.type === "STATE"),
 		false,
@@ -1022,18 +1017,27 @@ test("receipt-only without parent STATE reports the unread tail as retryable def
 		messages.some((message) => message.type === "DETAIL_COVERAGE"),
 		false,
 	);
-	const deferred = messages.find((message) => message.type === "SKIP_RESULT");
-	assert.ok(deferred?.type === "SKIP_RESULT");
-	assert.equal(deferred.stream, "receipts");
-	assert.equal(deferred.reason, "receipts_deferred_detail_budget");
-	assert.deepEqual(deferred.recovery_hint, {
-		action: "retry_by_runtime",
-		retryable: true,
+	assert.equal(messages.some((message) => message.type === "SKIP_RESULT" || message.type === "DETAIL_GAP"), false);
+});
+
+test("receipt-only reports an attempted unusable receipt as retryable", async () => {
+	const id = "synthetic-unread-receipt";
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: id }]) }],
+		getReceipt: { [id]: { body: getReceiptBody("") } },
 	});
-	const gaps = messages.filter((message) => message.type === "DETAIL_GAP");
-	assert.equal(gaps.length, 1);
-	assert.ok(gaps[0]?.type === "DETAIL_GAP");
-	assert.equal(gaps[0].stream, "receipts");
-	assert.equal(gaps[0].record_key, "synthetic-receipt-200");
-	assert.equal(gaps[0].retryable, true);
+	const { ctx, messages, emitted } = makeCtx(["receipts"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.deepEqual(calls, ["Activities", `GetReceipt:${id}`]);
+	assert.deepEqual(emitted, []);
+	assert.equal(messages.some((message) => message.type === "STATE"), false);
+	const gap = messages.find((message) => message.type === "DETAIL_GAP");
+	assert.ok(gap?.type === "DETAIL_GAP");
+	assert.equal(gap.stream, "receipts");
+	assert.equal(gap.record_key, id);
+	assert.equal(gap.retryable, true);
+	const skip = messages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip?.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "receipts_unavailable_detail");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
 });
