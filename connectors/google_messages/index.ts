@@ -111,8 +111,8 @@
  * gmcli gives no deletion signal for messages that scroll out of the
  * `--limit` window or a conversation gmcli stops returning, so an id once
  * seen stays remembered rather than being dropped and re-emitted as "new"
- * later. STATE is written after every message in this run's fetch has been
- * evaluated by the cursor and queued for emission — never before — and the
+ * later. STATE is written only for a non-truncated scan, after every fetched
+ * message has been evaluated and queued for emission if needed. The
  * local-collector runtime itself only durably commits a buffered STATE
  * cursor after the record batches emitted in the same run have been
  * enqueued (see collector-runner.ts's flushPendingBatch-before-checkpoint
@@ -438,15 +438,12 @@ export function parseGmcliMessagesJson(
 
 // ─── Bounding ────────────────────────────────────────────────────────────
 //
-// gmkit's `messages list` exposes only a flat `--limit` — no offset/cursor
-// pagination flag exists in the CLI; the tool requires a positive limit.
-// No tool cap: 1,000,000 only guards a runaway tool. A limit-hitting chat is treated
-// as POSSIBLY truncated (gmcli gives no "there were more" signal), and a
-// dedicated SKIP_RESULT diagnostic surfaces that honestly rather than silently
-// presenting a partial history as complete.
+// gmcli requires a positive flat limit, does not stream its JSON output,
+// and has no offset/cursor. These are local guards, not upstream caps.
 
+// Memory guard for gmcli's non-streaming, cursorless message read; a hit is disclosed.
 const DEFAULT_MESSAGES_PER_CHAT_LIMIT = 1_000_000;
-// Runaway-tool guard, not a platform limit; GMCLI_MAX_CHATS remains overridable.
+// Memory guard for gmcli's non-streaming, cursorless chat read; a hit is disclosed.
 const DEFAULT_MAX_CHATS = 1_000_000;
 
 function resolveMessagesPerChatLimit(): number {
@@ -852,11 +849,15 @@ export async function collect({
 	// interruption between here and that commit leaves the prior
 	// checkpoint (or none, on a first run) in place rather than a
 	// checkpoint claiming coverage this run never durably queued.
-	await emit({
-		type: "STATE",
-		stream: "messages",
-		cursor: { fingerprints: cursor.toState() },
-	});
+	// A limit hit is not exhaustion. Preserve the old cursor rather than
+	// checkpointing a prefix, even if all returned rows were unchanged.
+	if (!outcome.chatsTruncated && !outcome.truncated?.length) {
+		await emit({
+			type: "STATE",
+			stream: "messages",
+			cursor: { fingerprints: cursor.toState() },
+		});
+	}
 
 	// `messages` is this connector's only required stream and previously
 	// never proved its own coverage, leaving it permanently unmeasured

@@ -398,10 +398,9 @@ test("late rows: a message with an older sent_at than already-seen messages is s
 	);
 });
 
-// ─── Truncation: per-chat limit hit still commits STATE for what was fetched ─
+// ─── Truncation: bounded reads disclose the gap without checkpointing ───
 
-test("truncation: per-chat limit hit still commits a STATE watermark for the fetched window, plus an honest SKIP_RESULT", async () => {
-	const chats = [CHAT_ALICE];
+test("per-chat bound: a full page emits records and disclosure but no STATE", async () => {
 	const limit = 5;
 	const messages = Array.from({ length: limit }, (_, i) =>
 		msg({
@@ -409,47 +408,50 @@ test("truncation: per-chat limit hit still commits a STATE watermark for the fet
 			timestamp_ms: 1_754_071_000_000 + i * 1000,
 		}),
 	);
+	const env = { GMCLI_MESSAGES_PER_CHAT_LIMIT: String(limit) };
+	const run1 = await runGoogleMessagesCustom([CHAT_ALICE], messages, {}, env);
+	assert.equal(run1.code, 0);
+	assert.equal(records(run1.messages, "messages").length, limit);
+	assert.ok(skips(run1.messages).some((s) => s.reason === "gmcli_per_chat_limit_reached"));
+	assert.equal(stateFor(run1.messages, "messages"), undefined);
 
-	const run1 = await runGoogleMessagesCustom(
-		chats,
-		messages,
-		{},
-		{ GMCLI_MESSAGES_PER_CHAT_LIMIT: String(limit) },
-	);
-	assert.equal(
-		records(run1.messages, "messages").length,
-		limit,
-		"every fetched (bounded) message is emitted",
-	);
-
-	const truncationSkip = skips(run1.messages).find(
-		(s) => s.reason === "gmcli_per_chat_limit_reached",
-	);
-	assert.ok(
-		truncationSkip,
-		"a per-chat-limit truncation must surface an honest SKIP_RESULT — never silently claim completeness",
-	);
-
-	const cursor = stateFor(run1.messages, "messages") as
-		| { fingerprints?: Record<string, string> }
-		| undefined;
-	assert.ok(
-		cursor,
-		"a bounded-but-honest fetch still commits STATE for the window it did fetch — this fixture's message set is unchanged between run1/run2, so the fetched window is stable across runs regardless of --order direction, and withholding STATE here would only force useless re-emission of the same bounded window forever",
-	);
-	assert.equal(Object.keys(cursor?.fingerprints ?? {}).length, limit);
-
-	// Resuming against the identical (still-truncated) archive must not
-	// re-duplicate the bounded prefix it already committed.
-	const projected = projectState(run1.messages);
-	const run2 = await runGoogleMessagesCustom(chats, messages, projected, {
-		GMCLI_MESSAGES_PER_CHAT_LIMIT: String(limit),
+	// Seed the repeated full page with every fingerprint already known.
+	const previous = await runGoogleMessagesCustom([CHAT_ALICE], messages, {}, {
+		GMCLI_MESSAGES_PER_CHAT_LIMIT: String(limit + 1),
 	});
-	assert.equal(
-		records(run2.messages, "messages").length,
-		0,
-		"the already-committed bounded prefix is not re-emitted on resume",
+	assert.equal(previous.code, 0);
+	assert.ok(stateFor(previous.messages, "messages"));
+	const run2 = await runGoogleMessagesCustom([CHAT_ALICE], messages, projectState(previous.messages), env);
+	assert.equal(run2.code, 0);
+	assert.equal(records(run2.messages, "messages").length, 0);
+	assert.ok(skips(run2.messages).some((s) => s.reason === "gmcli_per_chat_limit_reached"));
+	assert.equal(stateFor(run2.messages, "messages"), undefined);
+});
+
+test("chat-list bound: more chats than the scan budget emits records and disclosure but no STATE", async () => {
+	const otherChat = { ...CHAT_ALICE, conversation_id: "chat_other", last_message_time_ms: 1 };
+	const run = await runGoogleMessagesCustom(
+		[otherChat, CHAT_ALICE],
+		[msg({ message_id: "msg_1", timestamp_ms: 1_754_071_000_000 })],
+		{},
+		{ GMCLI_MAX_CHATS: "1", GMCLI_MESSAGES_PER_CHAT_LIMIT: "2" },
 	);
+	assert.equal(run.code, 0);
+	assert.deepEqual(sortedIds(records(run.messages, "messages")), ["msg_1"]);
+	assert.ok(skips(run.messages).some((s) => s.reason === "gmcli_chat_scan_limit_reached"));
+	assert.equal(stateFor(run.messages, "messages"), undefined);
+});
+
+test("short read: no bound disclosure and STATE is still committed", async () => {
+	const run = await runGoogleMessagesCustom(
+		[CHAT_ALICE],
+		[msg({ message_id: "msg_1", timestamp_ms: 1_754_071_000_000 })],
+		{},
+		{ GMCLI_MAX_CHATS: "2", GMCLI_MESSAGES_PER_CHAT_LIMIT: "2" },
+	);
+	assert.equal(run.code, 0);
+	assert.equal(skips(run.messages).length, 0);
+	assert.ok(stateFor(run.messages, "messages"));
 });
 
 // ─── Crash before commit: a run that never reaches DONE leaves no partial checkpoint ─

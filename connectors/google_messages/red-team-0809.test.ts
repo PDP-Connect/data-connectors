@@ -237,13 +237,14 @@ test("finding 1 — growing conversation: a conversation past its per-chat limit
 		"run 1's fetched window is the newest `limit` messages, so the most recent one (m4) is present",
 	);
 
-	// Project STATE the way the real runtime does (per-stream last-wins).
-	const stateMsg = run1.messages.find(
-		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
-			m.type === "STATE" && m.stream === "messages",
+	// A full window may be truncated (gmcli gives no "there were more"
+	// signal), so run 1 keeps the prior cursor instead of checkpointing it.
+	assert.equal(
+		run1.messages.some((m) => m.type === "STATE" && m.stream === "messages"),
+		false,
+		"run 1 hit the per-chat limit, so it commits no STATE",
 	);
-	assert.ok(stateMsg, "run 1 commits a STATE watermark");
-	const projected = { messages: stateMsg?.cursor };
+	const projected = {};
 
 	// The conversation keeps growing: three brand-new messages arrive, newer
 	// than everything in run 1. The archive itself now has limit+3 messages
@@ -294,20 +295,25 @@ test("finding 1 — growing conversation: a conversation past its per-chat limit
 		"the conversation is still over its per-chat limit, so the existing honest per-chat SKIP_RESULT must still fire",
 	);
 
-	// A third run with no further growth must be a clean no-op — idempotency
-	// is preserved by the fingerprint cursor regardless of fetch direction.
-	const stateMsg2 = run2.messages.find(
-		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
-			m.type === "STATE" && m.stream === "messages",
-	);
-	const projected2 = { messages: stateMsg2?.cursor };
-	const run3 = await runGoogleMessagesCustom(chats, run2Messages, projected2, {
-		GMCLI_MESSAGES_PER_CHAT_LIMIT: String(limit),
-	});
+	// Still truncated, so still no checkpoint: a third run with no growth
+	// reads the same newest window again rather than claiming it complete.
 	assert.equal(
-		records(run3.messages, "messages").length,
-		0,
-		"re-fetching the same (still-truncated) newest window a third time emits no duplicates",
+		run2.messages.some((m) => m.type === "STATE" && m.stream === "messages"),
+		false,
+		"run 2 is still over the per-chat limit, so it commits no STATE",
+	);
+	const run3 = await runGoogleMessagesCustom(
+		chats,
+		run2Messages,
+		{},
+		{
+			GMCLI_MESSAGES_PER_CHAT_LIMIT: String(limit),
+		},
+	);
+	assert.deepEqual(
+		idsOf(records(run3.messages, "messages")),
+		run2Ids,
+		"the third run re-reads the same newest window",
 	);
 });
 
