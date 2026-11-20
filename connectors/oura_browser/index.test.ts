@@ -356,14 +356,14 @@ test("a last page that only repeats seen activity IDs does not complete the wind
   assert.equal(h.messages.find((m) => m.type === "SKIP_RESULT")?.reason, "inventory_not_proven_complete");
 });
 
-test("a second-page 429 reports retryable source pressure and no STATE", async () => {
+test("a second-page 429 reports pressure and emits a continuation-only STATE", async () => {
   const h = harness({ streams: ["readiness"], answers: (_endpoint, token) =>
     token ? { status: 429 } : { data: replay.daily_readiness, next_token: "next" } });
   await collectOuraBrowser(h.ctx, ACCESS);
   const skip = h.messages.find((m) => m.type === "SKIP_RESULT");
   assert.equal(skip?.reason, "upstream_pressure");
   assert.deepEqual(skip?.recovery_hint, { action: "retry_by_runtime", retryable: true });
-  assert.equal(h.messages.some((m) => m.type === "STATE"), false);
+  assert.deepEqual(continuationOnly(h.messages)?.resume, { start: DAY, end: DAY, nextToken: "next", lastIds: [id(301)] });
 });
 
 test("a default scan after a narrower since cursor starts full history", async () => {
@@ -384,5 +384,56 @@ test("a second-page request timeout is disclosed as retryable source pressure", 
   const skip = h.messages.find((m) => m.type === "SKIP_RESULT");
   assert.equal(skip?.reason, "upstream_pressure");
   assert.deepEqual(skip?.recovery_hint, { action: "retry_by_runtime", retryable: true });
-  assert.equal(h.messages.some((m) => m.type === "STATE"), false);
+  assert.deepEqual(continuationOnly(h.messages)?.resume, { start: DAY, end: DAY, nextToken: "next", lastIds: [id(401)] });
+});
+
+function continuationOnly(messages: EmittedMessage[]) {
+  return (messages.find((m) => m.type === "STATE") as { cursor?: {
+    next_day?: string; resume?: { start: string; end: string; nextToken: string; lastIds: string[] }
+  } } | undefined)?.cursor;
+}
+
+test("page three pressure persists the exact readiness window and resumes the saved provider page", async () => {
+  const p1 = replay.daily_readiness;
+  const p2 = p1.map((row) => ({ ...row, id: id(302) }));
+  const p3 = p1.map((row) => ({ ...row, id: id(303) }));
+  const stopped = harness({ streams: ["readiness"], answers: (_endpoint, token) =>
+    token === null ? { data: p1, next_token: "p2" } :
+      token === "p2" ? { data: p2, next_token: "p3" } : { status: 429 } });
+  await collectOuraBrowser(stopped.ctx, ACCESS);
+  const cursor = continuationOnly(stopped.messages);
+  assert.deepEqual(cursor?.resume, { start: DAY, end: DAY, nextToken: "p3", lastIds: [id(302)] });
+  assert.equal(cursor?.next_day, undefined);
+  assert.equal(stopped.messages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+
+  const recovered = harness({ streams: ["readiness"], state: { readiness: cursor }, answers: (_endpoint, token) =>
+    token === "p3" ? { data: p3, next_token: null } : { status: 404 } });
+  await collectOuraBrowser(recovered.ctx, ACCESS);
+  assert.deepEqual(recovered.calls.map((call) => call.token), ["p3"]);
+  assert.deepEqual([...stopped.records, ...recovered.records].map(({ data }) => data.id), [id(301), id(302), id(303)]);
+  assert.equal(continuationOnly(recovered.messages)?.resume, undefined);
+  assert.equal(continuationOnly(recovered.messages)?.next_day, "2026-09-24");
+});
+
+test("a refused saved token restarts exactly once from the same window head", async () => {
+  const cursor = { account: ACCESS.account, api_v2: true, requested_since: DAY,
+    resume: { start: DAY, end: DAY, nextToken: "expired", lastIds: [id(302)] } };
+  const h = harness({ streams: ["readiness"], state: { readiness: cursor }, answers: (_endpoint, token) =>
+    token ? { status: 400 } : { data: replay.daily_readiness, next_token: null } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map((call) => call.token), ["expired", null]);
+  assert.equal(continuationOnly(h.messages)?.resume, undefined);
+  assert.equal(continuationOnly(h.messages)?.next_day, "2026-09-24");
+});
+
+test("a saved token with partial page-identity overlap restarts before emitting that page", async () => {
+  const cursor = { account: ACCESS.account, api_v2: true, requested_since: DAY,
+    resume: { start: DAY, end: DAY, nextToken: "inconsistent", lastIds: [id(302), id(304)] } };
+  const shifted = [302, 303].map((n) => ({ ...replay.daily_readiness[0], id: id(n) }));
+  const h = harness({ streams: ["readiness"], state: { readiness: cursor }, answers: (_endpoint, token) =>
+    token ? { data: shifted, next_token: "should-not-be-read" } : { data: replay.daily_readiness, next_token: null } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map((call) => call.token), ["inconsistent", null]);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
+  assert.equal(continuationOnly(h.messages)?.resume, undefined);
 });

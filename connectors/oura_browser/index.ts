@@ -113,10 +113,18 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
   });
 }
 
+interface OuraWindowResume {
+  start: string;
+  end: string;
+  nextToken: string;
+  lastIds: string[];
+}
+
 interface CollectionResult<T> {
   rows: T[];
   complete: boolean;
   sourcePressure?: "rate_limited" | "timeout";
+  resume?: OuraWindowResume | undefined;
 }
 
 // Bound one stalled transport request, not the number of history pages.
@@ -125,12 +133,22 @@ const OURA_REQUEST_TIMEOUT_MS = 30_000;
 const NO_PROGRESS_PAGE_GUARD = 16;
 
 async function fetchCollection<T extends { id: string; day: string }>(page: BrowserCollectContext["page"], token: string,
-  endpoint: string, start: string, end: string): Promise<CollectionResult<T>> {
+  endpoint: string, start: string, end: string, resume?: OuraWindowResume): Promise<CollectionResult<T>> {
   const rows: T[] = [];
-  const seenTokens = new Set<string>();
-  const seenIds = new Set<string>();
+  let nextToken = resume?.nextToken ?? null;
+  const seenTokens = new Set<string>(nextToken ? [nextToken] : []);
+  const seenIds = new Set<string>(resume?.lastIds ?? []);
+  let checkingResume = resume !== undefined;
+  let checkpoint = resume;
   let noProgressPages = 0;
-  let nextToken: string | null = null;
+  const restart = () => {
+    checkingResume = false;
+    checkpoint = undefined;
+    nextToken = null;
+    seenTokens.clear();
+    seenIds.clear();
+    noProgressPages = 0;
+  };
   while (true) {
     const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
     if (nextToken) query.set("next_token", nextToken);
@@ -142,16 +160,22 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       });
     } catch (error) {
       const timeout = error instanceof Error && (error.name === "TimeoutError" || /timeout|timed out/i.test(error.message));
-      return timeout ? { rows, complete: false, sourcePressure: "timeout" } : { rows, complete: false };
+      return timeout ? { rows, complete: false, sourcePressure: "timeout", resume: checkpoint } : { rows, complete: false };
     }
     try {
-      if (response.status() === 429) return { rows, complete: false, sourcePressure: "rate_limited" };
+      if (response.status() === 429) return { rows, complete: false, sourcePressure: "rate_limited", resume: checkpoint };
+      if (checkingResume && [400, 404, 410].includes(response.status())) {
+        restart();
+        continue;
+      }
       if (response.status() === 401 || response.status() === 403) return { rows, complete: false };
       if (!response.ok()) return { rows, complete: false };
       const value: unknown = await response.json().catch(() => null);
       if (!value || typeof value !== "object" || Array.isArray(value)) return { rows, complete: false };
       const payload = value as Record<string, unknown>;
       if (!Array.isArray(payload.data)) return { rows, complete: false };
+      const pageRows: T[] = [];
+      const pageIds = new Set<string>();
       let invalidRow = false;
       const previousSize = seenIds.size;
       for (const row of payload.data) {
@@ -162,9 +186,20 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
           invalidRow = true;
           continue;
         }
-        rows.push(row as T);
-        seenIds.add(row.id);
+        pageRows.push(row as T);
+        pageIds.add(row.id);
       }
+      if (checkingResume) {
+        const overlap = [...pageIds].filter((id) => seenIds.has(id)).length;
+        const exactReplay = overlap === seenIds.size && overlap === pageIds.size;
+        if (invalidRow || (overlap > 0 && (!exactReplay || payload.next_token === null))) {
+          restart();
+          continue;
+        }
+        checkingResume = false;
+      }
+      rows.push(...pageRows);
+      for (const id of pageIds) seenIds.add(id);
       if (invalidRow) return { rows, complete: false };
       // A terminal next_token is Oura's only source evidence of a complete inventory.
       if (!("next_token" in payload)) return { rows, complete: false };
@@ -178,6 +213,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       if (noProgressPages > NO_PROGRESS_PAGE_GUARD) return { rows, complete: false };
       nextToken = payload.next_token;
       seenTokens.add(nextToken);
+      if (pageIds.size > 0) checkpoint = { start, end, nextToken, lastIds: [...pageIds].sort() };
     } finally { await response.dispose().catch(() => {}); }
   }
 }
@@ -211,6 +247,7 @@ interface OuraCursor {
   next_day?: string;
   refresh_from?: string;
   requested_since?: string | null;
+  resume?: OuraWindowResume | undefined;
 }
 
 function isUtcDay(value: unknown): value is string {
@@ -220,16 +257,18 @@ function isUtcDay(value: unknown): value is string {
 
 async function fetchWindow(
   ctx: BrowserCollectContext, token: string, stream: string,
-  startDate: string, endDate: string
+  startDate: string, endDate: string, resume?: OuraWindowResume
 ): Promise<{
   data: OuraDailyData;
   failedWindows: Array<{ start: string; end: string }>;
-  sourcePressure?: CollectionResult<never>["sourcePressure"];
+  sourcePressure?: CollectionResult<never>["sourcePressure"] | undefined;
+  resume?: OuraWindowResume | undefined;
 }> {
   const data: OuraDailyData = {};
   const failedWindows: Array<{ start: string; end: string }> = [];
   let sourcePressure: CollectionResult<never>["sourcePressure"];
-  let start = day(startDate);
+  let continuation: OuraWindowResume | undefined;
+  let start = day(resume?.start ?? startDate);
   const end = day(endDate);
   const endpoints = stream === "sleep" ? ["daily_sleep", "sleep"] :
     stream === "readiness" ? ["daily_readiness"] : ["daily_activity"];
@@ -238,6 +277,8 @@ async function fetchWindow(
     chunkEnd.setUTCDate(chunkEnd.getUTCDate() + CHUNK_DAYS - 1);
     if (chunkEnd > end) chunkEnd.setTime(end.getTime());
     const from = start.toISOString().slice(0, 10);
+    const saved = resume?.start === from ? resume : undefined;
+    if (saved) chunkEnd.setTime(day(saved.end).getTime());
     const to = chunkEnd.toISOString().slice(0, 10);
     await ctx.progress(`Fetching ${stream}: ${from} to ${to}`, { stream });
     let complete = true;
@@ -254,14 +295,16 @@ async function fetchWindow(
           sourcePressure ??= result.sourcePressure;
           data.sleeps = [...(data.sleeps ?? []), ...result.rows];
         } else if (endpoint === "daily_readiness") {
-          const result = await fetchCollection<DailyReadiness>(ctx.page, token, endpoint, from, to);
+          const result = await fetchCollection<DailyReadiness>(ctx.page, token, endpoint, from, to, saved);
           complete &&= result.complete;
           sourcePressure ??= result.sourcePressure;
+          if (failedWindows.length === 0) continuation = result.resume;
           data.daily_readinesses = [...(data.daily_readinesses ?? []), ...result.rows];
         } else {
-          const result = await fetchCollection<DailyActivity>(ctx.page, token, endpoint, from, to);
+          const result = await fetchCollection<DailyActivity>(ctx.page, token, endpoint, from, to, saved);
           complete &&= result.complete;
           sourcePressure ??= result.sourcePressure;
+          if (failedWindows.length === 0) continuation = result.resume;
           data.daily_activities = [...(data.daily_activities ?? []), ...result.rows];
         }
       } catch (error) {
@@ -276,7 +319,7 @@ async function fetchWindow(
     start = new Date(chunkEnd);
     start.setUTCDate(start.getUTCDate() + 1);
   }
-  return { data, failedWindows, sourcePressure };
+  return { data, failedWindows, sourcePressure, resume: continuation };
 }
 
 // One record per id: Oura repeats chunk-boundary days; keep the copy with more filled fields, ties keep the first.
@@ -435,7 +478,16 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
         await ctx.emit({ type: "STATE", stream, cursor: previous });
       continue;
     }
-    const result = await fetchWindow(ctx, access.accessToken, stream, startDate, endDate);
+    // Sleep joins two inventories by day. A page-only checkpoint would lose
+    // the prior score rows needed to recreate that join, so sleep still replays.
+    const saved = stream === "sleep" || (previous?.requested_since ?? undefined) !== requestedSince
+      ? undefined : previous?.resume;
+    const resume = saved && isUtcDay(saved.start) && isUtcDay(saved.end) &&
+      startDate <= saved.start && saved.start <= saved.end && saved.end <= endDate &&
+      typeof saved.nextToken === "string" && saved.nextToken.length > 0 &&
+      Array.isArray(saved.lastIds) && saved.lastIds.length > 0 &&
+      saved.lastIds.every((id) => typeof id === "string" && id.length > 0) ? saved : undefined;
+    const result = await fetchWindow(ctx, access.accessToken, stream, startDate, endDate, resume);
     const data = result.data;
     let records: RecordData[];
     if (stream === "sleep") {
@@ -469,6 +521,17 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
           type: "SKIP_RESULT", stream, reason: "inventory_not_proven_complete", message,
           recovery_hint: { action: "retry_by_runtime", retryable: true },
         });
+      }
+      if (result.resume) {
+        // Keep the completed-day watermark untouched; this only checkpoints
+        // the provider page after the validated rows were emitted.
+        await ctx.emit({ type: "STATE", stream, cursor: {
+          ...previous,
+          account: access.account,
+          api_v2: true,
+          requested_since: requestedSince ?? null,
+          resume: result.resume,
+        } });
       }
       // Desktop needs its runtime failure latch set before DONE; PageShim
       // derives Partial directly from the inventory skip above.

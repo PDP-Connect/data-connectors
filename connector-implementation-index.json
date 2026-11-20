@@ -20436,7 +20436,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.56",
+				"version": "0.1.57",
 				"display_name": "Oura (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
