@@ -31,7 +31,7 @@ const item = (posts.itemList as Json[])[0]!;
 const user = (users.userList as Json[])[0]!;
 const collection = (collections.collectionList as Json[])[0]!;
 type Stream = "videos" | "following" | "favorite_collections" | "profile";
-type Fault = "cursor" | "ids" | "unreadable";
+type Fault = "cursor" | "ids" | "unreadable" | "terminal-ids";
 const paths: Record<Stream, string> = {
 	videos: "/api/post/item_list/",
 	profile: "/api/post/item_list/",
@@ -67,11 +67,11 @@ async function run(
 					"synthetic safety stop: source did not terminate",
 				);
 				const index = Number(params.cursor ?? params.minCursor ?? "0");
-				const sourceIndex = fault === "ids" ? 0 : index;
+			const sourceIndex = fault === "ids" || fault === "terminal-ids" ? 0 : index;
 				const ids = Array.from({ length: 30 }, (_, i) =>
 					String(900000 + sourceIndex * 30 + i),
 				);
-				const hasMore = fault !== undefined || index + 1 < pages;
+			const hasMore = (fault !== undefined && fault !== "terminal-ids") || index + 1 < pages;
 				const cursor = fault === "cursor" ? 0 : index + 1;
 				if (stream === "following") {
 					json = {
@@ -99,7 +99,7 @@ async function run(
 				} else {
 					json = {
 						...posts,
-						total: pages * 30,
+					total: fault === "terminal-ids" ? undefined : pages * 30,
 						hasMore,
 						cursor: String(cursor),
 						itemList: ids.map((id) =>
@@ -184,6 +184,15 @@ for (const stream of ["videos", "following", "favorite_collections"] as const) {
 		});
 	}
 }
+
+test("videos: a duplicate-only terminal page without a total refuses without STATE", async () => {
+	const result = await run("videos", 2, "terminal-ids");
+	assert.equal(result.reads, 2);
+	assert.equal(result.records.length, 30);
+	assert.equal(result.failures.length, 1);
+	assert.match(result.failures[0]!, /^tiktok_list_incomplete:/);
+	assert.equal(result.messages.some((message) => message.type === "STATE"), false);
+});
 
 test("videos: the old 900-request boundary does not strand the remaining history", async () => {
 	// Isolate the request cap from the old 200-page cap for the red control.
