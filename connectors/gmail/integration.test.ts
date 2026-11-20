@@ -33,11 +33,11 @@
  */
 
 import assert from "node:assert/strict";
-import { resourceSet } from "@pdpp/connector-protocol";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { mock, test } from "node:test";
+import { resourceSet } from "@pdpp/connector-protocol";
 import type {
 	FetchMessageObject,
 	ImapFlow,
@@ -76,15 +76,14 @@ import {
 	type AttachmentHydrationResult,
 	AttachmentStallTimeoutError,
 	type AttachmentTransferProgress,
+	addAttachmentBackfillRecordToSummary,
 	attachmentBackfillPageByteBudget,
 	attachmentOutsideResourceScope,
 	buildAttachmentDetailCoverageMessage,
-	formatAttachmentBackfillSummary,
-	createAttachmentBackfillSummary,
-	addAttachmentBackfillRecordToSummary,
 	buildAttachmentDetailGap,
 	buildAttachmentTransferProgressMessage,
 	collectMetadata,
+	createAttachmentBackfillSummary,
 	DEFAULT_ATTACHMENT_PROGRESS_MIN_BYTES,
 	DEFAULT_ATTACHMENT_PROGRESS_MIN_INTERVAL_MS,
 	DEFAULT_ATTACHMENT_STALL_TIMEOUT_MS,
@@ -93,14 +92,15 @@ import {
 	type FetchBodiesFn,
 	type FetchedBodies,
 	fetchAttachmentPart,
+	formatAttachmentBackfillSummary,
 	gmailEmitForTests,
 	type HydrateAttachmentFn,
 	isoToImapDate,
 	makeAttachmentDetailCoverage,
-	makeEmitRecord as makeGmailEmitRecord,
 	makeAttachmentHydrator,
-	parseDeltaHoldbackRuns,
+	makeEmitRecord as makeGmailEmitRecord,
 	type PerMessageDeps,
+	parseDeltaHoldbackRuns,
 	processMessage,
 	recordAttachmentCoverage,
 	recoverServedAttachmentGaps,
@@ -2273,7 +2273,8 @@ test("runAllMailPasses: a completed historical walk reopens for new mail instead
 			// biome-ignore lint/suspicious/useAwait: async generator is required by the ImapFlow fetch shape.
 			async *fetch(range: string) {
 				fetchRanges.push(range);
-				yield makeMsg({ uid: 1, emailId: "seed" });
+				// A real FETCH answers only UIDs in the set it was asked for.
+				yield makeMsg({ uid: Number(range.split(/[:,]/)[0]), emailId: "seed" });
 			},
 		};
 
@@ -2795,7 +2796,7 @@ test("runAllMailPasses: attachments-only scope keeps the bounded message lane an
 			async *fetch(range: string) {
 				fetchRanges.push(range);
 				yield makeMsg({
-					uid: range === "1201:1300" ? 1250 : 1,
+					uid: range === "1201:1300" ? 1250 : Number(range.split(/[:,]/)[0]),
 					emailId: "attachment-only-message",
 					bodyStructure: { type: "text/plain", part: "1" },
 				});
@@ -5636,6 +5637,21 @@ test("collectMetadata: cursor + since intersection preserves incremental fetch r
 	}
 });
 
+test("collectMetadata: a reversed UID range is the same set, as in IMAP", async () => {
+	const client: Pick<ImapFlow, "search" | "fetch"> = {
+		search: mock.fn(async () => []),
+		// biome-ignore lint/suspicious/useAwait: async generator is required by the ImapFlow fetch shape.
+		async *fetch() {
+			yield makeMsg({ uid: 4, emailId: "reversed-range" });
+		},
+	};
+	const metas = await collectMetadata(client, "5:3");
+	assert.deepEqual(
+		metas.map((m) => m.uid),
+		[4],
+	);
+});
+
 test("collectMetadata: same-day pre-boundary records are filtered out (day-granular IMAP, second-precise boundary)", async () => {
 	const originalEmit = globalThis.process.stdout.write;
 	try {
@@ -7591,4 +7607,97 @@ test("throwing attachment emission with durable debt still collects every siblin
 	assert.deepEqual(coverage.gapKeys, ["abc123:1"]);
 	assert.deepEqual(coverage.hydratedKeys, ["abc123:2", "abc123:3"]);
 	assert.equal(coverage.localEmitRejected, false);
+});
+
+test("out-of-range history FETCH withholds STATE and retries the same UID window", async () => {
+	const originalWrite = process.stdout.write;
+	const protocol: EmittedMessage[] = [];
+	const ranges: string[] = [];
+	let secondPage: "stale" | "sparse" | "empty" = "stale";
+	const client: Parameters<typeof runAllMailPasses>[0] = {
+		close: mock.fn(),
+		download: () => {
+			throw new Error("unexpected download");
+		},
+		fetchOne: () => {
+			throw new Error("unexpected fetchOne");
+		},
+		search: mock.fn(async () => []),
+		mailbox: {
+			delimiter: "/",
+			exists: 1000,
+			flags: new Set<string>(),
+			path: "[Gmail]/All Mail",
+			uidNext: 1001,
+			uidValidity: 123n,
+		},
+		async *fetch(range: string) {
+			ranges.push(range);
+			if (range === "1:500" || secondPage === "stale") {
+				yield makeMsg({ uid: 500, emailId: "msg-500" });
+			} else if (secondPage === "sparse") {
+				yield makeMsg({ uid: 701, emailId: "msg-701" });
+			}
+		},
+	};
+	process.stdout.write = ((data: string): boolean => {
+		try {
+			protocol.push(JSON.parse(data) as EmittedMessage);
+		} catch {
+			/* Ignore non-protocol output. */
+		}
+		return true;
+	}) as typeof process.stdout.write;
+	try {
+		const emitted: string[] = [];
+		const run = async (state: Record<string, unknown>) => {
+			protocol.length = 0;
+			ranges.length = 0;
+			emitted.length = 0;
+			await runAllMailPasses(client, makeAllMailMailbox(), state, {
+				emitRecord: async (_stream, data) => {
+					emitted.push(String(data.id));
+					return true;
+				},
+				emittedAt: FROZEN_NOW,
+				requested: makeRequested(["messages"]),
+			});
+			return protocol.find(
+				(m) => m.type === "STATE" && m.stream === "messages",
+			);
+		};
+
+		const first = await run({});
+		assert.deepEqual(ranges, ["1:500"]);
+		assert.ok(first?.type === "STATE");
+		const checkpoint = { messages: first.cursor };
+		await assert.rejects(run(checkpoint), /outside the requested range/);
+		assert.deepEqual(ranges, ["501:1000"]);
+		assert.equal(
+			protocol.some((m) => m.type === "STATE"),
+			false,
+		);
+
+		secondPage = "sparse";
+		const sparse = await run(checkpoint);
+		assert.deepEqual(ranges, ["501:1000"]);
+		assert.deepEqual(emitted, ["msg-701"]);
+		assert.ok(sparse?.type === "STATE");
+		assert.equal(
+			(sparse.cursor as { all_mail: { uidnext: number } }).all_mail.uidnext,
+			1001,
+		);
+
+		secondPage = "empty";
+		const empty = await run(checkpoint);
+		assert.deepEqual(ranges, ["501:1000"]);
+		assert.deepEqual(emitted, []);
+		assert.ok(empty?.type === "STATE");
+		assert.equal(
+			(empty.cursor as { all_mail: { uidnext: number } }).all_mail.uidnext,
+			1001,
+		);
+	} finally {
+		process.stdout.write = originalWrite;
+	}
 });

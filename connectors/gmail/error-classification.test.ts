@@ -10,7 +10,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isImapTransientError } from "./imap-error-classification.ts";
+import {
+	isImapTransientError,
+	MetadataFetchUidRangeError,
+} from "./imap-error-classification.ts";
 
 test("isImapTransientError: ImapFlow CONNECT_TIMEOUT error code is retryable", () => {
 	const err = new Error("Failed to establish connection in required time");
@@ -113,4 +116,8 @@ test("MUTATION: removing TIMEOUT check would break CONNECT_TIMEOUT classificatio
 		"message pattern alone does NOT match 'in required time'",
 	);
 	// So the code check is critical for catching ImapFlow deadline errors.
+});
+
+test("isImapTransientError: a FETCH reply outside its requested UIDs is retryable", () => {
+	assert.ok(isImapTransientError(new MetadataFetchUidRangeError()));
 });

@@ -66,7 +66,10 @@ import {
 	ReferenceBlobUploadFailure,
 	runtimeBlobUploadAvailable as sharedRuntimeBlobUploadAvailable,
 } from "../../packages/polyfill-connectors/src/reference-blob-uploader.ts";
-import { isImapTransientError } from "./imap-error-classification.ts";
+import {
+	isImapTransientError,
+	MetadataFetchUidRangeError,
+} from "./imap-error-classification.ts";
 import {
 	type BodyPartSelection,
 	bigintToCursor,
@@ -2246,25 +2249,32 @@ function intersectUidRanges(
 	rangeStr: string,
 	searchUids: readonly number[],
 ): string {
-	const parts = rangeStr
-		.split(",")
-		.map((part) => part.trim())
-		.filter(Boolean)
-		.map((part) => {
-			const [a, b] = part.split(":");
-			const start = Number(a);
-			const end =
-				b === undefined
-					? start
-					: b === "*"
-						? Number.POSITIVE_INFINITY
-						: Number(b);
-			return { start, end };
-		})
-		.filter(({ start, end }) => !(Number.isNaN(start) || Number.isNaN(end)));
-	return searchUids
-		.filter((uid) => parts.some(({ start, end }) => uid >= start && uid <= end))
-		.join(",");
+	return searchUids.filter(compileMetadataUidSet(rangeStr)).join(",");
+}
+
+// Metadata FETCH uses concrete UIDs and ascending numeric ranges. Allow the
+// existing open-ended lower-bound form used by scope intersection.
+function compileMetadataUidSet(range: string): (uid: number) => boolean {
+	const singles = new Set<number>();
+	const intervals: { start: number; end: number }[] = [];
+	for (const part of range.split(",")) {
+		const [first, last] = part.trim().split(":");
+		const start = Number(first);
+		if (!Number.isSafeInteger(start) || start < 1) continue;
+		if (last === undefined) {
+			singles.add(start);
+			continue;
+		}
+		const end = last === "*" ? Number.POSITIVE_INFINITY : Number(last);
+		if (!(end >= 1)) continue;
+		// IMAP reads "b:a" as "a:b" (RFC 3501 section 9, seq-range).
+		intervals.push({ start: Math.min(start, end), end: Math.max(start, end) });
+	}
+	return (uid) =>
+		Number.isSafeInteger(uid) &&
+		uid > 0 &&
+		(singles.has(uid) ||
+			intervals.some(({ start, end }) => uid >= start && uid <= end));
 }
 
 /**
@@ -2370,10 +2380,16 @@ export async function collectMetadata(
 		}
 	}
 
+	const isRequestedUid = compileMetadataUidSet(range);
 	const metas: FetchMessageObject[] = [];
 	for await (const m of client.fetch(range, GMAIL_METADATA_FETCH_QUERY, {
 		uid: true,
 	})) {
+		if (!isRequestedUid(m.uid)) {
+			// A successful IMAP command with an out-of-scope result cannot
+			// establish that this range is safe to checkpoint.
+			throw new MetadataFetchUidRangeError();
+		}
 		// IMAP SINCE is day-granular; post-filter on exact ISO boundary to honor
 		// the stream's declared time_range.since at the second precision. When an
 		// exact boundary is declared, every message MUST have a valid internalDate
@@ -2574,6 +2590,7 @@ async function fetchBodies(
 	}
 }
 
+// Bounds one run's history work; the next run resumes from through + 1.
 export const DEFAULT_MESSAGES_BACKFILL_WINDOW_UIDS = 500;
 const MESSAGES_BACKFILL_WINDOW_UIDS_ENV =
 	"PDPP_GMAIL_MESSAGES_BACKFILL_WINDOW_UIDS";
