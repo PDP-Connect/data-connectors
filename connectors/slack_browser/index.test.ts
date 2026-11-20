@@ -1046,6 +1046,40 @@ test("an answer this connector does not recognise on a required stream fails clo
 	assert.deepEqual(h.of("users"), []);
 });
 
+for (const mode of ["long", "no-progress", "repeat"] as const) {
+	test(`channel inventory ${mode}: only a terminal cursor commits`, async () => {
+		const h = harness(["channels"]);
+		let pages = 0;
+		const api = fakeApi((call) => {
+			if (call.method !== "users.conversations") return undefined;
+			pages += 1;
+			const ceiling = mode === "long" ? 501 : mode === "repeat" ? 2 : 18;
+			assert.ok(pages <= ceiling, "nonterminal inventory must be bounded");
+			assert.equal(call.params.cursor, pages === 1 ? undefined : String(pages));
+			const id = "C" + String(mode === "no-progress" ? 1 : pages).padStart(10, "0");
+			return {
+				ok: true,
+				channels: [{ id, name: "synthetic-" + id, is_channel: true, is_member: true }],
+				response_metadata: {
+					next_cursor: mode === "long" && pages === 501 ? "" : mode === "repeat" ? "2" : String(pages + 1),
+				},
+			};
+		});
+		await run(h, api);
+		if (mode === "long") {
+			assert.equal(pages, 501);
+			assert.equal(h.of("channels").length, 501);
+			assert.ok(h.state("channels"));
+		} else {
+			assert.equal(pages, mode === "repeat" ? 2 : 18);
+			assert.equal(h.of("channels").length, 0);
+			assert.equal(h.state("channels"), undefined);
+			assert.equal(h.coverage().some((entry) => entry.stream === "channels"), false);
+			assert.ok(h.skips().some((entry) => entry.stream === "channels" && entry.reason === "collection_interrupted"));
+		}
+	});
+}
+
 test("conversation kinds and the allowlist narrow what is asked for", async () => {
 	const kinds = harness(["messages"]);
 	const kindsApi = await run(kinds, fakeApi(), { channelTypes: ["im"] });
