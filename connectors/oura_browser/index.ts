@@ -116,26 +116,33 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
 interface CollectionResult<T> {
   rows: T[];
   complete: boolean;
+  sourcePressure?: "rate_limited" | "timeout";
 }
+
+// Bound one stalled transport request, not the number of history pages.
+const OURA_REQUEST_TIMEOUT_MS = 30_000;
 
 async function fetchCollection<T extends { id: string; day: string }>(page: BrowserCollectContext["page"], token: string,
   endpoint: string, start: string, end: string): Promise<CollectionResult<T>> {
   const rows: T[] = [];
-  const seen = new Set<string>();
+  const seenTokens = new Set<string>();
+  const seenIds = new Set<string>();
   let nextToken: string | null = null;
-  for (let pages = 0; pages < 50; pages++) {
+  while (true) {
     const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
     if (nextToken) query.set("next_token", nextToken);
     let response: APIResponse;
     try {
       response = await page.context().request.get(`${API}/${endpoint}?${query}`, {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-        timeout: 30_000,
+        timeout: OURA_REQUEST_TIMEOUT_MS,
       });
-    } catch {
-      return { rows, complete: false };
+    } catch (error) {
+      const timeout = error instanceof Error && (error.name === "TimeoutError" || /timeout|timed out/i.test(error.message));
+      return timeout ? { rows, complete: false, sourcePressure: "timeout" } : { rows, complete: false };
     }
     try {
+      if (response.status() === 429) return { rows, complete: false, sourcePressure: "rate_limited" };
       if (response.status() === 401 || response.status() === 403) return { rows, complete: false };
       if (!response.ok()) return { rows, complete: false };
       const value: unknown = await response.json().catch(() => null);
@@ -143,6 +150,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       const payload = value as Record<string, unknown>;
       if (!Array.isArray(payload.data)) return { rows, complete: false };
       let invalidRow = false;
+      const previousSize = seenIds.size;
       for (const row of payload.data) {
         // A row without an identity or a calendar day cannot be placed in the
         // inventory, so its page cannot prove the inventory complete.
@@ -152,18 +160,20 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
           continue;
         }
         rows.push(row as T);
+        seenIds.add(row.id);
       }
       if (invalidRow) return { rows, complete: false };
       // A terminal next_token is Oura's only source evidence of a complete inventory.
       if (!("next_token" in payload)) return { rows, complete: false };
+      if (seenIds.size === previousSize && (payload.data.length > 0 || payload.next_token !== null))
+        return { rows, complete: false };
       if (payload.next_token === null) return { rows, complete: true };
-      if (typeof payload.next_token !== "string" || !payload.next_token || seen.has(payload.next_token))
+      if (typeof payload.next_token !== "string" || !payload.next_token || seenTokens.has(payload.next_token))
         return { rows, complete: false };
       nextToken = payload.next_token;
-      seen.add(nextToken);
+      seenTokens.add(nextToken);
     } finally { await response.dispose().catch(() => {}); }
   }
-  return { rows, complete: false };
 }
 
 function day(value: string): Date {
@@ -205,9 +215,14 @@ function isUtcDay(value: unknown): value is string {
 async function fetchWindow(
   ctx: BrowserCollectContext, token: string, stream: string,
   startDate: string, endDate: string
-): Promise<{ data: OuraDailyData; failedWindows: Array<{ start: string; end: string }> }> {
+): Promise<{
+  data: OuraDailyData;
+  failedWindows: Array<{ start: string; end: string }>;
+  sourcePressure?: CollectionResult<never>["sourcePressure"];
+}> {
   const data: OuraDailyData = {};
   const failedWindows: Array<{ start: string; end: string }> = [];
+  let sourcePressure: CollectionResult<never>["sourcePressure"];
   let start = day(startDate);
   const end = day(endDate);
   const endpoints = stream === "sleep" ? ["daily_sleep", "sleep"] :
@@ -225,18 +240,22 @@ async function fetchWindow(
         if (endpoint === "daily_sleep") {
           const result = await fetchCollection<DailySleep>(ctx.page, token, endpoint, from, to);
           complete &&= result.complete;
+          sourcePressure ??= result.sourcePressure;
           data.daily_sleeps = [...(data.daily_sleeps ?? []), ...result.rows];
         } else if (endpoint === "sleep") {
           const result = await fetchCollection<SleepSession>(ctx.page, token, endpoint, from, to);
           complete &&= result.complete;
+          sourcePressure ??= result.sourcePressure;
           data.sleeps = [...(data.sleeps ?? []), ...result.rows];
         } else if (endpoint === "daily_readiness") {
           const result = await fetchCollection<DailyReadiness>(ctx.page, token, endpoint, from, to);
           complete &&= result.complete;
+          sourcePressure ??= result.sourcePressure;
           data.daily_readinesses = [...(data.daily_readinesses ?? []), ...result.rows];
         } else {
           const result = await fetchCollection<DailyActivity>(ctx.page, token, endpoint, from, to);
           complete &&= result.complete;
+          sourcePressure ??= result.sourcePressure;
           data.daily_activities = [...(data.daily_activities ?? []), ...result.rows];
         }
       } catch (error) {
@@ -244,12 +263,14 @@ async function fetchWindow(
         connectorDiagnostic("oura_browser", "collection_failed", { stream, endpoint, from, to,
           detail: error instanceof Error ? error.message : String(error) });
       }
+      if (sourcePressure) break;
     }
     if (!complete) failedWindows.push({ start: from, end: to });
+    if (sourcePressure) break;
     start = new Date(chunkEnd);
     start.setUTCDate(start.getUTCDate() + 1);
   }
-  return { data, failedWindows };
+  return { data, failedWindows, sourcePressure };
 }
 
 // One record per id: Oura repeats chunk-boundary days; keep the copy with more filled fields, ties keep the first.
@@ -379,10 +400,12 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
   for (const stream of ["sleep", "readiness", "activity"] as const) {
     if (!ctx.requested.has(stream)) continue;
     const stored = ctx.state[stream] as OuraCursor | undefined;
-    // A cursor written for another account says nothing about this one.
-    const previous = ctx.collectionMode === "full_refresh" || stored?.api_v2 !== true ||
-      stored.account !== access.account ? undefined : stored;
     const requestedSince = requestedUtcDay(ctx.requested.get(stream)?.time_range?.since);
+    // A cursor from another account or a narrower lower bound cannot prove this range.
+    const priorSince = stored?.requested_since;
+    const widened = isUtcDay(priorSince) && (!requestedSince || requestedSince < priorSince);
+    const previous = ctx.collectionMode === "full_refresh" || stored?.api_v2 !== true ||
+      stored.account !== access.account || widened ? undefined : stored;
     const rawUntil = ctx.requested.get(stream)?.time_range?.until;
     const until = requestedUtcDay(rawUntil);
     const untilTimestamp = rawUntil ? Date.parse(rawUntil) : Number.NaN;
@@ -426,12 +449,21 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
       await ctx.emitRecord(stream, record);
     }
     if (result.failedWindows.length > 0) {
-      const message = `Oura ${stream} did not prove complete coverage of ${startDate} to ${endDate}.`;
-      await ctx.emit({
-        type: "SKIP_RESULT", stream, reason: "inventory_not_proven_complete",
-        message,
-        recovery_hint: { action: "retry_by_runtime", retryable: true },
-      });
+      const message = result.sourcePressure
+        ? `Oura ${stream} stopped under source pressure; the next run will retry the unconfirmed range.`
+        : `Oura ${stream} did not prove complete coverage of ${startDate} to ${endDate}.`;
+      if (result.sourcePressure) {
+        await ctx.emit({
+          type: "SKIP_RESULT", stream, reason: "upstream_pressure", message,
+          recovery_hint: { action: "retry_by_runtime", retryable: true },
+          diagnostics: { cause: result.sourcePressure },
+        });
+      } else {
+        await ctx.emit({
+          type: "SKIP_RESULT", stream, reason: "inventory_not_proven_complete", message,
+          recovery_hint: { action: "retry_by_runtime", retryable: true },
+        });
+      }
       // Desktop needs its runtime failure latch set before DONE; PageShim
       // derives Partial directly from the inventory skip above.
       if (ctx.browserSurface) await ctx.reportStreamFailure?.(stream, message, { retryable: true });
