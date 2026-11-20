@@ -1640,19 +1640,20 @@ function emitEventsPage(
 	ctx: StreamCtx,
 	items: GitHubEvent[],
 	priorCreatedAt: string | undefined,
-	latestIn: string | null | undefined,
-): {
-	droppedMalformed: number;
-	emitted: Promise<void>[];
-	latest: string | null | undefined;
-	stop: boolean;
-} {
-	let latest = latestIn;
+	priorIds: ReadonlySet<string>,
+	boundary: { latest: string | null | undefined; ids: Set<string> },
+): { droppedMalformed: number; emitted: Promise<void>[] } {
 	let droppedMalformed = 0;
 	const emitted: Promise<void>[] = [];
+	const until = streamUntil(ctx, "events");
 	for (const e of items) {
-		if (priorCreatedAt && e.created_at && e.created_at <= priorCreatedAt) {
-			return { droppedMalformed, emitted, latest, stop: true };
+		if (
+			priorCreatedAt &&
+			e.created_at &&
+			(e.created_at < priorCreatedAt ||
+				(e.created_at === priorCreatedAt && e.id && priorIds.has(e.id)))
+		) {
+			continue;
 		}
 		const rec = eventRecord(e);
 		if (!rec) {
@@ -1660,12 +1661,17 @@ function emitEventsPage(
 			continue;
 		}
 		emitted.push(ctx.emitRecord("events", rec));
-		latest = cursorBeforeUntil(
-			laterIso(latest, e.created_at),
-			streamUntil(ctx, "events"),
+		const latest = cursorBeforeUntil(
+			laterIso(boundary.latest, e.created_at),
+			until,
 		);
+		if (latest !== boundary.latest) {
+			boundary.latest = latest;
+			boundary.ids.clear();
+		}
+		if (e.created_at === boundary.latest && e.id) boundary.ids.add(e.id);
 	}
-	return { droppedMalformed, emitted, latest, stop: false };
+	return { droppedMalformed, emitted };
 }
 
 export async function collectEvents(ctx: StreamCtx): Promise<void> {
@@ -1675,10 +1681,20 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 	});
 	const { data: me } = await gh<GitHubUser>(ctx, "/user");
 	const eventsState = ctx.state.events as
-		| { last_created_at?: string }
+		| { last_created_at?: string; last_created_ids?: unknown }
 		| undefined;
 	const priorCreatedAt = eventsState?.last_created_at;
-	let latestCreatedAt: string | null | undefined = priorCreatedAt;
+	const priorIds = new Set<string>(
+		Array.isArray(eventsState?.last_created_ids)
+			? eventsState.last_created_ids.filter(
+					(id): id is string => typeof id === "string",
+				)
+			: [],
+	);
+	const boundary = {
+		latest: priorCreatedAt as string | null | undefined,
+		ids: new Set(priorIds),
+	};
 	let droppedTotal = 0;
 	let totalSeen = 0;
 	const visited = new Set<string>();
@@ -1721,11 +1737,25 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 			item_count: items.length,
 			total_seen: totalSeen,
 		});
-		const result = emitEventsPage(ctx, fresh, priorCreatedAt, latestCreatedAt);
+		const result = emitEventsPage(
+			ctx,
+			fresh,
+			priorCreatedAt,
+			priorIds,
+			boundary,
+		);
 		await Promise.all(result.emitted);
-		latestCreatedAt = result.latest;
 		droppedTotal += result.droppedMalformed;
-		path = result.stop ? null : page.nextUrl;
+		// An all-tie page may be followed by another page at the same second.
+		// Only a wholly old page that reaches strictly older data proves the end.
+		const crossedCursor =
+			priorCreatedAt &&
+			items.length > 0 &&
+			items.every(
+				(item) => item.created_at && item.created_at <= priorCreatedAt,
+			) &&
+			items.some((item) => item.created_at && item.created_at < priorCreatedAt);
+		path = crossedCursor ? null : page.nextUrl;
 	}
 	if (droppedTotal > 0) {
 		await ctx.emit({
@@ -1750,7 +1780,10 @@ export async function collectEvents(ctx: StreamCtx): Promise<void> {
 	await ctx.emit({
 		type: "STATE",
 		stream: "events",
-		cursor: { last_created_at: latestCreatedAt || priorCreatedAt || null },
+		cursor: {
+			last_created_at: boundary.latest || priorCreatedAt || null,
+			last_created_ids: [...boundary.ids].sort(),
+		},
 	});
 }
 

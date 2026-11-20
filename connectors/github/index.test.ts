@@ -2114,3 +2114,86 @@ test("GitHub contributions split a multi-year incremental gap at UTC calendar bo
 		],
 	);
 });
+
+test("GitHub incremental events evaluate the complete mixed cursor page", async (t: TestContext) => {
+	const prior = "2026-06-02T12:00:00Z";
+	const nextAt = "2026-06-03T12:00:00Z";
+	const older = "2026-06-01T12:00:00Z";
+	let pages = 0;
+	mockFetch(t, async (input) => {
+		const url = new URL(String(input));
+		if (url.pathname === "/user") return jsonResponse({ login: "fixture" });
+		pages += 1;
+		assert.ok(pages <= 2, "stop after the page that crosses the saved time");
+		const next = new URL(url);
+		next.searchParams.set("page", String(pages + 1));
+		return jsonResponse(
+			pages === 1
+				? [
+						{ ...publicEvent("newer"), created_at: nextAt },
+						publicEvent("new-tie"),
+						publicEvent("saved"),
+					]
+				: [{ ...publicEvent("old"), created_at: older }],
+			{ headers: { link: `<${next}>; rel="next"` } },
+		);
+	});
+	const { ctx, records, coverages, states } = makeCtx(["events"], {
+		events: { last_created_at: prior, last_created_ids: ["saved"] },
+	});
+	await collectEvents(ctx);
+	assert.equal(pages, 2);
+	assert.deepEqual(
+		records.map((row) => String(row.data.id)),
+		["newer", "new-tie"],
+	);
+	assert.deepEqual(
+		coverages.map(({ considered, covered }) => [considered, covered]),
+		[[4, 4]],
+	);
+	assert.deepEqual(states, [
+		{
+			stream: "events",
+			cursor: { last_created_at: nextAt, last_created_ids: ["newer"] },
+		},
+	]);
+});
+
+test("GitHub incremental events preserve equal-time IDs across page boundaries", async (t: TestContext) => {
+	let pages = 0;
+	mockFetch(t, async (input) => {
+		const url = new URL(String(input));
+		if (url.pathname === "/user") return jsonResponse({ login: "fixture" });
+		pages += 1;
+		const next = new URL(url);
+		next.searchParams.set("page", "2");
+		return pages === 1
+			? jsonResponse([publicEvent("saved")], {
+					headers: { link: `<${next}>; rel="next"` },
+				})
+			: jsonResponse([publicEvent("saved"), publicEvent("late-tie")]);
+	});
+	const prior = publicEvent("saved").created_at;
+	const { ctx, records, coverages, states } = makeCtx(["events"], {
+		events: { last_created_at: prior, last_created_ids: ["saved"] },
+	});
+	await collectEvents(ctx);
+	assert.equal(pages, 2);
+	assert.deepEqual(
+		records.map((row) => String(row.data.id)),
+		["late-tie"],
+	);
+	assert.deepEqual(
+		coverages.map(({ considered, covered }) => [considered, covered]),
+		[[2, 2]],
+	);
+	assert.deepEqual(states, [
+		{
+			stream: "events",
+			cursor: {
+				last_created_at: prior,
+				last_created_ids: ["late-tie", "saved"],
+			},
+		},
+	]);
+});

@@ -188,10 +188,35 @@ test("collectEvents: emits one record per well-formed event and a STATE cursor",
 		["2", "1"],
 	);
 	const state = states.find((s) => s.stream === "events");
-	assert.deepEqual(state?.cursor, { last_created_at: "2026-06-02T00:00:00Z" });
+	assert.deepEqual(state?.cursor, {
+		last_created_at: "2026-06-02T00:00:00Z",
+		last_created_ids: ["2"],
+	});
 });
 
 test("collectEvents: stops at the stored cursor without an upstream since param (emit-side incrementality)", async (t: TestContext) => {
+	installEventsFetch(t, [
+		[
+			eventItem("3", "WatchEvent", "2026-06-03T00:00:00Z"),
+			eventItem("2", "WatchEvent", "2026-06-02T00:00:00Z"),
+			eventItem("1", "PushEvent", "2026-06-01T00:00:00Z"),
+		],
+	]);
+	const { ctx, records } = makeCtx(["events"], {
+		events: {
+			last_created_at: "2026-06-02T00:00:00Z",
+			last_created_ids: ["2"],
+		},
+	});
+	await collectEvents(ctx);
+
+	assert.deepEqual(
+		records.map((r) => r.data.id),
+		["3"],
+	);
+});
+
+test("collectEvents: a cursor saved without tie IDs re-reads events at its own second once", async (t: TestContext) => {
 	installEventsFetch(t, [
 		[
 			eventItem("3", "WatchEvent", "2026-06-03T00:00:00Z"),
@@ -204,9 +229,10 @@ test("collectEvents: stops at the stored cursor without an upstream since param 
 	});
 	await collectEvents(ctx);
 
+	// Without saved IDs, an event at the saved second may never have been read.
 	assert.deepEqual(
 		records.map((r) => r.data.id),
-		["3"],
+		["3", "2"],
 	);
 });
 
