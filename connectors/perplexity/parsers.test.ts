@@ -350,3 +350,46 @@ test("answer sections with a hole are unreadable, never joined into a partial an
 		text: "Synthetic part 0.\n\nSynthetic part 1.",
 	});
 });
+
+test("an explicitly empty canonical answer takes precedence over sections", () => {
+	assert.deepEqual(
+		readAnswer({
+			blocks: [
+				{
+					intended_usage: "ask_text_0_markdown",
+					markdown_block: { answer: "Synthetic section." },
+				},
+				{ intended_usage: "ask_text", markdown_block: { answer: "" } },
+			],
+		}),
+		{ ok: true, text: null },
+	);
+});
+
+test("a repeated section index does not replace the first observation", () => {
+	assert.deepEqual(
+		readAnswer({
+			blocks: [
+				{
+					intended_usage: "ask_text_0_markdown",
+					markdown_block: { answer: "" },
+				},
+				{
+					intended_usage: "ask_text_0_markdown",
+					markdown_block: { answer: { not: "text" } },
+				},
+			],
+		}),
+		{ ok: true, text: null },
+	);
+});
+
+test("an empty detail page with an explicit continuation is not terminal", () => {
+	assert.deepEqual(
+		parseThreadDetailPage(JSON.stringify({ entries: [], has_next_page: true })),
+		{
+			ok: true,
+			page: { entries: [], hasNextPage: true },
+		},
+	);
+});
