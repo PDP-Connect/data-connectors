@@ -18,6 +18,30 @@ import { CONSENT_TIME_FIELDS } from "../../packages/polyfill-connectors/src/gene
 import { validateRecord } from "./schemas.ts";
 
 process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS = "1";
+process.env.PDPP_ANTHROPIC_LIVE_DETAIL_RETRY_DELAY_MS = "1";
+
+/** Run `fn` with env vars set, restoring them afterwards. */
+export async function withEnv<T>(
+	vars: Record<string, string>,
+	fn: () => Promise<T>,
+): Promise<T> {
+	const saved = Object.keys(vars).map((k) => [k, process.env[k]] as const);
+	Object.assign(process.env, vars);
+	try {
+		return await fn();
+	} finally {
+		for (const [k, v] of saved) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	}
+}
+
+export const CAP_ENV = "PDPP_ANTHROPIC_LIVE_MAX_CONVERSATIONS_PER_RUN";
+export const BYTES_ENV = "PDPP_ANTHROPIC_LIVE_MAX_RUN_BYTES";
+export const WALL_ENV = "PDPP_ANTHROPIC_LIVE_MAX_RUN_WALL_CLOCK_MS";
+/** The cap the opt-in count env is set to in the tests that need a backlog. */
+export const TEST_CAP = 200;
 
 export const ORG = "00000000-0000-4000-8000-0000000000f1";
 export const O = `/api/organizations/${ORG}`;
@@ -135,7 +159,7 @@ export function stampMessage(c: Conv, index: number, time: string): void {
 
 export type Route = (
 	url: URL,
-) => { status: number; body?: unknown } | undefined;
+) => { status: number; body?: unknown; delayMs?: number } | undefined;
 
 export interface HarnessOptions {
 	streams?: string[];
@@ -162,7 +186,9 @@ export function harness(convs: Conv[], options: HarnessOptions = {}) {
 		[];
 	let heldStates = 0;
 	const orgs = options.orgs ?? ORGS;
-	const respond = (path: string): { status: number; body?: unknown } => {
+	const respond = (
+		path: string,
+	): { status: number; body?: unknown; delayMs?: number } => {
 		const url = new URL(path, "https://claude.ai");
 		const routed = options.route?.(url);
 		if (routed) return routed;
@@ -205,7 +231,8 @@ export function harness(convs: Conv[], options: HarnessOptions = {}) {
 	};
 	const fakeFetch = (async (input: string) => {
 		calls.push(input);
-		const { status, body } = respond(input);
+		const { status, body, delayMs } = respond(input);
+		if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
 		return {
 			status,
 			ok: status >= 200 && status < 300,
@@ -344,6 +371,7 @@ export function harness(convs: Conv[], options: HarnessOptions = {}) {
 		ids,
 		nextState,
 		of,
+		records,
 		skips,
 		states,
 	};
