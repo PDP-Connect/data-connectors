@@ -4949,7 +4949,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/wholefoods/completion-evidence.test.ts",
-			line: 203,
+			line: 209,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "test drives/asserts the retryable inventory skip for each unproven page shape via collectOrders()",
