@@ -205,6 +205,41 @@ test("pickResumeTarget refuses to resume when the enumeration is still owed", as
 	);
 });
 
+test("pickResumeTarget prefers the stream cursor over the legacy cursor and discovery", async () => {
+	await withArchive(seedSessionSchema, async (_file, discovered) => {
+		await withArchive(seedSessionSchema, (_other, named) => {
+			const legacy = { archive_dir: discovered };
+			const state = { ...legacy, messages: { archive_dir: named } };
+			assert.deepEqual(pickResumeTarget(state, discovered), {
+				resumeTarget: named,
+				priorArchive: named,
+			});
+			assert.deepEqual(pickResumeTarget(legacy, named), {
+				resumeTarget: discovered,
+				priorArchive: discovered,
+			});
+		});
+	});
+});
+
+test("pickResumeTarget disallows a state location without discarding its provenance", async () => {
+	await withArchive(seedSessionSchema, async (_file, discovered) => {
+		await withArchive(seedSessionSchema, (_other, named) => {
+			const state = { messages: { archive_dir: named } };
+			assert.deepEqual(
+				pickResumeTarget(state, discovered, { allowStateArchive: false }),
+				{ resumeTarget: discovered, priorArchive: named },
+			);
+			assert.deepEqual(
+				pickResumeTarget(state, join(discovered, "not-created"), {
+					allowStateArchive: false,
+				}),
+				{ resumeTarget: null, priorArchive: named },
+			);
+		});
+	});
+});
+
 test("pickResumeTarget still reports priorArchive when it forces a full archive", async () => {
 	// Callers use `priorArchive` to tell a STATE-named archive from one merely
 	// found on disk. Choosing a different subcommand does not change that fact.
