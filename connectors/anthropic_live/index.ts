@@ -521,11 +521,13 @@ type Ctx = Pick<
  * record the gate withholds still counts: the budget errs on the safe side.
  */
 function meterEmits(ctx: Ctx): Ctx {
+	// TextEncoder, not Buffer: PageShim runs this bundle in a page, which has no Buffer.
+	const utf8 = new TextEncoder();
 	let bytes = 0;
 	return {
 		...ctx,
 		emitRecord: (stream, data) => {
-			bytes += Buffer.byteLength(JSON.stringify(data), "utf8");
+			bytes += utf8.encode(JSON.stringify(data)).length;
 			return ctx.emitRecord(stream, data);
 		},
 		emittedBytes: () => bytes,
