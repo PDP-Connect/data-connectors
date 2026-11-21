@@ -2,7 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { closeSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
+import {
+	closeSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	rmSync,
+	writeFileSync,
+	writeSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseCSVFile } from "./parsers.ts";
@@ -58,3 +67,31 @@ test("parseCSVFile with file 50 MiB + 1 byte", async () => {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });
+
+for (const rowCount of [100_000, 100_001]) {
+	test(`parseCSVFile distinguishes a complete row budget from an over-limit prefix (${rowCount})`, async () => {
+		const directory = mkdtempSync(join(tmpdir(), "netflix-row-limit-"));
+		try {
+			const csvPath = join(directory, "rows.csv");
+			const repeated = "Sample,2026-02-01\n".repeat(99_999);
+			const limitRow = "Boundary,2026-02-02\n";
+			const extra = rowCount > 100_000 ? "Omitted,2026-02-03\n" : "";
+			writeFileSync(csvPath, "Title,Date\n" + repeated + limitRow + extra);
+
+			const result = await parseCSVFile(csvPath);
+			assert.deepEqual(result.headers, ["title", "date"]);
+			assert.equal(result.malformedCount, 0);
+			assert.equal(result.rows.length, 100_000);
+			assert.deepEqual(result.rows.at(-1), {
+				title: "Boundary",
+				date: "2026-02-02",
+			});
+			assert.equal(
+				result.error,
+				extra ? "CSV exceeds maximum rows (100000)" : undefined,
+			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+}
