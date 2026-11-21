@@ -120,6 +120,31 @@ test("the byte budget stops a run between conversations and the next run resumes
 	assertWhole(runs, convs);
 });
 
+test("the exact byte size of one conversation defers the next whole conversation", async () => {
+	const convs = backlog(4);
+	const firstConversation = convs[0]!;
+	const probe = harness(convs, { streams: CHAT });
+	await collectAnthropicLive(probe.ctx);
+	const budget = probe.records
+		.filter((r) =>
+			r.stream === "conversations"
+				? r.data.id === firstConversation.uuid
+				: r.stream === "messages" &&
+					r.data.conversation_id === firstConversation.uuid,
+		)
+		.reduce((sum, r) => sum + jsonBytes(r.data), 0);
+	assert.ok(budget > 0, "the exact-fit threshold comes from emitted bytes");
+
+	const runs = await runUntilSettled(convs, { [BYTES_ENV]: String(budget) });
+	const first = runs[0]!;
+	assert.deepEqual(first.detailReads(), [firstConversation.uuid]);
+	assertWhole([first], [firstConversation]);
+	assert.equal(first.skips()[0]?.reason, "anthropic_live_backlog_deferred");
+	assert.ok(runs.length > 1);
+	assert.deepEqual(runs.at(-1)?.skips(), []);
+	assertWhole(runs, convs);
+});
+
 test("the wall-clock budget stops a run between conversations and the next run resumes", async () => {
 	const convs = backlog(12);
 	// Each detail read takes ~20 ms; the budget admits only a few per run.
