@@ -318,3 +318,36 @@ test("HTTP 200 error and partial envelopes cannot add nodes or close a valid ear
 		}
 	}
 });
+
+test("explicitly empty error annotations do not invalidate a complete reply", () => {
+	const nodes = [orderNode(ORDER_A)];
+	const pageInfo = { hasNextPage: false, endCursor: null };
+	const absentError = { error: null, errors: [], partial: false };
+	const decoded = readOrderHistoryConnection({
+		status: 200,
+		body: {
+			...absentError,
+			deliveriesOrdersList: { nodes, pageInfo, ...absentError },
+		},
+	});
+	assert.deepEqual(decoded?.nodes, nodes);
+	assert.deepEqual(decoded?.pageInfo, pageInfo);
+});
+
+test("numeric and string order IDs normalize to the same cache entity", () => {
+	const cache = orderHistoryPagesToCache([
+		{
+			after: null,
+			connection: {
+				nodes: [
+					orderNode("42", { id: 42 }),
+					{ __typename: "Delivery", order: { id: "42" } },
+				],
+				pageInfo: { hasNextPage: false },
+			},
+		},
+	]);
+	assert.deepEqual(Object.keys(cache).filter((key) => key.startsWith("Order:")), ["Order:42"]);
+	assert.equal((cache["Order:42"] as Record<string, unknown>).createdAt, "2026-01-15T10:00:00Z");
+	assert.equal((cache["Order:42"] as Record<string, unknown>).displayStatus, "paid");
+});
