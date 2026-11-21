@@ -17,6 +17,50 @@ import type {
 	InitiateArchiveResult,
 } from "./api.ts";
 import { collectGoogleMapsDataPortability } from "./index.ts";
+import { validateRecord } from "./schemas.ts";
+
+const ARCHIVE_METADATA_ROW = {
+	access_type: null,
+	archive_job_id: null,
+	download_url_count: 0,
+	export_time: null,
+	id: "maps.starred_places:not_started",
+	resource_group: "maps.starred_places",
+	source: "google_data_portability_api",
+	start_time: null,
+	state: null,
+};
+
+test("archive_jobs accepts zero download URLs and nullable unobserved metadata", () => {
+	assert.equal(validateRecord("archive_jobs", ARCHIVE_METADATA_ROW).ok, true);
+	assert.equal(
+		validateRecord("archive_jobs", {
+			...ARCHIVE_METADATA_ROW,
+			archive_job_id: "synthetic-job",
+			start_time: "2026-01-01T01:02:03.000Z",
+			state: "IN_PROGRESS",
+		}).ok,
+		true,
+	);
+});
+
+test("archive_jobs rejects invalid count, date and provenance independently", () => {
+	for (const [field, value] of [
+		["download_url_count", -1],
+		["download_url_count", 0.5],
+		["export_time", "unknown"],
+		["source", "unrelated"],
+	] as const) {
+		assert.equal(
+			validateRecord("archive_jobs", {
+				...ARCHIVE_METADATA_ROW,
+				[field]: value,
+			}).ok,
+			false,
+			`must reject invalid ${field}: ${value}`,
+		);
+	}
+});
 
 class FakeGoogleDataPortabilityClient {
 	readonly calls: Array<{ input?: unknown; method: string }> = [];
