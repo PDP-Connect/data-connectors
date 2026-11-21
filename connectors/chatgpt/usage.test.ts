@@ -1008,7 +1008,7 @@ test("usage history reads 60 full shared pages and the short final page", async 
 	await run();
 	const [summary] = records(harness, "usage_summary");
 	assert.equal(sub(summary, "totals").shared, 6001);
-	assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, 61);
+	assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, 62);
 });
 
 test("usage history rejects a full list page with no new ids", async () => {
@@ -1044,9 +1044,34 @@ test("usage history keeps shared count unknown after a full repeated shared page
 	const [summary] = records(harness, "usage_summary");
 	assert.equal(sub(summary, "totals").shared, null);
 	assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, 2);
-	assert.ok(harness.protocolMessages.some((m) => m.type === "STATE" && m.stream === "usage_summary"));
+	assertUsageCheckpoint(harness, false);
 });
 
+for (const ending of ["later-404", "changed-total", "empty-terminal"] as const) {
+	test(`usage shared pagination: ${ending}`, async () => {
+		process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
+		const ids = Array.from({ length: 120 }, (_, i) => ({ conversation_id: rawConvId(i) }));
+		const { run, harness, calls } = runHarness(["usage_summary"], {
+			routes: {
+				...siteRoutes({ conversations: many(120) }),
+				"/shared_conversations": (_init, url) => {
+					const offset = Number(url.searchParams.get("offset"));
+					if (offset === 0) return json({ items: ids.slice(0, 100), total: 200 });
+					if (ending === "later-404") return json({}, 404);
+					if (ending === "changed-total") return json({ items: ids.slice(100), total: 120 });
+					return json({ items: ids.slice(offset, offset + 100), total: 200 });
+				},
+			},
+		});
+		await run();
+		const [summary] = records(harness, "usage_summary");
+		const complete = ending === "empty-terminal";
+		assert.equal(sub(summary, "coverage").listing_complete, complete);
+		assert.equal(sub(summary, "totals").shared, complete ? 120 : null);
+		assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, complete ? 3 : 2);
+		assertUsageCheckpoint(harness, complete);
+	});
+}
 
 test("a full run of both streams emits valid records and leaks no canary anywhere", async () => {
 	const { run, harness, calls } = runHarness([

@@ -426,8 +426,9 @@ async function readSharedIds(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
 	limit: Limiter,
-): Promise<Set<string> | null> {
+): Promise<{ ids: Set<string> | null; partial: boolean }> {
 	const ids = new Set<string>();
+	let initialTotal: number | null = null;
 	for (let page = 0; ; page += 1) {
 		const r = await limit(() =>
 			fetchProjected(
@@ -437,24 +438,31 @@ async function readSharedIds(
 				"shared_conversation_ids",
 			),
 		);
-		if (r.kind === "status" && r.status === 404) return ids;
-		if (r.kind !== "ok") return null;
+		if (r.kind === "status" && r.status === 404 && page === 0)
+			return { ids, partial: false };
+		if (r.kind !== "ok") return { ids: null, partial: page > 0 };
 		const j = r.json as { items?: unknown; total?: unknown } | null;
 		const items = Array.isArray(j?.items) ? j.items : null;
-		if (!items) return null;
+		if (!items) return { ids: null, partial: page > 0 };
+		const rawTotal = j?.total;
+		const total =
+			typeof rawTotal === "number" &&
+			Number.isSafeInteger(rawTotal) &&
+			rawTotal >= 0
+				? rawTotal
+				: null;
+		if (page === 0) initialTotal = total;
+		else if (total !== initialTotal) return { ids: null, partial: true };
+		if (items.length === 0) return { ids, partial: false };
 		const before = ids.size;
 		for (const item of items) {
 			const id = (item as { conversation_id?: unknown } | null)
 				?.conversation_id;
 			if (typeof id === "string") ids.add(id);
 		}
-		if (items.length === SHARED_PAGE_LIMIT && ids.size === before) return null;
-		const total = typeof j?.total === "number" ? j.total : null;
-		if (
-			items.length < SHARED_PAGE_LIMIT ||
-			(total !== null && (page + 1) * SHARED_PAGE_LIMIT >= total)
-		)
-			return ids;
+		if (ids.size === before) return { ids: null, partial: true };
+		if (initialTotal !== null && ids.size === initialTotal)
+			return { ids, partial: false };
 	}
 }
 
@@ -838,7 +846,7 @@ async function runUsageSummary(
 
 	// 1. Lists, project lists and shares, sharing one in-flight limit.
 	const limit = createLimiter(REQUESTS_IN_FLIGHT);
-	const [main, archived, sharedIds, projectPass] = await Promise.all([
+	const [main, archived, shares, projectPass] = await Promise.all([
 		walkConversationList(deps, hooks, limit, { archived: false }),
 		walkConversationList(deps, hooks, limit, { archived: true, workers: 1 }),
 		readSharedIds(deps, hooks, limit),
@@ -903,12 +911,13 @@ async function runUsageSummary(
 	});
 
 	const listingComplete =
+		!shares.partial &&
 		projectPass.failed === 0 &&
 		!projectPass.truncated &&
 		(projectPass.sidebar === "ok" || projectPass.sidebar === "not_available");
 	const summary = buildUsageSummaryRecord({
 		conversations,
-		sharedIds,
+		sharedIds: shares.ids,
 		client: readClientContext(client ? await client : null),
 		coverage: {
 			archived_listing: archivedRead ? "read" : "not_available",
