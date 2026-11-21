@@ -213,13 +213,32 @@ export function planTypeOf(org: RawOrganization): string | null {
 	return null;
 }
 
+const PAYMENT_COUNTRY_RE = /^[A-Z]{2}$/;
+
+/**
+ * The card-issuing country from `subscription_details.payment_method`, or null
+ * when there is no card or the value is not two uppercase letters. Reads the
+ * `country` member only; no other payment field is touched.
+ */
+export function paymentCountryOf(
+	subscription: RawSubscriptionDetails | null,
+): string | null {
+	const method = subscription?.payment_method;
+	if (!isRecord(method)) return null;
+	const country = method.country;
+	return typeof country === "string" && PAYMENT_COUNTRY_RE.test(country)
+		? country
+		: null;
+}
+
 /**
  * The single `account_plan` record, field for field the chatgpt connector's.
  * `subscription` is null when subscription_details was not readable; its
  * fields are then null. `cancels_at` and `scheduled_plan_change` have no
- * observed source and are always null. `will_renew` is inferred for an
+ * observed source and are always null. `payment_country` is the card-issuing
+ * country code only, null without a card. `will_renew` is inferred for an
  * active subscription only: a next charge and no end date. Payment method and
- * billing identifiers are never read.
+ * billing identifiers other than that country are never read.
  */
 export function buildAccountPlanRecord(
 	org: RawOrganization,
@@ -256,6 +275,7 @@ export function buildAccountPlanRecord(
 		expires_at: expiresAt,
 		cancels_at: null,
 		scheduled_plan_change: null,
+		payment_country: paymentCountryOf(subscription),
 	};
 }
 
