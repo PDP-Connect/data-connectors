@@ -149,7 +149,7 @@ test("a full read slower than one bridge call is awaited across calls and read i
 	assert.deepEqual(h.failures, []);
 });
 
-test("a conversation whose full read never finishes is read in the light rendering and reported", async () => {
+test("a conversation whose full read fails at the bridge is read in the light rendering and reported", async () => {
 	const h = harness(three(), { streams: CHAT });
 	const progress = captureProgress(h);
 	const page = h.ctx.page as unknown as {
@@ -173,4 +173,46 @@ test("a conversation whose full read never finishes is read in the light renderi
 	]);
 	assert.deepEqual(h.failures, []);
 	assert.deepEqual(h.skips(), []);
+});
+
+test("a started full read the host stops polling is dropped from the page after it settles", async () => {
+	process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS = "5";
+	const convs = three();
+	const { org: _org, ...slow } = convs[1] as Conv;
+	const h = harness(convs, {
+		streams: CHAT,
+		route: (url) =>
+			url.pathname.endsWith(`/chat_conversations/${uuid(2)}`) &&
+			url.searchParams.get("render_all_tools") === "true"
+				? { status: 200, body: slow, delayMs: 30 }
+				: undefined,
+	});
+	const progress = captureProgress(h);
+	const page = h.ctx.page as unknown as {
+		evaluate: (fn: unknown, arg: unknown) => Promise<unknown>;
+	};
+	const evaluate = page.evaluate;
+	let abandoned: string | undefined;
+	page.evaluate = async (fn, arg) => {
+		const text = JSON.stringify(arg ?? "");
+		if (abandoned && text.includes(abandoned)) throw new Error(BRIDGE_TIMEOUT);
+		const result = await evaluate(fn, arg);
+		if (
+			text.includes(`/chat_conversations/${uuid(2)}?`) &&
+			text.includes("render_all_tools=true")
+		) {
+			abandoned = result as string;
+		}
+		return result;
+	};
+	await collectAnthropicLive(h.ctx);
+	assert.deepEqual(h.ids("conversations"), [uuid(1), uuid(2), uuid(3)]);
+	assert.deepEqual(progress.filter(isLightNotice), [
+		"Conversation 2 of 3 was read without tool details: the full read did not finish",
+	]);
+	assert.ok(abandoned);
+	const reads = (globalThis as Record<string, unknown>)
+		.__pdppAnthropicLiveReads as Map<string, unknown>;
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	assert.equal(reads.has(abandoned), false);
 });

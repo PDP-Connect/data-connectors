@@ -326,7 +326,7 @@ async function startDetailRead(
 	deadlineMs: number,
 ): Promise<string> {
 	return await page.evaluate(
-		({ apiPath, timeoutMs, slot }) => {
+		({ apiPath, timeoutMs, slot, expiryMs }) => {
 			const store = globalThis as unknown as Record<
 				string,
 				Map<string, Promise<{ status: number; json: unknown }>> | undefined
@@ -371,9 +371,21 @@ async function startDetailRead(
 				}
 			})();
 			reads.set(key, read);
+			// A read the host stops polling (a bridge call failed, or it gave up)
+			// must not stay in the page: drop it soon after it settles. A poll
+			// normally takes it first. unref keeps a Node test host from waiting.
+			void read.then(() => {
+				const timer = setTimeout(() => reads.delete(key), expiryMs);
+				(timer as { unref?: () => void }).unref?.();
+			});
 			return key;
 		},
-		{ apiPath: path, timeoutMs: deadlineMs, slot: PENDING_READS },
+		{
+			apiPath: path,
+			timeoutMs: deadlineMs,
+			slot: PENDING_READS,
+			expiryMs: 2 * pollSliceMs(),
+		},
 	);
 }
 
