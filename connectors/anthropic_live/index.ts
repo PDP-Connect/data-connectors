@@ -261,9 +261,13 @@ export async function ensureAnthropicLiveSession({
  * network error or timeout. 401 and 403 are returned, not thrown: a caller
  * decides whether that means "signed out" or "not available on this plan".
  */
-async function apiGet(page: Page, path: string): Promise<ApiResult> {
+async function apiGet(
+	page: Page,
+	path: string,
+	textBlocksOnly = false,
+): Promise<ApiResult> {
 	try {
-		return await evaluateGet(page, path);
+		return await evaluateGet(page, path, textBlocksOnly);
 	} catch {
 		// A throw from the evaluate itself (a host bridge timeout, a page that
 		// navigated away mid-call) is a network error, not the end of the run.
@@ -271,9 +275,19 @@ async function apiGet(page: Page, path: string): Promise<ApiResult> {
 	}
 }
 
-async function evaluateGet(page: Page, path: string): Promise<ApiResult> {
+/**
+ * With `textBlocksOnly`, a conversation detail's messages keep only their text
+ * blocks before the body leaves the page. The records are built from the text
+ * blocks alone (see flattenMessageText), and one tool result can carry tens of
+ * MB of `structured_content`, which the host bridge cannot return in time.
+ */
+async function evaluateGet(
+	page: Page,
+	path: string,
+	textBlocksOnly: boolean,
+): Promise<ApiResult> {
 	return await page.evaluate(
-		async ({ apiPath, timeoutMs }) => {
+		async ({ apiPath, timeoutMs, textOnly }) => {
 			if (location.origin !== "https://claude.ai") {
 				return { status: 0, json: null };
 			}
@@ -291,6 +305,17 @@ async function evaluateGet(page: Page, path: string): Promise<ApiResult> {
 				} catch {
 					json = null;
 				}
+				const messages = (json as { chat_messages?: unknown } | null)
+					?.chat_messages;
+				if (textOnly && Array.isArray(messages)) {
+					for (const message of messages) {
+						if (message && Array.isArray(message.content)) {
+							message.content = message.content.filter(
+								(block: { type?: unknown } | null) => block?.type === "text",
+							);
+						}
+					}
+				}
 				return { status: res.status, json };
 			} catch {
 				return { status: 0, json: null };
@@ -298,7 +323,11 @@ async function evaluateGet(page: Page, path: string): Promise<ApiResult> {
 				clearTimeout(timeout);
 			}
 		},
-		{ apiPath: path, timeoutMs: API_FETCH_TIMEOUT_MS },
+		{
+			apiPath: path,
+			timeoutMs: API_FETCH_TIMEOUT_MS,
+			textOnly: textBlocksOnly,
+		},
 	);
 }
 
@@ -312,7 +341,7 @@ async function readConversation(
 	path: string,
 	attempt = 1,
 ): Promise<ApiResult> {
-	const res = await apiGet(page, path);
+	const res = await apiGet(page, path, true);
 	if (res.status !== 0 || attempt >= DETAIL_ATTEMPTS) return res;
 	await politeDelay(detailRetryDelayMs() * attempt);
 	return await readConversation(page, path, attempt + 1);

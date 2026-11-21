@@ -67,3 +67,35 @@ test("a conversation read that never answers ends the streams retryable and keep
 		{ stream: "messages", retryable: true },
 	]);
 });
+
+test("a conversation detail leaves the page with text blocks only, so a huge tool result does not cross the bridge", async () => {
+	const convs = three();
+	const big = "x".repeat(2_000_000);
+	const answer = convs[1].chat_messages[1] as { content: unknown[] };
+	answer.content.push({
+		type: "tool_result",
+		name: "query",
+		content: [{ type: "text", text: "summary" }],
+		structured_content: { rows: big },
+	});
+	const h = harness(convs, { streams: CHAT });
+	const page = h.ctx.page as unknown as {
+		evaluate: (fn: unknown, arg: unknown) => Promise<unknown>;
+	};
+	const evaluate = page.evaluate;
+	let largest = 0;
+	page.evaluate = async (fn, arg) => {
+		const result = await evaluate(fn, arg);
+		largest = Math.max(largest, JSON.stringify(result).length);
+		return result;
+	};
+	await collectAnthropicLive(h.ctx);
+	assert.ok(largest < 20_000, `largest bridge result ${largest} bytes`);
+	assert.deepEqual(h.ids("conversations"), [uuid(1), uuid(2), uuid(3)]);
+	const contents = h
+		.of("messages")
+		.filter((m) => m.conversation_id === uuid(2))
+		.map((m) => m.content);
+	assert.deepEqual(contents, ["question", "answer"]);
+	assert.deepEqual(h.failures, []);
+});
