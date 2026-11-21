@@ -26,6 +26,7 @@ import {
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	flattenMessageText,
+	messageOmissionTimestamp,
 	omittedFieldCountOf,
 	oversizeTextOf,
 	parseClassifiedExport,
@@ -1106,4 +1107,38 @@ test("buildAccountPlanRecord: an entry without an id gives no record; a bad crea
 			buildAccountPlanRecord({ uuid: "o", created_at })?.account_created_at,
 			null,
 		);
+});
+
+test("omission accounting can place a message without an identity, using creation before update", () => {
+	const created_at = "2026-01-01T12:00:00Z";
+	const updated_at = "2026-01-03T12:00:00Z";
+	assert.equal(
+		messageOmissionTimestamp({ created_at, updated_at }),
+		Date.parse(created_at),
+	);
+	assert.equal(
+		messageOmissionTimestamp({ created_at: "invalid", updated_at }),
+		Date.parse(updated_at),
+	);
+	assert.equal(
+		messageOmissionTimestamp({ created_at: 123, updated_at: "invalid" }),
+		null,
+	);
+});
+
+test("mixed legacy content blocks keep readable strings in source order", () => {
+	assert.equal(
+		flattenMessageText({
+			text: "",
+			content: [
+				"plain",
+				null,
+				{ content: "legacy content" },
+				{ text: "" },
+				{ unreadable: 1 },
+				{ text: "modern text" },
+			],
+		}),
+		"plain\nlegacy content\nmodern text",
+	);
 });

@@ -553,7 +553,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/anthropic/parsers.test.ts",
-			line: 90,
+			line: 91,
 			column: 16,
 			category: "dependent_file_cursor",
 			note: "pipelined entry reader test: request each bounded chunk at the current offset.",
