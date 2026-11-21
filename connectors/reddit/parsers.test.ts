@@ -640,3 +640,40 @@ test("validateRecord: unknown stream returns ok:true pass-through", () => {
 	const v = validateRecord("not_a_stream", { id: "x" });
 	assert.ok(v.ok);
 });
+
+test("saved and vote records keep an explicit empty body instead of post fallback text", () => {
+	const child = {
+		kind: "t1",
+		data: {
+			name: "t1_fixture",
+			body: "",
+			selftext: "fallback",
+			link_title: "Parent title",
+		},
+	};
+	for (const build of [savedRecord, voteRecord]) {
+		const row = build(child, FETCHED_AT);
+		assert.equal(row.body, "");
+		assert.equal(row.body_len, 0);
+		assert.equal(row.title, "Parent title");
+		assert.equal(row.is_post, false);
+	}
+});
+
+test("current stats preserve explicit zero counters rather than emitting null", () => {
+	const data = {
+		name: "t3_fixture",
+		score: 0,
+		num_comments: 0,
+		upvote_ratio: 0,
+		gilded: 0,
+	};
+	const submitted = submittedStatsRecord(data);
+	const voted = voteStatsRecord({ kind: "t3", data });
+	assert.equal(submitted.score, 0);
+	assert.equal(submitted.num_comments, 0);
+	assert.equal(submitted.upvote_ratio, 0);
+	assert.equal(submitted.gilded, 0);
+	assert.equal(voted.score, 0);
+	assert.equal(voted.num_comments, 0);
+});
