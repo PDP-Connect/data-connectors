@@ -149,6 +149,18 @@ test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number
 	assert.equal(epochMsToIso(undefined), null);
 });
 
+test("decodeBase64Text: rejects noncanonical padding bits rather than aliasing valid text", () => {
+	assert.equal(decodeBase64Text("YQ=="), "a");
+	assert.equal(decodeBase64Text("YQ"), "a");
+	assert.equal(decodeBase64Text("YR=="), null);
+});
+
+test("epochMsToIso: refuses a finite timestamp outside the Date range", () => {
+	const endpoint = 8_640_000_000_000_000;
+	assert.equal(epochMsToIso(endpoint), "+275760-09-13T00:00:00.000Z");
+	assert.equal(epochMsToIso(endpoint + 1), null);
+});
+
 // ─── decodeNoteBodyBytes / decodeNoteBody (protobuf decode) ────────────
 
 test("decodeNoteBodyBytes: reads UTF-8 strings from length-delimited protobuf fields", async () => {
