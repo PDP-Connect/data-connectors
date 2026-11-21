@@ -21184,7 +21184,7 @@
 				},
 				"connector_key": "polar-flow",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/polar-flow",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Polar Flow",
 				"brand": {
 					"icon": "icon.svg",
@@ -21392,10 +21392,10 @@
 					{
 						"name": "training_sessions",
 						"required": false,
-						"description": "Training sessions in Polar Flow, from a watch, a sensor or entered by hand: the sport, when each started on the owner's local clock, its duration, distance, calories, average and highest heart rate, training load, the device that recorded it, its name and the owner's note. GPS routes, samples, laps and zones are not read.",
+						"description": "Training sessions in Polar Flow, from a watch, a sensor or entered by hand: the sport, when each started on the owner's local clock, its duration, distance, calories, average and highest heart rate, training load, the device that recorded it, its name, the owner's note, and its heart rate sample by sample (every second on a recorded session). GPS routes, the other samples (speed, power, altitude, cadence), laps and zones are not read.",
 						"display": {
 							"label": "Your Polar training sessions",
-							"detail": "Sport, start time, duration, distance, calories, heart rate and training load for each session. No routes or locations."
+							"detail": "Sport, start time, duration, distance, calories, training load and second-by-second heart rate for each session. No routes or locations."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -21481,6 +21481,50 @@
 								"has_training_target": {
 									"type": ["boolean", "null"],
 									"description": "Whether the session was done against a planned training target."
+								},
+								"heart_rate_samples": {
+									"type": ["array", "null"],
+									"minItems": 1,
+									"maxItems": 100,
+									"description": "The session's heart rate as Polar recorded it, one evenly spaced series per exercise (a multisport session has several), oldest first: every sample, at 1 second on a recorded session. A series longer than 43200 samples (12 hours at 1 second) is thinned evenly, keeping every k-th sample and a k times longer interval, so it still spans the session. Null when the session recorded no heart rate (a manual entry, no sensor). Absent on records collected before version 0.1.2.",
+									"items": {
+										"type": "object",
+										"additionalProperties": false,
+										"required": [
+											"exercise_id",
+											"start_time_local",
+											"interval_s",
+											"bpm"
+										],
+										"properties": {
+											"exercise_id": {
+												"type": "string",
+												"pattern": "^[1-9][0-9]*$",
+												"description": "Polar's id for the exercise within the session."
+											},
+											"start_time_local": {
+												"type": ["string", "null"],
+												"description": "When the exercise started, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone); the first sample was recorded then."
+											},
+											"interval_s": {
+												"type": "number",
+												"exclusiveMinimum": 0,
+												"maximum": 3600,
+												"description": "Seconds between consecutive samples."
+											},
+											"bpm": {
+												"type": "array",
+												"minItems": 1,
+												"maxItems": 43200,
+												"items": {
+													"type": ["integer", "null"],
+													"minimum": 1,
+													"maximum": 300
+												},
+												"description": "Heart rate in beats per minute; bpm[i] was recorded i * interval_s seconds after start_time_local. Null where the sensor had no reading."
+											}
+										}
+									}
 								}
 							},
 							"required": [

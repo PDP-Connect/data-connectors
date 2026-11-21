@@ -11,8 +11,9 @@
  * or time that does not parse, is unreadable instead of a guess. Ranges and units are the record
  * schemas' to check.
  *
- * Never read: the login e-mail (`userName`), the profile picture, GPS coordinates, samples, routes,
- * coach notes, club or team data.
+ * Never read: the login e-mail (`userName`), the profile picture, GPS coordinates, routes, a
+ * session's samples other than heart rate (speed, power, altitude, cadence and the rest), coach
+ * notes, club or team data.
  */
 
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -21,6 +22,7 @@ import {
 	activityDay,
 	activityTimelineResponse,
 	currentUserResponse,
+	MAX_HEART_RATE_SAMPLES,
 	type NightlyRecovery,
 	nightlyRecovery,
 	nightlyRecoveryResponse,
@@ -29,6 +31,7 @@ import {
 	sleepReportResponse,
 	type TrainingHistoryRow,
 	type TrainingSummaryResponse,
+	trainingDetailsResponse,
 	trainingHistoryResponse,
 	trainingHistoryRow,
 	trainingSummaryResponse,
@@ -147,6 +150,15 @@ export function userId(json: unknown): number | null {
 	return parsed.success ? parsed.data.user.id : null;
 }
 
+/**
+ * Polar answers the sleep goal in seconds (28800 for 8 hours), seen on a live account on 20 Nov
+ * 2026. Rounded to a hundredth of an hour.
+ */
+function sleepGoalHours(seconds: number | null | undefined): number | null {
+	const value = measured(seconds);
+	return value === null ? null : Math.round((value / 3600) * 100) / 100;
+}
+
 export function profileRecord(json: unknown): Built {
 	const parsed = currentUserResponse.safeParse(json);
 	if (!parsed.success) return UNREADABLE;
@@ -167,7 +179,7 @@ export function profileRecord(json: unknown): Built {
 		anaerobic_threshold_bpm: measured(phys?.anaerobicThreshold),
 		vo2max: measured(phys?.vo2Max),
 		functional_threshold_power_w: measured(phys?.functionalThresholdPower),
-		sleep_goal_hours: measured(phys?.sleepGoal),
+		sleep_goal_hours: sleepGoalHours(phys?.sleepGoal),
 		utc_offset: utcOffset(json),
 		measurement_unit: text(loc?.measurementUnit),
 		language: text(loc?.flowLanguage),
@@ -196,13 +208,110 @@ export function parseTrainingSummary(
 }
 
 /**
+ * Whether a session recorded heart rate, by its list row or its summary. A manual entry, or a
+ * session recorded without a sensor, says 0 in both, and its details hold no heart rate series.
+ */
+export function recordedHeartRate(
+	row: TrainingHistoryRow,
+	summary: TrainingSummaryResponse | null,
+): boolean {
+	return (
+		measured(row.hrAvg) !== null ||
+		measured(summary?.hrAverage) !== null ||
+		measured(summary?.hrMax) !== null
+	);
+}
+
+/** One exercise's heart rate series, as the session record carries it. */
+export interface HeartRateSeries {
+	exercise_id: string;
+	start_time_local: string | null;
+	interval_s: number;
+	bpm: Array<number | null>;
+}
+
+const ISO_DURATION = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/;
+
+/** An ISO 8601 time duration (`PT1S`, `PT30S`, `PT1M`) in seconds; null when it is not one or is 0. */
+export function durationSeconds(value: string): number | null {
+	const match = ISO_DURATION.exec(value);
+	if (!match || value === "PT") return null;
+	const total =
+		Number(match[1] ?? 0) * 3600 +
+		Number(match[2] ?? 0) * 60 +
+		Number(match[3] ?? 0);
+	return Number.isFinite(total) && total > 0 ? total : null;
+}
+
+/** A sample in bpm, rounded; 0 (Polar's no reading) and values no heart beats at read as null. */
+function bpm(value: number | null): number | null {
+	if (value === null) return null;
+	const rounded = Math.round(value);
+	return rounded >= 1 && rounded <= 300 ? rounded : null;
+}
+
+/**
+ * A session's heart rate series from its analysis details, one per exercise that recorded heart
+ * rate, oldest first. Null when no exercise did (a manual entry, a session without a sensor);
+ * "unreadable" when the answer is not in the shape expected, is about another session, or a
+ * series' interval does not parse.
+ *
+ * Every sample Polar holds is kept, at its own interval (1 s on a recorded session), up to
+ * MAX_HEART_RATE_SAMPLES across the session. A longer session is thinned evenly instead of cut:
+ * every k-th sample is kept and the interval grows k times, so the record still spans the whole
+ * session. Samples are not averaged, so each value kept is one Polar recorded.
+ */
+export function heartRateSamples(
+	json: unknown,
+	sessionId: number,
+): HeartRateSeries[] | null | "unreadable" {
+	const parsed = trainingDetailsResponse.safeParse(json);
+	if (!parsed.success || parsed.data.id !== sessionId) return "unreadable";
+	const { exercises, samples } = parsed.data;
+	const series: HeartRateSeries[] = [];
+	for (const [exerciseId, block] of Object.entries(samples ?? {})) {
+		const hr = block?.HEART_RATE?.samples;
+		if (!hr) continue;
+		if (!/^[1-9]\d*$/.test(exerciseId)) return "unreadable";
+		const interval = durationSeconds(hr.interval);
+		if (interval === null) return "unreadable";
+		const values = hr.values.map(bpm);
+		// Trailing gaps say nothing; a series with no reading at all is not one.
+		let end = values.length;
+		while (end > 0 && values[end - 1] === null) end -= 1;
+		if (end === 0) continue;
+		series.push({
+			exercise_id: exerciseId,
+			start_time_local: localTime(exercises?.[exerciseId]?.startTime),
+			interval_s: interval,
+			bpm: values.slice(0, end),
+		});
+	}
+	if (series.length === 0) return null;
+	// By start time, then by exercise id (numeric order: the ids have no leading zeros).
+	const order = (s: HeartRateSeries): string =>
+		`${s.start_time_local ?? ""}|${s.exercise_id.padStart(20, "0")}`;
+	series.sort((a, b) => (order(a) < order(b) ? -1 : 1));
+	const total = series.reduce((sum, s) => sum + s.bpm.length, 0);
+	const step = Math.ceil(total / MAX_HEART_RATE_SAMPLES);
+	if (step <= 1) return series;
+	return series.map((s) => ({
+		...s,
+		interval_s: s.interval_s * step,
+		bpm: s.bpm.filter((_, i) => i % step === 0),
+	}));
+}
+
+/**
  * One training session: the history row, and its analysis summary when that read (max heart rate,
  * end time, training load, device, the session's name). Without a summary those fields are null.
- * A summary about another session is not used.
+ * A summary about another session is not used. `samples` is the session's heart rate series from
+ * its analysis details, null when it recorded none or they were not read.
  */
 export function trainingSessionRecord(
 	row: TrainingHistoryRow,
 	summary: TrainingSummaryResponse | null,
+	samples: HeartRateSeries[] | null = null,
 ): Built {
 	const start = localTime(row.startDate);
 	if (start === null) return UNREADABLE;
@@ -225,6 +334,7 @@ export function trainingSessionRecord(
 		note: text(row.note),
 		is_test: orNull(row.isTest),
 		has_training_target: orNull(row.hasTrainingTarget),
+		heart_rate_samples: samples,
 	});
 }
 
