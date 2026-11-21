@@ -35,6 +35,7 @@ import {
 	buildSavedVideoRecord,
 	buildUserRecord,
 	buildVideoRecord,
+	collectionItemCount,
 	envelopeStatus,
 	newTextNotes,
 	parseAccount,
@@ -2784,4 +2785,43 @@ test("client params: still none after the profile page, the run stops early with
 		assert.equal(failure.message, `tiktok_interrupted: ${CLIENT_NOT_SEEN}`);
 		assert.equal(failure.retryable, true);
 	}
+});
+
+test("video counts keep exact V2 zero, fall back from unsafe V2, and do not invent missing counts", () => {
+	const record = buildVideoRecord(
+		{
+			id: "90001",
+			createTime: 1_700_000_000,
+			statsV2: {
+				playCount: "0",
+				diggCount: "9007199254740992",
+				shareCount: "9007199254740992",
+			},
+			stats: { playCount: 42, diggCount: 17 },
+		},
+		newTextNotes(),
+	);
+	assert.deepEqual(
+		[
+			record.play_count,
+			record.like_count,
+			record.share_count,
+			record.comment_count,
+		],
+		[0, 17, null, null],
+	);
+});
+
+test("collection counts distinguish proven zero, a large exact count, and unknown", () => {
+	const collection = { collectionId: "4321", name: "Synthetic favorites" };
+	assert.equal(collectionItemCount(collection), null);
+	assert.equal(collectionItemCount({ ...collection, total: "0" }), 0);
+	assert.equal(
+		collectionItemCount({ ...collection, total: "9007199254740991" }),
+		Number.MAX_SAFE_INTEGER,
+	);
+	assert.equal(
+		collectionItemCount({ ...collection, total: "9007199254740992" }),
+		null,
+	);
 });
