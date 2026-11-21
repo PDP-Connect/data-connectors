@@ -531,3 +531,35 @@ test("export dates preserve the stated clock and distinguish known local offsets
 		}
 	}
 });
+
+test("streamCsvRows waits for the row consumer before pulling another chunk", async () => {
+	const events: string[] = [];
+	let release!: () => void;
+	let started!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const entered = new Promise<void>((resolve) => { started = resolve; });
+	const parsing = streamCsvRows((async function* () {
+		events.push("first chunk"); yield "one\ntwo\n";
+		events.push("second chunk"); yield "three";
+	})(), async (row) => {
+		events.push(row[0] ?? "");
+		if (row[0] === "one") { started(); await held; }
+	});
+	await entered;
+	try {
+		assert.deepEqual(events, ["first chunk", "one"]);
+	} finally {
+		release();
+	}
+	assert.deepEqual(await parsing, { rowCount: 3 });
+	assert.deepEqual(events, ["first chunk", "one", "two", "second chunk", "three"]);
+});
+
+test("streamCsvRows reports a truncated final row without losing complete rows", async () => {
+	const rows: string[][] = [];
+	const result = await streamCsvRows((async function* () {
+		yield "\uFEFFa,b\r"; yield '\n1,ready\r\n2,"unclosed'; yield "";
+	})(), (row) => { rows.push(row); });
+	assert.deepEqual(rows, [["a", "b"], ["1", "ready"]]);
+	assert.deepEqual(result, { rowCount: 2, error: "CSV ended inside a quoted field" });
+});
