@@ -254,6 +254,48 @@ test("daily activity: a recorded day, a day nothing recorded and a day past the 
 	});
 });
 
+test("daily activity: a valid sync alone keeps the day but invalid sync times do not", () => {
+	const day = "2026-11-03";
+	const sync = 1_700_000_000_000;
+	const activity = (lastSync: number, stepCount = 0) => ({
+		dataPanelData: { stepCount },
+		activityGraphData: { lastSync },
+	});
+	assert.equal(
+		valid("daily_activity", dailyActivityRecord(day, activity(sync)))
+			.last_sync_at,
+		"2023-11-14T22:13:20.000Z",
+	);
+	for (const bad of [0, -1, 1.25, 253_402_300_800_000]) {
+		assert.deepEqual(dailyActivityRecord(day, activity(bad)), {
+			kind: "empty",
+		});
+		const kept = valid(
+			"daily_activity",
+			dailyActivityRecord(day, activity(bad, 7)),
+		);
+		assert.equal(kept.steps, 7);
+		assert.equal(kept.last_sync_at, null);
+	}
+});
+
+test("Nightly Recharge: fractional ratings are unknown but zero measured HRV is retained", () => {
+	const row = valid(
+		"nightly_recharge",
+		nightlyRechargeRecord({
+			date: "2026-11-03",
+			recoveryIndicator: 2.5,
+			ansRate: 1.5,
+			ansStatus: 3,
+			rmssd: 0,
+		}),
+	);
+	assert.equal(row.nightly_recharge_status, null);
+	assert.equal(row.ans_charge_status, null);
+	assert.equal(row.ans_charge, null);
+	assert.equal(row.hrv_rmssd_ms, 0);
+});
+
 test("sleep: a scored night and an unscored one, dated by the wake-up day", () => {
 	const { sleep } = fixtureData();
 	const scored = valid("sleep", sleepRecord(sleep[0]));
