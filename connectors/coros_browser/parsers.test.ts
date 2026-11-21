@@ -206,3 +206,54 @@ test("plannedRecords joins entries to workouts by place in plan and plan id", ()
 	assert.equal(orphan[0]?.ok && orphan[0].record.id, "2026-11-01:77:9");
 	assert.equal(orphan[1]?.ok, false);
 });
+
+test("plannedRecords keeps the same slot on the same day separate across plans", () => {
+	const result = plannedRecords({
+		entities: [
+			{ happenDay: 20261101, planId: "11", idInPlan: 2 },
+			{ happenDay: 20261101, planId: "22", idInPlan: 2 },
+		],
+		programs: [
+			{ planId: 22, idInPlan: "2", name: "Restorative ride" },
+			{ planId: 11, idInPlan: "2", name: "Easy run" },
+		],
+	});
+	assert.deepEqual(
+		result.map((row) => row.ok && [row.record.id, row.record.name]),
+		[
+			["2026-11-01:11:2", "Easy run"],
+			["2026-11-01:22:2", "Restorative ride"],
+		],
+	);
+});
+
+test("plannedRecords joins the missing and zero plan markers and keeps zero completion", () => {
+	const result = plannedRecords({
+		entities: [{ happenDay: 20261101, idInPlan: "2", completeRate: "0.00" }],
+		programs: [{ planId: 0, idInPlan: 2, name: "Standalone workout" }],
+	});
+	assert.deepEqual(
+		result.map(
+			(row) =>
+				row.ok && [row.record.id, row.record.name, row.record.completion_rate],
+		),
+		[["2026-11-01::2", "Standalone workout", 0]],
+	);
+});
+
+test("dailyRecord distinguishes a zero training load from an unavailable threshold", () => {
+	const record = dailyRecord({
+		happenDay: 20261101,
+		trainingLoad: 0,
+		ati: 0,
+		cti: 0,
+		rhr: 0,
+		vo2max: 0,
+	});
+	assert.ok(record);
+	assert.equal(record.training_load, 0);
+	assert.equal(record.acute_load, 0);
+	assert.equal(record.chronic_load, 0);
+	assert.equal(record.resting_heart_rate_bpm, null);
+	assert.equal(record.vo2max, null);
+});
