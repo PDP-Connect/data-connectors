@@ -572,7 +572,10 @@ test("review 1 #1: a known id is not an end; likes walk to hasMore:false before 
 	);
 	const last = h.messages.at(-1);
 	assert.equal(last?.type, "STATE");
-	assert.deepEqual(last && "cursor" in last ? last.cursor : null, { count: 4 });
+	assert.deepEqual(last && "cursor" in last ? last.cursor : null, {
+		count: 4,
+		head_ids: ["20"],
+	});
 });
 
 test("review 1 #1: likes that end without hasMore:false write no STATE", async () => {

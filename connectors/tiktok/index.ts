@@ -193,8 +193,8 @@ export const LOGIN_URL = `${TIKTOK_ORIGIN}/login`;
 const ITEM_PAGE_SIZE = "30";
 /** Accounts per page asked of /api/user/list/. */
 const USER_PAGE_SIZE = "30";
-// Full-history walks have no default page or request count cap. STATE contains
-// counts, not resumable list cursors; a cap would strand the same tail every run.
+// Full-history walks have no default page or request count cap. Top-level item
+// walks can retain a validated resume anchor separately from existing watermarks.
 /** Shortest and longest pause between two requests; random in between. */
 export const REQUEST_PAUSE_MIN_MS = 1500;
 export const REQUEST_PAUSE_MAX_MS = 3000;
@@ -902,7 +902,36 @@ export async function ensureTikTokSession(
 
 // ─── list walks ──────────────────────────────────────────────────────────
 
+interface ItemResume {
+	v: 1;
+	accountId: string;
+	replay: string;
+	next: string;
+	ids: string[];
+}
+
+function readItemResume(value: unknown, accountId: string): ItemResume | null {
+	if (!value || typeof value !== "object") return null;
+	const r = value as Partial<ItemResume>;
+	return r.v === 1 &&
+		r.accountId === accountId &&
+		typeof r.replay === "string" &&
+		r.replay.length > 0 &&
+		typeof r.next === "string" &&
+		r.next.length > 0 &&
+		r.next !== r.replay &&
+		r.next !== "0" &&
+		Array.isArray(r.ids) &&
+		r.ids.length > 0 &&
+		r.ids.length <= Number(ITEM_PAGE_SIZE) &&
+		r.ids.every((id) => typeof id === "string" && id.length > 0) &&
+		new Set(r.ids).size === r.ids.length
+		? (r as ItemResume)
+		: null;
+}
+
 interface WalkResult {
+	resumed?: boolean;
 	/** Entries the pages returned, repeats included. */
 	entries: number;
 	/** Pages read to reach hasMore:false. */
@@ -937,10 +966,42 @@ async function walkItemList(
 	maxPages: number,
 	onItem: (item: Item) => Promise<void>,
 	stopAfterPage?: (page: ItemPage) => boolean,
+	checkpoint?: {
+		accountId: string;
+		resume: ItemResume | null;
+		save: (value: ItemResume | null) => Promise<void>;
+	},
 ): Promise<WalkResult> {
-	const seenCursors = new Set<string>();
+	const seenCursors = new Set<string>(["0"]);
 	const seenIds = new Set<string>();
 	let cursor = "0";
+	let resumed = false;
+	let last = checkpoint?.resume ?? null;
+	if (last) {
+		const replay = parseItemPage(
+			await api.get(path, {
+				...base,
+				count: ITEM_PAGE_SIZE,
+				cursor: last.replay,
+			}),
+		);
+		if (
+			replay &&
+			replay.unreadable === 0 &&
+			replay.hasMore &&
+			replay.cursor === last.next &&
+			replay.items.length === last.ids.length &&
+			replay.items.every((item, index) => item.id === last!.ids[index])
+		) {
+			cursor = last.next;
+			seenCursors.add(last.replay);
+			for (const id of last.ids) seenIds.add(id);
+			resumed = true;
+		} else {
+			last = null;
+			await checkpoint?.save(null);
+		}
+	}
 	let read = 0;
 	let entries = 0;
 	let unreadable = 0;
@@ -948,17 +1009,25 @@ async function walkItemList(
 	const failedFields = new Set<string>();
 	for (let pages = 0; ; pages += 1) {
 		if (pages >= maxPages) {
+			if (last) await checkpoint?.save(last);
 			throw new TikTokStop(
 				"incomplete",
 				`${path} still had more after ${maxPages} pages`,
 			);
 		}
 		seenCursors.add(cursor);
-		const json = await api.get(path, {
-			...base,
-			count: ITEM_PAGE_SIZE,
-			cursor,
-		});
+		let json: unknown;
+		try {
+			json = await api.get(path, { ...base, count: ITEM_PAGE_SIZE, cursor });
+		} catch (error) {
+			if (
+				last &&
+				error instanceof TikTokStop &&
+				RETRYABLE_STOPS.has(error.stop)
+			)
+				await checkpoint?.save(last);
+			throw error;
+		}
 		const page = parseItemPage(json);
 		if (!page) {
 			throw new TikTokStop(
@@ -1006,6 +1075,7 @@ async function walkItemList(
 			return {
 				entries,
 				read,
+				resumed,
 				stopped: page.hasMore,
 				total,
 				unreadable,
@@ -1020,6 +1090,21 @@ async function walkItemList(
 				`${path} said it had more but gave no new cursor`,
 			);
 		}
+		const ids = page.items.map((item) => item.id);
+		if (
+			checkpoint &&
+			unreadable === 0 &&
+			ids.length <= Number(ITEM_PAGE_SIZE) &&
+			new Set(ids).size === ids.length
+		)
+			last = {
+				v: 1,
+				accountId: checkpoint.accountId,
+				replay: cursor,
+				next,
+				ids,
+			};
+		else last = null;
 		cursor = next;
 	}
 }
@@ -1329,6 +1414,56 @@ export async function collectTikTok(
 				"unreadable",
 				`${count} ${stream} ${count === 1 ? "entry carries" : "entries carry"} text that is not safe text and ${count === 1 ? "was" : "were"} not saved`,
 			);
+		}
+	};
+
+	const resumeState = (stream: Stream) => {
+		const raw = ctx.state[stream];
+		const state =
+			raw && typeof raw === "object" && !Array.isArray(raw)
+				? (raw as Record<string, never>)
+				: {};
+		const { item_resume, ...watermarks } = state;
+		return { item_resume, watermarks };
+	};
+	const itemCheckpoint = (stream: Stream) => {
+		const request = ctx.requested.get(stream);
+		if (request?.time_range || request?.resources?.length) return undefined;
+		const { item_resume, watermarks } = resumeState(stream);
+		const accountId = String(account.id);
+		return {
+			accountId,
+			resume: readItemResume(item_resume, accountId),
+			save: async (value: ItemResume | null) => {
+				assertSafe(stream);
+				await ctx.emit({
+					type: "STATE",
+					stream,
+					cursor: { ...watermarks, ...(value ? { item_resume: value } : {}) },
+				});
+			},
+		};
+	};
+	const finishItemState = async (
+		stream: Stream,
+		walk: WalkResult,
+		checkpoint: ReturnType<typeof itemCheckpoint>,
+	) => {
+		if (walk.resumed) {
+			// A suffix reaching the end drains the continuation; it cannot prove
+			// the current inventory or replace its previously recorded watermark.
+			await checkpoint?.save(null);
+		} else {
+			const { watermarks, item_resume } = resumeState(stream);
+			await ctx.emit({
+				type: "STATE",
+				stream,
+				cursor: {
+					...watermarks,
+					count: walk.read,
+					...(!checkpoint && item_resume ? { item_resume } : {}),
+				},
+			});
 		}
 	};
 
@@ -2103,6 +2238,7 @@ export async function collectTikTok(
 		[VIDEOS]: async () => {
 			const named = resourceTracker(VIDEOS);
 			const since = pushableSince(VIDEOS);
+			const checkpoint = itemCheckpoint(VIDEOS);
 			/** Posting time of the last unpinned video handed on. */
 			let previous: number | null = null;
 			/** Whether every unpinned video so far came newest first. */
@@ -2125,24 +2261,21 @@ export async function collectTikTok(
 				(page) =>
 					named?.done() === true ||
 					(since !== null && newestFirst && pageBeforeSince(page, since)),
+				checkpoint,
 			);
 			if (walk.stopped)
 				connectorDiagnostic("tiktok", "list_stopped_in_scope", {
 					stream: VIDEOS,
 					pages: walk.pages,
 				});
-			assertComplete(VIDEOS, walk);
+			assertComplete(VIDEOS, walk.resumed ? { ...walk, total: null } : walk);
 			assertSafe(VIDEOS);
 			// A proved-empty list, or a usable own video, settles the profile
 			// counts; listed videos without the counts, or a walk the scope
 			// ended early without one, leave it to findOwnItem.
 			ownFirstItemRead =
 				ownFirstItem !== null || (walk.read === 0 && !walk.stopped);
-			await ctx.emit({
-				type: "STATE",
-				stream: VIDEOS,
-				cursor: { count: walk.read },
-			});
+			await finishItemState(VIDEOS, walk, checkpoint);
 		},
 		[PROFILE]: async () => {
 			const settings = parseSettings(await api.get("/api/user/settings/", {}));
@@ -2197,7 +2330,10 @@ export async function collectTikTok(
 			emitted.add(item.id);
 			await emitBuilt(stream, () => buildSavedVideoRecord(item, notes));
 		};
-		const readOnce = async (): Promise<{ ids: string[]; walk: WalkResult }> => {
+		const checkpoint = itemCheckpoint(stream);
+		const readOnce = async (
+			saving?: typeof checkpoint,
+		): Promise<{ ids: string[]; walk: WalkResult }> => {
 			const ids: string[] = [];
 			const walk = await walkItemList(
 				api,
@@ -2209,12 +2345,13 @@ export async function collectTikTok(
 					await onItem(item);
 				},
 				() => named?.done() === true,
+				saving,
 			);
 			// Unreadable entries fail the stream whatever the count says.
 			assertComplete(stream, { ...walk, total: null });
 			return { ids, walk };
 		};
-		let { ids, walk } = await readOnce();
+		let { ids, walk } = await readOnce(checkpoint);
 		assertSafe(stream);
 		let total = walk.total;
 		let confirmed = false;
@@ -2226,6 +2363,7 @@ export async function collectTikTok(
 		for (
 			let attempt = 1;
 			!walk.stopped &&
+			!walk.resumed &&
 			!confirmed &&
 			total !== null &&
 			walk.read < total &&
@@ -2248,14 +2386,14 @@ export async function collectTikTok(
 			confirmed = sameIds(ids, again.ids);
 			({ ids, walk } = again);
 		}
-		if (!walk.stopped)
+		if (!walk.stopped && !walk.resumed)
 			settleCount(stream, {
 				confirmed,
 				entries: walk.entries,
 				read: walk.read,
 				total,
 			});
-		await ctx.emit({ type: "STATE", stream, cursor: { count: walk.read } });
+		await finishItemState(stream, walk, checkpoint);
 	}
 
 	async function walkUsers(

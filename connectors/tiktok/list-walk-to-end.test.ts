@@ -44,8 +44,13 @@ async function run(
 	pages: number,
 	fault?: Fault,
 	options: TikTokCollectOptions = {},
+	checkpoint: {
+		state?: TikTokCollectContext["state"];
+		movedPage?: number;
+	} = {},
 ) {
 	let reads = 0;
+	const cursors: number[] = [];
 	const messages: EmittedMessage[] = [];
 	const records: RecordData[] = [];
 	const failures: string[] = [];
@@ -68,10 +73,16 @@ async function run(
 					"synthetic safety stop: source did not terminate",
 				);
 				const index = Number(params.cursor ?? params.minCursor ?? "0");
+				cursors.push(index);
 				const sourceIndex =
 					fault === "ids" || fault === "terminal-ids" ? 0 : index;
 				const ids = Array.from({ length: 30 }, (_, i) =>
-					String(900000 + sourceIndex * 30 + i),
+					String(
+						900000 +
+							sourceIndex * 30 +
+							i +
+							(checkpoint.movedPage === index ? 500000 : 0),
+					),
 				);
 				const hasMore =
 					(fault !== undefined && fault !== "terminal-ids") ||
@@ -136,7 +147,7 @@ async function run(
 	const ctx: TikTokCollectContext = {
 		page,
 		requested: new Map([[stream, { name: stream }]]),
-		state: {},
+		state: checkpoint.state ?? {},
 		collectionMode: "incremental",
 		emit: async (message) => {
 			// Progress copy is not part of the terminal contract these tests pin.
@@ -156,7 +167,7 @@ async function run(
 		random: () => 0,
 		...options,
 	});
-	return { reads, messages, records, failures, recoveryHints };
+	return { reads, cursors, messages, records, failures, recoveryHints };
 }
 
 for (const stream of ["videos", "following", "favorite_collections"] as const) {
@@ -252,3 +263,56 @@ for (const stream of ["videos", "following"] as const) {
 		);
 	});
 }
+
+test("videos: resumes a capped full walk from a validated anchor, keeping prior count", async () => {
+	const interrupted = await run(
+		"videos",
+		4,
+		undefined,
+		{ maxPages: 2 },
+		{ state: { videos: { count: 17 } } },
+	);
+	assert.deepEqual(interrupted.cursors, [0, 1]);
+	assert.equal(interrupted.failures.length, 1);
+	const saved = interrupted.messages.find(
+		(message) => message.type === "STATE",
+	);
+	assert.ok(saved?.type === "STATE");
+	assert.equal((saved.cursor as Record<string, unknown>).count, 17);
+	assert.equal(
+		interrupted.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	const resumed = await run(
+		"videos",
+		4,
+		undefined,
+		{},
+		{ state: { videos: saved.cursor } },
+	);
+	assert.deepEqual(resumed.cursors, [1, 2, 3]);
+	assert.equal(
+		resumed.records.length,
+		60,
+		"revalidation does not emit the anchor again",
+	);
+	assert.deepEqual(resumed.failures, []);
+	assert.deepEqual(
+		resumed.messages.filter((message) => message.type === "STATE"),
+		[{ type: "STATE", stream: "videos", cursor: { count: 17 } }],
+	);
+	const moved = await run(
+		"videos",
+		4,
+		undefined,
+		{},
+		{ state: { videos: saved.cursor }, movedPage: 1 },
+	);
+	assert.deepEqual(moved.cursors, [1, 0, 1, 2, 3]);
+	assert.equal(moved.records.length, 120);
+	assert.deepEqual(moved.failures, []);
+	assert.deepEqual(
+		moved.messages.filter((message) => message.type === "STATE").at(-1),
+		{ type: "STATE", stream: "videos", cursor: { count: 120 } },
+	);
+});
