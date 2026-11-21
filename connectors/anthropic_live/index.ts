@@ -150,10 +150,11 @@ const pollSliceMs = () =>
 /** PageShim's limit on one bridge call. */
 const BRIDGE_CALL_LIMIT_MS = 30_000;
 /**
- * How long a settled read stays in the page for a poll to take. The host
- * sets its deadline when the start call returns, at most one bridge call
- * after the read could settle, and may begin its last poll one slice past
- * that deadline. One more slice is slack.
+ * How long a settled read stays in the page for a poll to take. Any poll
+ * after it settles takes it at once, so the one at risk is the first poll:
+ * it can come one start call (under the bridge limit) after the read
+ * settled, plus any gap the host leaves. The deadline and two slices on
+ * top leave the host a gap of more than two minutes for a full read.
  */
 const readExpiryMs = (deadlineMs: number) =>
 	Number(process.env.PDPP_ANTHROPIC_LIVE_READ_EXPIRY_MS) ||
