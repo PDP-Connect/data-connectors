@@ -453,7 +453,11 @@ async function readSharedIds(
 				: null;
 		if (page === 0) initialTotal = total;
 		else if (total !== initialTotal) return { ids: null, partial: true };
-		if (items.length === 0) return { ids, partial: false };
+		if (items.length === 0) {
+			return initialTotal === null || ids.size === initialTotal
+				? { ids, partial: false }
+				: { ids: null, partial: true };
+		}
 		const before = ids.size;
 		for (const item of items) {
 			const id = (item as { conversation_id?: unknown } | null)

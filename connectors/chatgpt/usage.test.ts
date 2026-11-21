@@ -1001,7 +1001,7 @@ test("usage history reads 60 full shared pages and the short final page", async 
 			...siteRoutes({ conversations: many(6002) }),
 			"/shared_conversations": (_init, url) => {
 				const offset = Number(url.searchParams.get("offset"));
-				return json({ items: shared.slice(offset, offset + 100), total: 7000 });
+				return json({ items: shared.slice(offset, offset + 100) });
 			},
 		},
 	});
@@ -1047,7 +1047,7 @@ test("usage history keeps shared count unknown after a full repeated shared page
 	assertUsageCheckpoint(harness, false);
 });
 
-for (const ending of ["later-404", "changed-total", "empty-terminal"] as const) {
+for (const ending of ["later-404", "changed-total", "empty-before-total", "empty-at-zero", "empty-without-total"] as const) {
 	test(`usage shared pagination: ${ending}`, async () => {
 		process.env[CHATGPT_USAGE_DETAIL_ENV] = "0";
 		const ids = Array.from({ length: 120 }, (_, i) => ({ conversation_id: rawConvId(i) }));
@@ -1056,7 +1056,10 @@ for (const ending of ["later-404", "changed-total", "empty-terminal"] as const) 
 				...siteRoutes({ conversations: many(120) }),
 				"/shared_conversations": (_init, url) => {
 					const offset = Number(url.searchParams.get("offset"));
+					if (ending === "empty-at-zero") return json({ items: [], total: 0 });
+					if (ending === "empty-without-total") return json({ items: ids.slice(offset, offset + 100) });
 					if (offset === 0) return json({ items: ids.slice(0, 100), total: 200 });
+					if (ending === "empty-before-total") return json({ items: [], total: 200 });
 					if (ending === "later-404") return json({}, 404);
 					if (ending === "changed-total") return json({ items: ids.slice(100), total: 120 });
 					return json({ items: ids.slice(offset, offset + 100), total: 200 });
@@ -1065,10 +1068,10 @@ for (const ending of ["later-404", "changed-total", "empty-terminal"] as const) 
 		});
 		await run();
 		const [summary] = records(harness, "usage_summary");
-		const complete = ending === "empty-terminal";
+		const complete = ending === "empty-at-zero" || ending === "empty-without-total";
 		assert.equal(sub(summary, "coverage").listing_complete, complete);
-		assert.equal(sub(summary, "totals").shared, complete ? 120 : null);
-		assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, complete ? 3 : 2);
+		assert.equal(sub(summary, "totals").shared, ending === "empty-at-zero" ? 0 : complete ? 120 : null);
+		assert.equal(calls.filter((c) => c.path.startsWith("/shared_conversations?")).length, ending === "empty-at-zero" ? 1 : complete ? 3 : 2);
 		assertUsageCheckpoint(harness, complete);
 	});
 }
