@@ -2021,15 +2021,18 @@ export async function collectTikTok(
 				};
 			}
 			const next = page.cursor;
-			if (
-				added === 0 ||
-				next === null ||
-				next === "" ||
-				seenCursors.has(next)
-			) {
+			if (next === null || next === "" || seenCursors.has(next)) {
 				throw new TikTokStop(
 					"incomplete",
 					"/api/user/collection_list/ said it had more but gave no new page",
+				);
+			}
+			// A well-formed continuation whose page repeats only seen collections
+			// is a list that shifted under offset paging: the next run can read it.
+			if (added === 0) {
+				throw new TikTokStop(
+					"unstable_collection_list",
+					"/api/user/collection_list/ continued with a page that added nothing new",
 				);
 			}
 			cursor = next;
@@ -2065,7 +2068,7 @@ export async function collectTikTok(
 			previous = ids;
 		}
 		throw new TikTokStop(
-			"incomplete",
+			"unstable_collection_list",
 			"the Favorites collections list changed on every read, so it could not be read consistently",
 		);
 	};

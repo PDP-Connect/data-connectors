@@ -31,7 +31,7 @@ const item = (posts.itemList as Json[])[0]!;
 const user = (users.userList as Json[])[0]!;
 const collection = (collections.collectionList as Json[])[0]!;
 type Stream = "videos" | "following" | "favorite_collections" | "profile";
-type Fault = "cursor" | "ids" | "unreadable" | "terminal-ids";
+type Fault = "cursor" | "ids" | "unreadable" | "terminal-ids" | "shift";
 const paths: Record<Stream, string> = {
 	videos: "/api/post/item_list/",
 	profile: "/api/post/item_list/",
@@ -50,6 +50,7 @@ async function run(
 	} = {},
 ) {
 	let reads = 0;
+	let passes = 0;
 	const cursors: number[] = [];
 	const messages: EmittedMessage[] = [];
 	const records: RecordData[] = [];
@@ -74,8 +75,15 @@ async function run(
 				);
 				const index = Number(params.cursor ?? params.minCursor ?? "0");
 				cursors.push(index);
+				// "shift": every full read of the list holds different ids, as when
+				// the list changes between two reads under offset paging.
+				if (index === 0) passes += 1;
 				const sourceIndex =
-					fault === "ids" || fault === "terminal-ids" ? 0 : index;
+					fault === "ids" || fault === "terminal-ids"
+						? 0
+						: fault === "shift"
+							? index + passes * 100
+							: index;
 				const ids = Array.from({ length: 30 }, (_, i) =>
 					String(
 						900000 +
@@ -85,7 +93,9 @@ async function run(
 					),
 				);
 				const hasMore =
-					(fault !== undefined && fault !== "terminal-ids") ||
+					(fault !== undefined &&
+						fault !== "terminal-ids" &&
+						fault !== "shift") ||
 					index + 1 < pages;
 				const cursor = fault === "cursor" ? 0 : index + 1;
 				if (stream === "following") {
@@ -314,5 +324,49 @@ test("videos: resumes a capped full walk from a validated anchor, keeping prior 
 	assert.deepEqual(
 		moved.messages.filter((message) => message.type === "STATE").at(-1),
 		{ type: "STATE", stream: "videos", cursor: { count: 120 } },
+	);
+});
+
+test("favorite_collections: a duplicate-only page with a new cursor is retryable without STATE", async () => {
+	const result = await run("favorite_collections", 3, "ids");
+	assert.equal(result.failures.length, 1);
+	assert.match(result.failures[0]!, /^tiktok_list_incomplete:/);
+	assert.match(
+		result.failures[0]!,
+		/continued with a page that added nothing new/,
+	);
+	assert.deepEqual(result.recoveryHints, [
+		{ action: "retry_by_runtime", retryable: true },
+	]);
+	assert.equal(
+		result.messages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("favorite_collections: ids that differ on every read are retryable without STATE", async () => {
+	const result = await run("favorite_collections", 2, "shift");
+	assert.equal(result.failures.length, 1);
+	assert.match(result.failures[0]!, /^tiktok_list_incomplete:/);
+	assert.match(result.failures[0]!, /changed on every read/);
+	assert.deepEqual(result.recoveryHints, [
+		{ action: "retry_by_runtime", retryable: true },
+	]);
+	assert.equal(
+		result.messages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("favorite_collections: a repeated cursor stays nonretryable", async () => {
+	const result = await run("favorite_collections", 3, "cursor");
+	assert.equal(result.failures.length, 1);
+	assert.match(result.failures[0]!, /said it had more but gave no new page/);
+	assert.deepEqual(result.recoveryHints, [
+		{ action: "unknown", retryable: false },
+	]);
+	assert.equal(
+		result.messages.some((message) => message.type === "STATE"),
+		false,
 	);
 });
