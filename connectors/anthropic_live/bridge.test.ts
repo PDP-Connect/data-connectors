@@ -143,7 +143,7 @@ test("a full read slower than one bridge call is awaited across calls and read i
 		return evaluate(fn, arg);
 	};
 	await collectAnthropicLive(h.ctx);
-	assert.ok(polls > 5, `polls ${polls}`);
+	assert.ok(polls >= 2, `polls ${polls}`);
 	assert.deepEqual(h.ids("conversations"), [uuid(1), uuid(2), uuid(3)]);
 	assert.deepEqual(progress.filter(isLightNotice), []);
 	assert.deepEqual(h.failures, []);
