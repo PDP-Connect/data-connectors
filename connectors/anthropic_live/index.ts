@@ -147,6 +147,17 @@ const fullReadDeadlineMs = () =>
 /** One wait on a running read; under the PageShim bridge's 30 s per call. */
 const pollSliceMs = () =>
 	Number(process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS) || 20_000;
+/** PageShim's limit on one bridge call. */
+const BRIDGE_CALL_LIMIT_MS = 30_000;
+/**
+ * How long a settled read stays in the page for a poll to take. The host
+ * sets its deadline when the start call returns, at most one bridge call
+ * after the read could settle, and may begin its last poll one slice past
+ * that deadline. One more slice is slack.
+ */
+const readExpiryMs = (deadlineMs: number) =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_READ_EXPIRY_MS) ||
+	BRIDGE_CALL_LIMIT_MS + deadlineMs + 2 * pollSliceMs();
 /**
  * The in-page fetch gives up before the PageShim bridge's 30 s per-call
  * limit, so a slow answer is a status 0 this connector can retry instead of
@@ -372,8 +383,8 @@ async function startDetailRead(
 			})();
 			reads.set(key, read);
 			// A read the host stops polling (a bridge call failed, or it gave up)
-			// must not stay in the page: drop it soon after it settles. A poll
-			// normally takes it first. unref keeps a Node test host from waiting.
+			// must not stay in the page: drop it once no poll can still come
+			// (readExpiryMs). unref keeps a Node test host from waiting.
 			void read.then(() => {
 				const timer = setTimeout(() => reads.delete(key), expiryMs);
 				(timer as { unref?: () => void }).unref?.();
@@ -384,7 +395,7 @@ async function startDetailRead(
 			apiPath: path,
 			timeoutMs: deadlineMs,
 			slot: PENDING_READS,
-			expiryMs: 2 * pollSliceMs(),
+			expiryMs: readExpiryMs(deadlineMs),
 		},
 	);
 }

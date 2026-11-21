@@ -104,7 +104,15 @@ test("a conversation detail leaves the page with text blocks only, so a huge too
 
 afterEach(() => {
 	delete process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS;
+	delete process.env.PDPP_ANTHROPIC_LIVE_READ_EXPIRY_MS;
 });
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const pendingReads = () =>
+	(globalThis as Record<string, unknown>).__pdppAnthropicLiveReads as Map<
+		string,
+		unknown
+	>;
 
 /** Records progress messages, which the harness otherwise drops. */
 function captureProgress(h: ReturnType<typeof harness>): string[] {
@@ -175,8 +183,9 @@ test("a conversation whose full read fails at the bridge is read in the light re
 	assert.deepEqual(h.skips(), []);
 });
 
-test("a started full read the host stops polling is dropped from the page after it settles", async () => {
+test("a started full read the host stops polling stays until its expiry, then leaves the page", async () => {
 	process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS = "5";
+	process.env.PDPP_ANTHROPIC_LIVE_READ_EXPIRY_MS = "400";
 	const convs = three();
 	const { org: _org, ...slow } = convs[1] as Conv;
 	const h = harness(convs, {
@@ -184,7 +193,7 @@ test("a started full read the host stops polling is dropped from the page after 
 		route: (url) =>
 			url.pathname.endsWith(`/chat_conversations/${uuid(2)}`) &&
 			url.searchParams.get("render_all_tools") === "true"
-				? { status: 200, body: slow, delayMs: 30 }
+				? { status: 200, body: slow, delayMs: 50 }
 				: undefined,
 	});
 	const progress = captureProgress(h);
@@ -192,6 +201,7 @@ test("a started full read the host stops polling is dropped from the page after 
 		evaluate: (fn: unknown, arg: unknown) => Promise<unknown>;
 	};
 	const evaluate = page.evaluate;
+	const started = Date.now();
 	let abandoned: string | undefined;
 	page.evaluate = async (fn, arg) => {
 		const text = JSON.stringify(arg ?? "");
@@ -211,8 +221,42 @@ test("a started full read the host stops polling is dropped from the page after 
 		"Conversation 2 of 3 was read without tool details: the full read did not finish",
 	]);
 	assert.ok(abandoned);
-	const reads = (globalThis as Record<string, unknown>)
-		.__pdppAnthropicLiveReads as Map<string, unknown>;
-	await new Promise((resolve) => setTimeout(resolve, 100));
-	assert.equal(reads.has(abandoned), false);
+	// Settles at about 50 ms and expires about 400 ms later.
+	await sleep(Math.max(0, started + 200 - Date.now()));
+	assert.equal(pendingReads().has(abandoned), true);
+	await sleep(Math.max(0, started + 700 - Date.now()));
+	assert.equal(pendingReads().has(abandoned), false);
+});
+
+test("a first poll that comes long after the read settled still gets the full rendering", async () => {
+	process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS = "5";
+	const h = harness(three(), { streams: CHAT });
+	const progress = captureProgress(h);
+	const page = h.ctx.page as unknown as {
+		evaluate: (fn: unknown, arg: unknown) => Promise<unknown>;
+	};
+	const evaluate = page.evaluate;
+	let fullKey: string | undefined;
+	let delayed = false;
+	page.evaluate = async (fn, arg) => {
+		const text = JSON.stringify(arg ?? "");
+		if (fullKey && !delayed && text.includes(fullKey)) {
+			// The read settled at once; the first poll arrives many slices later.
+			delayed = true;
+			await sleep(100);
+		}
+		const result = await evaluate(fn, arg);
+		if (
+			text.includes(`/chat_conversations/${uuid(2)}?`) &&
+			text.includes("render_all_tools=true")
+		) {
+			fullKey = result as string;
+		}
+		return result;
+	};
+	await collectAnthropicLive(h.ctx);
+	assert.ok(delayed);
+	assert.deepEqual(h.ids("conversations"), [uuid(1), uuid(2), uuid(3)]);
+	assert.deepEqual(progress.filter(isLightNotice), []);
+	assert.deepEqual(h.failures, []);
 });
