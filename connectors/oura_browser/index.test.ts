@@ -265,3 +265,46 @@ test("a terminal page with an empty id withholds STATE", async () => {
   assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
   assert.equal(h.messages.some((message) => message.type === "STATE"), false);
 });
+
+test("an incomplete sleep endpoint preserves its records and does not block readiness STATE", async () => {
+  const h = harness({ streams: ["sleep", "readiness"], answers: (endpoint) =>
+    endpoint === "sleep" ? { status: 503 } :
+      { data: replay[endpoint as keyof typeof replay], next_token: null } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map(({ endpoint }) => endpoint), ["daily_sleep", "sleep", "daily_readiness"]);
+  assert.deepEqual(h.records.map(({ stream, data }) => [stream, data.id]),
+    [["sleep", id(201)], ["readiness", id(301)]]);
+  assert.deepEqual(h.messages.flatMap((message) => message.type === "SKIP_RESULT" ?
+    [[message.stream, message.reason]] : []), [["sleep", "inventory_not_proven_complete"]]);
+  assert.deepEqual(h.messages.flatMap((message) => message.type === "STATE" ? [message.stream] : []),
+    ["readiness"]);
+});
+
+test("50 distinct advancing tokens with no terminal page cannot advance STATE", async () => {
+  const h = harness({ streams: ["readiness"], answers: (_endpoint, token) => ({
+    data: token === null ? replay.daily_readiness : [],
+    next_token: String(Number(token) + 1),
+  }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map(({ token }) => token), [null, ...Array.from({ length: 49 }, (_, i) => String(i + 1))]);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
+  assert.equal(h.messages.find((message) => message.type === "SKIP_RESULT")?.reason, "inventory_not_proven_complete");
+  assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+});
+
+test("an unbounded full refresh ignores a same-account cursor and requests the initial snapshot", async () => {
+  const h = harness({ streams: ["readiness"], openRange: true,
+    state: { readiness: { ...cursor, account: ACCESS.account } },
+    answers: () => ({ data: [], next_token: null }) });
+  await collectOuraBrowser({ ...h.ctx, collectionMode: "full_refresh" }, ACCESS);
+  assert.equal(h.calls[0]?.start, initialStartDate(new Date(`${today}T00:00:00Z`)));
+  assert.equal(h.calls.length, 3);
+  noSkip(h);
+  const nextDay = new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+  const state = h.messages.find((message) => message.type === "STATE");
+  assert.deepEqual(state, { type: "STATE", stream: "readiness", cursor: {
+    account: ACCESS.account, api_v2: true, next_day: nextDay,
+    refresh_from: new Date(Date.parse(`${today}T00:00:00Z`) - 2 * 86_400_000).toISOString().slice(0, 10),
+    requested_since: null,
+  } });
+});
