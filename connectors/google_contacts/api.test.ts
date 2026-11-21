@@ -168,3 +168,68 @@ test("constructor rejects an empty access token", () => {
 		/google_people_access_token_missing/,
 	);
 });
+
+test("paged incremental requests retain both boundaries and wait for the sync marker", async () => {
+	const transport = makeFetch([
+		jsonResponse({ connections: [], nextPageToken: "cursor+/=" }),
+		jsonResponse({ connections: [], nextSyncToken: "renewed+/=" }),
+	]);
+	const client = new GooglePeopleClient({
+		accessToken: "fixture-only",
+		fetch: transport.fetch,
+	});
+	const first = await client.listConnectionsPage({ syncToken: "old+/=" });
+	assert.deepEqual(first, {
+		people: [],
+		nextPageToken: "cursor+/=",
+		nextSyncToken: null,
+	});
+	const final = await client.listConnectionsPage({
+		syncToken: "old+/=",
+		pageToken: "cursor+/=",
+	});
+	assert.deepEqual(final, {
+		people: [],
+		nextPageToken: null,
+		nextSyncToken: "renewed+/=",
+	});
+	const query = new URL(transport.calls[1]!.url).searchParams;
+	assert.equal(query.get("pageToken"), "cursor+/=");
+	assert.equal(query.get("syncToken"), "old+/=");
+	assert.equal(query.get("requestSyncToken"), "true");
+});
+
+test("a row without an identity is rejected while a minimal valid contact keeps its membership", async () => {
+	const transport = makeFetch([
+		jsonResponse({
+			connections: [
+				null,
+				{ resourceName: " ", memberships: [] },
+				{
+					resourceName: " people/fixture ",
+					memberships: [
+						{},
+						{
+							contactGroupMembership: {
+								contactGroupResourceName: "contactGroups/fixture",
+							},
+						},
+					],
+				},
+			],
+		}),
+	]);
+	const client = new GooglePeopleClient({
+		accessToken: "fixture-only",
+		fetch: transport.fetch,
+	});
+	const { people } = await client.listConnectionsPage();
+	assert.deepEqual(
+		people.map(({ resourceName, memberships, deleted }) => [
+			resourceName,
+			memberships,
+			deleted,
+		]),
+		[["people/fixture", ["contactGroups/fixture"], false]],
+	);
+});
