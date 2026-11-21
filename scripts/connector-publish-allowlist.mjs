@@ -44,11 +44,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["google_contacts", "google-contacts"],
     ["google_maps", "google-maps"],
     ["google_maps_data_portability", "google-maps-data-portability"],
-    [
-      "google_messages",
-      "google-messages",
-      "Requires gmcli from PATH or $GMCLI_BIN; the OCI builder does not implement a per-platform tool layer yet.",
-    ],
+    ["google_messages", "google-messages"],
     ["google_takeout", "google-takeout"],
     ["groupme", "groupme"],
     ["heb", "heb"],

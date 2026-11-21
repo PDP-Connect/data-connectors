@@ -33,6 +33,7 @@ import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { assertNoUnbundledNativeDependency } from "./build-connector-oci-artifact.mjs";
 import { classifyExternals } from "./connector-host-runtime-contract.mjs";
 import {
 	declarationVersion,
@@ -666,11 +667,26 @@ describe("C-T3 named packaging refusals and the Gmail repair", () => {
 		assert.equal(deferred.hostProvided[0].package, "patchright");
 	});
 
-	for (const [connector, binary] of [
-		["slack", "SLACKDUMP_BIN"],
-		["signal", "SIGTOP_BIN"],
-		["google_messages", "GMCLI_BIN"],
-	]) {
+	it("builds and verifies Google Messages with a host helper declaration", () => {
+		const target = join(workspace, "google-messages");
+		const result = build(["--connector", "google_messages", "--out", target]);
+		assert.equal(result.status, 0, result.stderr);
+		const checked = verify(target);
+		assert.equal(checked.status, 0, checked.stderr);
+		// The profile layer (not config.json) is what an installer reads, so the helper declaration must survive into it.
+		const profile = JSON.parse(readFileSync(join(target, "collection-profile.json"), "utf8"));
+		const manifest = JSON.parse(readFileSync(join(repoRoot, "connectors/google_messages/manifest.json"), "utf8"));
+		assert.deepEqual(profile.runtime_requirements.external_tools, manifest.runtime_requirements.external_tools);
+	});
+
+	it("refuses every undeclared binary override by name", () => {
+		const directory = mkdtempSync(join(workspace, "host-helper-"));
+		writeFileSync(join(directory, "index.ts"), "void process.env.GMCLI_BIN; void process.env.FOO_BIN;");
+		const profile = { runtime_requirements: { external_tools: [{ name: "gmcli", detect: { executable: "gmcli", args: ["version"], exit_code: 0 } }] } };
+		assert.throws(() => assertNoUnbundledNativeDependency("synthetic", profile, directory), /\$FOO_BIN/);
+	});
+
+	for (const [connector, binary] of [["signal", "SIGTOP_BIN"]]) {
 		it(`${connector} refuses its unbundled native helper ${binary}`, () => {
 			const result = build(["--connector", connector, "--out", join(workspace, connector)]);
 			assert.notEqual(result.status, 0);
@@ -678,6 +694,12 @@ describe("C-T3 named packaging refusals and the Gmail repair", () => {
 			assert.match(result.stderr, /per-platform tool layer must land first/);
 		});
 	}
+
+	it("slack still refuses: its declared helper passes the override check, its escaping config asset does not", () => {
+		const result = build(["--connector", "slack", "--out", join(workspace, "slack")]);
+		assert.notEqual(result.status, 0);
+		assert.match(result.stderr, /slackdump-api-config\.toml.*escapes the install root/);
+	});
 });
 
 describe("P2-1 — version agreement", () => {
