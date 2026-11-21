@@ -57,7 +57,9 @@ JSON without the session, as the other endpoints do. On 20 November 2026 a signe
 session recorded with the Polar Flow phone app (no heart rate sensor) confirmed the envelope:
 `samples.<exercise id>.SPEED` and `.DISTANCE` were `{samples: {values, interval: "PT1S"}}` with
 one value per second, `COORDINATE` a list of fixes, and every series without data, `HEART_RATE`
-included, `null`. Heart rate values from a real sensor have not been seen yet. The same read showed
+included, `null`. On 21 November 2026 a session recorded with a heart rate sensor gave
+`HEART_RATE` in the same shape, one bpm value per second, and the connector's 302 values matched
+the 302 the sensor sent. The same read showed
 the profile's `sleepGoal` in seconds (`28800`). The heart rate values, the speed, distance and
 GPS points in it are invented and cut to a few seconds. The first value is null and the second `0`
 (no reading); the last two are null. The manual entry's details, all series null, are written in

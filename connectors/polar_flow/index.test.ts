@@ -379,7 +379,7 @@ test("details that fail ship the session without samples, once held; a 404 is no
 	assert.equal(skip?.reason, "source_unreadable");
 	assert.deepEqual(
 		(skip?.diagnostics as { fields: string[] } | undefined)?.fields,
-		["(heart rate samples)"],
+		["(heart rate samples unanswered)"],
 	);
 	assert.equal(
 		(stateOf(a.out, "training_sessions") as { held_at?: string }).held_at,
@@ -454,9 +454,65 @@ test("past the heart rate budget, sessions ship without samples and no details a
 	const progress = out.messages.find(
 		(m) =>
 			m.type === "PROGRESS" &&
-			String(m.message).includes("time for them ran out"),
+			String(m.message).includes("time for heart rate ran out"),
 	);
 	assert.equal(progress?.count, 1);
+});
+
+test("sessions older than the recent heart rate days ship without samples and no details are asked", async () => {
+	const s = site();
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	// 2027-02-03 makes the fixture's November sessions 90+ days old.
+	await collectPolarFlow(
+		ctx,
+		{ sleep: instant },
+		new Date("2027-02-03T12:00:00.000Z"),
+	);
+	const rows = recordsOf(out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.heart_rate_samples, null);
+	assert.equal(s.fetches.filter((f) => f.url.endsWith("/details")).length, 0);
+	const progress = out.messages.find(
+		(m) =>
+			m.type === "PROGRESS" && String(m.message).includes("older than 90 days"),
+	);
+	assert.equal(progress?.count, 1);
+});
+
+test("an empty details answer is a session without samples, not a bad shape", async () => {
+	const s = site({
+		override: (url) =>
+			url.endsWith("/details")
+				? new Response("null", {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					})
+				: undefined,
+	});
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.equal(
+		recordsOf(out, "training_sessions")[0]?.heart_rate_samples,
+		null,
+	);
+	assert.deepEqual(skipsOf(out), []);
+	assert.ok(
+		!out.messages.some(
+			(m) =>
+				m.type === "PROGRESS" &&
+				String(m.message).includes("not in the shape expected"),
+		),
+	);
 });
 
 test("a lost sign-in on the details stops the stream as sign_in_required", async () => {
@@ -823,7 +879,7 @@ test("a summary that is not the JSON expected ships the list fields but counts a
 	assert.equal(skip?.reason, "source_unreadable");
 	assert.deepEqual(
 		(skip?.diagnostics as { fields: string[] } | undefined)?.fields,
-		["(analysis summary)", "(heart rate samples)"],
+		["(analysis summary)", "(heart rate samples unanswered)"],
 	);
 	assert.equal(
 		(stateOf(out, "training_sessions") as { held_at?: string }).held_at,

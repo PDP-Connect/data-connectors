@@ -255,12 +255,14 @@ const profileSchema = z.strictObject({
  * of JSON. A longer session is thinned evenly to fit (parsers.ts).
  */
 export const MAX_HEART_RATE_SAMPLES = 43_200;
+export const MAX_HEART_RATE_SERIES = 100;
+export const MAX_HEART_RATE_INTERVAL_S = 3600;
 
 /** One exercise's heart rate, evenly spaced: `bpm[i]` was recorded `i * interval_s` after its start. */
 const heartRateSeriesSchema = z.strictObject({
 	exercise_id: z.string().regex(/^[1-9]\d*$/),
 	start_time_local: localTime.nullable(),
-	interval_s: z.number().gt(0).max(3600),
+	interval_s: z.number().gt(0).max(MAX_HEART_RATE_INTERVAL_S),
 	bpm: z.array(heartRate).min(1).max(MAX_HEART_RATE_SAMPLES),
 });
 
@@ -288,7 +290,7 @@ const trainingSessionSchema = z.strictObject({
 	heart_rate_samples: z
 		.array(heartRateSeriesSchema)
 		.min(1)
-		.max(100)
+		.max(MAX_HEART_RATE_SERIES)
 		.nullable()
 		.optional(),
 });

@@ -234,6 +234,15 @@ test("heart rate samples: an answer about another session, a bad interval or sha
 	assert.deepEqual(heartRateSamples(series("PT1M", [120.4, 400]), 5), [
 		{ exercise_id: "6", start_time_local: null, interval_s: 60, bpm: [120] },
 	]);
+	// Past an hour between samples, or more series than a record holds: unreadable, not dropped.
+	assert.equal(heartRateSamples(series("PT2H", [120]), 5), "unreadable");
+	const many = Object.fromEntries(
+		Array.from({ length: 101 }, (_, i) => [
+			String(i + 1),
+			{ HEART_RATE: { samples: { interval: "PT1S", values: [120] } } },
+		]),
+	);
+	assert.equal(heartRateSamples({ id: 5, samples: many }, 5), "unreadable");
 	assert.equal(durationSeconds("PT1H2M3.5S"), 3723.5);
 	assert.equal(durationSeconds("PT"), null);
 });

@@ -22,7 +22,9 @@ import {
 	activityDay,
 	activityTimelineResponse,
 	currentUserResponse,
+	MAX_HEART_RATE_INTERVAL_S,
 	MAX_HEART_RATE_SAMPLES,
+	MAX_HEART_RATE_SERIES,
 	type NightlyRecovery,
 	nightlyRecovery,
 	nightlyRecoveryResponse,
@@ -288,18 +290,26 @@ export function heartRateSamples(
 		});
 	}
 	if (series.length === 0) return null;
+	// More series than a record holds is not a session the connector knows how to read.
+	if (series.length > MAX_HEART_RATE_SERIES) return "unreadable";
 	// By start time, then by exercise id (numeric order: the ids have no leading zeros).
 	const order = (s: HeartRateSeries): string =>
 		`${s.start_time_local ?? ""}|${s.exercise_id.padStart(20, "0")}`;
 	series.sort((a, b) => (order(a) < order(b) ? -1 : 1));
 	const total = series.reduce((sum, s) => sum + s.bpm.length, 0);
 	const step = Math.ceil(total / MAX_HEART_RATE_SAMPLES);
-	if (step <= 1) return series;
-	return series.map((s) => ({
-		...s,
-		interval_s: s.interval_s * step,
-		bpm: s.bpm.filter((_, i) => i % step === 0),
-	}));
+	const thinned =
+		step <= 1
+			? series
+			: series.map((s) => ({
+					...s,
+					interval_s: s.interval_s * step,
+					bpm: s.bpm.filter((_, i) => i % step === 0),
+				}));
+	// An interval past an hour is not heart rate the record can hold: the session ships without it.
+	return thinned.some((s) => s.interval_s > MAX_HEART_RATE_INTERVAL_S)
+		? "unreadable"
+		: thinned;
 }
 
 /**

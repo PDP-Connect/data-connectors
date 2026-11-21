@@ -127,10 +127,14 @@ export const PACING: Pacing = {
 	sleep: politeDelay,
 };
 /**
- * A first import reads up to two years of sessions, each with a details answer of about 500 KB an
- * hour. The whole run must end inside the runtime's ceiling, so heart rate reads stop after this
- * long; the sessions after it are still delivered, without samples, and do not hold the cursor.
+ * A first import reads up to two years of sessions, oldest first, each with a details answer of
+ * about 500 KB an hour. Heart rate samples are read only for sessions of the last
+ * HEART_RATE_RECENT_DAYS days: a remote run starts from scratch every time, so a budget spent on
+ * the oldest sessions would leave the newest without samples on every run. The whole run must
+ * also end inside the runtime's ceiling, so heart rate reads stop after HEART_RATE_BUDGET_MS; the
+ * sessions after it are still delivered, without samples, and do not hold the cursor.
  */
+export const HEART_RATE_RECENT_DAYS = 90;
 export const HEART_RATE_BUDGET_MS = 4 * 60_000;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_FALLBACK_MS = 30_000;
@@ -755,7 +759,13 @@ interface Run {
 	heartRateDeadline: number;
 	/** Sessions shipped without samples because the heart rate budget ran out. */
 	heartRateSkipped: number;
+	/** Sessions older than HEART_RATE_RECENT_DAYS, shipped without samples by design. */
+	heartRateOlder: number;
 }
+
+/** Issue keys: samples in a shape the connector cannot read, and samples Polar did not serve. */
+const SAMPLES_SHAPE = "(heart rate samples)";
+const SAMPLES_UNANSWERED = "(heart rate samples unanswered)";
 
 interface SamplesRead {
 	samples: HeartRateSeries[] | null;
@@ -776,8 +786,13 @@ async function readHeartRate(
 	run: Run,
 	row: TrainingHistoryRow,
 	summary: TrainingSummaryResponse | null,
+	day: string,
 ): Promise<SamplesRead> {
 	if (!recordedHeartRate(row, summary)) {
+		return { samples: null, failure: null, unreadable: false };
+	}
+	if (day < addDays(run.today, 1 - HEART_RATE_RECENT_DAYS)) {
+		run.heartRateOlder += 1;
 		return { samples: null, failure: null, unreadable: false };
 	}
 	if ((run.p.now ?? Date.now)() >= run.heartRateDeadline) {
@@ -797,14 +812,21 @@ async function readHeartRate(
 			? { samples: null, failure: detail, unreadable: false }
 			: { samples: null, failure: null, unreadable: true };
 	}
-	if (detail.json === null) {
+	// An empty answer (a JSON null, which the in-page read turns into {}) is a session without
+	// details, as a 404 is.
+	if (
+		detail.json === null ||
+		(typeof detail.json === "object" &&
+			!Array.isArray(detail.json) &&
+			Object.keys(detail.json).length === 0)
+	) {
 		return { samples: null, failure: null, unreadable: false };
 	}
 	const samples = heartRateSamples(detail.json, row.id);
 	if (samples === "unreadable") {
 		// A shape the connector cannot read is the connector's to fix: a re-read repeats it, so it
 		// is reported but does not hold the cursor.
-		run.issues.training_sessions.add("(heart rate samples)");
+		run.issues.training_sessions.add(SAMPLES_SHAPE);
 		return { samples: null, failure: null, unreadable: false };
 	}
 	return { samples, failure: null, unreadable: false };
@@ -812,7 +834,7 @@ async function readHeartRate(
 
 /** Says which sessions shipped without heart rate samples although they recorded some. */
 async function reportHeartRate(run: Run): Promise<void> {
-	if (run.issues.training_sessions.has("(heart rate samples)")) {
+	if (run.issues.training_sessions.has(SAMPLES_SHAPE)) {
 		await run.ctx.emit({
 			type: "PROGRESS",
 			stream: "training_sessions",
@@ -821,12 +843,29 @@ async function reportHeartRate(run: Run): Promise<void> {
 			count: 0,
 		});
 	}
+	if (run.issues.training_sessions.has(SAMPLES_UNANSWERED)) {
+		await run.ctx.emit({
+			type: "PROGRESS",
+			stream: "training_sessions",
+			message:
+				"Polar did not answer for some heart rate samples; those sessions were saved without them and are read again on the next run.",
+			count: 0,
+		});
+	}
 	if (run.heartRateSkipped > 0) {
 		await run.ctx.emit({
 			type: "PROGRESS",
 			stream: "training_sessions",
 			count: run.heartRateSkipped,
-			message: `${run.heartRateSkipped} session(s) saved without heart rate samples: the run's time for them ran out.`,
+			message: `${run.heartRateSkipped} session(s) of the last ${HEART_RATE_RECENT_DAYS} days saved without heart rate samples: the run's time for heart rate ran out.`,
+		});
+	}
+	if (run.heartRateOlder > 0) {
+		await run.ctx.emit({
+			type: "PROGRESS",
+			stream: "training_sessions",
+			count: run.heartRateOlder,
+			message: `${run.heartRateOlder} session(s) older than ${HEART_RATE_RECENT_DAYS} days saved without heart rate samples: they are read only for recent sessions.`,
 		});
 	}
 }
@@ -878,9 +917,10 @@ async function readTraining(run: Run, w: Window): Promise<WindowRead> {
 			run,
 			row,
 			summary && summary.id === row.id ? summary : null,
+			start.slice(0, 10),
 		);
 		if (hr.failure) return { failure: hr.failure, unreadable };
-		if (hr.unreadable) run.issues.training_sessions.add("(heart rate samples)");
+		if (hr.unreadable) run.issues.training_sessions.add(SAMPLES_UNANSWERED);
 		const undelivered = await deliver(
 			ctx,
 			"training_sessions",
@@ -1110,6 +1150,7 @@ export async function collectPolarFlow(
 		heartRateDeadline:
 			(p.now ?? Date.now)() + (p.heartRateBudgetMs ?? HEART_RATE_BUDGET_MS),
 		heartRateSkipped: 0,
+		heartRateOlder: 0,
 	};
 	for (const stream of streams) {
 		const empty: Walk = {
