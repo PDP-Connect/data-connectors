@@ -336,3 +336,93 @@ test("optional payment note remains absent rather than a source null", () => {
 	assert.equal(Object.hasOwn(record, "note"), false);
 	assert.equal(validateRecord("transactions", record).ok, true);
 });
+
+test("a charge retains payer direction and only the allowed counterparty fields", () => {
+	const parsed = parseTransactionStory(
+		{
+			id: "story-1",
+			date_created: "2026-01-02T12:00:00Z",
+			payment: {
+				id: "payment-1",
+				action: "charge",
+				amount: 0,
+				actor: {
+					id: "requester",
+					username: "sample-a",
+					display_name: "Sample A",
+					phone: "synthetic",
+				},
+				target: {
+					user: {
+						id: "owner",
+						username: "sample-b",
+						display_name: "Sample B",
+						about: "not projected",
+					},
+				},
+			},
+		},
+		"owner",
+	);
+	assert.equal(parsed.kind, "record");
+	if (parsed.kind !== "record") return;
+	assert.equal(parsed.record.payment_type, "charge");
+	assert.equal(parsed.record.amount_cents, 0);
+	assert.equal(parsed.record.is_owner_actor, false);
+	assert.deepEqual(parsed.record.actor, {
+		id: "requester",
+		username: "sample-a",
+		display_name: "Sample A",
+	});
+	assert.deepEqual(parsed.record.target, {
+		id: "owner",
+		username: "sample-b",
+		display_name: "Sample B",
+	});
+});
+
+test("a transaction preserves explicit offsets across all projected dates", () => {
+	const created = "2026-01-02T13:07:59.001+05:30";
+	const updated = "2026-01-02T04:07:59.123-04:00";
+	const completed = "2026-01-02T08:10:00.000123";
+	const parsed = parseTransactionStory(
+		{
+			id: "story-2",
+			date_created: created,
+			date_updated: updated,
+			payment: { id: "payment-2", action: "pay", date_completed: completed },
+		},
+		"owner",
+	);
+	assert.equal(parsed.kind, "record");
+	if (parsed.kind !== "record") return;
+	assert.equal(parsed.record.date_created, created);
+	assert.equal(parsed.record.date_updated, updated);
+	assert.equal(parsed.record.date_completed, completed + "Z");
+});
+
+test("transaction device metadata distinguishes absent and explicit null observations", () => {
+	const story = {
+		id: "story-3",
+		date_created: "2026-01-02T12:00:00Z",
+		payment: { id: "payment-3", action: "pay" },
+	};
+	const absent = parseTransactionStory(story, "owner");
+	const unset = parseTransactionStory({ ...story, app: null }, "owner");
+	const present = parseTransactionStory(
+		{ ...story, app: { name: "Sample App" } },
+		"owner",
+	);
+	assert.equal(absent.kind, "record");
+	assert.equal(unset.kind, "record");
+	assert.equal(present.kind, "record");
+	if (
+		absent.kind !== "record" ||
+		unset.kind !== "record" ||
+		present.kind !== "record"
+	)
+		return;
+	assert.equal(Object.hasOwn(absent.record, "device_used"), false);
+	assert.equal(unset.record.device_used, null);
+	assert.equal(present.record.device_used, "Sample App");
+});
