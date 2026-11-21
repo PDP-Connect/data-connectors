@@ -13,6 +13,7 @@ import {
 	type PageDeadlines,
 	type PageGraphqlResult,
 	type PageSnapshot,
+	streamFailureHint,
 } from "./collect.ts";
 import {
 	evaluateInMainWorld,
@@ -2007,5 +2008,31 @@ describe("read ownership regressions", () => {
 		assert.equal(h.records[0]?.data.target_text, null);
 		assert.equal(h.records[1]?.data.target_text, "Healthy target");
 		assert.ok(stateFor(h, "reactions"));
+	});
+});
+
+describe("stream failure recovery directions", () => {
+	it("waits for a connector upgrade for an outdated query or explicitly refused operation", () => {
+		for (const message of [
+			"facebook_query_outdated: saved query is unavailable",
+			"facebook_mutation_refused: operation classified as non-read-only",
+		]) {
+			assert.deepEqual(streamFailureHint(message), {
+				action: "retry_on_connector_upgrade",
+				retryable: false,
+			});
+		}
+	});
+
+	it("keeps an incomplete or timed-out stream retryable even if details mention an outdated query", () => {
+		for (const message of [
+			"facebook_list_not_proven_complete: missing terminal evidence",
+			"facebook_page_timeout: diagnostic mentioned facebook_query_outdated",
+		]) {
+			assert.deepEqual(streamFailureHint(message), {
+				action: "retry_by_runtime",
+				retryable: true,
+			});
+		}
 	});
 });
