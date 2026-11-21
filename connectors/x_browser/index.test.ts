@@ -37,7 +37,38 @@ import {
 	LAYOUT_CONTAINER_SELECTOR,
 	LAYOUT_CONTROL_CAP,
 } from "./page-scripts.ts";
+import { parseRequestVariables, parseXDate } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
+
+test("legacy post date normalizes a positive fractional offset across the year boundary", () => {
+	assert.equal(
+		parseXDate("Thu Jan 01 00:15:30 +0530 2026"),
+		"2025-12-31T18:45:30.000Z",
+	);
+});
+
+test("a continuation value never supplies missing timeline identity", () => {
+	assert.deepEqual(
+		parseRequestVariables(
+			'{"cursor":"","screen_name":"not a handle","userId":"not-a-number"}',
+		),
+		{
+			hasCursor: true,
+			screenName: null,
+			userId: null,
+		},
+	);
+	assert.deepEqual(
+		parseRequestVariables(
+			'{"cursor":1,"screen_name":"sample_owner","userId":"1900000000000000001"}',
+		),
+		{
+			hasCursor: false,
+			screenName: "sample_owner",
+			userId: "1900000000000000001",
+		},
+	);
+});
 
 const ORIGIN = "https://x.com";
 const OWNER_ID = "1900000000000000001";
