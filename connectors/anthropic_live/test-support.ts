@@ -159,7 +159,7 @@ export function stampMessage(c: Conv, index: number, time: string): void {
 
 export type Route = (
 	url: URL,
-) => { status: number; body?: unknown } | undefined;
+) => { status: number; body?: unknown; delayMs?: number } | undefined;
 
 export interface HarnessOptions {
 	streams?: string[];
@@ -186,7 +186,9 @@ export function harness(convs: Conv[], options: HarnessOptions = {}) {
 		[];
 	let heldStates = 0;
 	const orgs = options.orgs ?? ORGS;
-	const respond = (path: string): { status: number; body?: unknown } => {
+	const respond = (
+		path: string,
+	): { status: number; body?: unknown; delayMs?: number } => {
 		const url = new URL(path, "https://claude.ai");
 		const routed = options.route?.(url);
 		if (routed) return routed;
@@ -229,7 +231,8 @@ export function harness(convs: Conv[], options: HarnessOptions = {}) {
 	};
 	const fakeFetch = (async (input: string) => {
 		calls.push(input);
-		const { status, body } = respond(input);
+		const { status, body, delayMs } = respond(input);
+		if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
 		return {
 			status,
 			ok: status >= 200 && status < 300,

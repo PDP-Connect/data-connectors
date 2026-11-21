@@ -7,7 +7,7 @@
 // synthetic.
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { collectAnthropicLive } from "./index.ts";
 import {
 	type Conv,
@@ -71,7 +71,9 @@ test("a conversation read that never answers ends the streams retryable and keep
 test("a conversation detail leaves the page with text blocks only, so a huge tool result does not cross the bridge", async () => {
 	const convs = three();
 	const big = "x".repeat(2_000_000);
-	const answer = convs[1].chat_messages[1] as { content: unknown[] };
+	const answer = (convs[1] as Conv).chat_messages[1] as unknown as {
+		content: unknown[];
+	};
 	answer.content.push({
 		type: "tool_result",
 		name: "query",
@@ -98,4 +100,77 @@ test("a conversation detail leaves the page with text blocks only, so a huge too
 		.map((m) => m.content);
 	assert.deepEqual(contents, ["question", "answer"]);
 	assert.deepEqual(h.failures, []);
+});
+
+afterEach(() => {
+	delete process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS;
+});
+
+/** Records progress messages, which the harness otherwise drops. */
+function captureProgress(h: ReturnType<typeof harness>): string[] {
+	const seen: string[] = [];
+	const ctx = h.ctx as unknown as {
+		progress: (message: string, extra?: unknown) => Promise<void>;
+	};
+	ctx.progress = async (message) => {
+		seen.push(message);
+	};
+	return seen;
+}
+
+const isLightNotice = (m: string) => m.includes("without tool details");
+
+test("a full read slower than one bridge call is awaited across calls and read in full", async () => {
+	process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS = "5";
+	const convs = three();
+	const { org: _org, ...slow } = convs[1] as Conv;
+	const h = harness(convs, {
+		streams: CHAT,
+		route: (url) =>
+			url.pathname.endsWith(`/chat_conversations/${uuid(2)}`) &&
+			url.searchParams.get("render_all_tools") === "true"
+				? { status: 200, body: slow, delayMs: 60 }
+				: undefined,
+	});
+	const progress = captureProgress(h);
+	const page = h.ctx.page as unknown as {
+		evaluate: (fn: unknown, arg: unknown) => Promise<unknown>;
+	};
+	const evaluate = page.evaluate;
+	let polls = 0;
+	page.evaluate = async (fn, arg) => {
+		if (JSON.stringify(arg ?? "").includes("readKey")) polls += 1;
+		return evaluate(fn, arg);
+	};
+	await collectAnthropicLive(h.ctx);
+	assert.ok(polls > 5, `polls ${polls}`);
+	assert.deepEqual(h.ids("conversations"), [uuid(1), uuid(2), uuid(3)]);
+	assert.deepEqual(progress.filter(isLightNotice), []);
+	assert.deepEqual(h.failures, []);
+});
+
+test("a conversation whose full read never finishes is read in the light rendering and reported", async () => {
+	const h = harness(three(), { streams: CHAT });
+	const progress = captureProgress(h);
+	const page = h.ctx.page as unknown as {
+		evaluate: (fn: unknown, arg: unknown) => Promise<unknown>;
+	};
+	const evaluate = page.evaluate;
+	page.evaluate = async (fn, arg) => {
+		const path = JSON.stringify(arg ?? "");
+		if (
+			path.includes(`/chat_conversations/${uuid(2)}?`) &&
+			path.includes("render_all_tools=true")
+		) {
+			throw new Error(BRIDGE_TIMEOUT);
+		}
+		return evaluate(fn, arg);
+	};
+	await collectAnthropicLive(h.ctx);
+	assert.deepEqual(h.ids("conversations"), [uuid(1), uuid(2), uuid(3)]);
+	assert.deepEqual(progress.filter(isLightNotice), [
+		"Conversation 2 of 3 was read without tool details: the full read did not finish",
+	]);
+	assert.deepEqual(h.failures, []);
+	assert.deepEqual(h.skips(), []);
 });

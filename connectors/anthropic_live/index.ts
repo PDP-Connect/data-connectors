@@ -139,8 +139,14 @@ const detailDelayMs = () =>
 	Number(process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS) || 400;
 const detailRetryDelayMs = () =>
 	Number(process.env.PDPP_ANTHROPIC_LIVE_DETAIL_RETRY_DELAY_MS) || 3000;
-/** Tries per conversation read before a network error ends the streams. */
-const DETAIL_ATTEMPTS = 3;
+/** Light-rendering tries after the full rendering failed. */
+const LIGHT_ATTEMPTS = 2;
+/** How long one full-rendering read may run in the page. */
+const fullReadDeadlineMs = () =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_FULL_READ_DEADLINE_MS) || 90_000;
+/** One wait on a running read; under the PageShim bridge's 30 s per call. */
+const pollSliceMs = () =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS) || 20_000;
 /**
  * The in-page fetch gives up before the PageShim bridge's 30 s per-call
  * limit, so a slow answer is a status 0 this connector can retry instead of
@@ -148,6 +154,8 @@ const DETAIL_ATTEMPTS = 3;
  */
 const API_FETCH_TIMEOUT_MS = 25_000;
 const DETAIL_QUERY = "tree=True&rendering_mode=messages&render_all_tools=true";
+/** Without render_all_tools, tool calls come back as text blocks, not payloads. */
+const LIGHT_DETAIL_QUERY = "tree=True&rendering_mode=messages";
 const TRAILING_ZEROS_RE = /0+$/;
 
 type Page = BrowserCollectContext["page"];
@@ -261,13 +269,9 @@ export async function ensureAnthropicLiveSession({
  * network error or timeout. 401 and 403 are returned, not thrown: a caller
  * decides whether that means "signed out" or "not available on this plan".
  */
-async function apiGet(
-	page: Page,
-	path: string,
-	textBlocksOnly = false,
-): Promise<ApiResult> {
+async function apiGet(page: Page, path: string): Promise<ApiResult> {
 	try {
-		return await evaluateGet(page, path, textBlocksOnly);
+		return await evaluateGet(page, path);
 	} catch {
 		// A throw from the evaluate itself (a host bridge timeout, a page that
 		// navigated away mid-call) is a network error, not the end of the run.
@@ -275,19 +279,9 @@ async function apiGet(
 	}
 }
 
-/**
- * With `textBlocksOnly`, a conversation detail's messages keep only their text
- * blocks before the body leaves the page. The records are built from the text
- * blocks alone (see flattenMessageText), and one tool result can carry tens of
- * MB of `structured_content`, which the host bridge cannot return in time.
- */
-async function evaluateGet(
-	page: Page,
-	path: string,
-	textBlocksOnly: boolean,
-): Promise<ApiResult> {
+async function evaluateGet(page: Page, path: string): Promise<ApiResult> {
 	return await page.evaluate(
-		async ({ apiPath, timeoutMs, textOnly }) => {
+		async ({ apiPath, timeoutMs }) => {
 			if (location.origin !== "https://claude.ai") {
 				return { status: 0, json: null };
 			}
@@ -305,17 +299,6 @@ async function evaluateGet(
 				} catch {
 					json = null;
 				}
-				const messages = (json as { chat_messages?: unknown } | null)
-					?.chat_messages;
-				if (textOnly && Array.isArray(messages)) {
-					for (const message of messages) {
-						if (message && Array.isArray(message.content)) {
-							message.content = message.content.filter(
-								(block: { type?: unknown } | null) => block?.type === "text",
-							);
-						}
-					}
-				}
 				return { status: res.status, json };
 			} catch {
 				return { status: 0, json: null };
@@ -323,28 +306,173 @@ async function evaluateGet(
 				clearTimeout(timeout);
 			}
 		},
-		{
-			apiPath: path,
-			timeoutMs: API_FETCH_TIMEOUT_MS,
-			textOnly: textBlocksOnly,
+		{ apiPath: path, timeoutMs: API_FETCH_TIMEOUT_MS },
+	);
+}
+
+/** The page-global map that holds detail reads between bridge calls. */
+const PENDING_READS = "__pdppAnthropicLiveReads";
+
+/**
+ * Starts a conversation detail read in the page and returns its key. The
+ * fetch runs on in the page after this bridge call returns, for up to
+ * `deadlineMs`. Each message keeps only its text blocks before the body can
+ * leave the page: the records use the text blocks alone (flattenMessageText),
+ * and one tool result can carry tens of MB of `structured_content`.
+ */
+async function startDetailRead(
+	page: Page,
+	path: string,
+	deadlineMs: number,
+): Promise<string> {
+	return await page.evaluate(
+		({ apiPath, timeoutMs, slot }) => {
+			const store = globalThis as unknown as Record<
+				string,
+				Map<string, Promise<{ status: number; json: unknown }>> | undefined
+			>;
+			const reads = store[slot] ?? new Map();
+			store[slot] = reads;
+			const key = `${Date.now()}-${Math.random()}`;
+			const read = (async () => {
+				if (location.origin !== "https://claude.ai") {
+					return { status: 0, json: null };
+				}
+				const controller = new AbortController();
+				const timeout = setTimeout(() => controller.abort(), timeoutMs);
+				try {
+					const res = await fetch(apiPath, {
+						credentials: "include",
+						headers: { accept: "application/json" },
+						signal: controller.signal,
+					});
+					let json: unknown = null;
+					try {
+						json = await res.json();
+					} catch {
+						json = null;
+					}
+					const messages = (json as { chat_messages?: unknown } | null)
+						?.chat_messages;
+					if (Array.isArray(messages)) {
+						for (const message of messages) {
+							if (message && Array.isArray(message.content)) {
+								message.content = message.content.filter(
+									(block: { type?: unknown } | null) => block?.type === "text",
+								);
+							}
+						}
+					}
+					return { status: res.status, json };
+				} catch {
+					return { status: 0, json: null };
+				} finally {
+					clearTimeout(timeout);
+				}
+			})();
+			reads.set(key, read);
+			return key;
 		},
+		{ apiPath: path, timeoutMs: deadlineMs, slot: PENDING_READS },
 	);
 }
 
 /**
- * Reads one conversation, retrying a network error or timeout (status 0) a
- * few times with a growing pause: on a busy proxy one read can stall while
- * the next succeeds. Other statuses return at once.
+ * Waits up to `sliceMs` (under the bridge's per-call limit) for a started
+ * read. Null means it is still running.
  */
-async function readConversation(
+async function pollDetailRead(
+	page: Page,
+	key: string,
+	sliceMs: number,
+): Promise<ApiResult | null> {
+	return await page.evaluate(
+		async ({ readKey, waitMs, slot }) => {
+			const store = globalThis as unknown as Record<
+				string,
+				Map<string, Promise<{ status: number; json: unknown }>> | undefined
+			>;
+			const read = store[slot]?.get(readKey);
+			if (!read) return { status: 0, json: null };
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const pending = new Promise<null>((resolve) => {
+				timer = setTimeout(() => resolve(null), waitMs);
+			});
+			const result = await Promise.race([read, pending]);
+			clearTimeout(timer);
+			if (result !== null) store[slot]?.delete(readKey);
+			return result;
+		},
+		{ readKey: key, waitMs: sliceMs, slot: PENDING_READS },
+	);
+}
+
+async function awaitDetailRead(
+	page: Page,
+	key: string,
+	until: number,
+): Promise<ApiResult> {
+	const result = await pollDetailRead(page, key, pollSliceMs());
+	if (result !== null) return result;
+	// The in-page fetch aborts itself at the deadline; one more slice lets
+	// that abort land before this gives up.
+	if (Date.now() > until + pollSliceMs()) return { status: 0, json: null };
+	return await awaitDetailRead(page, key, until);
+}
+
+/**
+ * A detail read that can outlast one bridge call: a large conversation over
+ * a slow proxy takes longer than the bridge allows a single evaluate.
+ */
+async function steppedDetailRead(
+	page: Page,
+	path: string,
+	deadlineMs: number,
+): Promise<ApiResult> {
+	try {
+		const key = await startDetailRead(page, path, deadlineMs);
+		return await awaitDetailRead(page, key, Date.now() + deadlineMs);
+	} catch {
+		return { status: 0, json: null };
+	}
+}
+
+/** A detail read, and whether it fell back to the light rendering. */
+interface DetailRead extends ApiResult {
+	light: boolean;
+}
+
+/**
+ * Reads one conversation. The full rendering is read in steps, so it may take
+ * longer than one bridge call. If it still fails with a network error or
+ * timeout (status 0), the light rendering is read instead, retried a few
+ * times with a growing pause. The light rendering turns tool calls into text
+ * blocks, so that conversation's message text differs; the caller reports
+ * it. One conversation that cannot be read in full no longer stops the
+ * conversations changed after it.
+ */
+async function readConversation(page: Page, path: string): Promise<DetailRead> {
+	const full = await steppedDetailRead(
+		page,
+		`${path}?${DETAIL_QUERY}`,
+		fullReadDeadlineMs(),
+	);
+	if (full.status !== 0) return { ...full, light: false };
+	return {
+		...(await readLight(page, `${path}?${LIGHT_DETAIL_QUERY}`)),
+		light: true,
+	};
+}
+
+async function readLight(
 	page: Page,
 	path: string,
 	attempt = 1,
 ): Promise<ApiResult> {
-	const res = await apiGet(page, path, true);
-	if (res.status !== 0 || attempt >= DETAIL_ATTEMPTS) return res;
+	const res = await steppedDetailRead(page, path, API_FETCH_TIMEOUT_MS);
+	if (res.status !== 0 || attempt >= LIGHT_ATTEMPTS) return res;
 	await politeDelay(detailRetryDelayMs() * attempt);
-	return await readConversation(page, path, attempt + 1);
+	return await readLight(page, path, attempt + 1);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1139,8 +1267,14 @@ export async function runConversationStreams(
 				);
 				const res = await readConversation(
 					ctx.page,
-					`${orgPath}/chat_conversations/${item.id}?${DETAIL_QUERY}`,
+					`${orgPath}/chat_conversations/${item.id}`,
 				);
+				if (res.status === 200 && res.light) {
+					await ctx.progress(
+						`Conversation ${index + 1} of ${batch.length} was read without tool details: the full read did not finish`,
+						{ stream: MESSAGES_STREAM },
+					);
+				}
 				if (res.status === 401 || res.status === 403) {
 					throw new AuthError(res.status);
 				}
