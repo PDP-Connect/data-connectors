@@ -185,3 +185,46 @@ for (const { end, error } of [
 		);
 	});
 }
+
+test("no selected streams means no Readwise request or protocol output", async () => {
+	const ctx = fixtureContext();
+	const noRead = async () => {
+		throw new Error("unexpected_read");
+	};
+	await collectReadwise(
+		{ ...ctx, requested: new Map(), credentials: {} },
+		noRead,
+	);
+	assert.deepEqual(ctx.protocolMessages, []);
+});
+
+test("a complete empty export checkpoints only the requested stream with measured zero coverage", async () => {
+	const state = { books: { updated_after: "2026-11-05T00:00:00.000Z" } };
+	const ctx = fixtureContext(state);
+	const requests: Array<[string | null, string | null]> = [];
+	await collectReadwise(
+		{ ...ctx, requested: new Map([["books", { name: "books" }]]) },
+		async (_credential, cursor, updatedAfter) => {
+			requests.push([cursor, updatedAfter]);
+			return { results: [], nextPageCursor: null };
+		},
+	);
+	assert.deepEqual(requests, [[null, "2026-11-05T00:00:00.000Z"]]);
+	assert.deepEqual(
+		ctx.protocolMessages.map((message) => message.type),
+		["DETAIL_COVERAGE", "STATE"],
+	);
+	const [coverage, checkpoint] = ctx.protocolMessages;
+	assert.equal(coverage?.type, "DETAIL_COVERAGE");
+	assert.equal(coverage.stream, "books");
+	assert.equal(coverage.considered, 0);
+	assert.equal(coverage.covered, 0);
+	assert.equal(checkpoint?.type, "STATE");
+	assert.equal(checkpoint.stream, "books");
+	assert.deepEqual(checkpoint.cursor, {
+		updated_after: "2026-11-05T23:55:00.000Z",
+	});
+	assert.deepEqual(state, {
+		books: { updated_after: "2026-11-05T00:00:00.000Z" },
+	});
+});
