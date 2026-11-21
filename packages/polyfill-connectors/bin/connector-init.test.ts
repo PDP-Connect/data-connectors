@@ -500,6 +500,41 @@ test("connector-init: rejects a non-snake_case connector name before touching di
 	);
 });
 
+test("connector-init: explicit display name and stream survive browser mode", () => {
+	assert.deepEqual(
+		parseArgs([
+			"demo_catalog",
+			"--browser",
+			"--stream",
+			"order_items",
+			"--display-name",
+			"Demo Product",
+		]),
+		{
+			name: "demo_catalog",
+			displayName: "Demo Product",
+			stream: "order_items",
+			browser: true,
+		},
+	);
+	assert.deepEqual(parseArgs(["demo_catalog"]), {
+		name: "demo_catalog",
+		displayName: "Demo Catalog",
+		stream: "items",
+		browser: false,
+	});
+});
+
+test("connector-init: a malformed explicit stream does not silently use the default", () => {
+	assert.throws(
+		() => parseArgs(["demo_catalog", "--stream", "Order-items"]),
+		(error: unknown) =>
+			error instanceof InitArgsError &&
+			/invalid stream name/i.test(error.message),
+	);
+	assert.throws(() => parseArgs(["demo_catalog", "--stream"]), InitArgsError);
+});
+
 function withTrackedSource(run: (root: string) => void): void {
 	const root = mkdtempSync(join(tmpdir(), "connector-init-source-"));
 	try {
