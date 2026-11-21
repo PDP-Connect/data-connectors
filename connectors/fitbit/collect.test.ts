@@ -41,6 +41,7 @@ import {
 import {
 	collectFitbit,
 	consentTimeField,
+	coverageMessage,
 	type DailyFamily,
 	dailyTaint,
 	type FamilyName,
@@ -912,4 +913,22 @@ test("consentTimeField: a UTC start for activities, the date for the daily strea
 		);
 	}
 	assert.throws(() => new StreamRead(["exercise"]).family("sleep"), RangeError);
+});
+
+test("owner progress distinguishes an empty import from a completed import", () => {
+	assert.equal(
+		coverageMessage("daily_summaries", "empty", 0),
+		"Fitbit daily summaries: none imported.",
+	);
+	assert.equal(
+		coverageMessage("sleep", "complete", 2),
+		"Fitbit sleep logs: 2 imported.",
+	);
+});
+
+test("owner progress reports a partial import without hiding saved records", () => {
+	assert.equal(
+		coverageMessage("activities", "partial", 2),
+		"Fitbit activities: 2 imported; some could not be read.",
+	);
 });
