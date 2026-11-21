@@ -296,3 +296,24 @@ test("activity schema: pre-existing fields are unchanged by the additive fields"
 		"day keeps its prior YYYY-MM-DD constraint",
 	);
 });
+
+test("known stream validation rejects a valid record for a different stream", () => {
+	assert.equal(validateRecord("readiness", READINESS_RECORD).ok, true);
+	assert.equal(validateRecord("sleep", READINESS_RECORD).ok, false);
+	assert.equal(validateRecord("activity", READINESS_RECORD).ok, false);
+});
+
+test("sleep session types may evolve within the size limit but cannot be blank", () => {
+	for (const value of ["new_session_kind", "x".repeat(64)]) {
+		assert.equal(
+			sleepSchema.safeParse({ ...SLEEP_RECORD, type: value }).success,
+			true,
+		);
+	}
+	for (const value of ["", "x".repeat(65)]) {
+		assert.equal(
+			sleepSchema.safeParse({ ...SLEEP_RECORD, type: value }).success,
+			false,
+		);
+	}
+});
