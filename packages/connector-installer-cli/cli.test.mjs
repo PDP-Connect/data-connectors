@@ -122,6 +122,33 @@ for (const command of ["lock", "updates"]) {
   });
 }
 
+test("verify requires an explicit layout before reading the supplied lock", async () => {
+  await withTempDir(async (dir) => {
+    const result = await runCli([
+      "verify", "--lock", join(dir, "missing.json"), "--install-root", join(dir, "install"),
+    ]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /^Usage:/);
+    assert.equal(result.stdout, "");
+    assert.equal(existsSync(join(dir, "install")), false);
+  });
+});
+
+test("verify rejects malformed local JSON without success output or filesystem writes", async () => {
+  await withTempDir(async (dir) => {
+    const lockPath = join(dir, "invalid.json");
+    writeFileSync(lockPath, "{");
+    const installRoot = join(dir, "install");
+    const result = await runCli([
+      "verify", "--lock", lockPath, "--install-root", installRoot, "--layout", "snapshot",
+    ]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /JSON/i);
+    assert.equal(result.stdout, "");
+    assert.equal(existsSync(installRoot), false);
+  });
+});
+
 test("verify of an empty lock reports ok and exits 0", async () => {
   await withTempDir(async (dir) => {
     const lockPath = writeLock(dir, { lockVersion: "2.0", connectors: [] });
@@ -136,6 +163,7 @@ test("verify of an empty lock reports ok and exits 0", async () => {
     ]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /"ok": true/);
+    assert.equal(existsSync(join(dir, "install")), false, "verify must not create an install tree");
   });
 });
 
