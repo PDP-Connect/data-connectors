@@ -82,3 +82,31 @@ test("validateRecord routes by stream and passes unknown streams through", () =>
 	assert.equal(validateRecord("items", ITEM_RECORD).ok, true);
 	assert.equal(validateRecord("highlights", { id: "1" }).ok, true);
 });
+
+test("items schema accepts missing optional URL and status after JSON serialization", () => {
+	const wire = JSON.parse(
+		JSON.stringify({
+			...ITEM_RECORD,
+			url: undefined,
+			status: undefined,
+		}),
+	);
+	assert.equal(Object.hasOwn(wire, "url"), false);
+	assert.equal(Object.hasOwn(wire, "status"), false);
+	assert.equal(validateRecord("items", wire).ok, true);
+});
+
+test("items schema accepts zero counts and rejects negative or fractional counts", () => {
+	for (const field of ["word_count", "reading_time_minutes"]) {
+		assert.equal(
+			validateRecord("items", { ...ITEM_RECORD, [field]: 0 }).ok,
+			true,
+		);
+		for (const invalid of [-1, 0.5]) {
+			assert.equal(
+				validateRecord("items", { ...ITEM_RECORD, [field]: invalid }).ok,
+				false,
+			);
+		}
+	}
+});
