@@ -28,6 +28,7 @@ import { describe, it } from "vitest";
 import {
 	attachmentContentType,
 	attachmentRecordId,
+	normalizeAttachmentContentType,
 	normalizeAttachments,
 	normalizeOneAttachment,
 	resolveUploadMimeType,
@@ -328,4 +329,32 @@ describe("GroupMe attachments stream (production seam)", () => {
 			);
 		});
 	});
+});
+
+it("the attachment key distinguishes both the URL and the position independently", () => {
+	const url = "https://i.groupme.com/fixture-a.jpg";
+	const original = attachmentRecordId("fixture-message", 0, url);
+	assert.notStrictEqual(
+		original,
+		attachmentRecordId("fixture-message", 1, url),
+	);
+	assert.notStrictEqual(
+		original,
+		attachmentRecordId(
+			"fixture-message",
+			0,
+			"https://i.groupme.com/fixture-b.jpg",
+		),
+	);
+});
+
+it("a normalized provider MIME type is preferred while an unknown one falls back", () => {
+	const fallback = "application/octet-stream";
+	const observed = normalizeAttachmentContentType(
+		" Application/PDF ; charset=UTF-8",
+	);
+	strictEqual(resolveUploadMimeType(observed, fallback), "application/pdf");
+	const unknown = normalizeAttachmentContentType("application/x-fixture");
+	strictEqual(unknown, null);
+	strictEqual(resolveUploadMimeType(unknown, fallback), fallback);
 });
