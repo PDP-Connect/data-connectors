@@ -10,7 +10,7 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { completeSourceFields } from "./__fixtures__/complete-source-fields.ts";
-import { hasSpotifyEndProof } from "./completion-evidence.ts";
+import { hasSpotifyEndProof, hasSpotifyTerminalBoundary } from "./completion-evidence.ts";
 import { spotifyCollect } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -2946,4 +2946,38 @@ test("a player that yields no query hashes after the reload still fails the expo
 		),
 	);
 	assert.equal(bundleRequests, 6);
+});
+
+const emptyFixture = {
+	stream: "saved_tracks",
+	operation: "fetchLibraryTracks",
+	navigation: "https://open.spotify.com/",
+	owner: "invented-owner",
+	selector: "invented-library",
+	firstOffset: 0,
+	lastOffset: 0,
+	responseOffset: 0,
+	pageCount: 1,
+	rawCount: 0,
+	expectedCount: 0,
+	discardedCount: 0,
+	remaining: false,
+	terminal: "empty_verified",
+} as const;
+
+test("an observed empty library needs an explicit zero count", () => {
+	assert.equal(hasSpotifyEndProof(emptyFixture, emptyFixture), true);
+	assert.equal(hasSpotifyEndProof({ ...emptyFixture, expectedCount: null }, emptyFixture), false);
+});
+
+test("a total-reached library cannot prove inventory with no reported total", () => {
+	const evidence = { ...emptyFixture, rawCount: 1, expectedCount: 1, terminal: "total_reached" } as const;
+	assert.equal(hasSpotifyEndProof(evidence, emptyFixture), true);
+	assert.equal(hasSpotifyEndProof({ ...evidence, expectedCount: null }, emptyFixture), false);
+});
+
+test("a terminal boundary alone does not prove coverage of discarded rows", () => {
+	const evidence = { ...emptyFixture, rawCount: 1, expectedCount: 1, discardedCount: 1, terminal: "total_reached" } as const;
+	assert.equal(hasSpotifyTerminalBoundary(evidence, emptyFixture), true);
+	assert.equal(hasSpotifyEndProof(evidence, emptyFixture), false);
 });
