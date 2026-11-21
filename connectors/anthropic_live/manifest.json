@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic-live",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-	"version": "0.3.17",
+	"version": "0.3.18",
 	"display_name": "Claude (Live Session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -253,7 +253,7 @@
 			},
 			"display": {
 				"label": "Your Claude plan",
-				"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. One record per chat-capable organization; only conversations and usage remain scoped to the original selected organization."
+				"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. payment_country is the country that issued the card on file (a two-letter code); no other payment detail is collected, and billing identifiers are not collected. One record per chat-capable organization; only conversations and usage remain scoped to the original selected organization."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -319,6 +319,11 @@
 						},
 						"required": ["plan_type", "changes_at"],
 						"additionalProperties": false
+					},
+					"payment_country": {
+						"type": ["string", "null"],
+						"pattern": "^[A-Z]{2}$",
+						"description": "Country that issued the card on file (from the payment method), as an ISO 3166-1 alpha-2 code. Not the account holder's address; null for accounts without a card. A country code can help re-identify a person when combined with other fields; only the country is read, never the card brand, last four digits or type."
 					}
 				},
 				"required": ["id"]
