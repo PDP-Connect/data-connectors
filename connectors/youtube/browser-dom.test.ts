@@ -10,6 +10,7 @@ import {
 	openSwitchAccount,
 	readGoogleAccountEmail,
 	readOwnAccount,
+	readPlaylistHeader,
 	readPlaylistLinks,
 	readSubscriptions,
 	readVideos,
@@ -269,6 +270,36 @@ test("video and playlist URLs must resolve to YouTube", () => {
 	);
 	assert.deepEqual(readPlaylistLinks(doc), []);
 	assert.deepEqual(readVideos("playlist", doc), []);
+});
+
+test("playlist header reads owner and named metadata without relying on their order", () => {
+	const doc = dom('<h1 id="title"> Weekend songs </h1><yt-avatar-stack-view-model><a href="/@example"> by Example </a></yt-avatar-stack-view-model>' +
+		'<span class="yt-content-metadata-view-model__metadata-text">42 views</span>' +
+		'<span class="yt-content-metadata-view-model__metadata-text">Updated today</span>' +
+		'<span class="yt-content-metadata-view-model__metadata-text">3 videos</span>' +
+		'<span class="yt-content-metadata-view-model__metadata-text">Unlisted</span>');
+	assert.deepEqual(readPlaylistHeader(doc), {
+		title: "Weekend songs",
+		owner: "Example",
+		owner_url: "https://www.youtube.com/@example",
+		visibility: "Unlisted",
+		video_count_text: "3 videos",
+		view_count_text: "42 views",
+	});
+});
+
+test("playlist header keeps missing or unrelated metadata unknown", () => {
+	const doc = dom('<h1 id="title"> One list </h1>' +
+		'<span class="yt-content-metadata-view-model__metadata-text">Private link shared</span>' +
+		'<span class="yt-content-metadata-view-model__metadata-text">Video playlist</span>');
+	assert.deepEqual(readPlaylistHeader(doc), {
+		title: "One list",
+		owner: null,
+		owner_url: null,
+		visibility: null,
+		video_count_text: null,
+		view_count_text: null,
+	});
 });
 
 test("old and lockup playlist cards supply real video titles and URLs", () => {
