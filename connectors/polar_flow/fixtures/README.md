@@ -53,7 +53,12 @@ The details file follows the shape `lmgarret/polar-flow-mcp` records from a devi
 (`SessionDetails` and `SampleBlock` in its OpenAPI description, captured 7 October 2026): series
 keyed by exercise id, each `{samples: {interval, values}}`, `PT1S` for heart rate, the GPS track a
 list of timestamped fixes, about 500 KB for an hour. On 19 November 2026 the path answered `401`
-JSON without the session, as the other endpoints do. The heart rate values, the speed, distance and
+JSON without the session, as the other endpoints do. On 20 November 2026 a signed-in read of a
+session recorded with the Polar Flow phone app (no heart rate sensor) confirmed the envelope:
+`samples.<exercise id>.SPEED` and `.DISTANCE` were `{samples: {values, interval: "PT1S"}}` with
+one value per second, `COORDINATE` a list of fixes, and every series without data, `HEART_RATE`
+included, `null`. Heart rate values from a real sensor have not been seen yet. The same read showed
+the profile's `sleepGoal` in seconds (`28800`). The heart rate values, the speed, distance and
 GPS points in it are invented and cut to a few seconds. The first value is null and the second `0`
 (no reading); the last two are null. The manual entry's details, all series null, are written in
 `../fake-polar.ts`.

@@ -285,7 +285,12 @@ const trainingSessionSchema = z.strictObject({
 	note: pdppSafeText.max(10_000).nullable(),
 	is_test: z.boolean().nullable(),
 	has_training_target: z.boolean().nullable(),
-	heart_rate_samples: z.array(heartRateSeriesSchema).min(1).max(100).nullable(),
+	heart_rate_samples: z
+		.array(heartRateSeriesSchema)
+		.min(1)
+		.max(100)
+		.nullable()
+		.optional(),
 });
 
 const dailyActivitySchema = z.strictObject({

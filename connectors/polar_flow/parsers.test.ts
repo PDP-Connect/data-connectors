@@ -49,6 +49,22 @@ test("localTime normalises Polar's zoneless times and refuses anything else", ()
 	assert.equal(localTime(1793776329000), null);
 });
 
+test("profile: Polar's sleep goal is in seconds", () => {
+	const user = fixtureData().user as Record<string, unknown> & {
+		physicalInfo: Record<string, unknown>;
+	};
+	const { physicalInfo } = user;
+	const at = (sleepGoal: unknown) =>
+		valid(
+			"profile",
+			profileRecord({ ...user, physicalInfo: { ...physicalInfo, sleepGoal } }),
+		).sleep_goal_hours;
+	assert.equal(at(28800), 8);
+	assert.equal(at(27000), 7.5);
+	assert.equal(at(0), null);
+	assert.equal(at(null), null);
+});
+
 test("profile: identity, body and zone settings, never the e-mail", () => {
 	const { user } = fixtureData();
 	const record = valid("profile", profileRecord(user));

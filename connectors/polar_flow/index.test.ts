@@ -402,6 +402,63 @@ test("details that fail ship the session without samples, once held; a 404 is no
 	);
 });
 
+test("details in a shape the connector cannot read ship the session without samples and do not hold", async () => {
+	const s = site({
+		override: (url) =>
+			url.endsWith("/details")
+				? new Response(JSON.stringify({ id: 1, samples: [] }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					})
+				: undefined,
+	});
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	const rows = recordsOf(out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.heart_rate_samples, null);
+	assert.deepEqual(skipsOf(out), []);
+	assert.equal(
+		(stateOf(out, "training_sessions") as { held_at?: string }).held_at,
+		undefined,
+	);
+	assert.ok(
+		out.messages.some(
+			(m) =>
+				m.type === "PROGRESS" &&
+				String(m.message).includes("not in the shape expected"),
+		),
+	);
+});
+
+test("past the heart rate budget, sessions ship without samples and no details are asked", async () => {
+	const s = site();
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant, heartRateBudgetMs: 0 }, NOW);
+	const rows = recordsOf(out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.max_heart_rate_bpm, 176);
+	assert.equal(rows[0]?.heart_rate_samples, null);
+	assert.equal(s.fetches.filter((f) => f.url.endsWith("/details")).length, 0);
+	assert.deepEqual(skipsOf(out), []);
+	const progress = out.messages.find(
+		(m) =>
+			m.type === "PROGRESS" &&
+			String(m.message).includes("time for them ran out"),
+	);
+	assert.equal(progress?.count, 1);
+});
+
 test("a lost sign-in on the details stops the stream as sign_in_required", async () => {
 	const s = site({
 		override: (url) =>

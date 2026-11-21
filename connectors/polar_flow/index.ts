@@ -117,12 +117,21 @@ export interface Pacing {
 	requestDelayMs: number;
 	maxRetryAfterMs: number;
 	sleep: (ms: number) => Promise<void>;
+	/** How long one run may spend reading heart rate samples; past it, sessions ship without them. */
+	heartRateBudgetMs?: number;
+	now?: () => number;
 }
 export const PACING: Pacing = {
 	requestDelayMs: 1000,
 	maxRetryAfterMs: 60_000,
 	sleep: politeDelay,
 };
+/**
+ * A first import reads up to two years of sessions, each with a details answer of about 500 KB an
+ * hour. The whole run must end inside the runtime's ceiling, so heart rate reads stop after this
+ * long; the sessions after it are still delivered, without samples, and do not hold the cursor.
+ */
+export const HEART_RATE_BUDGET_MS = 4 * 60_000;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_FALLBACK_MS = 30_000;
 const DAY_MS = 86_400_000;
@@ -742,6 +751,10 @@ interface Run {
 	today: string;
 	/** Per stream: the field paths of records that did not validate, for the skip diagnostics. */
 	issues: Record<Stream, Set<string>>;
+	/** Heart rate reads stop at this time (HEART_RATE_BUDGET_MS from the run's start). */
+	heartRateDeadline: number;
+	/** Sessions shipped without samples because the heart rate budget ran out. */
+	heartRateSkipped: number;
 }
 
 interface SamplesRead {
@@ -767,6 +780,10 @@ async function readHeartRate(
 	if (!recordedHeartRate(row, summary)) {
 		return { samples: null, failure: null, unreadable: false };
 	}
+	if ((run.p.now ?? Date.now)() >= run.heartRateDeadline) {
+		run.heartRateSkipped += 1;
+		return { samples: null, failure: null, unreadable: false };
+	}
 	const detail = await fetchJson(
 		run.ctx.page,
 		trainingDetailsRequest(row.id),
@@ -784,9 +801,34 @@ async function readHeartRate(
 		return { samples: null, failure: null, unreadable: false };
 	}
 	const samples = heartRateSamples(detail.json, row.id);
-	return samples === "unreadable"
-		? { samples: null, failure: null, unreadable: true }
-		: { samples, failure: null, unreadable: false };
+	if (samples === "unreadable") {
+		// A shape the connector cannot read is the connector's to fix: a re-read repeats it, so it
+		// is reported but does not hold the cursor.
+		run.issues.training_sessions.add("(heart rate samples)");
+		return { samples: null, failure: null, unreadable: false };
+	}
+	return { samples, failure: null, unreadable: false };
+}
+
+/** Says which sessions shipped without heart rate samples although they recorded some. */
+async function reportHeartRate(run: Run): Promise<void> {
+	if (run.issues.training_sessions.has("(heart rate samples)")) {
+		await run.ctx.emit({
+			type: "PROGRESS",
+			stream: "training_sessions",
+			message:
+				"Some heart rate samples were not in the shape expected; those sessions were saved without them.",
+			count: 0,
+		});
+	}
+	if (run.heartRateSkipped > 0) {
+		await run.ctx.emit({
+			type: "PROGRESS",
+			stream: "training_sessions",
+			count: run.heartRateSkipped,
+			message: `${run.heartRateSkipped} session(s) saved without heart rate samples: the run's time for them ran out.`,
+		});
+	}
 }
 
 /** One window of training history, each session's analysis summary and heart rate read after it. */
@@ -1059,7 +1101,16 @@ export async function collectPolarFlow(
 	const issues = Object.fromEntries(
 		STREAMS.map((stream) => [stream, new Set<string>()]),
 	) as Record<Stream, Set<string>>;
-	const run: Run = { ctx, p, user: user ?? 0, today, issues };
+	const run: Run = {
+		ctx,
+		p,
+		user: user ?? 0,
+		today,
+		issues,
+		heartRateDeadline:
+			(p.now ?? Date.now)() + (p.heartRateBudgetMs ?? HEART_RATE_BUDGET_MS),
+		heartRateSkipped: 0,
+	};
 	for (const stream of streams) {
 		const empty: Walk = {
 			failure: stop,
@@ -1103,6 +1154,7 @@ export async function collectPolarFlow(
 					release,
 				);
 		if (!stop) markHold(planned.cursor, walk, release);
+		if (stream === "training_sessions") await reportHeartRate(run);
 		await finish(ctx, stream, walk, planned.cursor, issues[stream]);
 		if (walk.failure?.reason === "sign_in_required") stop = walk.failure;
 	}

@@ -150,6 +150,15 @@ export function userId(json: unknown): number | null {
 	return parsed.success ? parsed.data.user.id : null;
 }
 
+/**
+ * Polar answers the sleep goal in seconds (28800 for 8 hours), seen on a live account on 20 Nov
+ * 2026. Rounded to a hundredth of an hour.
+ */
+function sleepGoalHours(seconds: number | null | undefined): number | null {
+	const value = measured(seconds);
+	return value === null ? null : Math.round((value / 3600) * 100) / 100;
+}
+
 export function profileRecord(json: unknown): Built {
 	const parsed = currentUserResponse.safeParse(json);
 	if (!parsed.success) return UNREADABLE;
@@ -170,7 +179,7 @@ export function profileRecord(json: unknown): Built {
 		anaerobic_threshold_bpm: measured(phys?.anaerobicThreshold),
 		vo2max: measured(phys?.vo2Max),
 		functional_threshold_power_w: measured(phys?.functionalThresholdPower),
-		sleep_goal_hours: measured(phys?.sleepGoal),
+		sleep_goal_hours: sleepGoalHours(phys?.sleepGoal),
 		utc_offset: utcOffset(json),
 		measurement_unit: text(loc?.measurementUnit),
 		language: text(loc?.flowLanguage),
