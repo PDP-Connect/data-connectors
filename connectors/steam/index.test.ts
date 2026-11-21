@@ -762,3 +762,26 @@ test("Steam protocol execution: required endpoint 401 remains a failed DONE", as
 		await fixture.stop();
 	}
 });
+
+test("Steam HTTP classification accepts the full 2xx range, not neighboring statuses", () => {
+	for (const status of [200, 204, 299]) {
+		assert.deepEqual(classifySteamHttpResponse(status, ""), { kind: "ok" });
+	}
+	for (const status of [199, 300]) {
+		assert.deepEqual(classifySteamHttpResponse(status, ""), {
+			kind: "error",
+			message: `steam_http_${String(status)}`,
+			status,
+		});
+	}
+});
+
+test("Steam HTTP classification does not let response body text override status", () => {
+	const body = '{"message":"synthetic unauthorized text"}';
+	assert.deepEqual(classifySteamHttpResponse(200, body), { kind: "ok" });
+	assert.deepEqual(classifySteamHttpResponse(403, body), {
+		kind: "error",
+		message: "steam_forbidden_auth_or_visibility",
+		status: 403,
+	});
+});
