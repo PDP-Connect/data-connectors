@@ -69,7 +69,7 @@
 import { existsSync } from "node:fs";
 import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -126,8 +126,12 @@ async function emitCoverageProgress(
 	emit: CollectContext["emit"],
 	input: {
 		filesScanned?: number;
-		reason: "collected" | "export_dir_empty" | "export_dir_missing";
-		status: "collected" | "missing";
+		reason:
+			| "collected"
+			| "export_dir_empty"
+			| "export_dir_missing"
+			| "unsupported_extensions";
+		status: "collected" | "missing" | "partial";
 	},
 ): Promise<void> {
 	const filesScanned = input.filesScanned ?? 0;
@@ -145,7 +149,11 @@ async function emitCoverageProgress(
 }
 
 function coverageMessage(
-	reason: "collected" | "export_dir_empty" | "export_dir_missing",
+	reason:
+		| "collected"
+		| "export_dir_empty"
+		| "export_dir_missing"
+		| "unsupported_extensions",
 	filesScanned: number,
 ): string {
 	if (reason === "export_dir_missing") {
@@ -162,15 +170,29 @@ function coverageMessage(
  * file. Uses async iteration over opendir so entries are streamed rather
  * than materialized into one giant array.
  */
-async function* walkDir(dir: string): AsyncGenerator<DiscoveredFile> {
+async function* walkDir(
+	dir: string,
+	unsupported: Map<string, number>,
+): AsyncGenerator<DiscoveredFile> {
 	const handle = await opendir(dir);
 	for await (const entry of handle) {
 		const entryPath = join(dir, entry.name);
 		if (entry.isDirectory()) {
-			yield* walkDir(entryPath);
+			yield* walkDir(entryPath, unsupported);
 			continue;
 		}
-		if (!(entry.isFile() && hasSupportedExtension(entry.name))) {
+		if (!entry.isFile()) {
+			continue;
+		}
+		if (!hasSupportedExtension(entry.name)) {
+			const extension = extname(entry.name).toLowerCase();
+			// Do not put arbitrary suffix text, names, or paths in a diagnostic.
+			const bucket = /^\.[a-z0-9]{1,12}$/.test(extension)
+				? extension
+				: extension
+					? "(other extension)"
+					: "(no extension)";
+			unsupported.set(bucket, (unsupported.get(bucket) ?? 0) + 1);
 			continue;
 		}
 		const st = await stat(entryPath);
@@ -227,6 +249,7 @@ runConnector({
 		const since = photosState.last_modified;
 		let latest = since;
 		let fileCount = 0;
+		const unsupported = new Map<string, number>();
 		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
 
 		connectorDiagnostic("apple_photos", "emit_start", {
@@ -235,7 +258,7 @@ runConnector({
 		});
 		await progress("Reading your exported photos");
 
-		for await (const file of walkDir(dir)) {
+		for await (const file of walkDir(dir, unsupported)) {
 			fileCount += 1;
 			if (isBeforeCursor(file.mtimeIso, since)) {
 				continue;
@@ -268,10 +291,23 @@ runConnector({
 			pass: "emit",
 			phase: "emit",
 		});
+		const partial = unsupported.size > 0;
+		if (partial) {
+			const count = [...unsupported.values()].reduce((sum, n) => sum + n, 0);
+			const details = [...unsupported.keys()]
+				.sort()
+				.map((extension) => `${extension} ${unsupported.get(extension)}`);
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "photos",
+				reason: "source_incomplete",
+				message: `Skipped ${count} ${count === 1 ? "file" : "files"} with unsupported extensions: ${details.join(", ")}`,
+			});
+		}
 		await emitCoverageProgress(emit, {
 			filesScanned: fileCount,
-			reason: "collected",
-			status: "collected",
+			reason: partial ? "unsupported_extensions" : "collected",
+			status: partial ? "partial" : "collected",
 		});
 
 		await emit({

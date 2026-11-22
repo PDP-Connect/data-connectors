@@ -30,6 +30,10 @@ const EXTENSION_MIME_MAP: Readonly<Record<string, string>> = {
 	".mov": "video/quicktime",
 	".mp4": "video/mp4",
 	".m4v": "video/x-m4v",
+	".webp": "image/webp",
+	".webm": "video/webm",
+	".avi": "video/x-msvideo",
+	".mkv": "video/x-matroska",
 };
 
 const DEFAULT_MIME_TYPE = "application/octet-stream";
