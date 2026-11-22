@@ -35,8 +35,6 @@ import type {
 	TimelineSegmentRecord,
 } from "./types.ts";
 
-const MAX_DISCOVERY_DEPTH = 5;
-const MAX_DISCOVERY_ENTRIES = 2000;
 const POINT_PROGRESS_INTERVAL = 10_000;
 const SEGMENT_PROGRESS_INTERVAL = 1000;
 const SUPPORTED_FILE_NAMES = new Set([
@@ -44,11 +42,7 @@ const SUPPORTED_FILE_NAMES = new Set([
 	"timeline.json",
 	"records.json",
 ]);
-type DiscoveryIncompleteReason =
-	| "entry_limit"
-	| "missing"
-	| "read_error"
-	| "depth_limit";
+type DiscoveryIncompleteReason = "missing" | "read_error";
 
 interface TimelineDiscovery {
 	readonly complete: boolean;
@@ -75,7 +69,6 @@ function isLikelyTimelineJson(path: string): boolean {
 interface DiscoveryState {
 	found: string[];
 	incompleteReason: DiscoveryIncompleteReason | undefined;
-	visited: number;
 }
 
 function markDiscoveryIncomplete(
@@ -97,51 +90,26 @@ async function readDiscoveryDirectory(
 	}
 }
 
-async function inspectDiscoveryEntry(
-	entry: Dirent,
-	path: string,
-	depth: number,
-	state: DiscoveryState,
-): Promise<void> {
-	if (entry.isDirectory()) {
-		if (depth >= MAX_DISCOVERY_DEPTH) {
-			markDiscoveryIncomplete(state, "depth_limit");
-			return;
-		}
-		await walkDiscoveryDirectory(path, depth + 1, state);
-		return;
-	}
-	if (entry.isFile() && isLikelyTimelineJson(path)) {
-		state.found.push(path);
-	}
-}
-
 async function walkDiscoveryDirectory(
-	dir: string,
-	depth: number,
+	root: string,
 	state: DiscoveryState,
 ): Promise<void> {
-	if (depth > MAX_DISCOVERY_DEPTH) {
-		markDiscoveryIncomplete(state, "depth_limit");
-		return;
-	}
-	if (state.visited >= MAX_DISCOVERY_ENTRIES) {
-		markDiscoveryIncomplete(state, "entry_limit");
-		return;
-	}
-	const entries = await readDiscoveryDirectory(dir, state);
-	if (!entries) {
-		return;
-	}
-	for (const entry of entries) {
-		if (state.visited >= MAX_DISCOVERY_ENTRIES) {
-			markDiscoveryIncomplete(state, "entry_limit");
-			return;
-		}
-		state.visited += 1;
-		await inspectDiscoveryEntry(entry, join(dir, entry.name), depth, state);
-		if (state.incompleteReason === "entry_limit") {
-			return;
+	const directories = [root];
+	for (
+		let dir = directories.pop();
+		dir !== undefined;
+		dir = directories.pop()
+	) {
+		const entries = await readDiscoveryDirectory(dir, state);
+		if (!entries) continue;
+		for (const entry of entries) {
+			// Only real child directories and regular files; never follow symlinks.
+			const path = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				directories.push(path);
+			} else if (entry.isFile() && isLikelyTimelineJson(path)) {
+				state.found.push(path);
+			}
 		}
 	}
 }
@@ -155,9 +123,8 @@ async function discoverTimelineFiles(
 	const state: DiscoveryState = {
 		found: [],
 		incompleteReason: undefined,
-		visited: 0,
 	};
-	await walkDiscoveryDirectory(importDir, 0, state);
+	await walkDiscoveryDirectory(importDir, state);
 	return {
 		complete: state.incompleteReason === undefined,
 		files: [...new Set(state.found)].sort(),
@@ -474,12 +441,6 @@ function discoveryFailureMessage(reason: DiscoveryIncompleteReason): string {
 			return "The configured Google Maps Timeline import directory is missing, so the source boundary was not observed";
 		case "read_error":
 			return "The Google Maps Timeline import directory could not be fully read, so the source boundary was not observed";
-		case "depth_limit":
-			return "The Google Maps Timeline import tree is deeper than the safe discovery limit, so coverage is incomplete";
-		case "entry_limit":
-			return "The Google Maps Timeline import tree exceeds the safe discovery limit, so coverage is incomplete";
-		default:
-			return "The Google Maps Timeline import tree could not be fully observed, so coverage is incomplete";
 	}
 }
 
