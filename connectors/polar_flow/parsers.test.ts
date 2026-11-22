@@ -17,7 +17,9 @@ import {
 	parseTrainingRow,
 	parseTrainingSummary,
 	profileRecord,
+	rowDate,
 	sleepRecord,
+	sleepRows,
 	trainingSessionRecord,
 	userId,
 	utcOffset,
@@ -380,4 +382,16 @@ test("Nightly Recharge: a night with no value is empty, a status out of range is
 	assert.deepEqual(nightlyRechargeRecord({ date: "05.11.2026", rmssd: 40 }), {
 		kind: "unreadable",
 	});
+});
+
+test("rowDate reads only a calendar-day string and rejects timestamp-shaped metadata", () => {
+	assert.equal(rowDate({ date: "2026-09-30" }), "2026-09-30");
+	assert.equal(rowDate({ date: "2026-09-30T00:00:00Z" }), null);
+	assert.equal(rowDate({}), null);
+});
+
+test("sleepRows keeps an empty list distinct from a malformed aggregate shape", () => {
+	assert.deepEqual(sleepRows([]), []);
+	assert.equal(sleepRows({ rows: [] }), null);
+	assert.equal(sleepRows(null), null);
 });
