@@ -43,8 +43,17 @@ import {
 	parseItemPage,
 	parseSettings,
 	parseUserPage,
+	secondsToInstant,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
+
+test("Unix seconds are serialized as an RFC 3339 UTC instant", () => {
+	assert.equal(secondsToInstant(86_400), "1970-01-02T00:00:00.000Z");
+});
+
+test("Unix timestamp formatting retains fractional seconds", () => {
+	assert.equal(secondsToInstant(1.125), "1970-01-01T00:00:01.125Z");
+});
 
 type Json = Record<string, unknown>;
 
