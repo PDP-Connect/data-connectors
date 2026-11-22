@@ -22,6 +22,27 @@ function dom(html: string): Document {
 		.document as unknown as Document;
 }
 
+test("playlist header trims a title and keeps the two displayed count labels separate", () => {
+	const result = readPlaylistHeader(dom(`
+		<h1 id="title">  Fixture list  </h1>
+		<span class="yt-content-metadata-view-model__metadata-text">  17 views  </span>
+		<span class="yt-content-metadata-view-model__metadata-text">  2 videos  </span>
+	`));
+	assert.equal(result.title, "Fixture list");
+	assert.equal(result.video_count_text, "2 videos");
+	assert.equal(result.view_count_text, "17 views");
+});
+
+test("playlist header leaves a blank title and nonnumeric video label unset", () => {
+	const result = readPlaylistHeader(dom(`
+		<h1 id="title"> </h1>
+		<span class="yt-content-metadata-view-model__metadata-text">Videos</span>
+	`));
+	assert.equal(result.title, null);
+	assert.equal(result.video_count_text, null);
+	assert.equal(result.view_count_text, null);
+});
+
 test("own channel prefers the active account header over generic page links", () => {
 	const doc = dom(
 		'<a href="/@someone-else">sidebar</a><ytd-active-account-header-renderer><span id="channel-handle">@owner</span><span id="email">owner@example.com</span></ytd-active-account-header-renderer>',
