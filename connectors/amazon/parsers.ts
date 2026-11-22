@@ -238,6 +238,33 @@ const CARD_ONLY_RE =
 const UNABLE_RE = /Unable to display payment details/i;
 // Script or markup that reached a text node is never a payment method.
 const CODE_LIKE_RE = /[{};<>]|=>|\bfunction\b|\bwindow\.|\bdocument\./;
+
+// Apply the same text guard only to the published fields. The raw projections
+// also feed existing fingerprints and must remain unchanged.
+function cleanEmittedText(value: string | null): string | null {
+	return value && !CODE_LIKE_RE.test(value) ? value : null;
+}
+
+export function cleanEmittedOrder(record: OrdersRecord): OrdersRecord {
+	return {
+		...record,
+		delivery_status: cleanEmittedText(record.delivery_status),
+		status_detail: cleanEmittedText(record.status_detail),
+		payment_method_summary: cleanEmittedText(record.payment_method_summary),
+	};
+}
+
+export function cleanEmittedOrderItem(
+	record: OrderItemRecord,
+): OrderItemRecord {
+	const refund_status = cleanEmittedText(record.refund_status);
+	return {
+		...record,
+		refund_status,
+		returned: refund_status !== null && record.returned,
+	};
+}
+
 const GRAND_TOTAL_RE =
 	/Grand Total:?\s*((?:[A-Z]{1,3}\s?)?(?:[$£€₹]|R\$)?\s?\d[\d.,\s\u00a0\u202f]*[.,]\d{2}(?:\s?€)?)/i;
 const ASIN_RE = /\/(?:gp\/product|dp)\/([A-Z0-9]{10})/;

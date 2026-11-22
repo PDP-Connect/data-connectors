@@ -46,6 +46,8 @@ import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/pag
 import {
 	buildOrderItemRecord,
 	buildOrderRecord,
+	cleanEmittedOrder,
+	cleanEmittedOrderItem,
 	countOrderCardsWithoutOrderId,
 	mergeOrderItems,
 	parseAmazonProfileDom,
@@ -1054,7 +1056,9 @@ async function recoverPendingOrderItemDetailGapPage(
 			for (const item of result.detail.items) {
 				await deps.emitRecord(
 					"order_items",
-					buildOrderItemRecord(locator.orderId, locator.orderDate, item),
+					cleanEmittedOrderItem(
+						buildOrderItemRecord(locator.orderId, locator.orderDate, item),
+					),
 				);
 			}
 			await deps.emit({
@@ -1357,7 +1361,7 @@ export async function emitOrderAndItems(
 			if (!unchanged && !excluded) {
 				// beforeEmit runs only after SDK selection and validation. Fulfilment
 				// proves local emission, not durable host acceptance.
-				await deps.emitRecord("orders", orderRecord, {
+				await deps.emitRecord("orders", cleanEmittedOrder(orderRecord), {
 					beforeEmit: async () => {
 						emitted = true;
 					},
@@ -1399,7 +1403,7 @@ export async function emitOrderAndItems(
 					continue;
 				}
 				let emitted = false;
-				await deps.emitRecord("order_items", record, {
+				await deps.emitRecord("order_items", cleanEmittedOrderItem(record), {
 					beforeEmit: async () => {
 						emitted = true;
 					},
