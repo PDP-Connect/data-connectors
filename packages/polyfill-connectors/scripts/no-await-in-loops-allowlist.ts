@@ -4095,14 +4095,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/shopify/order-history-api.test.ts",
-			line: 303,
+			line: 314,
 			column: 17,
 			category: "test_assertion_sequencing",
 			note: "Run each navigation-change phase (during fetch, between pages, cached empty) in turn against a fresh reader before asserting it is rejected.",
 		},
 		{
 			path: "connectors/shopify/order-history-api.test.ts",
-			line: 326,
+			line: 337,
 			column: 18,
 			category: "test_assertion_sequencing",
 			note: "Read the cache on each attempt in turn to assert it never refetches or rebinds.",
