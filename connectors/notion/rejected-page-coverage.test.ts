@@ -33,6 +33,40 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { pagesSchema } from "./schemas.ts";
+
+const pageMetadata = {
+	id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+	object: "page",
+	parent_type: null,
+	parent_id: null,
+	title: null,
+	url: null,
+	archived: false,
+	created_time: null,
+	last_edited_time: null,
+	created_by_id: null,
+	last_edited_by_id: null,
+};
+
+test("page metadata accepts explicit null title but requires the title key", () => {
+	assert.equal(pagesSchema.safeParse(pageMetadata).success, true);
+	assert.equal(
+		pagesSchema.safeParse({ ...pageMetadata, title: undefined }).success,
+		false,
+	);
+});
+
+test("page metadata accepts a title exactly at the declared limit", () => {
+	assert.equal(
+		pagesSchema.safeParse({ ...pageMetadata, title: "x".repeat(4000) }).success,
+		true,
+	);
+	assert.equal(
+		pagesSchema.safeParse({ ...pageMetadata, title: "x".repeat(4001) }).success,
+		false,
+	);
+});
 
 const ENTRYPOINT = connectorEntrypoint("notion");
 const GOOD_PAGE_ID = "11111111-1111-4111-8111-111111111111";
