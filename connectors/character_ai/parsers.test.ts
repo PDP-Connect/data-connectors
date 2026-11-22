@@ -1498,6 +1498,17 @@ test("the latest time is chosen at full fractional precision, offsets normalized
 	);
 });
 
+test("latestTime returns null when there is no timestamp to select", () => {
+	assert.equal(latestTime([]), null);
+	assert.equal(latestTime([null, null]), null);
+});
+
+test("latestTime preserves the first spelling when two timestamps represent the same instant", () => {
+	const first = "2026-01-01T01:00:00.500+01:00";
+	const second = "2026-01-01T00:00:00.5Z";
+	assert.equal(latestTime([first, second]), first);
+});
+
 // ─── Later gap pages, page interruptions, session handoff ───────────────
 
 function gap(gapId: string, chatId: string, leaseId?: string) {
