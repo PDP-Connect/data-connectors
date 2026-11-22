@@ -109,6 +109,30 @@ test("transactions schema accepts a representative pay record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("transactions schema rejects nonexistent UTC date_created values", () => {
+	for (const date_created of [
+		"2026-02-29T12:00:00Z",
+		"2024-04-31T12:00:00Z",
+		"2024-02-29T24:00:00Z",
+	]) {
+		const record = { ...TRANSACTION_RECORD, date_created };
+		const result = transactionsSchema.safeParse(record);
+		assert.equal(result.success, false, date_created);
+		assert.deepEqual(result.error?.issues[0]?.path, ["date_created"]);
+		assert.equal(validateRecord("transactions", record).ok, false);
+	}
+});
+
+test("transactions schema preserves a valid leap-day date_created with fractional seconds", () => {
+	const date_created = "2024-02-29T23:59:59.123456Z";
+	const result = transactionsSchema.safeParse({
+		...TRANSACTION_RECORD,
+		date_created,
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+	assert.equal(result.data.date_created, date_created);
+});
+
 test("transactions schema accepts an unknown amount as null", () => {
 	const result = transactionsSchema.safeParse({
 		...TRANSACTION_RECORD,
