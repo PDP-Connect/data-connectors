@@ -48,6 +48,11 @@ test("isoFromUnix: null / undefined / empty / non-numeric → null", () => {
 	assert.equal(isoFromUnix(-1), null);
 });
 
+test("isoFromUnix: finite timestamps outside the Date range return null", () => {
+	assert.equal(isoFromUnix(8_640_000_000_001), null);
+	assert.equal(isoFromUnix("8640000000001"), null);
+});
+
 // ─── domainOf ───────────────────────────────────────────────────────────
 
 test("domainOf: extracts lowercase hostname from a link URL", () => {
