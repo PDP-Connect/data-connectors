@@ -329,6 +329,8 @@ export function resolveColumns(
 	};
 }
 
+const DECIMAL_CELL_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+
 /**
  * An empty cell means the reading was never taken — a ride with no strap, a
  * manually entered activity with no calories. It becomes null and never 0,
@@ -340,7 +342,7 @@ export function numberOrNull(cell: string | undefined): number | null {
 		return null;
 	}
 	const trimmed = cell.trim();
-	if (trimmed === "") {
+	if (!DECIMAL_CELL_RE.test(trimmed)) {
 		return null;
 	}
 	const value = Number(trimmed);

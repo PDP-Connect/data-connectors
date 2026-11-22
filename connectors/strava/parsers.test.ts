@@ -125,6 +125,19 @@ test("an empty cell is null, never zero", () => {
 	assert.equal(numberOrNull("0"), 0);
 });
 
+test("synthetic activities keep decimal readings but do not turn hex cells into measurements", () => {
+	const cols = columns();
+	const row = new Array<string>(HEADER.length).fill("");
+	row[cols.id] = "123";
+	row[cols.activityDate] = "2026-01-15T12:00:00Z";
+	row[cols.distanceM] = "0x20";
+	row[cols.elapsedTimeS] = "1.25e2";
+	const record = buildActivityRecord(row, cols, null);
+	assert.ok(record);
+	assert.equal(record.distance_m, null);
+	assert.equal(record.elapsed_time_s, 125);
+});
+
 test("a ride with no heart-rate strap yields null heart rates, not zeros", () => {
 	const cols = columns();
 	const row = new Array<string>(HEADER.length).fill("");
