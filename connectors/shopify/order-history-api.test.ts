@@ -18,6 +18,7 @@ import {
 	readOrderHistoryConnection,
 } from "./order-history-api.ts";
 import {
+	canonicalShopUrl,
 	extractOrdersWithCoverage,
 	hasNextOrdersPage,
 	hasOrderCountMismatch,
@@ -25,6 +26,17 @@ import {
 } from "./parsers.ts";
 
 const ORDER_A = "11111111-aaaa-4aaa-8aaa-111111111111";
+test("Shop display URLs preserve the path, query and fragment across domains", () => {
+	assert.equal(
+		canonicalShopUrl("https://shop.com/example?view=compact#section"),
+		"https://shop.app/example?view=compact#section",
+	);
+});
+
+test("Shop display normalization leaves a non-URL label unchanged", () => {
+	assert.equal(canonicalShopUrl("example-label"), "example-label");
+});
+
 const ORDER_B = "22222222-bbbb-4bbb-8bbb-222222222222";
 const ORDER_C = "33333333-cccc-4ccc-8ccc-333333333333";
 
