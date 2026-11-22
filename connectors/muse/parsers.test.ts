@@ -63,6 +63,15 @@ test("times: epoch ms and seconds become RFC 3339 UTC; zoneless strings are reje
 	assert.equal(msToIso("1792607934000"), null);
 });
 
+test("zoned timestamps reject hour 24 instead of moving to the next day", () => {
+	assert.equal(zonedIsoToIso("2026-01-03T24:00:00Z"), null);
+	assert.equal(zonedIsoToIso("2026-01-03T24:00+02:00"), null);
+	assert.equal(
+		zonedIsoToIso("2026-01-03T23:59:59-02:00"),
+		"2026-01-04T01:59:59.000Z",
+	);
+});
+
 test("cleanText keeps safe text unchanged and replaces control-rich text with null", () => {
 	assert.deepEqual(cleanText("line\nnext"), {
 		value: "line\nnext",
