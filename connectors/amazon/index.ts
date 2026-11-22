@@ -1376,7 +1376,15 @@ export async function emitOrderAndItems(
 			let emittedItems = 0;
 			let excludedItems = 0;
 			for (const item of merged) {
-				const record = buildOrderItemRecord(listOrder.orderId, orderDate, item);
+				const record = buildOrderItemRecord(
+					listOrder.orderId,
+					orderDate,
+					item,
+					{
+						orderStatus: listOrder.deliveryStatus,
+						itemCount: Math.max(orderRecord.item_count ?? 0, merged.length),
+					},
+				);
 				if (
 					listOrder.orderId &&
 					isLegitimatelyExcluded(deps, "order_items", record)

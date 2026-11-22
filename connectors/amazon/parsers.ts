@@ -5,6 +5,7 @@
 // I/O so they can be unit-tested in isolation.
 
 import { parseHTML } from "linkedom";
+import { deriveItemReturnState } from "./order-refund-status.ts";
 import {
 	type AmazonStore,
 	absoluteStoreUrl,
@@ -1103,7 +1104,20 @@ export function buildOrderItemRecord(
 	orderId: string,
 	orderDate: string,
 	merged: MergedItem,
+	orderContext?: {
+		orderStatus: string | null | undefined;
+		itemCount: number | null;
+	},
 ): OrderItemRecord {
+	const returns = orderContext
+		? deriveItemReturnState({
+				itemRefundText: merged.refund_status,
+				...orderContext,
+			})
+		: {
+				returned: RETURNED_RE.test(merged.refund_status || ""),
+				refund_status: merged.refund_status || null,
+			};
 	return {
 		id: itemId(orderId, merged),
 		order_id: orderId,
@@ -1116,8 +1130,7 @@ export function buildOrderItemRecord(
 		quantity: merged.quantity ?? 1,
 		seller: merged.seller || null,
 		item_image_url: merged.item_image_url || null,
-		returned: RETURNED_RE.test(merged.refund_status || ""),
-		refund_status: merged.refund_status || null,
+		...returns,
 	};
 }
 

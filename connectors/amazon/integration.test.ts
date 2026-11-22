@@ -340,6 +340,43 @@ test("emitOrderAndItems: wantsItems=false suppresses item records but not the or
 	assert.equal(emitted.filter((r) => r.stream === "orders").length, 1);
 });
 
+test("emitOrderAndItems: refunded single-item order marks the item returned", async () => {
+	const { deps, emitted } = makeRecordingDeps({ wantsOrders: false });
+	const listOrder = makeListOrder({
+		orderId: "fictional-single",
+		deliveryStatus: "Refunded",
+		items: [{ asin: "FAKEITEMAA", name: "Fictional spool", url: "" }],
+	});
+	await emitOrderAndItems(deps, listOrder, null, "2026-01-05");
+	const items = emitted.filter((event) => event.stream === "order_items");
+	assert.equal(items.length, 1);
+	assert.equal(items[0]?.data.returned, true);
+	assert.equal(items[0]?.data.refund_status, "Refunded");
+});
+
+test("emitOrderAndItems: refunded multi-item order keeps status without marking individual returns", async () => {
+	const { deps, emitted } = makeRecordingDeps({ wantsOrders: false });
+	const listOrder = makeListOrder({
+		orderId: "fictional-multi",
+		deliveryStatus: "Refunded",
+		items: ["FAKEITEMAA", "FAKEITEMBB", "FAKEITEMCC"].map((asin) => ({
+			asin,
+			name: "Fictional spool",
+			url: "",
+		})),
+	});
+	await emitOrderAndItems(deps, listOrder, null, "2026-01-05");
+	const items = emitted.filter((event) => event.stream === "order_items");
+	assert.deepEqual(
+		items.map(({ data }) => [data.returned, data.refund_status]),
+		[
+			[false, "Refunded"],
+			[false, "Refunded"],
+			[false, "Refunded"],
+		],
+	);
+});
+
 test("emitOrderAndItems: both streams disabled → nothing emitted", async () => {
 	const { deps, emitted } = makeRecordingDeps({
 		wantsOrders: false,
