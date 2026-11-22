@@ -273,3 +273,33 @@ test("parseOrdersResponse: also handles a response with no 'data' wrapper", () =
 	const nodes = parseOrdersResponse({ orders: [SYNTHETIC_NODE] });
 	assert.equal(nodes.length, 1);
 });
+
+test("parseOrdersResponse: null data does not emit order-shaped error metadata", () => {
+	const response = {
+		data: null,
+		errors: [
+			{
+				message: "Synthetic source error",
+				extensions: { orders: [{ orderUuid: "synthetic-metadata" }] },
+			},
+		],
+	};
+	assert.deepEqual(parseOrdersResponse(response), []);
+});
+
+test("orderItemRecords: dropping whitespace names preserves the next item's source index", () => {
+	const items = orderItemRecords("synthetic-parent", [
+		{ name: "   " },
+		{ name: "Example item", quantity: 2 },
+	]);
+	assert.deepEqual(items, [
+		{
+			id: "synthetic-parent-item-1",
+			order_id: "synthetic-parent",
+			name: "Example item",
+			quantity: 2,
+			unit_price_cents: null,
+			customizations: [],
+		},
+	]);
+});
