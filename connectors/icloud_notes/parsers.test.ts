@@ -1065,3 +1065,51 @@ test("body text that decompresses under no format is undecodable with a recorded
 		["body_not_compressed"],
 	);
 });
+
+test("readNoteRecord: invalid explicit timestamp is not replaced by otherwise valid metadata", async () => {
+	const result = await readNoteRecord({
+		recordName: "synthetic-note",
+		recordType: "Note",
+		created: { timestamp: 1_700_000_000_000 },
+		fields: {
+			TitleEncrypted: { value: null },
+			TextDataEncrypted: { value: null },
+			CreationDate: { value: "not-a-timestamp" },
+		},
+	});
+	assert.equal(result.record?.created_at, null);
+	assert.deepEqual(
+		result.unavailableFields.map(({ field, reason }) => [field, reason]),
+		[["created_at", "invalid_timestamp"]],
+	);
+});
+
+test("readNoteRecord: incomplete folder scan and unreadable observed folder stay distinguishable", async () => {
+	const record: CloudKitRecord = {
+		recordName: "synthetic-note",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: null },
+			TextDataEncrypted: { value: null },
+			Folder: { value: { recordName: "synthetic-folder" } },
+		},
+	};
+	const incomplete = await readNoteRecord(record, new Map(), {
+		folderScanComplete: false,
+	});
+	const unreadable = await readNoteRecord(record, new Map(), {
+		folderScanComplete: false,
+		unavailableFolderIds: new Set(["synthetic-folder"]),
+	});
+	for (const [result, expected] of [
+		[incomplete, "folder_projection_incomplete"],
+		[unreadable, "folder_name_unavailable"],
+	] as const) {
+		assert.equal(result.record?.folder_id, "synthetic-folder");
+		assert.equal(result.record?.folder_name, null);
+		assert.deepEqual(
+			result.unavailableFields.map(({ field, reason }) => [field, reason]),
+			[["folder_name", expected]],
+		);
+	}
+});
