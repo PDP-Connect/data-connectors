@@ -11,6 +11,37 @@ import { pathToFileURL } from "node:url";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildFullScanCoverageMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { databasesSchema } from "./schemas.ts";
+
+const toyDatabaseMetadata = {
+	id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+	title: "Invented table",
+	parent_type: null,
+	parent_id: null,
+	url: null,
+	archived: null,
+	created_time: null,
+	last_edited_time: null,
+	property_names: [],
+};
+
+test("Notion database metadata preserves dashed and compact ID spellings", () => {
+	for (const id of [
+		toyDatabaseMetadata.id,
+		toyDatabaseMetadata.id.replaceAll("-", ""),
+	]) {
+		assert.equal(databasesSchema.parse({ ...toyDatabaseMetadata, id }).id, id);
+	}
+});
+
+test("Notion database metadata preserves property label order and Unicode", () => {
+	const labels = ["Zebra", "Café", "alpha"];
+	const row = databasesSchema.parse({
+		...toyDatabaseMetadata,
+		property_names: labels,
+	});
+	assert.deepEqual(row.property_names, labels);
+});
 
 test("Notion full-scan coverage records the enumerated boundary, including empty", () => {
 	assert.deepEqual(buildFullScanCoverageMessage("pages", 0), {
