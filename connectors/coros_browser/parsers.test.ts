@@ -151,6 +151,20 @@ test("activityRecord: without a zone the row's own date is the local day; withou
 	);
 });
 
+test("activityRecord ignores an offset outside the published range", () => {
+	const row = {
+		labelId: "synthetic-activity",
+		startTime: Date.parse("2026-01-15T23:45:00Z") / 1000,
+		sportType: 1,
+		date: 20260115,
+	};
+	for (const startTimezone of [-99, 99]) {
+		const record = activityRecord({ ...row, startTimezone });
+		assert.equal(record?.utc_offset_minutes, null);
+		assert.equal(record?.start_date, "2026-01-15");
+	}
+});
+
 test("activityPage and dayList and schedule refuse a shape that is not theirs", () => {
 	assert.deepEqual(activityPage({ count: 0, totalPage: 0 }), {
 		rows: [],
