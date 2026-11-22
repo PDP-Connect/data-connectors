@@ -63,6 +63,16 @@ test("centsFromMonetary: unparseable string -> null, never guessed", () => {
 	assert.equal(centsFromMonetary("N/A"), null);
 });
 
+test("orderRecord rejects malformed thousands separators in a charged total", () => {
+	const record = orderRecord({
+		orderUuid: "synthetic-malformed-total",
+		totalCharged: { displayString: "$12,34.56" },
+		grandTotal: { unitAmount: 1234 },
+	});
+	assert.equal(record?.total_cents, 1234);
+	assert.equal(centsFromMonetary("$1234.56"), 123_456);
+});
+
 test("centsFromMonetary: empty monetary object -> null", () => {
 	assert.equal(centsFromMonetary({}), null);
 });
