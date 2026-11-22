@@ -72,6 +72,18 @@ test("parseIsoDateTime: returns null for unparseable input", () => {
 	assert.equal(parseIsoDateTime("not a date"), null);
 	assert.equal(parseIsoDateTime(null), null);
 });
+test("parseIsoDateTime: returns null for a missing or empty timestamp", () => {
+	assert.equal(parseIsoDateTime(undefined), null);
+	assert.equal(parseIsoDateTime(""), null);
+});
+
+test("parseIsoDateTime: rejects an out-of-range clock with an explicit offset", () => {
+	assert.equal(parseIsoDateTime("2026-04-15T12:60:00+01:30"), null);
+	assert.equal(
+		parseIsoDateTime("2026-04-15T12:59:00+01:30"),
+		"2026-04-15T11:29:00.000Z",
+	);
+});
 
 test("parseDistanceMeters: converts kilometers to meters", () => {
 	assert.equal(parseDistanceMeters("29.49", "kilometers"), 29_490);
