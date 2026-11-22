@@ -254,3 +254,51 @@ test("real Notion connector protocol emits no coverage proof or STATE when provi
 	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
 	assert.equal(lastDone(result.messages).status, "failed");
 });
+
+const fictionalSummary = {
+	id: "00000000-0000-4000-8000-000000000001",
+	parent_type: null,
+	parent_id: null,
+	title: "Fixture notebook",
+	url: null,
+	archived: null,
+	created_time: null,
+	last_edited_time: "2026-10-01T12:00:00.000Z",
+};
+
+test("Notion page validation identifies a malformed edit timestamp", async () => {
+	const { validateRecord } = await import("./schemas.ts");
+	const page = {
+		...fictionalSummary,
+		object: "page",
+		created_by_id: null,
+		last_edited_by_id: null,
+	};
+	assert.ok(validateRecord("pages", page).ok);
+
+	const result = validateRecord("pages", {
+		...page,
+		last_edited_time: "not-a-timestamp",
+	});
+	if (result.ok) assert.fail("expected malformed timestamp to be rejected");
+	assert.deepEqual(
+		result.issues.map((issue) => issue.path),
+		["last_edited_time"],
+	);
+});
+
+test("Notion database validation identifies a scalar property-name list", async () => {
+	const { validateRecord } = await import("./schemas.ts");
+	const database = { ...fictionalSummary, property_names: ["Fixture column"] };
+	assert.ok(validateRecord("databases", database).ok);
+
+	const result = validateRecord("databases", {
+		...database,
+		property_names: "Fixture column",
+	});
+	if (result.ok) assert.fail("expected scalar property names to be rejected");
+	assert.deepEqual(
+		result.issues.map((issue) => issue.path),
+		["property_names"],
+	);
+});
