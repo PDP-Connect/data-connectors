@@ -4620,14 +4620,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/strava/parsers.ts",
-			line: 245,
+			line: 253,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "streamCsvRows(): each CSV row is emitted before parsing the next row to keep memory bounded",
 		},
 		{
 			path: "connectors/strava/parsers.ts",
-			line: 251,
+			line: 259,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "streamCsvRows(): the final CSV row is emitted before the parser returns",
