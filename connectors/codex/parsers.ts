@@ -65,9 +65,10 @@ export function payloadOutputPreview(
 // ─── Epoch / ISO conversion ─────────────────────────────────────────────
 
 export function epochToIso(sec: number | null | undefined): string | null {
-	return Number.isFinite(sec) && typeof sec === "number" && sec > 0
-		? new Date(sec * 1000).toISOString()
-		: null;
+	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) return null;
+	const date = new Date(sec * 1000);
+	// A finite source value can still exceed JavaScript's representable Date range.
+	return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────
