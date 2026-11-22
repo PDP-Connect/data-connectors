@@ -65,6 +65,18 @@ test("sport names follow Training Hub's tables; workouts read categories first",
 	assert.equal(regionKey(101), null);
 });
 
+test("sport metadata: the custom label covers both ends of its reserved range", () => {
+	assert.equal(sportName(9800), "Custom_Sport");
+	assert.equal(sportName(9930), "Custom_Sport");
+	assert.equal(sportName(9799), null);
+	assert.equal(sportName(9931), null);
+});
+
+test("plan metadata: custom and unknown labels use the sport fallback", () => {
+	assert.equal(planSportName(9800), "Custom_Sport");
+	assert.equal(planSportName(12345), null);
+});
+
 test("profileRecord: account and dashboard into one validated profile, no email", () => {
 	const record = profileRecord(
 		dataOf(fixture("account.json")),
