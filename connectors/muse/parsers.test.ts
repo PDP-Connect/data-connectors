@@ -72,6 +72,27 @@ test("zoned timestamps reject hour 24 instead of moving to the next day", () => 
 	);
 });
 
+test("zoned timestamps reject impossible calendar dates before applying the offset", () => {
+	for (const value of [
+		"2026-02-30T10:00:00Z",
+		"2026-02-29T10:00:00Z",
+		"2026-04-31T10:00:00Z",
+		"2026-04-31T00:30:00+02:00",
+		"2026-13-01T10:00:00Z",
+		"2026-01-00T10:00:00Z",
+	]) {
+		assert.equal(zonedIsoToIso(value), null, value);
+	}
+	assert.equal(
+		zonedIsoToIso("2028-02-29T10:00:00Z"),
+		"2028-02-29T10:00:00.000Z",
+	);
+	assert.equal(
+		zonedIsoToIso("2028-02-29T23:30:00-08:00"),
+		"2028-03-01T07:30:00.000Z",
+	);
+});
+
 test("cleanText keeps safe text unchanged and replaces control-rich text with null", () => {
 	assert.deepEqual(cleanText("line\nnext"), {
 		value: "line\nnext",
