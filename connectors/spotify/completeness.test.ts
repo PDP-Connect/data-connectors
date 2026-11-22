@@ -2391,6 +2391,61 @@ test("Spotify end proof requires the exact player navigation, owner, request, an
 	);
 });
 
+const syntheticEnd = {
+	stream: "synthetic-stream",
+	operation: "synthetic-operation",
+	navigation: "https://open.spotify.com/",
+	owner: "synthetic-owner",
+	selector: "synthetic-selector",
+	firstOffset: 0,
+	lastOffset: 10,
+	responseOffset: 10,
+	pageCount: 2,
+	rawCount: 11,
+	expectedCount: 11,
+	discardedCount: 0,
+	remaining: false,
+	terminal: "total_reached",
+} as const;
+
+test("Spotify rejects terminal evidence with a broken offset or page counter", () => {
+	assert.equal(hasSpotifyEndProof(syntheticEnd, syntheticEnd), true);
+	for (const [label, changes] of [
+		["traversal started late", { firstOffset: 1 }],
+		["response does not echo final offset", { responseOffset: 9 }],
+		["unsafe offset", { lastOffset: 2 ** 53, responseOffset: 2 ** 53 }],
+		["no page actually read", { pageCount: 0 }],
+	] as const) {
+		assert.equal(
+			hasSpotifyEndProof({ ...syntheticEnd, ...changes }, syntheticEnd),
+			false,
+			label,
+		);
+	}
+});
+
+test("Spotify rejects inconsistent empty or total-reached terminal evidence", () => {
+	const empty = {
+		...syntheticEnd,
+		lastOffset: 0,
+		responseOffset: 0,
+		pageCount: 1,
+		rawCount: 0,
+		expectedCount: 0,
+		terminal: "empty_verified",
+	} as const;
+	assert.equal(hasSpotifyEndProof(empty, empty), true);
+	assert.equal(hasSpotifyEndProof({ ...empty, expectedCount: null }, empty), false);
+	assert.equal(
+		hasSpotifyEndProof({ ...empty, rawCount: 1, expectedCount: 1 }, empty),
+		false,
+	);
+	assert.equal(
+		hasSpotifyEndProof({ ...syntheticEnd, expectedCount: null }, syntheticEnd),
+		false,
+	);
+});
+
 function playlistLibraryResponse(): unknown {
 	return {
 		data: {
