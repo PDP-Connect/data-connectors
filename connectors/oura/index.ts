@@ -216,9 +216,10 @@ async function fetchAll<T>(
 				params.next_token = nextToken;
 			}
 			const json = await oura<T>(governor, endpoint, token, params);
-			if (Array.isArray(json.data)) {
-				all.push(...json.data);
+			if (!Array.isArray(json?.data)) {
+				throw new Error(`oura_invalid_page: ${endpoint} response must contain a data array`);
 			}
+			all.push(...json.data);
 			nextToken = json.next_token || undefined;
 			return Boolean(nextToken);
 		},

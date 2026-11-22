@@ -33,7 +33,7 @@ function unpacedGovernor(): ReturnType<typeof createConnectorHttpGovernor> {
 }
 
 interface OuraPageFixture {
-	data: Array<{
+	data?: Array<{
 		average_breath?: number;
 		contributors?: Record<string, number>;
 		day: string;
@@ -164,6 +164,27 @@ function truncationSkip(
 			message.type === "SKIP_RESULT" && message.stream === stream,
 	);
 }
+
+test("a malformed final page cannot advance the activity checkpoint", async () => {
+	const { ctx, messages, records } = makeContext({
+		state: { activity: { last_day: "2030-01-01" } },
+	});
+	await assert.rejects(
+		withOuraPages(
+			[
+				{
+					data: [{ id: "synthetic-page-row", day: "2030-01-02" }],
+					next_token: "synthetic-next",
+				},
+				{ next_token: null },
+			],
+			() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+		),
+		/oura_invalid_page: daily_activity response must contain a data array/,
+	);
+	assert.equal(records.length, 0);
+	assert.equal(lastStateCursor(messages, "activity"), undefined);
+});
 
 test("a walk that exhausts naturally advances the cursor and discloses no truncation", async () => {
 	// No `next_token` on the final page is the provider saying it has nothing
