@@ -1,8 +1,11 @@
 /** Interpret Amazon's human status labels, not return-eligibility controls. */
 const ORDER_COMPLETE = /^(?:refunded|refund issued|return complete)$/i;
-// A negation right before the phrase ("Not returned", "No refund issued") never counts.
 const ITEM_COMPLETE =
-	/(?<!\b(?:not|no|never)\s)\b(?:refunded|refund issued|return complete|returned)\b/i;
+	/\b(?:refunded|refund issued|return complete|returned)\b/i;
+// A negation before the phrase, with at most one word between ("Not returned",
+// "No refund issued", "Not yet refunded"), means it has not happened.
+const NEGATED_COMPLETE =
+	/\b(?:not|no|never)\s+(?:\w+\s+)?(?:refunded|refund issued|return complete|returned)\b/i;
 // Eligibility controls say what a buyer may still do, not what happened.
 const ELIGIBILITY = /^\s*return (?:or replace items|window)/i;
 
@@ -22,7 +25,7 @@ export function deriveItemReturnState({
 }): { returned: boolean; refund_status: string | null } {
 	const item = statusText(itemRefundText);
 	const order = statusText(orderStatus);
-	if (item && ITEM_COMPLETE.test(item)) {
+	if (item && ITEM_COMPLETE.test(item) && !NEGATED_COMPLETE.test(item)) {
 		return { returned: true, refund_status: item };
 	}
 	if (itemCount === 1 && order && ORDER_COMPLETE.test(order)) {
