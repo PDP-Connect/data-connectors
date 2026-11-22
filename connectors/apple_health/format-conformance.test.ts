@@ -34,8 +34,18 @@ import {
 	syntheticExportStartYear,
 } from "./__fixtures__/synthetic-export.ts";
 import { HEALTH_AREA_STREAMS } from "./areas.ts";
+import { isoDate } from "./parsers.ts";
 
 const ENTRYPOINT = connectorEntrypoint("apple_health");
+
+test("FORMAT-CONFORMANCE: invalid calendar dates do not become valid record timestamps", () => {
+	assert.equal(isoDate("2031-02-29 10:00:00 +0000"), null);
+	assert.equal(isoDate("2032-02-30 10:00:00 +0000"), null);
+	assert.equal(
+		isoDate("2032-02-29 23:30:00 -0700"),
+		"2032-03-01T06:30:00.000Z",
+	);
+});
 
 function records(
 	messages: readonly EmittedMessage[],
