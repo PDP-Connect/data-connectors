@@ -32,6 +32,9 @@ test("return state uses completed evidence, never eligibility or pending order s
 		["Refunded", "Delivered", 3, true, "Refunded"],
 		["Return complete", "Delivered", 3, true, "Return complete"],
 		["<script>Refunded</script>", null, 1, false, null],
+		["Not returned", "Delivered", 3, false, "Not returned"],
+		["No refund issued", "Delivered", 1, false, "No refund issued"],
+		["Return started", "Delivered", 3, false, "Return started"],
 	] as const;
 	for (const [
 		itemRefundText,

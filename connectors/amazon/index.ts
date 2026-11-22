@@ -1382,7 +1382,12 @@ export async function emitOrderAndItems(
 					item,
 					{
 						orderStatus: listOrder.deliveryStatus,
-						itemCount: Math.max(orderRecord.item_count ?? 0, merged.length),
+						// Only a count both surfaces agree on proves "one item": a merge that
+						// found a different number than the order's own count is unreliable.
+						itemCount:
+							orderRecord.item_count === merged.length
+								? orderRecord.item_count
+								: null,
 					},
 				);
 				if (
