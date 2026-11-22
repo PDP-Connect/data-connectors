@@ -273,3 +273,27 @@ test("connectors fixture: only connected or needs-reauth services are kept", () 
 	assert.equal(isConnectedApp(asana), false);
 	assert.equal(isConnectedApp({ ...asana, needs_reauth: true }), true);
 });
+
+test("scheduled tasks: malformed interval values stay unknown rather than rounded", () => {
+	for (const interval_seconds of [-1, 1.5]) {
+		const { record } = buildScheduledTaskRecord({
+			id: "synthetic-schedule",
+			enabled: false,
+			cadence: { kind: "interval", interval_seconds },
+		});
+		assert.equal(record.id, "synthetic-schedule");
+		assert.equal(record.enabled, false);
+		assert.equal(record.cadence_kind, "interval");
+		assert.equal(record.cadence_interval_seconds, null);
+	}
+});
+
+test("scheduled tasks: a millisecond value in the seconds field does not invent a next run", () => {
+	const { record } = buildScheduledTaskRecord({
+		id: "synthetic-run-once",
+		next_run_at_utc: 1_792_684_800_000,
+		cadence: { kind: "runonce", run_at_utc: 1_792_684_800 },
+	});
+	assert.equal(record.next_run_at, null);
+	assert.equal(record.cadence_run_at, "2026-10-22T16:00:00.000Z");
+});
