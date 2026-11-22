@@ -208,6 +208,42 @@ test("validateRecord routes by stream and passes unknown streams through", () =>
 	assert.equal(validateRecord("heart_rate", { id: "x" }).ok, true);
 });
 
+// Invented shape-only record; no provider capture or personal measurements.
+const SYNTHETIC_READINESS = {
+	id: "00000000-0000-4000-8000-000000000001",
+	day: "2030-01-01",
+	score: null,
+	temperature_deviation: null,
+	temperature_trend_deviation: null,
+	contributors: {},
+};
+
+test("readiness validation rejects a missing nullable field with its path", () => {
+	const { score: _omittedScore, ...record } = SYNTHETIC_READINESS;
+	assert.equal(validateRecord("readiness", SYNTHETIC_READINESS).ok, true);
+	const result = validateRecord("readiness", record);
+	assert.equal(result.ok, false);
+	if (result.ok) return;
+	assert.deepEqual(
+		result.issues.map(({ path }) => path),
+		["score"],
+	);
+});
+
+test("readiness validation rejects a contributors array with its path", () => {
+	assert.equal(validateRecord("readiness", SYNTHETIC_READINESS).ok, true);
+	const result = validateRecord("readiness", {
+		...SYNTHETIC_READINESS,
+		contributors: [],
+	});
+	assert.equal(result.ok, false);
+	if (result.ok) return;
+	assert.deepEqual(
+		result.issues.map(({ path }) => path),
+		["contributors"],
+	);
+});
+
 // Non-regression: every pre-existing field on the two touched streams
 // (sleep, activity) keeps its exact prior name, type, and nullability — the
 // additive fields above must not have displaced any of them.
