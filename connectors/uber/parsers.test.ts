@@ -288,3 +288,13 @@ test("receiptRecord: falls back to null fare_total when no fare_total line exist
 test("receiptRecord: returns null with no fare-breakdown evidence at all", () => {
 	assert.equal(receiptRecord("trip-3", []), null);
 });
+
+test("parseDistanceMeters: preserves an explicit zero in a supported unit", () => {
+	assert.equal(parseDistanceMeters("0", "kilometers"), 0);
+	assert.equal(parseDistanceMeters("0", "miles"), 0);
+});
+
+test("parseDurationSeconds: preserves zero minutes and accepts an hours-only display", () => {
+	assert.equal(parseDurationSeconds("0 minutes"), 0);
+	assert.equal(parseDurationSeconds("2 hours"), 7200);
+});
