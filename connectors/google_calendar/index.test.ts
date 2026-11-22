@@ -13,6 +13,43 @@ import type {
 import type { CalendarEvent, CalendarListEntry, EventsPage } from "./api.ts";
 import { CalendarSyncTokenExpiredError } from "./api.ts";
 import { collectGoogleCalendar } from "./index.ts";
+import { calendarsSchema } from "./schemas.ts";
+
+test("calendar metadata accepts explicit null without treating missing fields as null", () => {
+	const metadata = {
+		id: "synthetic-calendar",
+		summary: null,
+		time_zone: null,
+		access_role: null,
+		primary: false,
+		source: "google_calendar_api",
+	};
+	assert.equal(calendarsSchema.safeParse(metadata).success, true);
+	assert.equal(
+		calendarsSchema.safeParse({ ...metadata, summary: undefined }).success,
+		false,
+	);
+});
+
+test("calendar metadata accepts summaries at the declared limit but not beyond", () => {
+	const metadata = {
+		id: "synthetic-calendar",
+		time_zone: "UTC",
+		access_role: null,
+		primary: false,
+		source: "google_calendar_api",
+	};
+	assert.equal(
+		calendarsSchema.safeParse({ ...metadata, summary: "x".repeat(2000) })
+			.success,
+		true,
+	);
+	assert.equal(
+		calendarsSchema.safeParse({ ...metadata, summary: "x".repeat(2001) })
+			.success,
+		false,
+	);
+});
 
 class FakeCalendarClient {
 	readonly calls: Array<{ args?: unknown; method: string }> = [];
