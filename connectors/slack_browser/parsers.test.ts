@@ -150,6 +150,17 @@ test("a reply is not a thread parent; an edited message keeps who edited it", ()
 	assert.equal(editedRecord.edited_ts, "1790300100.000000");
 });
 
+test("timestamp display parsing falls back to zero when a value is missing or blank", () => {
+	assert.equal(slackTsSeconds(undefined), 0);
+	assert.equal(slackTsSeconds(""), 0);
+});
+
+test("timestamp display parsing falls back to zero for non-finite text", () => {
+	assert.equal(slackTsSeconds("Infinity"), 0);
+	assert.equal(slackTsSeconds("not-a-timestamp"), 0);
+	assert.equal(slackTsSeconds("20.125"), 20.125);
+});
+
 test("thread activity is judged by the latest reply, not the parent's own time", () => {
 	const [active, quiet, plain] = history(
 		"conversations.history-C0123456789-threads",
