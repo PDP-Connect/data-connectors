@@ -34,6 +34,20 @@ import {
 	resolveUploadMimeType,
 } from "./index.ts";
 
+it("uses declared image metadata even when no URL is present", () => {
+	strictEqual(
+		attachmentContentType({ type: "image", url: null }),
+		"image/jpeg",
+	);
+});
+
+it("uses an observed document MIME type over the generic file guess", () => {
+	strictEqual(
+		resolveUploadMimeType("application/pdf", "application/octet-stream"),
+		"application/pdf",
+	);
+});
+
 describe("GroupMe attachments stream (production seam)", () => {
 	describe("attachmentRecordId (record_key uniqueness)", () => {
 		it("derives distinct record keys for two different attachments in the same message", () => {
