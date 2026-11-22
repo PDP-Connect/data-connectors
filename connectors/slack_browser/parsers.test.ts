@@ -325,3 +325,19 @@ test("user groups, reminders and stars build the archive profile's records", () 
 	assert.equal(channelStarRecord.id, "channel:C0987654321");
 	assert.equal(channelStarRecord.target_id, "C0987654321");
 });
+
+test("blank file identities are counted as gaps, not emitted as keys", () => {
+	const family = buildMessageFamily(
+		"CSYNTHETIC",
+		{
+			ts: "1790400000.000100",
+			files: [{ id: "" }, { id: " " }, {}, { id: "FSYNTHETIC" }],
+		},
+		EMITTED_AT,
+	);
+	assert.equal(family.fileGaps, 3);
+	assert.deepEqual(
+		family.files.map((file) => file.id),
+		["FSYNTHETIC"],
+	);
+});
