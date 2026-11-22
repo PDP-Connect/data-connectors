@@ -183,6 +183,22 @@ test("only a 200 reply with a readable connection and no error is a usable page"
 	}), null);
 });
 
+test("a nested partial or malformed error field cannot prove an empty history", () => {
+	const terminal = { hasNextPage: false };
+	assert.ok(readOrderHistoryConnection(reply([], terminal, { errors: [], partial: false })));
+	for (const extra of [{ partial: true }, { errors: { message: "synthetic failure" } }]) {
+		assert.equal(readOrderHistoryConnection(reply([], terminal, extra)), null);
+	}
+});
+
+test("a terminal page with missing or non-array nodes is not an empty result", () => {
+	const terminal = { hasNextPage: false };
+	assert.ok(readOrderHistoryConnection(reply([], terminal)));
+	for (const nodes of [undefined, null, {}]) {
+		assert.equal(readOrderHistoryConnection(reply([], terminal, { nodes })), null);
+	}
+});
+
 test("the reader pages from the first page by cursor and stops at the terminal page", async () => {
 	const requests: Array<{ after: string | null; pageSize: number }> = [];
 	const replies = new Map<string | null, OrderHistoryApiReply>([
