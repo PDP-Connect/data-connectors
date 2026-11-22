@@ -16,6 +16,23 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parseCSVFile } from "./parsers.ts";
 
+test("parseCSVFile accepts ordinary CSV with quoted headers", async (t) => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "netflix-test-quoted-headers-"));
+	t.after(() => rmSync(tmpDir, { recursive: true, force: true }));
+	const csvPath = join(tmpDir, "viewing-activity.csv");
+	writeFileSync(
+		csvPath,
+		'"Title","Date"\r\n"An Example, Part 1",2024-01-15\r\n',
+	);
+
+	const result = await parseCSVFile(csvPath);
+	assert.equal(result.error, undefined);
+	assert.deepEqual(result.headers, ["title", "date"]);
+	assert.deepEqual(result.rows, [
+		{ title: "An Example, Part 1", date: "2024-01-15" },
+	]);
+});
+
 test("parseCSVFile with file EXACTLY at 50 MiB", async () => {
 	const tmpDir = "/tmp/netflix-test-exact";
 	mkdirSync(tmpDir, { recursive: true });

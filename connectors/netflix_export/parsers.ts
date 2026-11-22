@@ -337,7 +337,7 @@ function parseCSVContent(content: string): {
 }
 
 function parseHeaders(line: string): string[] {
-	return line.split(",").map((h) => h.trim().toLowerCase());
+	return splitCSVFields(line).map((header) => header.toLowerCase());
 }
 
 function isValidRow(): boolean {
