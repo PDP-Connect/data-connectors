@@ -34,6 +34,42 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { archivePathEnumerationIncomplete, pickResumeTarget } from "./index.ts";
+import { buildWorkspaceRecord } from "./parsers.ts";
+
+const displayMetadataRow = {
+	DATA: null,
+	ENTERPRISE_ID: null,
+	ID: 1,
+	TEAM: null,
+	TEAM_ID: null,
+	URL: null,
+	USER_ID: null,
+	USERNAME: null,
+};
+
+test("workspace display metadata prefers the row name and falls back to the smaller icon", () => {
+	const row = {
+		...displayMetadataRow,
+		TEAM: "Fixture workspace",
+		DATA: JSON.stringify({
+			team: "Fixture fallback",
+			icon: { image_102: "fixture-icon-small" },
+		}),
+	};
+	const record = buildWorkspaceRecord(row, "2026-01-01T00:00:00Z");
+	assert.equal(record.name, "Fixture workspace");
+	assert.equal(record.icon_url, "fixture-icon-small");
+});
+
+test("workspace display metadata falls back to the source name without inventing an icon", () => {
+	const row = {
+		...displayMetadataRow,
+		DATA: JSON.stringify({ team: "Fixture fallback" }),
+	};
+	const record = buildWorkspaceRecord(row, "2026-01-01T00:00:00Z");
+	assert.equal(record.name, "Fixture fallback");
+	assert.equal(record.icon_url, null);
+});
 
 // ─── Archive fixtures ────────────────────────────────────────────────────
 
