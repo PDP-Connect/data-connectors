@@ -44,6 +44,30 @@ test("parseCsv keeps empty trailing fields and refuses an unterminated quote", (
 	assert.throws(() => parseCsv('a,"b\n'), /unterminated/);
 });
 
+test("parseCsv keeps the final row after CR-only line endings", () => {
+	assert.deepEqual(parseCsv("Label,Note\rAlpha,first\rBeta,last"), [
+		["Label", "Note"],
+		["Alpha", "first"],
+		["Beta", "last"],
+	]);
+});
+
+test("parseExportTable trims reordered headers and leaves an absent cell empty", () => {
+	assert.deepEqual(
+		parseExportTable(" Label , Quantity \nAlpha,2\nBeta", [
+			"Quantity",
+			"Label",
+		]),
+		{
+			ok: true,
+			rows: [
+				{ Label: "Alpha", Quantity: "2" },
+				{ Label: "Beta", Quantity: "" },
+			],
+		},
+	);
+});
+
 test("parseExportTable keys rows by header and fails when a required column is missing", () => {
 	assert.equal(tickRows().length, 7);
 	const missing = parseExportTable("Date,Route\n2026-01-01,x\n", TICK_COLUMNS);
