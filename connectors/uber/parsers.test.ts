@@ -234,6 +234,14 @@ test("tripRecord: returns null when GetTrip produced no trip at all", () => {
 	assert.equal(tripRecord("trip-4", undefined, undefined), null);
 });
 
+test("tripRecord preserves the sign of a fare padded with whitespace", () => {
+	const fare = " -$4.50 ";
+	const record = tripRecord("synthetic-trip", { fare }, undefined);
+	assert.ok(record);
+	assert.equal(record.fare_total, fare);
+	assert.equal(record.fare_total_cents, -450);
+});
+
 test("parseFareBreakdown: extracts label/amount pairs by data-testid, ignoring unrelated HTML", () => {
 	const html = `<div class="fare-breakdown-wrapper"><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_trip_fare" class="fare-breakdown-name">Trip fare</span><span data-testid="fare_line_item_amount_trip_fare" class="fare-breakdown-amount">€40.95</span></div><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_promotion" class="fare-breakdown-name">Promotion</span><span data-testid="fare_line_item_amount_promotion" class="fare-breakdown-amount">-€6.44</span></div></div><div class="unrelated"><span>Not a fare line</span></div>`;
 	const lines = parseFareBreakdown(html);
