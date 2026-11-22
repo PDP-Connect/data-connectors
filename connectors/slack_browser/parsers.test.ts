@@ -249,6 +249,25 @@ test("channels and users keep every field the archive profile reads", () => {
 	assert.equal(botRecord.is_bot, true);
 });
 
+test("group display metadata distinguishes missing text from a blank description", () => {
+	const absent = buildUserGroup({ id: "SFixture" });
+	const blank = buildUserGroup({ id: "SFixture", description: "" });
+	assert.equal(absent.description, null);
+	assert.equal(blank.description, "");
+});
+
+test("group status metadata distinguishes unspecified, active, and deleted", () => {
+	assert.equal(buildUserGroup({ id: "SFixture" }).deleted, null);
+	assert.equal(
+		buildUserGroup({ id: "SFixture", date_delete: 0 }).deleted,
+		false,
+	);
+	assert.equal(
+		buildUserGroup({ id: "SFixture", date_delete: 1 }).deleted,
+		true,
+	);
+});
+
 test("user groups, reminders and stars build the archive profile's records", () => {
 	const [group] =
 		userGroupsListSchema.parse(fixture("usergroups.list")).usergroups ?? [];
