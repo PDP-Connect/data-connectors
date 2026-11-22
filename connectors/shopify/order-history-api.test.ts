@@ -97,6 +97,17 @@ test("one order with a terminal pageInfo is read and proves the end of the list"
 	assert.equal(hasNextOrdersPage(cache), false);
 });
 
+test("order coverage rejects an impossible source calendar date but keeps a leap day with an offset", () => {
+	const impossible = orderNode(ORDER_A, { createdAt: "2026-02-29T10:00:00Z" });
+	const leapDay = "2028-02-29T23:30:00-08:00";
+	const valid = orderNode(ORDER_B, { createdAt: leapDay });
+	const cache = orderHistoryPagesToCache(pagesOf(reply([impossible, valid], { hasNextPage: false })));
+	const coverage = extractOrdersWithCoverage(cache);
+
+	assert.equal(coverage.discardedRows, 1);
+	assert.deepEqual(coverage.orders.map((order) => [order.id, order.placedAt]), [[ORDER_B, leapDay]]);
+});
+
 test("a cursor chain from the first page to a terminal page proves the end", () => {
 	const cache = orderHistoryPagesToCache(pagesOf(
 		reply([orderNode(ORDER_A), orderNode(ORDER_B)], { hasNextPage: true, endCursor: "cursor-1" }),
