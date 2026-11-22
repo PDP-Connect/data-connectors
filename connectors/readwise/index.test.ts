@@ -8,6 +8,20 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import { createExportReader } from "./api.ts";
 import { collectReadwise } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+import { encodeText } from "./text.ts";
+
+test("Readwise text encoding preserves readable Unicode and line breaks", () => {
+	const readable = "first\tline\nsecond\rline \u{1F4D6}";
+	assert.equal(encodeText(readable), readable);
+});
+
+test("Readwise text encoding distinguishes a literal escape from a rewritten code unit", () => {
+	const text = String.raw`literal \u0001` + " actual \u0001 lone \uD800";
+	assert.equal(
+		encodeText(text),
+		String.raw`literal \u005Cu0001 actual \u0001 lone \uD800`,
+	);
+});
 
 function fixtureContext(state: Record<string, unknown> = {}) {
 	const recording = makeRecordingEmit(validateRecord);
