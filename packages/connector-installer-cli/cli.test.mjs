@@ -114,6 +114,20 @@ for (const command of ["install", "verify"]) {
   });
 }
 
+test("a value option followed by another option names the missing value", async () => {
+  const result = await runCli(["verify", "--lock", "--install-root", "unused", "--layout", "snapshot"]);
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.trim(), "Missing value for --lock");
+});
+
+test("an explicitly empty option value names the missing value", async () => {
+  const result = await runCli(["verify", "--lock", "", "--install-root", "unused", "--layout", "snapshot"]);
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.trim(), "Missing value for --lock");
+});
+
 for (const command of ["lock", "updates"]) {
   test(`\`${command}\` is not a command`, async () => {
     const result = await runCli([command]);
