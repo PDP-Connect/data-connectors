@@ -1159,9 +1159,9 @@ export function parsePostNode(
 	const author = postAuthorId(node);
 	if (author !== null && author !== viewerId)
 		return { kind: "not_own", createTime };
-	const id =
-		node.post_id ??
-		getPath(node, ["comet_sections", "content", "story", "post_id"]);
+	const id = isNumericId(node.post_id)
+		? node.post_id
+		: getPath(node, ["comet_sections", "content", "story", "post_id"]);
 	if (!isNumericId(id) || createTime === null || author === null)
 		return { kind: "unreadable" };
 	const privacy = postPrivacy(node, counter);
