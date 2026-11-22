@@ -28,7 +28,6 @@ import {
 	grantDays,
 	inRange,
 	LOGIN_URL,
-	MAX_RETRY_DAYS,
 	makeEnsureSession,
 	normaliseRetry,
 	ORIGIN,
@@ -611,10 +610,6 @@ const span = (from: string, to = from) => ({ from, to });
 /** A first run's cursor at NOW, in the fixture account's Pacific/Auckland. */
 const CURSOR = { next_day: "2026-09-22", floor: "2026-06-24" };
 
-test("the retry list holds at most a year and a day", () => {
-	assert.equal(MAX_RETRY_DAYS, 366);
-});
-
 test("normaliseRetry sorts, merges spans that overlap, touch or nest, keeps apart those a day apart, and leaves its input alone", () => {
 	const input = [
 		span("2026-07-10", "2026-07-12"),
@@ -625,38 +620,25 @@ test("normaliseRetry sorts, merges spans that overlap, touch or nest, keeps apar
 		span("2026-07-08", "2026-07-11"),
 	];
 	const copy = structuredClone(input);
-	assert.deepEqual(normaliseRetry(input), {
-		retry: [span("2026-07-01", "2026-07-05"), span("2026-07-07", "2026-07-12")],
-		dropped: 0,
-	});
+	assert.deepEqual(normaliseRetry(input), [
+		span("2026-07-01", "2026-07-05"),
+		span("2026-07-07", "2026-07-12"),
+	]);
 	assert.deepEqual(input, copy);
-	assert.deepEqual(normaliseRetry([]), { retry: [], dropped: 0 });
+	assert.deepEqual(normaliseRetry([]), []);
 });
 
-test("normaliseRetry keeps a year and a day whole, and past it lets the oldest days go first, counting them", () => {
-	const year = span("2025-06-01", "2026-06-01");
-	assert.deepEqual(normaliseRetry([year]), { retry: [year], dropped: 0 });
-	assert.deepEqual(normaliseRetry([span("2026-09-16"), year]), {
-		retry: [span("2025-06-02", "2026-06-01"), span("2026-09-16")],
-		dropped: 1,
-	});
-	// 1 + 6 + 365 days: the first span goes whole, the second loses five days of six.
-	assert.deepEqual(
-		normaliseRetry([
-			span("2025-03-01", "2026-02-28"),
-			span("2025-01-05", "2025-01-10"),
-			span("2025-01-01"),
-		]),
-		{
-			retry: [span("2025-01-10"), span("2025-03-01", "2026-02-28")],
-			dropped: 6,
-		},
+test("normaliseRetry keeps 500 consecutive days in one span and preserves disjoint days", () => {
+	const days = Array.from({ length: 500 }, (_, n) =>
+		span(new Date(Date.UTC(2025, 0, 1 + n)).toISOString().slice(0, 10)),
 	);
-	// The days over the cap exactly fill the oldest span: it goes whole, never left running backwards.
-	assert.deepEqual(
-		normaliseRetry([span("2025-01-01"), span("2025-03-01", "2026-03-01")]),
-		{ retry: [span("2025-03-01", "2026-03-01")], dropped: 1 },
-	);
+	assert.deepEqual(normaliseRetry(days.toReversed()), [
+		span("2025-01-01", "2026-05-15"),
+	]);
+	assert.deepEqual(normaliseRetry([span("2024-12-29"), ...days]), [
+		span("2024-12-29"),
+		span("2025-01-01", "2026-05-15"),
+	]);
 });
 
 test("readCursor keeps each retry span whose days parse and run forward, drops the rest alone, and normalises what it keeps", () => {
@@ -680,10 +662,10 @@ test("readCursor keeps each retry span whose days parse and run forward, drops t
 		}),
 		{ ...CURSOR, retry: [span("2026-07-01", "2026-07-06")] },
 	);
-	// Over the cap, a saved list is cut to the latest year and a day.
+	// A long saved span is kept whole: no cap lets old days go.
 	assert.deepEqual(
 		readCursor({ ...CURSOR, retry: [span("2025-01-01", "2026-06-01")] }),
-		{ ...CURSOR, retry: [span("2025-06-01", "2026-06-01")] },
+		{ ...CURSOR, retry: [span("2025-01-01", "2026-06-01")] },
 	);
 });
 
