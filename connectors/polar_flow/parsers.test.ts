@@ -43,6 +43,19 @@ test("localTime normalises Polar's zoneless times and refuses anything else", ()
 	assert.equal(localTime(1793776329000), null);
 });
 
+test("localTime keeps leap days and refuses the same date in a non-leap year", () => {
+	assert.equal(localTime("2024-02-29 23:59:59"), "2024-02-29T23:59:59");
+	assert.equal(localTime("2025-02-29 23:59:59"), null);
+});
+
+test("localTime accepts up to nine fractional digits and emits whole seconds", () => {
+	assert.equal(
+		localTime("2026-01-01T00:00:00.123456789"),
+		"2026-01-01T00:00:00",
+	);
+	assert.equal(localTime("2026-01-01T00:00:00.1234567890"), null);
+});
+
 test("profile: identity, body and zone settings, never the e-mail", () => {
 	const { user } = fixtureData();
 	const record = valid("profile", profileRecord(user));
