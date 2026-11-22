@@ -197,6 +197,43 @@ test("an unparseable or empty date yields null so the row is counted, not guesse
 	assert.equal(parseActivityDate("last Tuesday"), null);
 });
 
+test("rejects invalid written calendar, clock, and offset values", () => {
+	for (const value of [
+		"2024-02-30T10:00:00Z", "2023-02-29T10:00:00Z",
+		"2024-13-45T99:99:99Z", "2024-02-29T10:00:00+25:99",
+		"2024-02-29T10:00:00+0199", "2024-02-29 24:00:00",
+		"2024-02-29T10:60:00", "2024-02-29T10:00:60Z",
+		"Aug 32, 2020, 7:30:00 AM", "Apr 31, 2020, 7:30:00 AM",
+		"Aug 12, 2020, 0:30:00 AM", "Aug 12, 2020, 13:30:00 PM",
+	]) assert.equal(parseActivityDate(value), null, value);
+	assert.deepEqual(parseActivityDate("2024-02-29T10:00:00Z"), {
+		iso: "2024-02-29T10:00:00Z", basis: "utc",
+	});
+	assert.deepEqual(parseActivityDate("2024-02-29T23:30:00-0800"), {
+		iso: "2024-02-29T23:30:00-0800", basis: "utc",
+	});
+});
+
+test("CSV splits bare CR and CRLF without changing quoted carriage returns", () => {
+	const rows = [["a", "b"], ["1", "2"], ["3", "4"]];
+	assert.deepEqual(parseCsvRows("a,b\r1,2\r3,4\r"), { rows });
+	assert.deepEqual(parseCsvRows("a,b\r\n1,2\r\n3,4\r\n"), { rows });
+	assert.deepEqual(parseCsvRows('a,b\r"x\ry",2\r'), { rows: [["a", "b"], ["x\ry", "2"]] });
+});
+
+test("streamed CSV treats a split CRLF as one break and preserves quoted CRLF", async () => {
+	async function* chunks() {
+		yield "a,b\r";
+		yield "";
+		yield '\n"x\r';
+		yield '\ny",2\r';
+		yield "\n3,4\r";
+	}
+	const rows: string[][] = [];
+	assert.deepEqual(await streamCsvRows(chunks(), row => { rows.push(row); }), { rowCount: 3 });
+	assert.deepEqual(rows, [["a", "b"], ["x\r\ny", "2"], ["3", "4"]]);
+});
+
 test("a row with no usable id is rejected rather than emitted with a fake one", () => {
 	const cols = columns();
 	const row = new Array<string>(HEADER.length).fill("");
