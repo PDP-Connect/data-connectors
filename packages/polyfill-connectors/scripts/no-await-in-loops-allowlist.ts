@@ -3766,7 +3766,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/netflix_export/parsers.ts",
-			line: 187,
+			line: 189,
 			column: 26,
 			category: "dependent_file_cursor",
 			note: "fd.read(): sequential file/dir walk, incremental byte-offset read, or one-way fs mutation",
