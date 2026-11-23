@@ -14,7 +14,6 @@ import { validateRecord } from "./schemas.ts";
 
 const STREAMS = ["books", "highlights"] as const;
 const CURSOR_SKEW_MS = 5 * 60 * 1000;
-const MAX_PAGES = 1000;
 
 type ReadPage = ReturnType<typeof createExportReader>;
 type ReadwiseContext = Pick<
@@ -64,7 +63,6 @@ export async function collectReadwise(
 			: new Date(earliest).toISOString();
 	const seen = new Set<string>();
 	let cursor: string | null = null;
-	let pages = 0;
 	const counts = {
 		books: { considered: 0, covered: 0 },
 		highlights: { considered: 0, covered: 0 },
@@ -87,7 +85,6 @@ export async function collectReadwise(
 	};
 
 	do {
-		if (++pages > MAX_PAGES) throw new Error("readwise_page_bound_exceeded");
 		const page = await readPage(token, cursor, updatedAfter);
 		for (const book of page.results) {
 			if (ctx.requested.has("books")) {

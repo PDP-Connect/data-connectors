@@ -185,3 +185,29 @@ for (const { end, error } of [
 		);
 	});
 }
+
+test("a history of more than 1,000 pages completes and writes the terminal state", async () => {
+	const ctx = fixtureContext();
+	const totalPages = 1200;
+	let page = 0;
+	const read = createExportReader(
+		async () => {
+			page += 1;
+			return Response.json({
+				nextPageCursor: page < totalPages ? `cursor-${page}` : null,
+				results: [{ user_book_id: page, highlights: [] }],
+			});
+		},
+		async () => {},
+	);
+	await collectReadwise(ctx, read);
+	assert.equal(page, totalPages);
+	assert.equal(
+		ctx.emitted.filter(({ stream }) => stream === "books").length,
+		totalPages,
+	);
+	assert.equal(
+		ctx.protocolMessages.some((message) => message.type === "STATE"),
+		true,
+	);
+});
