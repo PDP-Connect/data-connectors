@@ -195,6 +195,7 @@ async function searchAll(
 	const results: NotionObject[] = [];
 	let cursor: string | undefined;
 	let pageIndex = 0;
+	const seenCursors = new Set<string>();
 	for (;;) {
 		const body: NotionSearchBody = {
 			sort: { direction: "descending", timestamp: "last_edited_time" },
@@ -235,6 +236,12 @@ async function searchAll(
 		if (typeof nextCursor !== "string" || nextCursor.trim().length === 0) {
 			throw new Error("notion_pagination_contradiction");
 		}
+		// A cursor already used means the provider is not advancing. Another
+		// request would fetch the same page again and keep its duplicates.
+		if (seenCursors.has(nextCursor)) {
+			throw new Error("notion_pagination_cycle");
+		}
+		seenCursors.add(nextCursor);
 		cursor = nextCursor;
 		pageIndex += 1;
 		await politeDelay(POLITE_DELAY_MS);

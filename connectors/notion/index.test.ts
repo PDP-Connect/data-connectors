@@ -64,7 +64,11 @@ function lastDone(
 }
 
 async function runRealNotionConnector(
-	mode: "complete" | "provider_failure" | "contradictory_pagination",
+	mode:
+		| "complete"
+		| "provider_failure"
+		| "contradictory_pagination"
+		| "repeated_cursor_pagination",
 ) {
 	const harnessDir = await mkdtemp(join(tmpdir(), "pdpp-notion-protocol-"));
 	const wrapperPath = join(harnessDir, "notion-wrapper.mjs");
@@ -80,6 +84,13 @@ globalThis.fetch = async (_input, init) => {
   const body = JSON.parse(init?.body ?? "{}");
   const object = body.filter?.value;
   const isPage = object === "page";
+  if (mode === "repeated_cursor_pagination" && isPage) {
+    return new Response(JSON.stringify({
+      has_more: true,
+      next_cursor: "same-cursor",
+      results: []
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (mode === "contradictory_pagination" && isPage) {
     return new Response(JSON.stringify({
       has_more: true,
@@ -161,6 +172,17 @@ test("real Notion connector fails closed when has_more is true without a cursor"
 		1,
 		"a contradictory pagination response fails the run",
 	);
+	assert.equal(
+		protocolMessagesFor(result.messages, "DETAIL_COVERAGE").length,
+		0,
+	);
+	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
+	assert.equal(lastDone(result.messages).status, "failed");
+});
+
+test("real Notion connector fails closed when the provider repeats a cursor", async () => {
+	const result = await runRealNotionConnector("repeated_cursor_pagination");
+	assert.equal(result.code, 1, "a repeated cursor fails the run");
 	assert.equal(
 		protocolMessagesFor(result.messages, "DETAIL_COVERAGE").length,
 		0,
