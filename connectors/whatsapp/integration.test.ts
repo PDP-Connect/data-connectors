@@ -543,3 +543,70 @@ test("WhatsApp connector marks media hydration failed when blob upload fails", a
 		await rm(importRoot, { force: true, recursive: true });
 	}
 });
+
+test("WhatsApp ZIP chat entry cap reports omissions without losing the supported chat", async (t) => {
+	const small = "[6/5/24, 9:15:22 AM] FixtureA: synthetic message";
+	const large = `${small}${"x".repeat(128)}`;
+	for (const [label, entries, expectedMessages, expectedSkips] of [
+		[
+			"mixed",
+			[
+				{ name: "small.txt", data: small },
+				{ name: "large.txt", data: large },
+			],
+			1,
+			1,
+		],
+		["only oversized", [{ name: "large.txt", data: large }], 0, 1],
+		["all small", [{ name: "small.txt", data: small }], 1, 0],
+	] as const) {
+		await t.test(label, async () => {
+			const importRoot = await mkdtemp(
+				join(tmpdir(), "pdpp-whatsapp-chat-entry-cap-"),
+			);
+			try {
+				await writeFile(
+					join(importRoot, "synthetic.zip"),
+					makeStoredZip(entries),
+				);
+				const { messages } = await runConnectorProtocolSubprocess({
+					cwd: PACKAGE_ROOT,
+					entrypoint: WHATSAPP_ENTRYPOINT,
+					env: {
+						PDPP_OWNER_TOKEN: "",
+						PDPP_RS_URL: "",
+						RS_URL: "",
+						WHATSAPP_EXPORT_DIR: importRoot,
+						WHATSAPP_MAX_ZIP_CHAT_TEXT_BYTES: "96",
+					},
+					start: {
+						scope: { streams: [{ name: "chats" }, { name: "messages" }] },
+						type: "START",
+					},
+				});
+				assert.equal(records(messages, "messages").length, expectedMessages);
+				const skips = messages.filter(
+					(message) => message.type === "SKIP_RESULT",
+				);
+				assert.equal(skips.length, expectedSkips);
+				if (expectedSkips) {
+					assert.equal(skips[0]?.reason, "import_chat_entry_too_large");
+					assert.ok(skips[0]?.message?.includes('"large.txt"'));
+					assert.ok(
+						skips[0]?.message?.includes(`${Buffer.byteLength(large)} bytes`),
+					);
+					assert.ok(skips[0]?.message?.includes("limit 96 bytes"));
+					assert.ok(skips[0]?.message?.includes("plain .txt"));
+					const coverage = detailCoverage(messages).find(
+						(m) => m.stream === "chats",
+					);
+					assert.ok(
+						coverage && (coverage.considered ?? 0) > (coverage.covered ?? 0),
+					);
+				}
+			} finally {
+				await rm(importRoot, { force: true, recursive: true });
+			}
+		});
+	}
+});

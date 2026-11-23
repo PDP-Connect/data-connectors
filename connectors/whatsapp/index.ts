@@ -46,6 +46,7 @@ import {
 	looksLikeWhatsAppChatExport,
 	mintChatId,
 	nowIso,
+	type OversizedWhatsAppChatEntry,
 	type ParsedWhatsAppAttachment,
 	type ParsedWhatsAppMessage,
 	sampleUniform,
@@ -359,13 +360,20 @@ async function parseZipExportFile(
 	exportOrdinal: number,
 	exportTotal: number,
 	skipStream: string,
-): Promise<{ closeSource: () => void; source: ParsedExportSource | null }> {
+): Promise<{
+	closeSource: () => void;
+	source: ParsedExportSource | null;
+	oversizedChatEntries?: number;
+}> {
 	const fileSize = statSync(fileName).size;
 	const fd = openSync(fileName, "r");
 	const closeSource = () => closeSync(fd);
 	let artifact: ReturnType<typeof extractWhatsAppChatArtifactFromFile>;
+	const oversized: OversizedWhatsAppChatEntry[] = [];
 	try {
-		artifact = extractWhatsAppChatArtifactFromFile(fd, fileSize);
+		artifact = extractWhatsAppChatArtifactFromFile(fd, fileSize, (entry) =>
+			oversized.push(entry),
+		);
 	} catch (err) {
 		if (err instanceof WhatsAppZipPolicyRejection) {
 			closeSource();
@@ -380,8 +388,28 @@ async function parseZipExportFile(
 		closeSource();
 		throw err;
 	}
+	try {
+		for (const entry of oversized) {
+			await emit({
+				message: `Skipped WhatsApp ZIP chat entry ${JSON.stringify(entry.name)}: declares ${entry.sizeBytes} bytes (limit ${entry.capBytes} bytes). Upload that chat as a plain .txt file instead.`,
+				reason: "import_chat_entry_too_large",
+				stream: skipStream,
+				type: "SKIP_RESULT",
+			});
+		}
+	} catch (err) {
+		closeSource();
+		throw err;
+	}
 	if (!artifact) {
 		closeSource();
+		if (oversized.length > 0) {
+			return {
+				closeSource: () => undefined,
+				source: null,
+				oversizedChatEntries: oversized.length,
+			};
+		}
 		await emit({
 			message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: not a supported chat export.`,
 			reason: "unsupported_export",
@@ -392,6 +420,7 @@ async function parseZipExportFile(
 	}
 	return {
 		closeSource,
+		oversizedChatEntries: oversized.length,
 		source: {
 			attachments: artifact.mediaFiles,
 			closeSource,
@@ -567,6 +596,7 @@ async function parseTxtExportFile(fileName: string): Promise<TxtParseOutcome> {
 
 interface ParseExportOutcome {
 	closeSource: () => void;
+	oversizedChatEntries?: number;
 	result: { source: ParsedExportSource; summary: WhatsAppChatSummary } | null;
 }
 
@@ -596,7 +626,11 @@ async function parseZipExportOutcome(
 		skipStream,
 	);
 	if (!zipResult.source) {
-		return { closeSource: zipResult.closeSource, result: null };
+		return {
+			closeSource: zipResult.closeSource,
+			oversizedChatEntries: zipResult.oversizedChatEntries ?? 0,
+			result: null,
+		};
 	}
 	// The zip path's identity scan runs over the already-bounded,
 	// already-in-memory chat text (see parseZipExportFile) -- cheap to
@@ -613,17 +647,27 @@ async function parseZipExportOutcome(
 	} catch (err) {
 		zipResult.closeSource();
 		if (err instanceof WhatsAppMessageLimitExceededError) {
-			return skipParseExport(
-				emit,
-				`Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: ${err.message}.`,
-				"import_exceeds_bounded_read_policy",
-				skipStream,
-			);
+			return {
+				...(await skipParseExport(
+					emit,
+					`Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: ${err.message}.`,
+					"import_exceeds_bounded_read_policy",
+					skipStream,
+				)),
+				oversizedChatEntries: zipResult.oversizedChatEntries ?? 0,
+			};
 		}
 		throw err;
 	}
 	if (summary.messageCount === 0) {
 		zipResult.closeSource();
+		if (zipResult.oversizedChatEntries) {
+			return {
+				closeSource: () => undefined,
+				oversizedChatEntries: zipResult.oversizedChatEntries,
+				result: null,
+			};
+		}
 		return skipParseExport(
 			emit,
 			`Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: not a supported chat export.`,
@@ -633,6 +677,7 @@ async function parseZipExportOutcome(
 	}
 	return {
 		closeSource: zipResult.closeSource,
+		oversizedChatEntries: zipResult.oversizedChatEntries ?? 0,
 		result: { source: zipResult.source, summary },
 	};
 }
@@ -1340,7 +1385,8 @@ runConnector({
 		// The discovery walk is the chat coverage boundary. Every export file is
 		// considered even when parsing later rejects it; only successfully parsed
 		// exports are covered.
-		const consideredExports = files.length;
+		let consideredExports = files.length;
+		let skippedChatEntries = 0;
 		let importedExports = 0;
 		let totalAttachments = 0;
 		let totalAttachmentsCovered = 0;
@@ -1352,7 +1398,11 @@ runConnector({
 				continue;
 			}
 			const exportOrdinal = index + 1;
-			const { closeSource, result } = await parseExportFile(
+			const {
+				closeSource,
+				result,
+				oversizedChatEntries = 0,
+			} = await parseExportFile(
 				f,
 				emit,
 				progress,
@@ -1360,6 +1410,9 @@ runConnector({
 				files.length,
 				skipStream,
 			);
+			skippedChatEntries += oversizedChatEntries;
+			// The file's existing slot accounts for one skipped entry if no chat was imported.
+			consideredExports += Math.max(0, oversizedChatEntries - (result ? 0 : 1));
 			if (!result) {
 				closeSource();
 				continue;
@@ -1421,13 +1474,13 @@ runConnector({
 			}
 		}
 
-		// One chat record per successfully parsed export file: `importedExports`
+		// At most one chat record per successfully parsed export file: `importedExports`
 		// counts the files that yielded a chat, measured at the discovery walk
 		// above rather than from the emit count, so a steady-state run whose chats
 		// were all fingerprint-suppressed still reads covered. Files rejected by
 		// `parseExportFile` emit their own SKIP_RESULT: they remain in the
 		// enumeration denominator but stay out of `covered`, so a rejected export
-		// correctly reads partial.
+		// correctly reads partial. Oversized ZIP chat candidates add missed slots.
 		if (requested.has("chats")) {
 			await emit(
 				buildDetailCoverageMessage({
@@ -1451,8 +1504,10 @@ runConnector({
 					stateStream: "messages",
 					requiredKeys: [],
 					hydratedKeys: [],
-					considered: totalMessages,
-					covered: totalMessages,
+					// The rejected text was not read, so its message denominator is unknown.
+					...(skippedChatEntries === 0
+						? { considered: totalMessages, covered: totalMessages }
+						: {}),
 				}),
 			);
 		}
