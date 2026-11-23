@@ -388,7 +388,7 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
       : today;
     const endDate = untilEnd < today ? untilEnd : today;
     // An explicit range is collected as one inventory, even when it spans more
-    // than 90 days. A partial range cannot advance STATE, so a fixed cap here
+    // than one chunk. A partial range cannot advance STATE, so a fixed cap here
     // would replay the same prefix forever.
     const overlapStart = addDays(today, -MUTABLE_OVERLAP_DAYS);
     let startDate = requestedSince ?? previous?.next_day ?? initialStartDate(day(endDate));
