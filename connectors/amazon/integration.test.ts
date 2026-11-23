@@ -2853,6 +2853,13 @@ for (const row of [
 		expected: true,
 	},
 	{
+		label: "status-only locator with a full stop",
+		itemCount: undefined,
+		status: "Return complete.",
+		eligibility: "",
+		expected: true,
+	},
+	{
 		label: "legacy locator",
 		itemCount: undefined,
 		status: undefined,

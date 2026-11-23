@@ -768,7 +768,9 @@ function recoverableDeliveryStatus(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
 	// Store only known status labels, not arbitrary shipment or recipient text.
-	return /^(?:delivered|refunded|refund issued|return complete)$/i.test(trimmed)
+	return /^(?:delivered|refunded|refund issued|return complete)[.!]?$/i.test(
+		trimmed,
+	)
 		? trimmed
 		: undefined;
 }
