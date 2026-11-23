@@ -68,6 +68,7 @@ async function runRealNotionConnector(
 		| "complete"
 		| "provider_failure"
 		| "contradictory_pagination"
+		| "terminal_page_with_cursor"
 		| "repeated_cursor_pagination",
 ) {
 	const harnessDir = await mkdtemp(join(tmpdir(), "pdpp-notion-protocol-"));
@@ -95,6 +96,13 @@ globalThis.fetch = async (_input, init) => {
     return new Response(JSON.stringify({
       has_more: true,
       next_cursor: null,
+      results: []
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }
+  if (mode === "terminal_page_with_cursor" && isPage) {
+    return new Response(JSON.stringify({
+      has_more: false,
+      next_cursor: "synthetic-next",
       results: []
     }), { status: 200, headers: { "content-type": "application/json" } });
   }
@@ -172,6 +180,17 @@ test("real Notion connector fails closed when has_more is true without a cursor"
 		1,
 		"a contradictory pagination response fails the run",
 	);
+	assert.equal(
+		protocolMessagesFor(result.messages, "DETAIL_COVERAGE").length,
+		0,
+	);
+	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
+	assert.equal(lastDone(result.messages).status, "failed");
+});
+
+test("real Notion connector fails closed when a terminal page supplies a cursor", async () => {
+	const result = await runRealNotionConnector("terminal_page_with_cursor");
+	assert.equal(result.code, 1, "a terminal page with a cursor fails the run");
 	assert.equal(
 		protocolMessagesFor(result.messages, "DETAIL_COVERAGE").length,
 		0,
