@@ -79,8 +79,6 @@ interface WhatsAppCursors {
 	messages: FingerprintCursor;
 }
 const SUPPORTED_EXPORT_EXTENSIONS = [".txt", ".zip"] as const;
-const MAX_DISCOVERY_DEPTH = 3;
-const MAX_DISCOVERY_ENTRIES = 10_000;
 const MESSAGE_PROGRESS_INTERVAL = 500;
 const ATTACHMENT_PROGRESS_INTERVAL = 25;
 const STREAM_PRIORITY = ["chats", "messages", "attachments"] as const;
@@ -159,26 +157,18 @@ function uploadBlob(args: {
 
 async function discoverExportFiles(importDir: string): Promise<string[]> {
 	const found: string[] = [];
-	let visited = 0;
-	async function walk(dir: string, depth: number): Promise<void> {
-		if (depth > MAX_DISCOVERY_DEPTH || visited >= MAX_DISCOVERY_ENTRIES) {
-			return;
-		}
+	async function walk(dir: string): Promise<void> {
 		const entries = await readdir(dir, { withFileTypes: true });
 		for (const entry of entries) {
-			visited += 1;
-			if (visited > MAX_DISCOVERY_ENTRIES) {
-				return;
-			}
 			const path = join(dir, entry.name);
 			if (entry.isDirectory()) {
-				await walk(path, depth + 1);
+				await walk(path);
 			} else if (entry.isFile() && isSupportedExportFile(entry.name)) {
 				found.push(path);
 			}
 		}
 	}
-	await walk(importDir, 0);
+	await walk(importDir);
 	return [...new Set(found)].sort();
 }
 

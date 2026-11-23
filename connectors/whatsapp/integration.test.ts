@@ -339,6 +339,81 @@ test("WhatsApp rejected exports stay in the chat denominator but out of coverage
 	}
 });
 
+test("WhatsApp discovers and collects a chat export five directories deep", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-whatsapp-depth-"));
+	try {
+		const nested = join(importRoot, "one", "two", "three", "four", "five");
+		await mkdir(nested, { recursive: true });
+		await writeFile(
+			join(nested, "fixture.txt"),
+			"[6/5/24, 9:15:22 AM] FixtureA: test-only deep import",
+		);
+		const { messages } = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint: WHATSAPP_ENTRYPOINT,
+			env: {
+				PDPP_RS_URL: "",
+				RS_URL: "",
+				TZ: "America/Chicago",
+				WHATSAPP_EXPORT_DIR: importRoot,
+			},
+			start: {
+				scope: { streams: [{ name: "chats" }, { name: "messages" }] },
+				type: "START",
+			},
+		});
+		assert.equal(records(messages, "chats").length, 1);
+		assert.equal(records(messages, "messages").length, 1);
+		assert.ok(messages.some(
+			(message) => message.type === "PROGRESS" &&
+				message.message === "Found 1 WhatsApp export file(s) to inspect.",
+		));
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("WhatsApp discovers and counts all 10,001 supported filenames in one directory", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-whatsapp-width-"));
+	const fileCount = 10_001;
+	const batchSize = 128;
+	try {
+		// Empty exports keep parsing cheap but must still appear in the inventory.
+		for (let start = 0; start < fileCount; start += batchSize) {
+			await Promise.all(Array.from(
+				{ length: Math.min(batchSize, fileCount - start) },
+				(_, index) => writeFile(join(importRoot, `fixture-${start + index}.txt`), ""),
+			));
+		}
+		const { messages } = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint: WHATSAPP_ENTRYPOINT,
+			env: {
+				PDPP_RS_URL: "",
+				RS_URL: "",
+				TZ: "America/Chicago",
+				WHATSAPP_EXPORT_DIR: importRoot,
+			},
+			retainRawStdout: false,
+			start: {
+				scope: { streams: [{ name: "chats" }] },
+				type: "START",
+			},
+			timeoutMs: 90_000,
+		});
+		assert.ok(messages.some(
+			(message) => message.type === "PROGRESS" &&
+				message.message === `Found ${fileCount} WhatsApp export file(s) to inspect.`,
+		));
+		const coverage = detailCoverage(messages).find((message) => message.stream === "chats");
+		assert.ok(coverage, "expected chats DETAIL_COVERAGE");
+		assert.equal(coverage.considered, fileCount);
+		assert.equal(coverage.covered, 0);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
 test("WhatsApp connector declares attachment coverage from parsed media inventory", async () => {
 	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-whatsapp-coverage-"));
 	try {
