@@ -3626,7 +3626,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -4665,7 +4665,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.15",
+				"version": "0.3.16",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
