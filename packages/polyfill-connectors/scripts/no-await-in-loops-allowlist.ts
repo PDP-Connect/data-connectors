@@ -3787,14 +3787,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/notion/index.ts",
-			line: 216,
+			line: 217,
 			column: 3,
 			category: "dependent_pagination",
 			note: "progress(): next request depends on the prior page's cursor/offset/response",
 		},
 		{
 			path: "connectors/notion/index.ts",
-			line: 338,
+			line: 345,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
