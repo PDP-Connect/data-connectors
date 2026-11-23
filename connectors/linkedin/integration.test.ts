@@ -2654,8 +2654,8 @@ test("provider evidence: 2500 distinct connections reach the empty end and indep
 		before: summary, after: summary,
 		connectionPage: start => ({elements: elements.slice(start, start + 40), paging: {start, total}}),
 		resolvePage: path => {
-			const ids = new URL(path, "https://www.linkedin.com").searchParams.get("ids");
-			assert.ok(ids?.startsWith("List(") && ids.endsWith(")"));
+			const ids = new URL(path, "https://www.linkedin.com").searchParams.get("ids") ?? "";
+			assert.ok(ids.startsWith("List(") && ids.endsWith(")"));
 			return {errors: Object.fromEntries(ids.slice(5, -1).split(",").map(id => [id, {status: 404}]))};
 		},
 	});

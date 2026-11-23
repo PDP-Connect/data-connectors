@@ -20106,7 +20106,7 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.29",
+				"version": "0.1.30",
 				"display_name": "Oura",
 				"brand": {
 					"icon": "icon.svg",
