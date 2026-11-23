@@ -8,16 +8,39 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
 	detectViewingActivitySchema,
 	inferDirectHistoryDateOrder,
 	inferDirectHistoryDateOrderFromRows,
+	parseCSVFile,
 	parseCSVLine,
 	parseDirectHistoryDate,
 	parseFullExportDurationSeconds,
 	parseFullExportStartTime,
 } from "./parsers.ts";
+
+test("parseCSVFile preserves UTF-8 text split across file reads", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "netflix-parser-"));
+	try {
+		const file = join(dir, "synthetic.csv");
+		const header = "Title,Date\n";
+		const prefix = "x".repeat(64 * 1024 - Buffer.byteLength(header) - 1);
+		const title = prefix + "\u00e9\u{1f3ac}";
+		await writeFile(file, `${header}${title},2026-04-03\n`);
+		const parsed = await parseCSVFile(file);
+		assert.equal(parsed.error, undefined);
+		assert.equal(parsed.malformedCount, 0);
+		assert.equal(parsed.rows.length, 1);
+		assert.equal(parsed.rows[0]?.title?.length, title.length);
+		assert.equal(parsed.rows[0]?.title?.slice(-3), title.slice(-3));
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
 
 test("parseCSVLine handles basic comma-separated fields", () => {
 	const headers = [
