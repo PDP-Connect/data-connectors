@@ -87,7 +87,6 @@ export async function chatGptUsageFetchInBrowser(
 	const h = {
 		SLUG: /^[a-z0-9][a-z0-9._:-]{0,63}$/,
 		OPAQUE_ID: /^[A-Za-z0-9_-]{1,128}$/,
-		MAX_EVENTS: 5000,
 		isObj(v: unknown): v is Record<string, unknown> {
 			return typeof v === "object" && v !== null && !Array.isArray(v);
 		},
@@ -262,14 +261,12 @@ export async function chatGptUsageFetchInBrowser(
 					acc.userImages += h
 						.partTypes(m.content)
 						.filter((p) => p === "image_asset_pointer").length;
-					if (t !== null && events.length < h.MAX_EVENTS)
-						events.push([t, 0, null]);
+					if (t !== null) events.push([t, 0, null]);
 				} else if (role === "assistant") {
 					acc.assistantChars += h.textLength(m.content);
 					const model = h.slug(md.model_slug) ?? h.slug(md.default_model_slug);
 					if (model) h.bump(models, model);
-					if (t !== null && events.length < h.MAX_EVENTS)
-						events.push([t, 1, model]);
+					if (t !== null) events.push([t, 1, model]);
 				}
 			}
 			const workspaceId = c.workspace_id;
