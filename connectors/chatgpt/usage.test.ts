@@ -329,6 +329,51 @@ test("conversation projection keeps counts, models and features and drops every 
 	);
 });
 
+test("conversation projection retains 6000 ordered metadata events and no message text", () => {
+	// Exercise the self-contained page projector without calling its transport.
+	const source = String(chatGptUsageFetchInBrowser);
+	const start = source.search(/\bconst h\s*=/);
+	const end = source.search(/\bconst controller\s*=/);
+	assert.ok(start >= 0 && end > start, "page projection helper block");
+	const project = runInThisContext(
+		`(input) => { ${source.slice(start, end)} return h.conversation(input); }`,
+	) as (input: unknown) => { events: unknown[] };
+
+	const first = 1_800_000_000;
+	const text = "SYNTHETIC_MESSAGE_TEXT_MUST_NOT_SURVIVE";
+	const model = "example-model";
+	const count = 6000;
+	const mapping = Object.fromEntries(
+		Array.from({ length: count }, (_, i) => [
+			`sample-${i}`,
+			{
+				parent: i > 0 ? `sample-${i - 1}` : null,
+				message: {
+					author: { role: i % 2 === 0 ? "user" : "assistant" },
+					content: { content_type: "text", parts: [text] },
+					create_time: first + i,
+					metadata: i % 2 === 0 ? {} : { model_slug: model },
+				},
+			},
+		]),
+	);
+	const result = project({
+		conversation_id: "sample-thread",
+		current_node: `sample-${count - 1}`,
+		mapping,
+		title: text,
+	});
+
+	assert.equal(JSON.stringify(result).includes(text), false);
+	assert.equal(result.events.length, count);
+	assert.deepEqual(
+		result.events,
+		Array.from({ length: count }, (_, i) =>
+			i % 2 === 0 ? [first + i, 0, null] : [first + i, 1, model],
+		),
+	);
+});
+
 test("batch projection maps every element and a non-200 returns no body", async () => {
 	installFakeSite(siteRoutes());
 	const batch = await inPage("/conversations/batch", "conversation_detail", {
