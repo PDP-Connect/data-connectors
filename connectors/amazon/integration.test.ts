@@ -2830,6 +2830,76 @@ test("recoverPendingOrderItemDetailGaps: hydrates future Amazon order-item gaps 
 	);
 });
 
+for (const row of [
+	{
+		label: "one refunded item",
+		itemCount: 1,
+		status: "Refunded",
+		eligibility: "",
+		expected: true,
+	},
+	{
+		label: "multiple items",
+		itemCount: 3,
+		status: "Refunded",
+		eligibility: "",
+		expected: false,
+	},
+	{
+		label: "legacy locator",
+		itemCount: undefined,
+		status: undefined,
+		eligibility: "Return or replace items",
+		expected: true,
+	},
+	{
+		label: "delivered item",
+		itemCount: 1,
+		status: "Delivered",
+		eligibility: "Return or replace items",
+		expected: false,
+	},
+]) {
+	test(`recovery item return state: ${row.label}`, async () => {
+		const orderId = "000-0000000-0000000";
+		const { deps, emitted } = makeRecordingDeps();
+		const html = makeDetailHtml().replace(
+			'<div data-component="unitPrice">',
+			`<div data-component="itemReturnEligibility">${row.eligibility}</div><div data-component="unitPrice">`,
+		);
+		const result = await recoverPendingOrderItemDetailGaps(
+			makeDetailPageStub(html),
+			{
+				capture: null,
+				detailGaps: [
+					{
+						detail_locator: {
+							kind: "amazon.order_detail",
+							order_date: "2026-01-05",
+							order_id: orderId,
+							...(row.status ? { delivery_status: row.status } : {}),
+							...(row.itemCount ? { item_count: row.itemCount } : {}),
+						},
+						gap_id: "gap_synthetic",
+						record_key: orderId,
+						reference_only: true,
+						status: "pending",
+						stream: "order_items",
+					},
+				],
+				emit: deps.emit,
+				emitRecord: deps.emitRecord,
+			},
+			makeRunFlags(),
+		);
+		assert.deepEqual(result, { recovered: 1, stoppedWithPending: false });
+		assert.deepEqual(
+			emitted.map(({ data }) => data.returned),
+			[row.expected],
+		);
+	});
+}
+
 test("recoverPendingOrderItemDetailGaps: a recovered gap does NOT mark durable known-hydrated proof (no list-surface data available)", async () => {
 	// The recovery path only has the gap locator's order id/date, not the
 	// full list-page row (delivery status, list total, list item count) that
