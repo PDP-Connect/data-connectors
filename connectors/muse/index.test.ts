@@ -935,6 +935,33 @@ test("activities page back with before until a page with no days", async () => {
 	});
 });
 
+test("activities emit an identity once within and across pages", async () => {
+	const event = {
+		message_id: "synthetic-activity",
+		timestamp: "2030-01-02T12:00:00Z",
+		type: "message",
+	};
+	const older = {
+		...event,
+		message_id: "synthetic-older",
+		timestamp: "2030-01-02T11:00:00Z",
+	};
+	const pages = [
+		{ days: [{ activities: [event, event] }] },
+		{ days: [{ activities: [event, older] }] },
+		{ days: [] },
+	];
+	const { gateway } = fakeGateway({ "activity.list": () => pages.shift() });
+	const h = harness({ streams: ["activities"] });
+	await collectMuseWith(h.ctx, gateway);
+	assert.equal(h.failures.length, 0);
+	assert.equal(h.records("activities").length, 2);
+	assert.deepEqual(h.states("activities")[0], {
+		version: 2,
+		newest_timestamp: "2030-01-02T12:00:00.000Z",
+	});
+});
+
 test("activities stop at the saved watermark", async () => {
 	const params: Json[] = [];
 	const pages = activityPages(ACTIVITY_LIMIT * 3);
