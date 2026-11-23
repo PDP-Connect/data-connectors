@@ -71,6 +71,7 @@ import {
 	newOrdersCoverage,
 	type OrderItemsCoverage,
 	type OrdersCoverage,
+	AMAZON_DETAIL_PARSER_VERSION,
 	planIncrementalYears,
 	priorOrdersEvidenceForYear,
 	processListOrder,
@@ -1351,21 +1352,25 @@ test("planIncrementalYears: historical years with prior last_scraped are skipped
 			frozen: false,
 			last_scraped: "2026-01-01T00:00:00.000Z",
 			order_count: 5,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		},
 		"2024": {
 			frozen: false,
 			last_scraped: "2025-06-01T00:00:00.000Z",
 			order_count: 12,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		},
 		"2023": {
 			frozen: false,
 			last_scraped: "2025-06-01T00:00:00.000Z",
 			order_count: 8,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		},
 		"2010": {
 			frozen: false,
 			last_scraped: "2025-01-01T00:00:00.000Z",
 			order_count: 2,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		},
 	};
 	const years = [2026, 2025, 2024, 2023, 2010];
@@ -1417,6 +1422,7 @@ test("planIncrementalYears: legacy state shape (flat years object) treated as pr
 			frozen: false,
 			last_scraped: "2025-12-01T00:00:00.000Z",
 			order_count: 3,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		},
 		"2023": { frozen: false, order_count: 0, last_scraped: "" }, // empty last_scraped = no proof of scrape
 	};
@@ -1432,6 +1438,39 @@ test("planIncrementalYears: legacy state shape (flat years object) treated as pr
 	assert.ok(
 		planned.includes(2023),
 		"2023 with empty last_scraped treated as not-yet-scraped",
+	);
+});
+
+test("planIncrementalYears: a historical year read by an older parser is planned once", () => {
+	const yearsState = {
+		"2024": {
+			frozen: true,
+			last_scraped: "2025-12-01T00:00:00.000Z",
+			order_count: 3,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
+		},
+		// Stored before the parser version existed: a parser fix must reach it.
+		"2023": {
+			frozen: true,
+			last_scraped: "2025-12-01T00:00:00.000Z",
+			order_count: 8,
+		},
+		"2022": {
+			frozen: true,
+			last_scraped: "2025-12-01T00:00:00.000Z",
+			order_count: 2,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION - 1,
+		},
+	};
+	const { planned, skipped } = planIncrementalYears(
+		[2026, 2025, 2024, 2023, 2022],
+		yearsState,
+		2026,
+	);
+	assert.deepEqual(planned, [2026, 2025, 2023, 2022]);
+	assert.deepEqual(
+		skipped.map(({ year }) => year),
+		[2024],
 	);
 });
 

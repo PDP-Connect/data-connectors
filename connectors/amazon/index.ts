@@ -75,6 +75,9 @@ export interface YearState {
 	frozen: boolean;
 	last_scraped: string;
 	order_count: number;
+	/** The parser version the year was read with. A year read by an older
+	 *  parser is read again once, so a parser fix reaches stored history. */
+	parser_version?: number;
 }
 
 export interface YearsCursor {
@@ -2216,6 +2219,7 @@ export async function applyYearCompletionState({
 			order_count: yearOrderCount,
 			frozen: year < new Date().getFullYear() && stableCount,
 			last_scraped: nowIso(),
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		};
 	} else {
 		connectorDiagnostic("amazon", "year_cursor_not_advanced", {
@@ -2414,8 +2418,11 @@ async function runYear(
  *   - Previous year is always included (returns / late-arriving shipments
  *     can post after year-end).
  *   - Any year ≥2 years ago that already has a `last_scraped` timestamp in
- *     prior state is skipped — it was captured on a previous run and
- *     re-scraping it on every incremental run is unbounded behaviour.
+ *     prior state, read by the current parser version, is skipped — it was
+ *     captured on a previous run and re-scraping it on every incremental run
+ *     is unbounded behaviour. A year read by an older parser (no
+ *     `parser_version`, or a smaller one) is planned once, so a parser fix
+ *     reaches stored history.
  *   - Any year ≥2 years ago with NO prior `last_scraped` (newly discovered)
  *     is included so first-time discovery still works.
  *   - If there is no prior scraped state at all (first run), all years are
@@ -2449,8 +2456,13 @@ export function planIncrementalYears(
 			continue;
 		}
 		const prior = yearsState[String(year)];
-		if (prior?.last_scraped) {
-			// Historical year with prior state: skip to prevent unbounded re-scrape.
+		if (
+			prior?.last_scraped &&
+			prior.parser_version === AMAZON_DETAIL_PARSER_VERSION
+		) {
+			// Historical year read by the current parser: skip to prevent
+			// unbounded re-scrape. A year read by an older parser is planned
+			// once so a parser fix reaches stored history.
 			skipped.push({
 				year,
 				reason: `prior state last_scraped=${prior.last_scraped}`,
@@ -2766,7 +2778,10 @@ if (isMainModule(import.meta.url)) {
 			for (const year of years) {
 				const prior = yearsState[String(year)];
 				// Year-freezing: skip if already frozen
-				if (prior?.frozen) {
+				if (
+					prior?.frozen &&
+					prior.parser_version === AMAZON_DETAIL_PARSER_VERSION
+				) {
 					connectorDiagnostic("amazon", "year_skipped_frozen", { year });
 					await progress(`Skipping year ${year} (already complete)`);
 					continue;
