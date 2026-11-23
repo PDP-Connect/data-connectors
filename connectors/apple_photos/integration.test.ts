@@ -183,17 +183,50 @@ test("apple_photos extracts filename/size/hash/mtime/content_type for fixture fi
 	}
 });
 
-test("apple_photos ignores unsupported file extensions", async () => {
+test("apple_photos collects all four additional media extensions", async () => {
+	const samples = [
+		["sample.webp", "image/webp"],
+		["sample.webm", "video/webm"],
+		["sample.avi", "video/x-msvideo"],
+		["sample.mkv", "video/x-matroska"],
+	] as const;
+	const dir = buildExportDirFixture(
+		samples.map(([relPath]) => ({
+			relPath,
+			contents: Buffer.from(relPath),
+		})),
+	);
+	try {
+		const result = await runApplePhotos(dir, ["photos"]);
+		const actual = records(result.messages, "photos").map((record) => [
+			record.filename,
+			record.content_type,
+		]);
+		assert.deepEqual(actual.sort(), [...samples].sort());
+		assert.equal(skips(result.messages).length, 0);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos reports grouped unsupported extensions and partial coverage", async () => {
 	const dir = buildExportDirFixture([
-		{ relPath: "IMG_0001.jpg", contents: Buffer.from("real-photo") },
-		{ relPath: "readme.txt", contents: Buffer.from("not a photo") },
-		{ relPath: ".DS_Store", contents: Buffer.from("mac metadata") },
+		{ relPath: "sample.jpg", contents: Buffer.from("invented image") },
+		{ relPath: "nested/sample.DNG", contents: Buffer.from("") },
+		{ relPath: "other.dng", contents: Buffer.from("") },
+		{ relPath: "another.xyz", contents: Buffer.from("") },
 	]);
 	try {
 		const result = await runApplePhotos(dir, ["photos"]);
-		const photos = records(result.messages, "photos");
-		assert.equal(photos.length, 1);
-		assert.equal(photos[0]?.filename, "IMG_0001.jpg");
+		assert.equal(records(result.messages, "photos").length, 1);
+		const omitted = skips(result.messages);
+		assert.equal(omitted.length, 1);
+		assert.equal(omitted[0]?.reason, "source_incomplete");
+		assert.equal(
+			omitted[0]?.message,
+			"Skipped 3 files with unsupported extensions: .dng 2, .xyz 1",
+		);
+		assert.match(result.stderr, /"status":"partial"/);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
