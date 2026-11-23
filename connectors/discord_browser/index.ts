@@ -631,6 +631,7 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 
 	for (;;) {
 		// We only advance the offset when the prior page reports an unread tail.
+		// Reaching the ceiling requires a raised request budget.
 		if (offset > MAX_SEARCH_OFFSET) {
 			return { kind: "skipped", refused: false, offsetLimited: true };
 		}
@@ -1015,7 +1016,7 @@ export async function collectDiscordBrowser(
 	const searched: string[] = [];
 	let saved = 0;
 	let skippedServers = 0;
-	let offsetLimitedServers = 0;
+	const offsetLimitedServers = new Set<string>();
 	let refusals = 0;
 	let limitReached = false;
 	let stop: RunStop | null = null;
@@ -1061,7 +1062,7 @@ export async function collectDiscordBrowser(
 		}
 		if (outcome.kind === "skipped") {
 			skippedServers += 1;
-			if (outcome.offsetLimited) offsetLimitedServers += 1;
+			if (outcome.offsetLimited) offsetLimitedServers.add(serverId);
 			refusals = outcome.refused ? refusals + 1 : 0;
 			if (refusals >= MAX_CONSECUTIVE_SERVER_REFUSALS) {
 				stop = "verification_required";
@@ -1079,7 +1080,9 @@ export async function collectDiscordBrowser(
 		...queue.filter((id) => !searchedSet.has(id)),
 		...searched,
 	];
-	const waiting = queue.filter((id) => cursors[id] === undefined).length;
+	const waiting = queue.filter(
+		(id) => cursors[id] === undefined && !offsetLimitedServers.has(id),
+	).length;
 
 	if (stop) {
 		await stopRun(stop);
@@ -1090,8 +1093,8 @@ export async function collectDiscordBrowser(
 				options,
 				"servers_skipped",
 				`${plural(skippedServers, "server", "servers")} could not be searched this time. A later run tries again.` +
-					(offsetLimitedServers > 0
-						? ` Discord’s ${MAX_SEARCH_OFFSET.toLocaleString("en-US")}-offset search limit left results unread in ${plural(offsetLimitedServers, "server", "servers")}.`
+					(offsetLimitedServers.size > 0
+						? ` Discord’s ${MAX_SEARCH_OFFSET.toLocaleString("en-US")}-offset search limit left results unread in ${plural(offsetLimitedServers.size, "server", "servers")}.`
 						: ""),
 			);
 		}

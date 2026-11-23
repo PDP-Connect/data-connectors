@@ -1401,14 +1401,29 @@ test("an unread tail at the search offset ceiling leaves the server incomplete",
 	);
 	assert.equal(searches(fake).length, 400);
 	assert.equal(h.of("messages").length, 10_000);
-	assert.ok(
-		h
-			.skips()
-			.some(
-				(skip) =>
-					skip.reason === "discord_servers_skipped" &&
-					/9,975-offset/.test(skip.message ?? ""),
-			),
+	const skips = h.skips();
+	assert.equal(skips.length, 1);
+	assert.equal(skips[0]?.reason, "discord_servers_skipped");
+	assert.match(skips[0]?.message ?? "", /9,975-offset/);
+	const state = h.cursor("messages") as { servers: Record<string, unknown> };
+	assert.equal(state.servers[SERVER_A], undefined);
+});
+
+test("the default request budget stops a 10,500-message server before the search offset ceiling", async () => {
+	const all = messagesBy(OWNER, 10_500);
+	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: all }) });
+	// Leave both budgets untouched; scanning the newest 2,000 excluded hits
+	// consumes requests but not the message budget.
+	const until = all[1_999]!.timestamp;
+	const h = harness(fake, ["messages"], {}, { timeRange: { until } });
+	await collectDiscordBrowser(h.ctx, fast());
+	assert.equal(fake.calls.length, 100);
+	assert.equal(searches(fake).length, 98);
+	assert.ok(h.of("messages").length > 0);
+	assert.ok(h.of("messages").length < MAX_MESSAGES_PER_RUN);
+	assert.deepEqual(
+		h.skips().map((skip) => skip.reason),
+		["discord_run_limit_reached"],
 	);
 	const state = h.cursor("messages") as { servers: Record<string, unknown> };
 	assert.equal(state.servers[SERVER_A], undefined);
