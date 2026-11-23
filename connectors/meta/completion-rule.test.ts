@@ -666,7 +666,7 @@ function nonterminalPostsResponse(
 	} as unknown as Response;
 }
 
-test("completion rule: a capped posts walk reports both requested streams as failed", async () => {
+test("completion rule: a posts walk whose cursor never advances reports both requested streams as failed", async () => {
 	const { ctx, emitNavigation, emitRequest, failures, harness } = setup([
 		"posts",
 		"post_likes",
@@ -714,7 +714,7 @@ test("completion rule: a capped posts walk reports both requested streams as fai
 			.filter((message) => message.type === "SKIP_RESULT")
 			.map((message) => `${message.stream}:${message.reason}`)
 			.sort(),
-		["post_likes:inventory_not_proven_complete", "posts:inventory_not_proven_complete"],
+		["post_likes:stream_collection_failed", "posts:stream_collection_failed"],
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -774,7 +774,7 @@ test("completion rule: a capped posts walk keeps emitted records and fails only 
 	);
 });
 
-test("completion rule: a capped following walk keeps its users and reports following failed", async () => {
+test("completion rule: a following walk that stops answering keeps its users and reports following failed", async () => {
 	const pages: unknown[] = [];
 	for (let index = 0; index < 500; index += 1) {
 		pages.push({
@@ -803,7 +803,7 @@ test("completion rule: a capped following walk keeps its users and reports follo
 		harness.protocolMessages
 			.filter((message) => message.type === "SKIP_RESULT")
 			.map((message) => message.reason),
-		["inventory_not_proven_complete"],
+		["stream_collection_failed"],
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),

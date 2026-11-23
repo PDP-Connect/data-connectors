@@ -1557,10 +1557,11 @@ test("collectAllStreams: following accepts the record builder's id fallback when
 	assert.deepEqual(streamFailures(harness), []);
 });
 
-test("collectAllStreams: following hitting the page ceiling keeps its rows and is not proven complete instead of silently truncating", async () => {
+test("collectAllStreams: a following cursor that repeats fails the stream and keeps the rows already read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const fetchScript: Record<string, ScriptedFetch[]> = {};
-	// Every page reports a next cursor forever — forces the FOLLOWING_MAX_PAGES ceiling.
+	// Every page reports the same next cursor forever: the walk has no page cap,
+	// so only the repeated cursor stops it.
 	fetchScript["/api/v1/friendships/u1/following/"] = [
 		{
 			json: {
@@ -1587,13 +1588,13 @@ test("collectAllStreams: following hitting the page ceiling keeps its rows and i
 
 	const skip = harness.protocolMessages.find(
 		(m) =>
-			m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
+			m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
 	);
-	assert.ok(skip, "expected an inventory_not_proven_complete SKIP_RESULT");
+	assert.ok(skip, "expected a stream_collection_failed SKIP_RESULT");
 	assert.equal((skip as { stream: string }).stream, "following");
 	assert.ok(
 		harness.emitted.some((e) => e.stream === "following"),
-		"records read before the cap are kept",
+		"records read before the repeat are kept",
 	);
 });
 
