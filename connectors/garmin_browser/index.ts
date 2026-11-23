@@ -466,8 +466,8 @@ async function fetchJson(
 /**
  * Owner-local days, YYYY-MM-DD: `next_day` is the first not yet read, `floor` where the contiguous
  * read began. `retry` holds the days, as spans with both ends included, whose records did not all
- * read cleanly: later runs read them again until they do, as long as the list holds them
- * (MAX_RETRY_DAYS); with none, the key is absent. `retry_next` is the kept day the next run starts
+ * read cleanly: later eligible runs read them again until they do; with none, the key is absent.
+ * `retry_next` is the kept day the next run starts
  * reading again from, round to the oldest: present only when a run stopped before reading every
  * kept day again. `since_at` and `until_at`, for a stream consented by instant, are the grant
  * instants its days are complete for: on the days from `floor` up to `next_day`, every record that
@@ -487,13 +487,6 @@ export interface DayCursor {
 	retry?: Window[];
 	retry_next?: string;
 }
-/**
- * The most days `retry` holds, and so the bound on reading kept days again until they read: past
- * it, the oldest are let go, and PROGRESS counts them. Kept days below a grant's start wait there
- * for a grant that reaches them, so under a start that moves on they count towards it until one
- * does.
- */
-export const MAX_RETRY_DAYS = 366;
 /** Days a run reads: on from the cursor, back before its floor, or again from `retry`. */
 type Segment =
 	| { kind: "forward"; from: string; to: string; since: string }
@@ -556,14 +549,8 @@ function subtract(spans: readonly Window[], cut: Window): Window[] {
 	});
 }
 
-/**
- * The retry list in its one form: sorted, spans that overlap or touch merged, and at most
- * MAX_RETRY_DAYS days, the oldest let go first. `dropped` counts the days let go.
- */
-export function normaliseRetry(spans: readonly Window[]): {
-	retry: Window[];
-	dropped: number;
-} {
+/** The sorted union of retry spans, merging overlap and adjacency without dropping days. */
+export function normaliseRetry(spans: readonly Window[]): Window[] {
 	const retry: Window[] = [];
 	const sorted = spans.toSorted((a, b) =>
 		a.from < b.from ? -1 : a.from > b.from ? 1 : 0,
@@ -576,20 +563,7 @@ export function normaliseRetry(spans: readonly Window[]): {
 			retry.push({ from, to });
 		}
 	}
-	const total = retry.reduce((days, span) => days + spanDays(span), 0);
-	const dropped = Math.max(0, total - MAX_RETRY_DAYS);
-	for (let excess = dropped; excess > 0; ) {
-		const oldest = retry[0] as Window;
-		const days = spanDays(oldest);
-		if (days <= excess) {
-			retry.shift();
-			excess -= days;
-		} else {
-			oldest.from = addDays(oldest.from, excess);
-			excess = 0;
-		}
-	}
-	return { retry, dropped };
+	return retry;
 }
 
 /** `spans` from the first day at or after `day` on, then round from the oldest to the day before it. */
@@ -634,7 +608,7 @@ export function readCursor(value: unknown): DayCursor {
 	if (!isDay(next_day) || !isDay(floor) || floor > next_day) return {};
 	const kept: DayCursor = {};
 	const spans = Array.isArray(retry) ? retry.flatMap(readSpan) : [];
-	const list = normaliseRetry(spans).retry;
+	const list = normaliseRetry(spans);
 	if (list.length > 0) {
 		kept.retry = list;
 		if (isDay(retry_next)) kept.retry_next = retry_next;
@@ -970,7 +944,7 @@ export function planDays(
  * Records how a day or window read in full went: one with an unreadable record joins the retry
  * list, a clean one leaves it, except on the days the grant's until holds records back on (`held`),
  * where a record after it is neither delivered nor counted, so a kept one may still not read. The
- * list stays raw while the run reads: `settle` puts it in its one form, cap included, once at the
+ * list stays raw while the run reads: `settle` puts it in its one form once at the
  * end, so a day read again is never let go twice.
  */
 function mark(
@@ -991,16 +965,15 @@ function mark(
 	cursor.retry = read.reduce((list, part) => subtract(list, part), spans);
 }
 
-/** Normalises and caps the retry list once a stream's reading is done. Answers how many days the cap let go. */
-function settle(cursor: DayCursor): number {
-	const { retry, dropped } = normaliseRetry(cursor.retry ?? []);
+/** Normalises the retry list once a stream's reading is done. */
+function settle(cursor: DayCursor): void {
+	const retry = normaliseRetry(cursor.retry ?? []);
 	if (retry.length > 0) {
 		cursor.retry = retry;
 	} else {
 		delete cursor.retry;
 		delete cursor.retry_next;
 	}
-	return dropped;
 }
 
 /** Moves the cursor past a day read in full; past a day read again, it moves only `retry_next`. */
@@ -1113,7 +1086,7 @@ function spent(
 	return true;
 }
 
-/** Counts a day or window read in full: one read again counts toward the retry cap only when it still does not read cleanly. */
+/** Counts a day or window read in full; an unreadable retry counts toward the per-run retry budget. */
 function tally(walk: Walk, segment: Segment, keep: boolean): void {
 	walk.progressed += 1;
 	if (segment.kind === "retry" && keep) walk.retried += 1;
@@ -1316,7 +1289,7 @@ export async function collectGarminBrowser(
 			: isDayStream(stream)
 				? await walkDays(s, stream)
 				: await walkWindows(s, stream);
-		const dropped = settle(plan.cursor);
+		settle(plan.cursor);
 		// Counts, never an id, a date or a value.
 		if (walk.unreadable > 0) {
 			await ctx.emit({
@@ -1324,14 +1297,6 @@ export async function collectGarminBrowser(
 				stream,
 				count: walk.unreadable,
 				message: `${walk.unreadable} record(s) unreadable.`,
-			});
-		}
-		if (dropped > 0) {
-			await ctx.emit({
-				type: "PROGRESS",
-				stream,
-				count: dropped,
-				message: `${dropped} day(s) of unreadable records could not be kept for another try.`,
 			});
 		}
 		const reason: Reason | null = walk.failure

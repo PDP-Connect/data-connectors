@@ -31,7 +31,6 @@ import {
 	APP_URL,
 	collectGarminBrowser,
 	type GarminCollectContext,
-	MAX_RETRY_DAYS,
 	ORIGIN,
 	type Pacing,
 	type PageFetch,
@@ -3721,8 +3720,7 @@ test("collect: a run whose history maxDaysPerRun cuts short defers as before, th
 	});
 });
 
-test("collect: past MAX_RETRY_DAYS the oldest kept days are let go, and a second PROGRESS line counts the days, with no date", async () => {
-	assert.equal(MAX_RETRY_DAYS, 366);
+test("collect: keeps old unreadable days outside the grant without a loss message", async () => {
 	const fake = fakeGarmin(
 		site((data) => {
 			for (const day of daysFrom("2026-09-16", "2026-09-18")) {
@@ -3748,19 +3746,13 @@ test("collect: past MAX_RETRY_DAYS the oldest kept days are let go, and a second
 			count: 3,
 			message: "3 record(s) unreadable.",
 		},
-		{
-			stream: "daily_summaries",
-			count: 1,
-			message:
-				"1 day(s) of unreadable records could not be kept for another try.",
-		},
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(statesOf(h), {
 		daily_summaries: {
 			...FULL,
 			retry: [
-				span("2025-06-04", "2026-06-01"),
+				span("2025-06-03", "2026-06-01"),
 				span("2026-09-16", "2026-09-18"),
 			],
 		},
@@ -3768,7 +3760,7 @@ test("collect: past MAX_RETRY_DAYS the oldest kept days are let go, and a second
 	assertStateLast(h);
 });
 
-test("collect: a range stream past MAX_RETRY_DAYS lets the oldest kept days go as well: its window joins whole, so the days let go outnumber the nights", async () => {
+test("collect: range retries keep an older disjoint span and report unreadable records only", async () => {
 	const fake = fakeGarmin(site((data) => nightOn(data, "2026-09-18", "5400")));
 	const h = await collect(fake, {
 		// A full list, outside the grant (whose first day is the floor): kept, never read.
@@ -3780,19 +3772,13 @@ test("collect: a range stream past MAX_RETRY_DAYS lets the oldest kept days go a
 	assert.deepEqual(idsOf(h, "sleep"), IDS.sleep);
 	assert.deepEqual(progressLines(h), [
 		{ stream: "sleep", count: 1, message: "1 record(s) unreadable." },
-		{
-			stream: "sleep",
-			count: 28,
-			message:
-				"28 day(s) of unreadable records could not be kept for another try.",
-		},
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(statesOf(h), {
 		sleep: {
 			...FULL,
 			retry: [
-				span("2025-06-29", "2026-06-01"),
+				span("2025-06-01", "2026-06-01"),
 				span("2026-08-24", "2026-09-20"),
 			],
 		},
@@ -3800,8 +3786,13 @@ test("collect: a range stream past MAX_RETRY_DAYS lets the oldest kept days go a
 	assertStateLast(h);
 });
 
-test("collect: at the cap, the list is cut once after the run: a kept day read again and still unreadable is let go once, and counted once", async () => {
-	const kept = span("2025-09-01", "2026-09-01");
+test("collect: 500 unreadable retry days remain and bounded retries advance in order", async () => {
+	const kept = span("2025-01-01", "2026-05-15");
+	const history = { ...FULL, floor: kept.from };
+	const options = {
+		streams: ["daily_summaries" as const],
+		ranges: { daily_summaries: { since: kept.from + "T00:00:00.000Z" } },
+	};
 	const fake = fakeGarmin(
 		site((data) => {
 			for (const day of [
@@ -3813,12 +3804,12 @@ test("collect: at the cap, the list is cut once after the run: a kept day read a
 		}),
 	);
 	const h = await collect(fake, {
-		state: { daily_summaries: { ...FULL, retry: [kept] } },
-		streams: ["daily_summaries"],
+		...options,
+		state: { daily_summaries: { ...history, retry: [kept] } },
 	});
 	assert.deepEqual(pathsOf(fake, "daily_summaries").map(dayOf), [
 		...daysFrom("2026-09-15", TODAY),
-		...daysFrom("2025-09-01", "2025-09-07"),
+		...daysFrom("2025-01-01", "2025-01-07"),
 	]);
 	assert.deepEqual(progressLines(h), [
 		{
@@ -3826,19 +3817,35 @@ test("collect: at the cap, the list is cut once after the run: a kept day read a
 			count: 14,
 			message: "14 record(s) unreadable.",
 		},
-		{
-			stream: "daily_summaries",
-			count: 7,
-			message:
-				"7 day(s) of unreadable records could not be kept for another try.",
-		},
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(statesOf(h), {
 		daily_summaries: {
-			...FULL,
-			retry: [span("2025-09-08", "2026-09-01"), span("2026-09-15", TODAY)],
-			retry_next: "2025-09-08",
+			...history,
+			retry: [kept, span("2026-09-15", TODAY)],
+			retry_next: "2025-01-08",
+		},
+	});
+	const again = fakeGarmin(
+		site((data) => {
+			for (const day of [
+				...daysFrom("2025-01-08", "2025-01-14"),
+				...daysFrom("2026-09-15", TODAY),
+			]) {
+				summaryOn(data, day, "8432");
+			}
+		}),
+	);
+	const follow = await collect(again, { ...options, state: statesOf(h) });
+	assert.deepEqual(
+		pathsOf(again, "daily_summaries").map(dayOf).slice(7),
+		daysFrom("2025-01-08", "2025-01-14"),
+	);
+	assert.deepEqual(statesOf(follow), {
+		daily_summaries: {
+			...history,
+			retry: [kept, span("2026-09-15", TODAY)],
+			retry_next: "2025-01-15",
 		},
 	});
 });
