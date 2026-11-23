@@ -421,7 +421,12 @@ export async function collectGoogleContacts(
 		...(result.nextSyncToken
 			? {
 					sync_token: result.nextSyncToken,
-					synced_at: new Date(now()).toISOString(),
+					// A capped walk retained the input token; its age has not changed.
+					...(result.truncated
+						? state.people?.synced_at === undefined
+							? {}
+							: { synced_at: state.people.synced_at }
+						: { synced_at: new Date(now()).toISOString() }),
 				}
 			: {}),
 		fingerprints: peopleCursor.toState(),
