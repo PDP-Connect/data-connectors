@@ -756,18 +756,39 @@ export function recordDetailOutcome(
  * stream the coverage report describes, so the runtime's
  * `gap.stream === coverage.stream` match holds).
  *
- * Reference-only and redacted: the opaque Amazon order id is the only datum that
- * crosses (it is already the `record_key`/`detail_locator.order_id`); no
+ * Reference-only and redacted: only the order id/date and optional bounded
+ * status/count cross; no
  * recipient, address, payment, item title, or item text is carried. `reason`
  * stays redacted but precise enough to distinguish exhausted navigation retries
  * from parse-missing detail pages and connector-budget deferrals.
  */
+function recoverableDeliveryStatus(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	// Store only known status labels, not arbitrary shipment or recipient text.
+	return /^(?:delivered|refunded|refund issued|return complete)$/i.test(trimmed)
+		? trimmed
+		: undefined;
+}
+
+function positiveItemCount(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+		? value
+		: undefined;
+}
+
 export function buildOrderDetailGap(
 	orderId: string,
 	reason: AmazonDetailGapReason = "temporary_unavailable",
 	failureKind?: DetailFailureKind | undefined,
 	orderDate?: string | undefined,
+	orderContext?: {
+		orderStatus?: string | null | undefined;
+		itemCount?: number | undefined;
+	},
 ): DetailGapMessage {
+	const deliveryStatus = recoverableDeliveryStatus(orderContext?.orderStatus);
+	const itemCount = positiveItemCount(orderContext?.itemCount);
 	return {
 		type: "DETAIL_GAP",
 		stream: "order_items",
@@ -781,6 +802,10 @@ export function buildOrderDetailGap(
 			kind: "amazon.order_detail",
 			order_id: orderId,
 			...(orderDate ? { order_date: orderDate } : {}),
+			...(deliveryStatus !== undefined
+				? { delivery_status: deliveryStatus }
+				: {}),
+			...(itemCount !== undefined ? { item_count: itemCount } : {}),
 		},
 		...(failureKind
 			? {
@@ -798,6 +823,8 @@ function readRecoverableAmazonOrderDetailGap(
 	orderDate: string;
 	orderId: string;
 	recordKey: string | number;
+	deliveryStatus: string | undefined;
+	itemCount: number | undefined;
 } | null {
 	if (gap.stream !== "order_items" || gap.status !== "pending") {
 		return null;
@@ -821,6 +848,8 @@ function readRecoverableAmazonOrderDetailGap(
 		orderDate,
 		orderId,
 		recordKey: gap.record_key ?? orderId,
+		deliveryStatus: recoverableDeliveryStatus(locator.delivery_status),
+		itemCount: positiveItemCount(locator.item_count),
 	};
 }
 
@@ -1051,10 +1080,25 @@ async function recoverPendingOrderItemDetailGapPage(
 			deps.store,
 		);
 		if (result.status === "hydrated") {
+			const orderContext =
+				locator.itemCount === undefined
+					? undefined
+					: {
+							orderStatus: locator.deliveryStatus,
+							itemCount: Math.max(
+								locator.itemCount,
+								result.detail.items.length,
+							),
+						};
 			for (const item of result.detail.items) {
 				await deps.emitRecord(
 					"order_items",
-					buildOrderItemRecord(locator.orderId, locator.orderDate, item),
+					buildOrderItemRecord(
+						locator.orderId,
+						locator.orderDate,
+						item,
+						orderContext,
+					),
 				);
 			}
 			await deps.emit({
@@ -1082,6 +1126,7 @@ async function recoverPendingOrderItemDetailGapPage(
 				result.reason,
 				result.failureKind,
 				locator.orderDate,
+				{ orderStatus: locator.deliveryStatus, itemCount: locator.itemCount },
 			),
 		);
 		reDeferred += 1;
@@ -2069,6 +2114,10 @@ export async function processResolvedListOrder(
 				detailGapReason,
 				detailFailureKind ?? undefined,
 				orderDate,
+				{
+					orderStatus: listOrder.deliveryStatus,
+					itemCount: listOrder.items.length,
+				},
 			),
 		);
 	}
