@@ -61,6 +61,31 @@ function harness(options: {
   return { ctx, calls, records, messages };
 }
 
+test("a first run starts at the full history floor and keeps windows contiguous", async () => {
+  const firstDay = "2015-01-01";
+  const today = new Date().toISOString().slice(0, 10);
+  const h = harness({ streams: ["readiness"], openRange: true,
+    answers: () => ({ data: [], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls[0]?.start, firstDay);
+  for (let i = 1; i < h.calls.length; i++) {
+    assert.equal(h.calls[i]?.start, h.calls[i - 1]?.end);
+  }
+  assert.equal(h.calls.at(-1)?.end,
+    new Date(Date.parse(today) + 86_400_000).toISOString().slice(0, 10));
+  assert.ok(h.messages.some(message => message.type === "STATE"));
+});
+
+test("a terminal page after 60 fake pages completes the collection", async () => {
+  const h = harness({ streams: ["readiness"], answers: (_endpoint, token) => {
+    const pageNumber = token === null ? 1 : Number(token);
+    return { data: [], next_token: pageNumber < 60 ? String(pageNumber + 1) : null };
+  } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 60);
+  assert.ok(h.messages.some(message => message.type === "STATE"));
+});
+
 test("API v2 replay preserves every legacy document and mapped field", async () => {
   const h = harness();
   await collectOuraBrowser(h.ctx, ACCESS);
