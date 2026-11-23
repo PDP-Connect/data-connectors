@@ -290,9 +290,9 @@ test("planDays: first runs, resumed runs with overlap, grants that move", () => 
 		floor: "2016-01-01",
 	});
 	assert.deepEqual(planDays("daily_metrics", null, undefined, false, TODAY), {
-		from: "2026-05-14",
+		from: "2016-01-01",
 		to: "2026-11-11",
-		floor: "2026-05-14",
+		floor: "2016-01-01",
 	});
 	assert.deepEqual(
 		planDays("planned_workouts", null, undefined, false, TODAY),
@@ -439,7 +439,7 @@ test("collect: a first run delivers every stream and a cursor for each day strea
 	assert.deepEqual(skipsOf(messages), []);
 	assert.deepEqual(statesOf(messages), {
 		activities: { v: 1, floor: "2016-01-01", next_day: "2026-11-12" },
-		daily_metrics: { v: 1, floor: "2026-05-14", next_day: "2026-11-12" },
+		daily_metrics: { v: 1, floor: "2016-01-01", next_day: "2026-11-12" },
 		planned_workouts: { v: 1, floor: "2026-10-13", next_day: "2026-12-09" },
 	});
 	assert.equal(paths[0], "/account/query");
@@ -701,6 +701,55 @@ test("collect: one unreadable row among good ones is counted, not emitted", asyn
 	const progress = messages.find((m) => m.type === "PROGRESS");
 	assert.equal(progress?.type === "PROGRESS" && progress.count, 1);
 	assert.deepEqual(skipsOf(messages), []);
+});
+
+test("collect: a daily-history budget stop resumes the saved floor with overlap", async () => {
+	const requested = { daily_metrics: undefined };
+	const firstPage = fakePage(corosApi());
+	const first = context(firstPage.page, requested);
+	// One account probe and two 28-day windows exhaust the injected budget.
+	const pacing = { ...FAST, maxRequestsPerRun: 3 };
+	await collectCorosBrowser(first.ctx, pacing, NOW);
+	assert.match(
+		firstPage.paths.find((path) => path.startsWith("/analyse/dayDetail/")) ??
+			"",
+		/startDay=20160101/,
+	);
+	assert.deepEqual(
+		skipsOf(first.messages).map((row) => row.slice(0, 2)),
+		[["daily_metrics", "source_limit_reached"]],
+	);
+	const saved = statesOf(first.messages);
+	assert.deepEqual(saved.daily_metrics, {
+		v: 1,
+		floor: "2016-01-01",
+		next_day: "2016-02-26",
+	});
+
+	const secondPage = fakePage(corosApi());
+	const second = context(secondPage.page, requested, saved);
+	await collectCorosBrowser(second.ctx, pacing, NOW);
+	assert.match(
+		secondPage.paths.find((path) => path.startsWith("/analyse/dayDetail/")) ??
+			"",
+		/startDay=20160219/,
+	);
+	assert.deepEqual(statesOf(second.messages).daily_metrics, {
+		v: 1,
+		floor: "2016-01-01",
+		next_day: "2016-04-15",
+	});
+
+	const scopedPage = fakePage(corosApi());
+	const scoped = context(scopedPage.page, {
+		daily_metrics: { since: "2026-11-07" },
+	});
+	await collectCorosBrowser(scoped.ctx, pacing, NOW);
+	assert.match(
+		scopedPage.paths.find((path) => path.startsWith("/analyse/dayDetail/")) ??
+			"",
+		/startDay=20261106/,
+	);
 });
 
 test("collect: the request budget stops the run with source_limit_reached", async () => {
