@@ -14,6 +14,7 @@ import {
 	type DayCursor,
 	dayDetailPath,
 	OVERLAP_DAYS,
+	PROBE_PATH,
 	type PageFetch,
 	pageFetch,
 	planDays,
@@ -762,4 +763,67 @@ test("collect: the request budget stops the run with source_limit_reached", asyn
 		"planned_workouts",
 		"source_limit_reached",
 	]);
+});
+
+test("planDays: an old daily-metrics cursor backfills from the full-history floor", () => {
+	// Tim's 2026-11-17 full-history rule intentionally re-backfills the old
+	// 180-day window; the runtime deduplicates overlapping records by id.
+	assert.deepEqual(
+		planDays(
+			"daily_metrics",
+			{ v: 1, floor: "2026-05-14", next_day: "2026-11-12" },
+			undefined,
+			false,
+			TODAY,
+		),
+		{ from: "2016-01-01", to: "2026-11-11", floor: "2016-01-01" },
+	);
+});
+
+test("collect: daily history fits the default budget, and mixed history resumes after a budget stop", async () => {
+	const api = (path: string): Answer => {
+		let data: unknown;
+		if (path === PROBE_PATH) data = { userId: "1" };
+		else if (path.startsWith("/dashboard/")) data = { summaryInfo: {} };
+		else if (path.startsWith("/activity/")) data = { dataList: [{ labelId: "1", startTime: 1767225600, sportType: 1 }], totalPage: 13 };
+		else if (path.startsWith("/analyse/dayDetail/")) data = { dayList: [] };
+		else if (path.startsWith("/training/schedule/")) data = { entities: [], programs: [] };
+		else throw new Error("Unexpected synthetic COROS path");
+		return { status: 200, contentType: "application/json", body: JSON.stringify({ result: "0000", data }) };
+	};
+	const dailyPaths = (paths: string[]) =>
+		paths.filter((path) => path.startsWith("/analyse/dayDetail/"));
+	// Keep the actual default budget and delays, replacing only the wait function.
+	const pacing = { sleep: async () => {} };
+	const dailyPage = fakePage(api);
+	const daily = context(dailyPage.page, { daily_metrics: undefined });
+	await collectCorosBrowser(daily.ctx, pacing, NOW);
+	assert.equal(dailyPaths(dailyPage.paths).length, 142);
+	assert.deepEqual(skipsOf(daily.messages), []);
+	assert.deepEqual(statesOf(daily.messages).daily_metrics, {
+		v: 1,
+		floor: "2016-01-01",
+		next_day: "2026-11-12",
+	});
+
+	const mixedPage = fakePage(api);
+	const mixed = context(mixedPage.page, EVERY);
+	await collectCorosBrowser(mixed.ctx, pacing, NOW);
+	assert.equal(mixedPage.paths.length, 400);
+	assert.deepEqual(skipsOf(mixed.messages).map((row) => row.slice(0, 2)), [
+		["daily_metrics", "source_limit_reached"],
+		["planned_workouts", "source_limit_reached"],
+	]);
+	const saved = statesOf(mixed.messages);
+	const cursor = readCursor(saved.daily_metrics);
+	assert.ok(cursor);
+	assert.equal(cursor.floor, "2016-01-01");
+	assert.equal(cursor.next_day, addDays("2016-01-01", 99 * 28));
+	const resumePage = fakePage(api);
+	const resume = context(resumePage.page, { daily_metrics: undefined }, saved);
+	await collectCorosBrowser(resume.ctx, pacing, NOW);
+	const resumeFrom = addDays(cursor.next_day, -7).replaceAll("-", "");
+	assert.match(dailyPaths(resumePage.paths)[0] ?? "", new RegExp(`startDay=${resumeFrom}&`));
+	assert.deepEqual(skipsOf(resume.messages), []);
+	assert.deepEqual(statesOf(resume.messages).daily_metrics, statesOf(daily.messages).daily_metrics);
 });
