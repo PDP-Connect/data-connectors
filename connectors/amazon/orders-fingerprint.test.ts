@@ -702,3 +702,42 @@ test("processListOrder: unrestricted matching baseline skips detail without losi
  assert.deepEqual(deps.ordersCoverage,{considered:[list.orderId],covered:[list.orderId],dateDropped:[]});
  assert.deepEqual(deps.hydratedOrders,baseline);
 });
+
+test("processListOrder: unversioned detail baseline hydrates once then skips the refreshed baseline", async () => {
+ const {processListOrder,listSurfaceFingerprint}=await import("./index.ts");
+ const {buildOrderRecord,parseOrderDate}=await import("./parsers.ts");
+ const list=makeListOrder();
+ const orderDate=parseOrderDate(list.orderDateRaw);
+ assert.ok(orderDate);
+ const harness=makeRecordingEmit();
+ const runtime=makeEmitRecord({
+  requested:new Map([["orders",{name:"orders"}],["order_items",{name:"order_items"}]]),
+  emittedAt:RUN2_AT,emit:harness.emit,validateRecord,isTombstone:undefined,
+  timeRangeFieldFor:()=>({field:"order_date",format:"date"}),
+ });
+ // Version 1 was the unversioned hash of the list record.
+ const old=recordFingerprint(buildOrderRecord(list,null,orderDate,RUN1_AT),["fetched_at"]);
+ const deps:EmitDeps={...makeDeps(RUN2_AT).deps,emit:harness.emit,emitRecord:runtime.emit,
+  isRecordSelected:runtime.isSelected,itemResourcesRestricted:false,
+  hydratedOrders:new Map([[list.orderId,old]]),orderItemsCoverage:newOrderItemsCoverage(),ordersCoverage:newOrdersCoverage()};
+ const freshFlags=()=>({detailAttempts:0,detailCaptured:false,failedDetailCaptured:false,repairAttempted:false,
+  sessionRepairRequired:false,temporaryDetailFailures:0});
+ let navigations=0,reads=0;
+ const html='<div id="orderDetails"><div data-component="chargeSummary">Grand Total: $42.99</div>' +
+  '<div data-component="purchasedItemsRightGrid"><div data-component="itemTitle"><a href="/dp/B01ABCDEFG">Widget</a></div><div data-component="unitPrice">$42.99</div></div></div>';
+ const page={goto:async()=>{navigations++;},waitForSelector:async()=>{},
+  url:()=>"https://www.amazon.com/gp/your-account/order-details?orderID="+list.orderId,
+  content:async()=>{reads++;return html;}} as unknown as Parameters<typeof processListOrder>[0];
+ const first=freshFlags();
+ assert.equal(await processListOrder(page,deps,first,list),true);
+ assert.deepEqual([first.detailAttempts,navigations,reads],[1,1,1]);
+ const records=()=>harness.protocolMessages.flatMap(m=>m.type==="RECORD"?[m.stream]:[]).sort();
+ assert.deepEqual(records(),["order_items","orders"]);
+ const current=listSurfaceFingerprint(list,orderDate,RUN2_AT);
+ assert.notEqual(old,current);
+ assert.equal(deps.hydratedOrders?.get(list.orderId),current);
+ const second=freshFlags();
+ assert.equal(await processListOrder(page,deps,second,list),true);
+ assert.deepEqual([second.detailAttempts,navigations,reads],[0,1,1]);
+ assert.deepEqual(records(),["order_items","orders"]);
+});

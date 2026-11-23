@@ -1953,13 +1953,20 @@ interface ListOrderDetailResolution {
  * still valid; if it has (delivery progressed, a return appeared), the
  * order must be re-hydrated.
  */
+// Bump when parsing changes detail-derived fields so saved list baselines
+// are hydrated again even when the order's list-page fields did not change.
+export const AMAZON_DETAIL_PARSER_VERSION = 2;
+
 export function listSurfaceFingerprint(
 	listOrder: ListPageOrder,
 	orderDate: string,
 	emittedAt: string,
 ): string {
 	return recordFingerprint(
-		buildOrderRecord(listOrder, null, orderDate, emittedAt),
+		{
+			...buildOrderRecord(listOrder, null, orderDate, emittedAt),
+			detail_parser_version: AMAZON_DETAIL_PARSER_VERSION,
+		},
 		["fetched_at"],
 	);
 }
@@ -2070,7 +2077,7 @@ export async function processListOrder(
 		priorFingerprint !== undefined &&
 		priorFingerprint !== currentListFingerprint
 	) {
-		// Stale proof: the list surface moved since hydration. Drop the entry
+		// Stale proof: the list surface or parser version changed. Drop the entry
 		// so this run's real hydration (below) re-establishes it fresh.
 		deps.hydratedOrders?.delete(listOrder.orderId);
 	}
