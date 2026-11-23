@@ -17,8 +17,8 @@ import { validateRecord } from "./schemas.ts";
 import { ensureOuraApiAccess, type OuraApiAccess, probeOuraPortalSession, probeOuraSignInInProgress, readOuraCachedAccess } from "./api-access.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
-// Include today in the initial 90-day snapshot.
-const INITIAL_LOOKBACK_DAYS = 89;
+// Default first-run history starts at this fixed UTC day.
+const HISTORY_FLOOR = "2015-01-01";
 const MUTABLE_OVERLAP_DAYS = 2;
 const CHUNK_DAYS = 30;
 
@@ -123,7 +123,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
   const rows: T[] = [];
   const seen = new Set<string>();
   let nextToken: string | null = null;
-  for (let pages = 0; pages < 50; pages++) {
+  while (true) {
     const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
     if (nextToken) query.set("next_token", nextToken);
     let response: APIResponse;
@@ -163,7 +163,6 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       seen.add(nextToken);
     } finally { await response.dispose().catch(() => {}); }
   }
-  return { rows, complete: false };
 }
 
 function day(value: string): Date {
@@ -176,10 +175,8 @@ function requestedUtcDay(value: string | undefined): string | undefined {
   return Number.isNaN(timestamp) ? undefined : new Date(timestamp).toISOString().slice(0, 10);
 }
 
-export function initialStartDate(now = new Date()): string {
-  const start = new Date(now);
-  start.setUTCDate(start.getUTCDate() - INITIAL_LOOKBACK_DAYS);
-  return start.toISOString().slice(0, 10);
+export function initialStartDate(_now?: Date): string {
+  return HISTORY_FLOOR;
 }
 
 function addDays(value: string, days: number): string {
