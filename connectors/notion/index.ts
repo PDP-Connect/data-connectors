@@ -300,31 +300,51 @@ async function runStream(args: RunStreamArgs): Promise<void> {
 	});
 	const items = await searchAll(token, filter, progress, streamName);
 	const streamState = state[streamName] as
-		| { last_edited_time?: string }
+		| { last_edited_time?: string; watermark_rule?: number }
 		| undefined;
-	const prior = streamState?.last_edited_time;
+	const prior =
+		streamState?.watermark_rule === 2
+			? streamState.last_edited_time
+			: undefined;
 	let latest = prior;
-	// Rows this run objectively accounted for — emitted-and-valid, or correctly
-	// suppressed as unchanged. NEVER aliased to `items.length`: the schema is
-	// strict (title ≤ 4000 chars, url ≤ 4096, safe-text), so a real page CAN be
-	// rejected, and a rejected page must not be claimed as covered just because
-	// it was enumerated. Tallied from the same `validateRecord` verdict the
-	// runtime's emitRecord applies.
+	const validEditTimes: string[] = [];
+	let earliestRejected: string | undefined;
+	// Only rule-2 watermarks prove old rows were validated; recheck legacy state.
+	// Count emitted-and-valid or correctly suppressed rows, not items.length.
+	// Strict title/url/safe-text bounds can reject real enumerated pages.
+	// Enumeration alone must never count a rejected page as covered.
+	// Use the same validateRecord verdict as the runtime's emitRecord.
 	let covered = 0;
 	for (const item of items) {
 		if (prior && item.last_edited_time && item.last_edited_time <= prior) {
-			// Suppressed-unchanged: an earlier run's identical content already passed
-			// the real emitRecord shape-check, so this is genuinely accounted for.
+			// Suppression relies on the watermark staying strictly below every
+			// rejected edit timestamp. Rejected rows (and later valid rows) must
+			// remain eligible for emission on the next complete search.
 			covered += 1;
 			continue;
 		}
 		const record = toRecord(item);
 		if (validateRecord(streamName, record).ok) {
 			covered += 1;
+			if (item.last_edited_time) {
+				validEditTimes.push(item.last_edited_time);
+			}
+		} else if (
+			item.last_edited_time &&
+			(!earliestRejected || item.last_edited_time < earliestRejected)
+		) {
+			earliestRejected = item.last_edited_time;
 		}
 		await emitRecord(streamName, record);
-		if (item.last_edited_time && (!latest || item.last_edited_time > latest)) {
-			latest = item.last_edited_time;
+	}
+	// Search order must not let a newer valid row leap over an older rejected
+	// row. Equal timestamps are held too, because suppression uses <= prior.
+	for (const edited of validEditTimes) {
+		if (
+			(!earliestRejected || edited < earliestRejected) &&
+			(!latest || edited > latest)
+		) {
+			latest = edited;
 		}
 	}
 	await progress(`Emitted ${streamName}`, {
@@ -364,7 +384,7 @@ async function runStream(args: RunStreamArgs): Promise<void> {
 	await emit({
 		type: "STATE",
 		stream: streamName,
-		cursor: { last_edited_time: latest || prior || null },
+		cursor: { last_edited_time: latest || prior || null, watermark_rule: 2 },
 	});
 }
 
