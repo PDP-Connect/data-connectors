@@ -107,6 +107,39 @@ export const trainingSummaryResponse = z.looseObject({
 });
 export type TrainingSummaryResponse = z.infer<typeof trainingSummaryResponse>;
 
+/**
+ * GET /api/training/analysis/{id}/details, as the in-page read hands it over: only the session
+ * id, each exercise's start time and each exercise's HEART_RATE series. The page drops the rest
+ * (GPS fixes, speed, power and the other series) before the answer leaves it. A series is evenly
+ * spaced: `values[i]` was recorded `i` intervals after the exercise's start, `interval` is an
+ * ISO 8601 duration (`PT1S` on a recorded session), and a value is null where the sensor had no
+ * reading. A manual entry's series are all null.
+ */
+export const trainingDetailsResponse = z.looseObject({
+	id: z.int().positive(),
+	exercises: z
+		.record(z.string(), z.looseObject({ startTime: str }).nullable())
+		.nullish(),
+	samples: z
+		.record(
+			z.string(),
+			z
+				.looseObject({
+					HEART_RATE: z
+						.looseObject({
+							samples: z.looseObject({
+								interval: z.string(),
+								values: z.array(z.number().nullable()),
+							}),
+						})
+						.nullish(),
+				})
+				.nullable(),
+		)
+		.nullish(),
+});
+export type TrainingDetailsResponse = z.infer<typeof trainingDetailsResponse>;
+
 /** One day of GET /api/activity-timeline/loadFour, keyed by YYYY-MM-DD in the answer. */
 export const activityDay = z.looseObject({
 	dataPanelData: z
@@ -217,6 +250,22 @@ const profileSchema = z.strictObject({
 	language: vocabulary,
 });
 
+/**
+ * Most heart rate samples one session record carries: twelve hours at Polar's 1 Hz, under 200 KB
+ * of JSON. A longer session is thinned evenly to fit (parsers.ts).
+ */
+export const MAX_HEART_RATE_SAMPLES = 43_200;
+export const MAX_HEART_RATE_SERIES = 100;
+export const MAX_HEART_RATE_INTERVAL_S = 3600;
+
+/** One exercise's heart rate, evenly spaced: `bpm[i]` was recorded `i * interval_s` after its start. */
+const heartRateSeriesSchema = z.strictObject({
+	exercise_id: z.string().regex(/^[1-9]\d*$/),
+	start_time_local: localTime.nullable(),
+	interval_s: z.number().gt(0).max(MAX_HEART_RATE_INTERVAL_S),
+	bpm: z.array(heartRate).min(1).max(MAX_HEART_RATE_SAMPLES),
+});
+
 const trainingSessionSchema = z.strictObject({
 	id: z.string().regex(/^[1-9]\d*$/),
 	sport_id: z.int(),
@@ -238,6 +287,12 @@ const trainingSessionSchema = z.strictObject({
 	note: pdppSafeText.max(10_000).nullable(),
 	is_test: z.boolean().nullable(),
 	has_training_target: z.boolean().nullable(),
+	heart_rate_samples: z
+		.array(heartRateSeriesSchema)
+		.min(1)
+		.max(MAX_HEART_RATE_SERIES)
+		.nullable()
+		.optional(),
 });
 
 const dailyActivitySchema = z.strictObject({
