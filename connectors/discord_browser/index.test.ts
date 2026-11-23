@@ -1391,19 +1391,35 @@ test("an interrupted disjoint expansion cannot omit the uncovered interval", asy
 	assert.equal(collected.size, 90);
 });
 
-test("the accepted search result-offset ceiling still marks the server complete", async () => {
-	// 10,025 messages means the site's own 9,975 offset ceiling is reached
-	// before the listing ends; the product owner accepts that as the range's
-	// end, so the walk records full coverage.
-	const all = messagesBy(OWNER, 10_025);
+test("an unread tail at the search offset ceiling leaves the server incomplete", async () => {
+	const all = messagesBy(OWNER, 10_500);
 	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: all }) });
 	const h = harness(fake, ["messages"]);
 	await collectDiscordBrowser(
 		h.ctx,
 		fast([], { maxMessages: 20_000, maxRequests: 450 }),
 	);
-	// 400 pages of 25 up to and including offset 9,975.
+	assert.equal(searches(fake).length, 400);
 	assert.equal(h.of("messages").length, 10_000);
+	assert.ok(
+		h
+			.skips()
+			.some(
+				(skip) =>
+					skip.reason === "discord_servers_skipped" &&
+					/9,975-offset/.test(skip.message ?? ""),
+			),
+	);
+	const state = h.cursor("messages") as { servers: Record<string, unknown> };
+	assert.equal(state.servers[SERVER_A], undefined);
+});
+
+test("a 300-message server still writes complete coverage", async () => {
+	const all = messagesBy(OWNER, 300);
+	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: all }) });
+	const h = harness(fake, ["messages"]);
+	await collectDiscordBrowser(h.ctx, fast());
+	assert.equal(h.of("messages").length, 300);
 	assert.deepEqual(h.skips(), []);
 	const state = h.cursor("messages") as {
 		servers: Record<
