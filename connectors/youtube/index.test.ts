@@ -3020,3 +3020,46 @@ test("playlist items prove empty only after every owned playlist and the index e
   if (proof) assert.equal(proof.considered, 0);
  }
 });
+
+test("unsupported watch history range still flushes completed likes coverage", async () => {
+	const page = new FixturePage([], { channel_url: null, email: null });
+	const goto = page.goto.bind(page);
+	page.goto = async (url: string) => {
+		assert.ok(!url.includes("/feed/history"), "unsupported history must not be read");
+		await goto(url);
+	};
+	const streams: string[] = [];
+	const coverage: string[] = [];
+	const messages: Record<string, unknown>[] = [];
+	setConnectorDiagnosticSink((line) => coverage.push(line));
+	try {
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([
+				["likes", { name: "likes" }],
+				[
+					"watch_history",
+					{
+						name: "watch_history",
+						time_range: { since: "2026-01-01T00:00:00Z" },
+					},
+				],
+			]) as never,
+			emitRecord: async (stream) => { streams.push(stream); },
+			emit: async (message) => { messages.push(message as Record<string, unknown>); },
+			reportStreamFailure: failureReporter(messages),
+			progress: async () => undefined,
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.deepEqual(streams, ["likes"]);
+	assert.deepEqual(
+		messages.filter((message) => message.stream === "watch_history").map(({ type, reason }) => [type, reason]),
+		[["SKIP_RESULT", "scope_not_supported"]],
+	);
+	assert.ok(
+		coverage.some((line) => line.includes('"stream":"likes"') && line.includes('"emitted_count":1')),
+		"completed likes coverage must be reported",
+	);
+});
