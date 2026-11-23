@@ -2846,6 +2846,13 @@ for (const row of [
 		expected: false,
 	},
 	{
+		label: "status-only locator",
+		itemCount: undefined,
+		status: "Refunded",
+		eligibility: "",
+		expected: true,
+	},
+	{
 		label: "legacy locator",
 		itemCount: undefined,
 		status: undefined,

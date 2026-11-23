@@ -35,6 +35,8 @@ test("return state uses completed evidence, never eligibility or pending order s
 		["Not returned", "Delivered", 3, false, "Not returned"],
 		["Not yet refunded", "Delivered", 3, false, "Not yet refunded"],
 		["Not yet returned", "Delivered", 1, false, "Not yet returned"],
+		["Not returned", "Refund issued", 1, false, "Not returned"],
+		[null, "Return complete.", 1, true, "Return complete."],
 		["No refund issued", "Delivered", 1, false, "No refund issued"],
 		["Return started", "Delivered", 3, false, "Return started"],
 	] as const;

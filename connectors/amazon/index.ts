@@ -1082,13 +1082,15 @@ async function recoverPendingOrderItemDetailGapPage(
 			deps.store,
 		);
 		if (result.status === "hydrated") {
+			// A status-only gap (the list card parsed no titles) still carries the
+			// order label; the detail page supplies the item count.
 			const orderContext =
-				locator.itemCount === undefined
+				locator.itemCount === undefined && locator.deliveryStatus === undefined
 					? undefined
 					: {
 							orderStatus: locator.deliveryStatus,
 							itemCount: Math.max(
-								locator.itemCount,
+								locator.itemCount ?? 0,
 								result.detail.items.length,
 							),
 						};
@@ -1397,16 +1399,20 @@ export async function emitOrderAndItems(
 		if (deps.wantsOrders) {
 			const excluded = isLegitimatelyExcluded(deps, "orders", orderRecord);
 			if (!excluded) deps.ordersCoverage?.considered.push(listOrder.orderId);
+			// Fingerprint what is published. A clean order hashes the same as its
+			// raw record, so only an order whose stored text held page code differs
+			// and is rewritten once.
+			const publishedOrder = cleanEmittedOrder(orderRecord);
 			const unchanged =
 				!excluded &&
 				validateRecord("orders", orderRecord).ok &&
 				deps.ordersFingerprintCursor?.priorFingerprint(orderRecord.id) ===
-					recordFingerprint(orderRecord, ["fetched_at"]);
+					recordFingerprint(publishedOrder, ["fetched_at"]);
 			let emitted = unchanged;
 			if (!unchanged && !excluded) {
 				// beforeEmit runs only after SDK selection and validation. Fulfilment
 				// proves local emission, not durable host acceptance.
-				await deps.emitRecord("orders", cleanEmittedOrder(orderRecord), {
+				await deps.emitRecord("orders", publishedOrder, {
 					beforeEmit: async () => {
 						emitted = true;
 					},
@@ -1475,7 +1481,7 @@ export async function emitOrderAndItems(
 		allEmitted = allEmitted && itemsAccepted;
 		if (allEmitted) {
 			if (deps.wantsOrders)
-				deps.ordersFingerprintCursor?.shouldEmit(orderRecord);
+				deps.ordersFingerprintCursor?.shouldEmit(cleanEmittedOrder(orderRecord));
 			if (detail && deps.wantsItems) {
 				deps.hydratedOrders?.set(
 					listOrder.orderId,

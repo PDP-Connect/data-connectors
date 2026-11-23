@@ -1,5 +1,5 @@
 /** Interpret Amazon's human status labels, not return-eligibility controls. */
-const ORDER_COMPLETE = /^(?:refunded|refund issued|return complete)$/i;
+const ORDER_COMPLETE = /^(?:refunded|refund issued|return complete)[.!]?$/i;
 const ITEM_COMPLETE =
 	/\b(?:refunded|refund issued|return complete|returned)\b/i;
 // A negation before the phrase, with at most one word between ("Not returned",
@@ -28,7 +28,9 @@ export function deriveItemReturnState({
 	if (item && ITEM_COMPLETE.test(item) && !NEGATED_COMPLETE.test(item)) {
 		return { returned: true, refund_status: item };
 	}
-	if (itemCount === 1 && order && ORDER_COMPLETE.test(order)) {
+	const itemNegated = item !== null && NEGATED_COMPLETE.test(item);
+	// An explicit "Not returned" on the item outranks the order-level label.
+	if (!itemNegated && itemCount === 1 && order && ORDER_COMPLETE.test(order)) {
 		return { returned: true, refund_status: order };
 	}
 	const itemInformative = item && !ELIGIBILITY.test(item) ? item : null;

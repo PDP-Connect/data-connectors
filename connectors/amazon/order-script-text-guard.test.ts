@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { recordFingerprint } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
 	buildOrderItemRecord,
 	buildOrderRecord,
@@ -117,4 +118,20 @@ test("UFPO emission checks combined statuses, payment and item-status copy", () 
 			.refund_status,
 		null,
 	);
+});
+
+test("published-order fingerprint equals the raw one for clean orders and differs once for orders that held page code", () => {
+	const build = (status: string) =>
+		buildOrderRecord(list(status), parseOrderDetailDom(card(status)), date, date);
+	const clean = build("Delivered");
+	assert.equal(
+		recordFingerprint(cleanEmittedOrder(clean), ["fetched_at"]),
+		recordFingerprint(clean, ["fetched_at"]),
+	);
+	const dirty = build("console.log('ready')");
+	assert.notEqual(
+		recordFingerprint(cleanEmittedOrder(dirty), ["fetched_at"]),
+		recordFingerprint(dirty, ["fetched_at"]),
+	);
+	assert.equal(cleanEmittedOrder(dirty).delivery_status, null);
 });
