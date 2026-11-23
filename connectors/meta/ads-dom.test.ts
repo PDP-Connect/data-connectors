@@ -882,7 +882,7 @@ test("classifyAdsDialogInPage: visible source empty message proves a zero-height
 });
 
 for (const surface of ["advertisers", "categories"] as const) {
- for (const scenario of ["missing", "noop", "duplicates", "virtualized", "replaced", "error", "valid", "second-noop", "navigation", "lost-document-token", "late-replaced", "invalid", "multi", "script-error", "signout"] as const) {
+ for (const scenario of ["missing", "noop", "duplicates", "virtualized", "replaced", "error", "valid", "second-noop", "long-growth", "stalled-visible", "navigation", "lost-document-token", "late-replaced", "invalid", "multi", "script-error", "signout"] as const) {
   test(`traversal proof: ${surface} ${scenario} retains rows and fails closed unless every click grows`, async () => {
    const label = surface === "advertisers" ? "See more" : "View all";
    const row = (name: string) => surface === "advertisers"
@@ -901,12 +901,14 @@ for (const surface of ["advertisers", "categories"] as const) {
      if (scenario === "replaced") document.querySelector('[role="dialog"]')!.outerHTML = `<section role="dialog"><div role="list">${row("Row C")}${row("Row D")}${row("Row E")}</div></section>`;
      if (["valid", "navigation", "lost-document-token", "late-replaced", "script-error"].includes(scenario) || (scenario === "second-noop" && clicks === 1)) list.insertAdjacentHTML("beforeend", row("Row C"));
      if (scenario === "multi") list.insertAdjacentHTML("beforeend", row(clicks === 1 ? "Row C" : "Row D"));
+     if (scenario === "long-growth") list.insertAdjacentHTML("beforeend", row(`Expansion ${clicks}`));
      if (scenario === "invalid") list.insertAdjacentHTML("beforeend", row("x".repeat(501)));
      if (scenario === "navigation") Object.defineProperty(document, "URL", {value: "https://accountscenter.instagram.com/other/", configurable: true});
      if (scenario === "lost-document-token") delete (document as Document & {__pdppAdsTraversal?: unknown}).__pdppAdsTraversal;
      if (scenario === "signout") { list.insertAdjacentHTML("beforeend", row("Row C")); document.body.insertAdjacentHTML("beforeend", '<form action="/accounts/login/"><input type="password"></form>'); }
      if (scenario === "error") list.insertAdjacentHTML("afterend", '<p role="alert">Something went wrong</p>');
-     if (!((scenario === "second-noop" || scenario === "multi") && clicks === 1)) document.querySelector("#expand")?.remove();
+     if (scenario !== "stalled-visible" && !(scenario === "long-growth" && clicks < 70) &&
+      !((scenario === "second-noop" || scenario === "multi") && clicks === 1)) document.querySelector("#expand")?.remove();
     },
    });
    const evaluate = page.evaluate;
@@ -922,12 +924,21 @@ for (const surface of ["advertisers", "categories"] as const) {
    const result = surface === "advertisers"
     ? await scrapeAdvertisers(page, clock)
     : await scrapeTargetingCategories(page, clock);
-   assert.equal(result.reached, scenario === "valid" || scenario === "multi");
+   assert.equal(result.reached, scenario === "valid" || scenario === "multi" || scenario === "long-growth");
    const names = result.items.map(item => typeof item === "string" ? item : item.name);
    assert.ok(names.includes("Row A"), "retain previously readable Row A");
    assert.ok(names.includes("Row B"), "retain previously readable Row B");
    if (scenario === "multi") assert.deepEqual(names, ["Row A", "Row B", "Row C", "Row D"]);
    if (scenario === "valid") assert.deepEqual(names, ["Row A", "Row B", "Row C"]);
+   if (scenario === "long-growth") {
+    assert.equal(clicks, 70);
+    assert.equal(names.length, 72);
+    assert.ok(names.includes("Expansion 70"));
+   }
+   if (scenario === "stalled-visible") {
+    assert.equal(clicks, 1, "an unchanged dialog must not be clicked again");
+    assert.deepEqual(names, ["Row A", "Row B"]);
+   }
   });
  }
 }

@@ -2084,7 +2084,6 @@ export async function scrapeAdvertisers(
 }
 
 const ADS_SEE_MORE_RE = /^see more$/i;
-const ADS_MAX_EXPANSIONS = 50;
 const ADS_EXPANSION_WAIT_MS = 10_000;
 
 type AdsTraversalRow = { description: string | null; name: string };
@@ -2271,7 +2270,7 @@ async function expandAdsDialog(
   return waitForGrowth(before, deadline, false);
  };
  const walk = await walkPagesWithCeiling({
-  maxPages: ADS_MAX_EXPANSIONS,
+  maxPages: Number.MAX_SAFE_INTEGER,
   fetchPage: async () => {
    const before = await sample(true);
    if (!before.clicked) { failed ||= before.failed; return false; }
