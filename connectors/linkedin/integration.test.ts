@@ -2593,6 +2593,8 @@ async function collectProof(options: {
 	before?: unknown; after?: unknown; confirmation?: unknown;
 	connections?: unknown; resolution?: unknown; me?: unknown;
 	skillsPage?: (start: number) => unknown;
+	connectionPage?: (start: number) => {elements: unknown[]; paging: {start: number; total: number}};
+	resolvePage?: (path: string) => unknown;
 } = {}) {
 	const recording = makeRecordingEmit(validateRecord);
 	const paths: string[] = [];
@@ -2610,11 +2612,11 @@ async function collectProof(options: {
 		if (path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")) {
 			return { elements: [options.profile ?? proofProfile()] };
 		}
-		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) return options.resolution ?? RESOLVED_PROFILES;
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) return options.resolvePage?.(path) ?? options.resolution ?? RESOLVED_PROFILES;
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
 			if (walkEnded) return options.confirmation ?? { elements: [], paging: { start, total: start } };
-			const result = start === 0 ? options.connections ?? { elements: CONNECTIONS_PAGE_1.elements } : { elements: [] };
+			const result = options.connectionPage?.(start) ?? (start === 0 ? options.connections ?? { elements: CONNECTIONS_PAGE_1.elements } : { elements: [] });
 			if (Array.isArray((result as { elements?: unknown[] }).elements) && (result as { elements: unknown[] }).elements.length === 0) walkEnded = true;
 			return result;
 		}
@@ -2640,6 +2642,26 @@ test("provider evidence: complete inventories emit RECORD, coverage, then STATE"
 		const rowIndex = recording.events.findIndex((event) => event.kind === "record" && event.stream === stream);
 		assert.ok(rowIndex >= 0 && rowIndex < coverageIndex && coverageIndex < stateIndex, stream);
 	}
+});
+
+test("provider evidence: 2500 distinct connections reach the empty end and independent confirmation", async () => {
+	const total = 2500;
+	const elements = Array.from({length: total}, (_, index) => ({
+		connectedMember: `urn:li:fsd_profile:fixture-${index}`, createdAt: 1_700_000_000_000,
+	}));
+	const summary = {...PROOF_SUMMARY, numConnections: total};
+	const {recording, paths} = await collectProof({
+		before: summary, after: summary,
+		connectionPage: start => ({elements: elements.slice(start, start + 40), paging: {start, total}}),
+		resolvePage: path => {
+			const ids = new URL(path, "https://www.linkedin.com").searchParams.get("ids");
+			assert.ok(ids?.startsWith("List(") && ids.endsWith(")"));
+			return {errors: Object.fromEntries(ids.slice(5, -1).split(",").map(id => [id, {status: 404}]))};
+		},
+	});
+	assert.equal(new Set(recording.emitted.filter(row => row.stream === "connections").map(row => row.data.id)).size, total);
+	assert.equal(paths.filter(path => path.includes("/dash/connections?") && path.endsWith("&start=2500")).length, 2);
+	assert.equal(claimsFullCoverage(recording, "connections"), true);
 });
 
 test("provider evidence: proved zero totals cover empty sections and connections", async () => {
@@ -2883,11 +2905,23 @@ test("skills walk: a first page is completed from the owner's skills collection"
 	assert.equal(paths.filter((path) => path.includes("/dash/profileSkills?")).length, 2);
 });
 
+test("skills walk: all 260 invented skills are collected past the old page ceiling", async () => {
+	const skills = [...ALL_SKILLS, ...Array.from({length: 257}, (_, offset) => ({
+		entityUrn: `urn:li:fsd_skill:(12,${offset + 4})`, name: `Fixture skill ${offset + 4}`,
+	}))];
+	const profile = skillsFirstPageProfile();
+	profile.profileSkills.paging.total = skills.length;
+	const {recording} = await collectProof({profile, skillsPage: skillsWalk(skills)});
+	assert.deepEqual(skillIds(recording), skills.map(skill => skill.entityUrn));
+	assert.equal(claimsFullCoverage(recording, "skills"), true);
+});
+
 test("skills walk: anything unproven keeps the first page and the gap", async (t) => {
 	const cases: Record<string, (start: number) => unknown> = {
 		"endpoint missing": () => httpFailure(404),
 		"another owner's skill": skillsWalk([...ALL_SKILLS.slice(0, 2), { entityUrn: "urn:li:fsd_skill:(99,3)", name: "X" }]),
 		"short of its total": skillsWalk(ALL_SKILLS.slice(0, 2), 3),
+		"repeated page": (start) => ({ elements: ALL_SKILLS.slice(0, 2), paging: { start, count: 2, total: 4 } }),
 		"no name": skillsWalk([...ALL_SKILLS.slice(0, 2), { entityUrn: "urn:li:fsd_skill:(12,3)" }]),
 		"total changes": (start) => ({ ...skillsWalk(ALL_SKILLS, 3, 2)(start), paging: { start, count: 2, total: 3 + start } }),
 	};

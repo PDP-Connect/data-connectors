@@ -44,7 +44,7 @@
  *   - Any account where `-93` 404s/reshapes and a fallback decoration id is
  *     actually needed.
  *   - Non-US / non-EN locales, business/Premium accounts, accounts with
- *     >2000 connections (the CONNECTIONS_MAX truncation path), accounts
+ *     very large connection inventories, accounts
  *     with categorized (non-flat) `profileSkills`, accounts with a
  *     `profileEducations[].grade` value set.
  *
@@ -123,7 +123,6 @@ const LINKEDIN_FEED_URL = "https://www.linkedin.com/feed/";
 const LINKEDIN_LOGIN_URL = "https://www.linkedin.com/login";
 const SESSION_COOKIE = /li_at|JSESSIONID/;
 const CONNECTIONS_PAGE_SIZE = 40;
-const CONNECTIONS_MAX = 2000;
 const RESOLVE_BATCH_SIZE = 20;
 const PAGE_DELAY_MS = 500;
 
@@ -324,7 +323,6 @@ async function fetchDashProfile(
 }
 
 const SKILLS_PAGE_SIZE = 20;
-const SKILLS_MAX_PAGES = 10;
 
 interface SkillsWalk {
 	/** Every skill, when the walk proved the whole list; otherwise absent. */
@@ -355,7 +353,7 @@ async function walkProfileSkills(
 	// Each page starts where the last one's rows ended: a server may return
 	// fewer than asked for.
 	let start = 0;
-	for (let index = 0; index < SKILLS_MAX_PAGES; index += 1) {
+	while (true) {
 		const result = await voyagerFetch<Record<string, unknown>>(page,
 			`/voyager/api/identity/dash/profileSkills?q=viewee&profileUrn=${urn}&start=${start}&count=${SKILLS_PAGE_SIZE}`,
 			capture, `skills-page-${String(start).padStart(4, "0")}`);
@@ -402,8 +400,7 @@ interface ConnectionsResult {
 		| "continuation_advertised"
 		| "page_error"
 		| "malformed_page"
-		| "repeated_page"
-		| "page_budget";
+		| "repeated_page";
 	total: number | null;
 }
 
@@ -435,7 +432,7 @@ async function fetchConnections(
 		...(error ? { error } : {}),
 	});
 
-	while (start < CONNECTIONS_MAX) {
+	while (true) {
 		const result = await voyagerFetch<VoyagerConnectionsResponse>(
 			page,
 			`/voyager/api/relationships/dash/connections?count=${CONNECTIONS_PAGE_SIZE}&q=search&sortType=RECENTLY_ADDED&start=${start}`,
@@ -545,7 +542,6 @@ async function fetchConnections(
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
-	return finish(start >= CONNECTIONS_MAX ? "page_budget" : "malformed_page");
 }
 
 /** Batch-resolve connection member URNs to profile summaries (name,
@@ -887,7 +883,7 @@ export async function collectLinkedIn(
 			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-before"), meResult);
 		await progress("Fetching LinkedIn connections", { stream: "connections" });
 		connectionsResult = await fetchConnections(page, progress, capture);
-		if (beforeSummary.total !== undefined && beforeSummary.total <= CONNECTIONS_MAX) {
+		if (beforeSummary.total !== undefined) {
 			confirmation = await voyagerFetch(page,
 				`/voyager/api/relationships/dash/connections?count=${CONNECTIONS_PAGE_SIZE}&q=search&sortType=RECENTLY_ADDED&start=${beforeSummary.total}`,
 				capture, "connections-confirmation");
@@ -1064,9 +1060,7 @@ export async function collectLinkedIn(
 					missing_urn_count: connectionsResult.missingUrnCount,
 					...(!connectionsComplete
 						? {
-							page_reason: terminationReason === "page_budget"
-								? "older_connections_deferred_page_budget"
-								: terminationReason === "continuation_advertised"
+							page_reason: terminationReason === "continuation_advertised"
 									? "linkedin_connections_continuation_advertised"
 								: terminationReason === "page_error"
 									? "linkedin_connections_page_failed"

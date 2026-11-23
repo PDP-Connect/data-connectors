@@ -108,9 +108,6 @@ const TRIPS_URL = `${RIDERS_ORIGIN}/trips`;
 const GRAPHQL_PATH = "/graphql";
 /** Uber's own default page size for the Activities feed, observed live. */
 const ACTIVITIES_PAGE_SIZE = 5;
-/** Safety ceiling, not an observed Uber limit — mirrors venmo's page-cap precedent. */
-const MAX_ACTIVITY_PAGES = 200;
-const MAX_DETAIL_FETCHES = 200;
 const PAGE_DELAY_MS = 500;
 const DETAIL_DELAY_MS = 500;
 
@@ -199,12 +196,11 @@ const GET_RECEIPT_QUERY = `query GetReceipt($tripUUID: String!, $timestamp: Stri
 `;
 
 /**
- * Every transport fault this connector throws is wrapped in one of these two
- * named errors before it can reach the runtime's retryablePattern check —
- * mirrors venmo's VENMO_RETRYABLE_PATTERN precedent (see that file's doc for
- * why an exact-name pattern is safer than a bare-vocabulary wildcard).
+ * Exact retryable errors: upstream rate/transport failures and an Activities
+ * cursor cycle that otherwise cannot advance this full-history run.
  */
-export const UBER_RETRYABLE_PATTERN = /uber_rate_limited|uber_transport_error/i;
+export const UBER_RETRYABLE_PATTERN =
+	/uber_rate_limited|uber_transport_error|uber_activity_cursor_repeated/i;
 
 interface UberFetchResult {
 	body: string;
@@ -331,10 +327,14 @@ export async function fetchAllActivities(
 ): Promise<{ activities: UberActivity[]; truncated: boolean }> {
 	const all: UberActivity[] = [];
 	const seenIds = new Set<string>();
+	const usedTokens = new Set<string>();
 	let nextPageToken: string | undefined;
 	const walk = await walkPagesWithCeiling({
-		maxPages: MAX_ACTIVITY_PAGES,
-		fetchPage: async (pageNumber) => {
+		maxPages: Number.MAX_SAFE_INTEGER,
+		fetchPage: async () => {
+			if (nextPageToken) {
+				usedTokens.add(nextPageToken);
+			}
 			const { status, body } = await fetchPath("Activities", ACTIVITIES_QUERY, {
 				includePast: true,
 				includeUpcoming: false,
@@ -359,10 +359,11 @@ export async function fetchAllActivities(
 			if (!token || newOnPage === 0) {
 				return false;
 			}
-			nextPageToken = token;
-			if (pageNumber < MAX_ACTIVITY_PAGES) {
-				await delay(PAGE_DELAY_MS);
+			if (usedTokens.has(token)) {
+				throw new Error("uber_activity_cursor_repeated");
 			}
+			nextPageToken = token;
+			await delay(PAGE_DELAY_MS);
 			return true;
 		},
 	});
@@ -417,12 +418,10 @@ export async function collectAllStreams(
 		return;
 	}
 
-	const { activities, truncated } = await fetchAllActivities(fetchPath, delay);
+	const { activities } = await fetchAllActivities(fetchPath, delay);
 	const tripIds = activities
 		.map((a) => activityTripId(a))
-		.filter((id): id is string => Boolean(id))
-		.slice(0, MAX_DETAIL_FETCHES);
-	const detailTruncated = activities.length > MAX_DETAIL_FETCHES;
+		.filter((id): id is string => Boolean(id));
 
 	const tripsRequired: string[] = [];
 	const tripsHydrated: string[] = [];
@@ -467,35 +466,6 @@ export async function collectAllStreams(
 	}
 
 	if (wantTrips) {
-		if (truncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "trips",
-				reason: "trips_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message: `Uber activity feed stopped at the ${MAX_ACTIVITY_PAGES}-page limit with more trip history possibly available`,
-				diagnostics: { page_limit: MAX_ACTIVITY_PAGES },
-			});
-		}
-		if (detailTruncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "trips",
-				reason: "trips_deferred_detail_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message: `Uber trip detail stopped at the ${MAX_DETAIL_FETCHES}-trip detail-fetch limit for this run`,
-				diagnostics: {
-					detail_fetch_limit: MAX_DETAIL_FETCHES,
-					total_trips: activities.length,
-				},
-			});
-		}
 		// `trips` is full_inventory / incremental: false (no source-side date
 		// or stop-at-seen filter is proven — see the manifest and this
 		// connector's header comment): it emits no STATE, matching the

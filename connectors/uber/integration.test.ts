@@ -19,7 +19,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams, type UberPageFetch } from "./index.ts";
+import {
+	collectAllStreams,
+	fetchAllActivities,
+	UBER_RETRYABLE_PATTERN,
+	type UberPageFetch,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T00:00:00.000Z";
@@ -338,6 +343,75 @@ test("collectAllStreams: a page with no nextPageToken stops even with a full pag
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(emitted.length, 1);
 	assert.equal(calls.filter((c) => c === "Activities").length, 1);
+});
+
+test("fetchAllActivities: 250 advancing pages preserve every distinct trip", async () => {
+	const trips = Array.from({ length: 250 }, (_, i) => ({ uuid: `trip-${i}` }));
+	let pages = 0;
+	const fetchPath: UberPageFetch = async (operation, _query, variables) => {
+		assert.equal(operation, "Activities");
+		const i = pages++;
+		assert.equal(variables.limit, 5);
+		assert.equal(variables.nextPageToken, i === 0 ? undefined : `page-${i}`);
+		assert.ok(i < trips.length);
+		return {
+			status: 200,
+			body: activitiesBody([trips[i]!], i + 1 < trips.length ? `page-${i + 1}` : null),
+		};
+	};
+	const { activities, truncated } = await fetchAllActivities(fetchPath, NO_DELAY);
+	assert.deepEqual(activities, trips);
+	assert.equal(pages, trips.length);
+	assert.equal(truncated, false);
+});
+
+test("collectAllStreams: 250 listed trips all fetch requested details", async () => {
+	const trips = Array.from({ length: 250 }, (_, i) => ({ uuid: `trip-${i}` }));
+	const activitiesPages = Array.from({ length: 50 }, (_, i) => ({
+		body: activitiesBody(trips.slice(i * 5, i * 5 + 5), i < 49 ? `page-${i + 1}` : null),
+	}));
+	const getTrip = Object.fromEntries(
+		trips.map(({ uuid }) => [uuid, { body: getTripBody({ status: "COMPLETED" }) }]),
+	);
+	const getReceipt = Object.fromEntries(
+		trips.map(({ uuid }) => [uuid, { body: getReceiptBody(RECEIPT_HTML("$10.00")) }]),
+	);
+	for (const streams of [["trips", "receipts"], ["receipts"]]) {
+		const { fetchPath, calls } = makeScriptedFetch({ activitiesPages, getTrip, getReceipt });
+		const { ctx, emitted } = makeCtx(streams);
+		await collectAllStreams(ctx, fetchPath, NO_DELAY);
+		assert.deepEqual(calls.filter((call) => call.startsWith("GetTrip:")),
+			streams.includes("trips") ? trips.map(({ uuid }) => `GetTrip:${uuid}`) : []);
+		assert.deepEqual(calls.filter((call) => call.startsWith("GetReceipt:")),
+			trips.map(({ uuid }) => `GetReceipt:${uuid}`));
+		assert.equal(emitted.length, trips.length * streams.length);
+	}
+});
+
+test("fetchAllActivities: a cursor cycle rejects before fetching a used token", async () => {
+	const responses = [activitiesBody([{ uuid: "trip-0" }], "a"),
+		activitiesBody([{ uuid: "trip-1" }], "b"), activitiesBody([{ uuid: "trip-2" }], "a")];
+	const tokens: unknown[] = [];
+	const fetchPath: UberPageFetch = async (_operation, _query, variables) => {
+		tokens.push(variables.nextPageToken);
+		const body = responses[tokens.length - 1];
+		assert.ok(body, "must not fetch the repeated token");
+		return { status: 200, body };
+	};
+	await assert.rejects(fetchAllActivities(fetchPath, NO_DELAY), UBER_RETRYABLE_PATTERN);
+	assert.equal(UBER_RETRYABLE_PATTERN.test("uber_activity_cursor_repeated"), true);
+	assert.deepEqual(tokens, [undefined, "a", "b"]);
+});
+
+test("fetchAllActivities: a page with no new IDs stops before a repeated token", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({ activitiesPages: [
+		{ body: activitiesBody([{ uuid: "trip-0" }], "a") },
+		{ body: activitiesBody([{ uuid: "trip-0" }], "a") },
+	] });
+	assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+		activities: [{ uuid: "trip-0" }], truncated: false,
+	});
+	assert.deepEqual(calls, ["Activities", "Activities"]);
 });
 
 // ─── Records-before-DETAIL_COVERAGE ordering ────────────────────────────────
