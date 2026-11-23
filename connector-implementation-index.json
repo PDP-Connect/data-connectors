@@ -19887,7 +19887,7 @@
 				},
 				"connector_key": "notion",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Notion",
 				"brand": {
 					"icon": "icon.svg",
@@ -29853,7 +29853,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.28",
+				"version": "0.2.29",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
