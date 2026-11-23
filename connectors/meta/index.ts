@@ -160,7 +160,6 @@ import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/pag
 import {
 	buildAdRecords,
 	dedupeFollowingByUsername,
-	FOLLOWING_MAX_PAGES,
 	FOLLOWING_PAGE_LIMIT,
 	followingRecord,
 	postLikeRecords,
@@ -186,7 +185,6 @@ const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const ACCOUNTS_CENTER_ORIGIN = "https://accountscenter.instagram.com";
 const SESSION_COOKIE_RE = /sessionid|ds_user_id/;
 const NAVIGATION_ATTEMPTS = 3;
-const POSTS_MAX_PAGES = 100;
 const ADS_REQUIRED_SURFACES = [
 	"advertisers",
 	"ad_topics",
@@ -1228,6 +1226,7 @@ export async function fetchAllPosts(
 		page.off("framenavigated", onFrameNavigated);
 	};
 
+	const seenPostCursors = new Set<string>();
 	let walk: Awaited<ReturnType<typeof walkPagesWithCeiling>>;
 	try {
 		walk = await walkPagesWithCeiling({
@@ -1392,10 +1391,15 @@ export async function fetchAllPosts(
 					return false;
 				}
 				if (pageInfo?.has_next_page !== true) return false;
+				const cursor = pageInfo.end_cursor;
+				if (typeof cursor === "string") {
+					if (seenPostCursors.has(cursor)) throw new Error("posts cursor repeated");
+					seenPostCursors.add(cursor);
+				}
 				await delay(1500);
 				return true;
 			},
-			maxPages: POSTS_MAX_PAGES,
+			maxPages: Number.POSITIVE_INFINITY,
 		});
 	} catch (error) {
 		legacyCaptureController.abort();
@@ -1456,6 +1460,7 @@ export async function fetchAllFollowing(
 	username = "",
 ): Promise<{ sourceEnd: boolean; truncated: boolean; users: InstagramFollowingUser[]; ownerBound: boolean; ownerConflict: boolean }> {
 	const users: InstagramFollowingUser[] = [];
+	const seenFollowingCursors = new Set<string>();
 	let maxId: string | null = null;
 	let sourceEnd = false;
 	let ownerBound = true;
@@ -1522,11 +1527,13 @@ export async function fetchAllFollowing(
 			if (!json?.next_max_id) {
 				return false;
 			}
+			if (seenFollowingCursors.has(json.next_max_id)) throw new Error("following cursor repeated");
+			seenFollowingCursors.add(json.next_max_id);
 			maxId = json.next_max_id;
 			await delay(800);
 			return true;
 		},
-		maxPages: FOLLOWING_MAX_PAGES,
+		maxPages: Number.POSITIVE_INFINITY,
 	}).catch((error: unknown) => {
 		// Pages read and validated before the failure are not thrown away.
 		throw users.length > 0
