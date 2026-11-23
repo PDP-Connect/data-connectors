@@ -8,20 +8,14 @@
  *
  * The callback is allowed to return `true` on the final permitted page. That
  * is the important case: the provider still has unread data, so the result
- * must be marked truncated rather than complete. Positive Infinity lets a
- * caller with its own progress guard continue until a terminal page.
+ * must be marked truncated rather than complete.
  */
 export async function walkPagesWithCeiling(args: {
 	readonly maxPages: number;
 	readonly fetchPage: (pageNumber: number) => boolean | Promise<boolean>;
 }): Promise<{ pagesFetched: number; truncated: boolean }> {
-	if (
-		args.maxPages !== Number.POSITIVE_INFINITY &&
-		(!Number.isInteger(args.maxPages) || args.maxPages < 1)
-	) {
-		throw new RangeError(
-			"maxPages must be a positive integer or positive Infinity",
-		);
+	if (!Number.isInteger(args.maxPages) || args.maxPages < 1) {
+		throw new RangeError("maxPages must be a positive integer");
 	}
 
 	for (let pageNumber = 1; pageNumber <= args.maxPages; pageNumber += 1) {

@@ -6292,13 +6292,6 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "onLine(): sequential file/dir walk, incremental byte-offset read, or one-way fs mutation",
 		},
 		{
-			path: "src/page-ceiling.test.ts",
-			line: 47,
-			column: 3,
-			category: "test_assertion_sequencing",
-			note: "each invalid ceiling is rejected on its own, asserting the walker fetched no page first",
-		},
-		{
 			path: "src/page-ceiling.ts",
 			line: 28,
 			column: 24,

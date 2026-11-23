@@ -185,6 +185,9 @@ const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const ACCOUNTS_CENTER_ORIGIN = "https://accountscenter.instagram.com";
 const SESSION_COOKIE_RE = /sessionid|ds_user_id/;
 const NAVIGATION_ATTEMPTS = 3;
+// Posts and following have no page ceiling: the walk ends on the source's last
+// page or on a repeated cursor. The shared walker only takes a positive integer.
+const NO_PAGE_CEILING = Number.MAX_SAFE_INTEGER;
 const ADS_REQUIRED_SURFACES = [
 	"advertisers",
 	"ad_topics",
@@ -1399,7 +1402,7 @@ export async function fetchAllPosts(
 				await delay(1500);
 				return true;
 			},
-			maxPages: Number.POSITIVE_INFINITY,
+			maxPages: NO_PAGE_CEILING,
 		});
 	} catch (error) {
 		legacyCaptureController.abort();
@@ -1533,7 +1536,7 @@ export async function fetchAllFollowing(
 			await delay(800);
 			return true;
 		},
-		maxPages: Number.POSITIVE_INFINITY,
+		maxPages: NO_PAGE_CEILING,
 	}).catch((error: unknown) => {
 		// Pages read and validated before the failure are not thrown away.
 		throw users.length > 0

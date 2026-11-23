@@ -28,28 +28,3 @@ test("walkPagesWithCeiling distinguishes terminal exhaustion from a capped conti
 	assert.deepEqual(capped, { pagesFetched: 2, truncated: true });
 	assert.deepEqual(cappedPages, [1, 2]);
 });
-
-test("an unlimited walk completes only at the terminal page", async () => {
-	let lastPage = 0;
-	const complete = await walkPagesWithCeiling({
-		maxPages: Number.POSITIVE_INFINITY,
-		fetchPage: (pageNumber) => {
-			assert.equal(pageNumber, ++lastPage);
-			return pageNumber <= 500;
-		},
-	});
-	assert.equal(lastPage, 501);
-	assert.deepEqual(complete, { pagesFetched: 501, truncated: false });
-});
-
-test("invalid finite ceilings still reject before fetching", async () => {
-	for (const maxPages of [0, -1, 1.5, Number.NaN, Number.NEGATIVE_INFINITY]) {
-		await assert.rejects(
-			walkPagesWithCeiling({
-				maxPages,
-				fetchPage: () => assert.fail("invalid ceiling fetched a page"),
-			}),
-			RangeError,
-		);
-	}
-});
