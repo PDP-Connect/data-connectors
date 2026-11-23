@@ -53,6 +53,21 @@ function whatsappZipPolicy(): ZipReadPolicy {
 // buffer materialized just to run the chat-format sniff against it.
 const MAX_CHAT_TEXT_BYTES = 200 * 1024 * 1024;
 
+function resolveMaxZipChatTextBytes(): number {
+	const value = Number(process.env.WHATSAPP_MAX_ZIP_CHAT_TEXT_BYTES);
+	return Number.isSafeInteger(value) && value > 0
+		? Math.min(value, MAX_CHAT_TEXT_BYTES)
+		: MAX_CHAT_TEXT_BYTES;
+}
+
+export interface OversizedWhatsAppChatEntry {
+	name: string;
+	sizeBytes: number;
+	capBytes: number;
+}
+
+type ReportOversizedChatEntry = (entry: OversizedWhatsAppChatEntry) => void;
+
 // MAX_CHAT_TEXT_BYTES bounds the RAW TEXT size of a zip's chat entry, but a
 // genuinely large plain .txt upload (not zip-bounded at all) or a
 // pathologically message-dense chat.txt can still build an unboundedly
@@ -488,17 +503,25 @@ function lazyMediaFiles(
 function findChatTextEntry(
 	entries: readonly ZipEntry[],
 	mediaFiles: ParsedWhatsAppAttachment[],
+	reportOversized?: ReportOversizedChatEntry,
 ): ExtractedWhatsAppChatArtifact | null {
 	const textEntries = entries.filter((entry) => TXT_EXT_RE.test(entry.name));
-	for (const entry of textEntries) {
-		if (entry.uncompressedSize > MAX_CHAT_TEXT_BYTES) {
-			// Declared size is untrusted for bomb defense (see
-			// bounded-zip-archive.ts), but here it is only a fast-skip for an
-			// implausible chat-text entry -- if it's a lying declaration, data()
-			// below would still be bounded by the shared archive policy and would
-			// simply fail this candidate the normal way.
-			continue;
+	const capBytes = resolveMaxZipChatTextBytes();
+	// Inspect metadata for all candidates, including those after the first
+	// usable chat. Do not inflate skipped entries or broaden the ZIP policy.
+	if (reportOversized) {
+		for (const entry of textEntries) {
+			if (entry.uncompressedSize > capBytes) {
+				reportOversized({
+					name: basename(entry.name),
+					sizeBytes: entry.uncompressedSize,
+					capBytes,
+				});
+			}
 		}
+	}
+	for (const entry of textEntries) {
+		if (entry.uncompressedSize > capBytes) continue;
 		let text: string;
 		try {
 			text = entry.data().toString("utf8");
@@ -542,11 +565,16 @@ function extractEntriesOrNull(
 	}
 }
 
-function extractFromZip(bytes: Buffer): ExtractedWhatsAppChatArtifact | null {
+function extractFromZip(
+	bytes: Buffer,
+	reportOversized?: ReportOversizedChatEntry,
+): ExtractedWhatsAppChatArtifact | null {
 	const entries = extractEntriesOrNull(() =>
 		readZipEntries(bytes, whatsappZipPolicy()),
 	);
-	return entries ? findChatTextEntry(entries, lazyMediaFiles(entries)) : null;
+	return entries
+		? findChatTextEntry(entries, lazyMediaFiles(entries), reportOversized)
+		: null;
 }
 
 /**
@@ -559,21 +587,25 @@ function extractFromZip(bytes: Buffer): ExtractedWhatsAppChatArtifact | null {
 export function extractWhatsAppChatArtifactFromFile(
 	fd: number,
 	fileSize: number,
+	reportOversized?: ReportOversizedChatEntry,
 ): ExtractedWhatsAppChatArtifact | null {
 	const entries = extractEntriesOrNull(() =>
 		readZipEntriesFromFile(fd, fileSize, whatsappZipPolicy()),
 	);
-	return entries ? findChatTextEntry(entries, lazyMediaFiles(entries)) : null;
+	return entries
+		? findChatTextEntry(entries, lazyMediaFiles(entries), reportOversized)
+		: null;
 }
 
 export function extractWhatsAppChatArtifact(
 	filename: string,
 	input: Buffer | Uint8Array | string,
+	reportOversized?: ReportOversizedChatEntry,
 ): ExtractedWhatsAppChatArtifact | null {
 	const bytes =
 		typeof input === "string" ? Buffer.from(input, "utf8") : Buffer.from(input);
 	if (ZIP_EXT_RE.test(filename) || hasZipLocalFileSignature(bytes)) {
-		return extractFromZip(bytes);
+		return extractFromZip(bytes, reportOversized);
 	}
 	const text = bytes.toString("utf8");
 	return looksLikeWhatsAppChatExport(text)
