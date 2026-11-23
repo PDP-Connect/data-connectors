@@ -92,6 +92,12 @@ const MAX_PHOTO_BYTES_ENV = "PDPP_APPLE_PHOTOS_MAX_PHOTO_BYTES";
 // Progress cadence — emit a PROGRESS every N files so operators see motion
 // on large libraries.
 const PROGRESS_INTERVAL_FILES = 500;
+const NON_MEDIA_MACOS_METADATA = new Set([
+	".DS_Store",
+	".Spotlight-V100",
+	".fseventsd",
+	".Trashes",
+]);
 
 /** The configured export directory path, regardless of whether it currently exists. */
 function configuredExportDir(): string {
@@ -125,7 +131,8 @@ function hasSupportedExtension(filename: string): boolean {
 async function emitCoverageProgress(
 	emit: CollectContext["emit"],
 	input: {
-		filesScanned?: number;
+		photosFound?: number;
+		filesSkipped?: number;
 		reason:
 			| "collected"
 			| "export_dir_empty"
@@ -134,9 +141,10 @@ async function emitCoverageProgress(
 		status: "collected" | "missing" | "partial";
 	},
 ): Promise<void> {
-	const filesScanned = input.filesScanned ?? 0;
+	const photosFound = input.photosFound ?? 0;
+	const filesSkipped = input.filesSkipped ?? 0;
 	connectorDiagnostic("apple_photos", "coverage", {
-		files_scanned: filesScanned,
+		files_scanned: photosFound + filesSkipped,
 		reason: input.reason,
 		status: input.status,
 		stream: "photos",
@@ -144,7 +152,7 @@ async function emitCoverageProgress(
 	await emit({
 		type: "PROGRESS",
 		stream: "photos",
-		message: coverageMessage(input.reason, filesScanned),
+		message: coverageMessage(input.reason, photosFound, filesSkipped),
 	});
 }
 
@@ -154,7 +162,8 @@ function coverageMessage(
 		| "export_dir_empty"
 		| "export_dir_missing"
 		| "unsupported_extensions",
-	filesScanned: number,
+	photosFound: number,
+	filesSkipped: number,
 ): string {
 	if (reason === "export_dir_missing") {
 		return "No photo export folder found";
@@ -162,7 +171,10 @@ function coverageMessage(
 	if (reason === "export_dir_empty") {
 		return "Photo export folder is empty";
 	}
-	return `Found ${filesScanned} ${filesScanned === 1 ? "photo" : "photos"} in your export`;
+	const found = `Found ${photosFound} ${photosFound === 1 ? "photo" : "photos"} in your export`;
+	return reason === "unsupported_extensions"
+		? `${found}, ${filesSkipped} skipped (unsupported extensions)`
+		: found;
 }
 
 /**
@@ -173,18 +185,26 @@ function coverageMessage(
 async function* walkDir(
 	dir: string,
 	unsupported: Map<string, number>,
+	since: string | undefined,
 ): AsyncGenerator<DiscoveredFile> {
 	const handle = await opendir(dir);
 	for await (const entry of handle) {
 		const entryPath = join(dir, entry.name);
 		if (entry.isDirectory()) {
-			yield* walkDir(entryPath, unsupported);
+			yield* walkDir(entryPath, unsupported, since);
 			continue;
 		}
 		if (!entry.isFile()) {
 			continue;
 		}
 		if (!hasSupportedExtension(entry.name)) {
+			if (NON_MEDIA_MACOS_METADATA.has(entry.name)) {
+				continue;
+			}
+			if (since !== undefined) {
+				const modified = (await stat(entryPath)).mtime.toISOString();
+				if (isBeforeCursor(modified, since)) continue;
+			}
 			const extension = extname(entry.name).toLowerCase();
 			// Do not put arbitrary suffix text, names, or paths in a diagnostic.
 			const bucket = /^\.[a-z0-9]{1,12}$/.test(extension)
@@ -258,7 +278,7 @@ runConnector({
 		});
 		await progress("Reading your exported photos");
 
-		for await (const file of walkDir(dir, unsupported)) {
+		for await (const file of walkDir(dir, unsupported, since)) {
 			fileCount += 1;
 			if (isBeforeCursor(file.mtimeIso, since)) {
 				continue;
@@ -291,9 +311,9 @@ runConnector({
 			pass: "emit",
 			phase: "emit",
 		});
-		const partial = unsupported.size > 0;
+		const count = [...unsupported.values()].reduce((sum, n) => sum + n, 0);
+		const partial = count > 0;
 		if (partial) {
-			const count = [...unsupported.values()].reduce((sum, n) => sum + n, 0);
 			const details = [...unsupported.keys()]
 				.sort()
 				.map((extension) => `${extension} ${unsupported.get(extension)}`);
@@ -305,7 +325,8 @@ runConnector({
 			});
 		}
 		await emitCoverageProgress(emit, {
-			filesScanned: fileCount,
+			photosFound: fileCount,
+			filesSkipped: count,
 			reason: partial ? "unsupported_extensions" : "collected",
 			status: partial ? "partial" : "collected",
 		});
