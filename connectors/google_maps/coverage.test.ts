@@ -19,7 +19,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -593,28 +593,8 @@ test("google_maps fails closed when discovery misses the source boundary", async
 		tmpdir(),
 		`pdpp-google-maps-not-a-directory-${String(process.pid)}-${Date.now()}`,
 	);
-	const deepRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-deep-"));
-	const cappedRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-capped-"));
 	try {
 		await writeFile(readErrorRoot, "not a directory");
-		const deepPaths: string[] = [];
-		let deepPath = deepRoot;
-		for (let level = 0; level < 6; level += 1) {
-			deepPath = join(deepPath, `level-${String(level)}`);
-			deepPaths.push(deepPath);
-		}
-		await deepPaths.reduce(
-			(previous, path) => previous.then(() => mkdir(path)),
-			Promise.resolve(),
-		);
-		await Promise.all(
-			Array.from({ length: 2001 }, (_, index) =>
-				writeFile(
-					join(cappedRoot, `unrelated-${String(index).padStart(4, "0")}.txt`),
-					"",
-				),
-			),
-		);
 
 		const runDiscoveryCase = async (importRoot: string): Promise<void> => {
 			const { messages } = await runImport(importRoot, {}, [
@@ -647,15 +627,75 @@ test("google_maps fails closed when discovery misses the source boundary", async
 				false,
 			);
 		};
-		await [missingRoot, readErrorRoot, deepRoot, cappedRoot].reduce(
+		await [missingRoot, readErrorRoot].reduce(
 			(previous, importRoot) =>
 				previous.then(() => runDiscoveryCase(importRoot)),
 			Promise.resolve(),
 		);
 	} finally {
 		await rm(readErrorRoot, { force: true, recursive: true });
-		await rm(deepRoot, { force: true, recursive: true });
-		await rm(cappedRoot, { force: true, recursive: true });
+	}
+});
+
+test("google_maps discovers complete deep and wide Timeline trees", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-google-maps-discovery-"));
+	try {
+		const deep = join(root, "deep");
+		const wide = join(root, "wide");
+		const leaf = join(
+			deep,
+			...Array.from({ length: 8 }, (_, i) => `level-${i}`),
+		);
+		await mkdir(leaf, { recursive: true });
+		await mkdir(wide);
+		await writeFile(join(leaf, "Records.json"), JSON.stringify(EXPORT_FIXTURE));
+		for (let offset = 0; offset < 2500; offset += 50) {
+			await Promise.all(
+				Array.from({ length: 50 }, (_, i) =>
+					writeFile(
+						join(wide, `filler-${String(offset + i).padStart(4, "0")}.txt`),
+						"",
+					),
+				),
+			);
+		}
+		await writeFile(
+			join(wide, "Timeline.json"),
+			JSON.stringify(EXPORT_FIXTURE),
+		);
+		for (const importRoot of [deep, wide]) {
+			const { messages } = await runImport(importRoot);
+			const { considered, covered } = pointsCoverage(messages);
+			assert.equal(considered, 2);
+			assert.equal(covered, 2);
+			assert.ok(messages.some((message) => message.type === "STATE"));
+		}
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
+test("google_maps does not enter a child directory alias", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-google-maps-alias-"));
+	try {
+		const actual = join(root, "actual");
+		await mkdir(actual);
+		await writeFile(
+			join(actual, "Records.json"),
+			JSON.stringify(EXPORT_FIXTURE),
+		);
+		await symlink(actual, join(root, "alias"), "junction");
+		const { messages } = await runImport(root);
+		assert.ok(
+			messages.some(
+				(message) =>
+					message.type === "PROGRESS" &&
+					message.message === "Found 1 Google Maps files to read",
+			),
+		);
+		assert.equal(pointsCoverage(messages).covered, 2);
+	} finally {
+		await rm(root, { force: true, recursive: true });
 	}
 });
 
