@@ -48,6 +48,12 @@ const manifest = JSON.parse(
 	readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
 );
 
+test("run budget copy describes saved progress without promising the rest on a later run", () => {
+	const message = manifest.reason_display_messages.run_budget_reached;
+	assert.doesNotMatch(message, /for the rest|tomorrow/i);
+	assert.match(message, /saved/i);
+});
+
 /** A response holding only a top and a bottom cursor: the end of a list. */
 function cursorsOnly(bookmarks: boolean): string {
 	const instructions = [
