@@ -135,3 +135,31 @@ test("published-order fingerprint equals the raw one for clean orders and differ
 	);
 	assert.equal(cleanEmittedOrder(dirty).delivery_status, null);
 });
+
+test("emission keeps prose with a semicolon and still rejects statement-like text", () => {
+	const record = (delivery_status: string | null, refund_status: string | null) => ({
+		order: cleanEmittedOrder({
+			...buildOrderRecord(list("Delivered"), null, date, date),
+			delivery_status,
+		}),
+		item: cleanEmittedOrderItem({
+			...buildOrderItemRecord(orderId, date, {
+				asin: "FAKEITEMAA",
+				name: "Fictional spool",
+				url: "",
+			} as never),
+			returned: true,
+			refund_status,
+		}),
+	});
+	const prose = record("Delivered; left with concierge", "Refund issued; pickup complete");
+	assert.equal(prose.order.delivery_status, "Delivered; left with concierge");
+	assert.equal(prose.item.refund_status, "Refund issued; pickup complete");
+	assert.equal(prose.item.returned, true);
+	for (const code of ["a(); b()", "x = 1; y = 2", "foo();", "if (x) {y}", "run('a');"]) {
+		const rejected = record(code, code);
+		assert.equal(rejected.order.delivery_status, null, code);
+		assert.equal(rejected.item.refund_status, null, code);
+		assert.equal(rejected.item.returned, false, code);
+	}
+});

@@ -237,8 +237,11 @@ const CARD_ONLY_RE =
 	/((?:Visa|Mastercard|Amex|Discover|Diners|Unknown Credit Card|Credit Card|Debit Card) ending in \d{3,5})/i;
 const UNABLE_RE = /Unable to display payment details/i;
 // Script or markup that reached a text node is never a payment method.
+// A semicolon alone is ordinary punctuation ("Delivered; left with concierge").
+// It is code only as a statement end (before a closer or the end, after a call,
+// index or string) or beside an assignment.
 const CODE_LIKE_RE =
-	/[{};<>]|=>|\bfunction\b|\b(?:window|document|console)\.|\b(?:var|let|const)\s+\w+\s*=|\w\(\s*['"`]/;
+	/[{}<>]|=>|;\s*(?:$|[}\])])|[)\]"'`]\s*;|\b\w+\s*=\s*[^=\s]|\bfunction\b|\b(?:window|document|console)\.|\b(?:var|let|const)\s+\w+\s*=|\w\(\s*['"`]/;
 
 // Apply the same text guard only to the published fields. The raw projections
 // also feed existing fingerprints and must remain unchanged.

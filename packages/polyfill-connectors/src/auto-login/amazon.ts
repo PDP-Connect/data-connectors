@@ -230,11 +230,18 @@ async function probeAmazonOrdersPageInPlace(page: Page): Promise<boolean> {
  * credentials, and the sign-in URL handed to the operator carries no secrets.
  */
 export function isAmazonAccessRestrictedText(text: string): boolean {
+	// A block page is a short message. Both phrases in a long page (an order
+	// title, a product name) are content, not a block.
+	const visible = text.replace(/\s+/g, " ").trim();
+	if (visible.length >= AMAZON_BLOCK_PAGE_MAX_CHARS) return false;
+	const head = visible.slice(0, AMAZON_BLOCK_PHRASE_WINDOW_CHARS);
 	return (
-		/access restricted/i.test(text) &&
-		/unauthorized\s+(?:AI\s+)?agent/i.test(text)
+		/access restricted/i.test(head) &&
+		/unauthorized\s+(?:AI\s+)?agent/i.test(head)
 	);
 }
+const AMAZON_BLOCK_PAGE_MAX_CHARS = 1_500;
+const AMAZON_BLOCK_PHRASE_WINDOW_CHARS = 400;
 
 /** Read bounded visible text for diagnosis only. A failed read gives no new diagnosis. */
 export async function pageShowsAmazonAccessRestriction(
@@ -242,7 +249,9 @@ export async function pageShowsAmazonAccessRestriction(
 ): Promise<boolean> {
 	try {
 		const text = await page.locator("body").innerText({ timeout: 1_000 });
-		return isAmazonAccessRestrictedText(text.slice(0, 500));
+		return isAmazonAccessRestrictedText(
+			text.slice(0, AMAZON_BLOCK_PAGE_MAX_CHARS),
+		);
 	} catch {
 		return false;
 	}

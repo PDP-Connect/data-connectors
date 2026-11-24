@@ -413,6 +413,25 @@ test("Amazon access restriction requires both diagnostic phrases", () => {
 		false,
 	);
 	assert.equal(isAmazonAccessRestrictedText("Your orders"), false);
+	// Both phrases inside ordinary content are not a block page.
+	assert.equal(
+		isAmazonAccessRestrictedText(
+			`Delivered: Security Handbook - Access Restricted: Detecting an Unauthorized Agent ${"Fictional order line. ".repeat(80)}`,
+		),
+		false,
+	);
+	assert.equal(
+		isAmazonAccessRestrictedText(
+			`Your orders ${"Fictional order line. ".repeat(80)} Access Restricted: Unauthorized AI Agent`,
+		),
+		false,
+	);
+	assert.equal(
+		isAmazonAccessRestrictedText(
+			`${"Fictional page text. ".repeat(30)} Access Restricted: Unauthorized AI Agent`,
+		),
+		false,
+	);
 });
 
 test("ensureAmazonSession reports an explicit automated-browser block without challenge advice", async () => {
