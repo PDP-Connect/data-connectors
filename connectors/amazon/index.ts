@@ -79,6 +79,8 @@ export interface YearState {
 	/** The parser version the year was read with. A year read by an older
 	 *  parser is read again once, so a parser fix reaches stored history. */
 	parser_version?: number;
+	/** The latest scan was incomplete; the successful fields above are unchanged. */
+	incomplete?: true;
 }
 
 export interface YearsCursor {
@@ -2184,6 +2186,17 @@ interface YearCompletionArgs {
 	yearOrderCount: number;
 }
 
+function markYearIncomplete(
+	years: YearsCursor,
+	year: number,
+	prior: YearState | undefined,
+): void {
+	years[String(year)] = {
+		...(prior ?? { frozen: false, last_scraped: "", order_count: 0 }),
+		incomplete: true,
+	};
+}
+
 export async function applyYearCompletionState({
 	newYearsState,
 	prior,
@@ -2198,11 +2211,9 @@ export async function applyYearCompletionState({
 	// policy makes irreversible: `order_count` would hold the capped prefix
 	// count, and because a truncated year reproduces the SAME capped count on
 	// every run, `stableCount` goes true on the very next run and freezes a past
-	// year for good — and `collect()` skips frozen years outright
-	// (`if (prior?.frozen) continue`), so the untraversed tail becomes
-	// unreachable by ANY future run. Leaving the prior state untouched keeps the
-	// year eligible for a later, fuller scan.
+	// year for good. Carry the last success forward with a retry marker.
 	if (truncated) {
+		markYearIncomplete(newYearsState, year, prior);
 		connectorDiagnostic("amazon", "year_cursor_not_advanced", {
 			year,
 			reason: "page_limit",
@@ -2221,7 +2232,9 @@ export async function applyYearCompletionState({
 	// treating the year as complete forever.
 	if (unparseableDateCount === 0) {
 		const stableCount =
-			prior !== undefined && prior.order_count === yearOrderCount;
+			prior !== undefined &&
+			!(prior.incomplete === true && !prior.last_scraped) &&
+			prior.order_count === yearOrderCount;
 		newYearsState[String(year)] = {
 			order_count: yearOrderCount,
 			frozen: year < new Date().getFullYear() && stableCount,
@@ -2229,6 +2242,7 @@ export async function applyYearCompletionState({
 			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		};
 	} else {
+		markYearIncomplete(newYearsState, year, prior);
 		connectorDiagnostic("amazon", "year_cursor_not_advanced", {
 			year,
 			reason: "unparseable_order_rows",
@@ -2465,9 +2479,10 @@ export function planIncrementalYears(
 		const prior = yearsState[String(year)];
 		if (
 			prior?.last_scraped &&
+			prior.incomplete !== true &&
 			prior.parser_version === AMAZON_DETAIL_PARSER_VERSION
 		) {
-			// Historical year read by the current parser: skip to prevent
+			// Complete historical year read by the current parser: skip to prevent
 			// unbounded re-scrape. A year read by an older parser is planned
 			// once so a parser fix reaches stored history.
 			skipped.push({
@@ -2787,6 +2802,7 @@ if (isMainModule(import.meta.url)) {
 				// Year-freezing: skip if already frozen
 				if (
 					prior?.frozen &&
+					prior.incomplete !== true &&
 					prior.parser_version === AMAZON_DETAIL_PARSER_VERSION
 				) {
 					connectorDiagnostic("amazon", "year_skipped_frozen", { year });
@@ -2816,7 +2832,8 @@ if (isMainModule(import.meta.url)) {
 					) {
 						throw error;
 					}
-					// Not frozen and no STATE for this year: the next run reads it again.
+					// Keep prior success, but make sure this interrupted year retries.
+					markYearIncomplete(newYearsState, year, prior);
 					connectorDiagnostic("amazon", "stopped_early_kept_orders", {
 						code,
 						year,
@@ -2832,7 +2849,7 @@ if (isMainModule(import.meta.url)) {
 					// The orders read are real: never follow with "no orders on this store".
 					ordersSeen += ordersEmittedThisRun;
 					// Save fingerprints and hydration for the orders read; the stopped
-					// year has no entry in newYearsState, so nothing is frozen or advanced.
+					// year records only the retry marker over any prior success.
 					await emit({
 						type: "STATE",
 						stream: "orders",

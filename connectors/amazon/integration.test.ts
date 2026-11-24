@@ -51,6 +51,7 @@ import {
 import {
 	AMAZON_CHALLENGE_SELECTOR,
 	AMAZON_CHALLENGE_TEXT_PATTERN,
+	AMAZON_DETAIL_PARSER_VERSION,
 	AMAZON_MID_WALK_STOP_RE,
 	AMAZON_NO_ORDERS_TEXT_PATTERN,
 	AMAZON_WALK_BUDGET_MS,
@@ -71,7 +72,6 @@ import {
 	newOrdersCoverage,
 	type OrderItemsCoverage,
 	type OrdersCoverage,
-	AMAZON_DETAIL_PARSER_VERSION,
 	planIncrementalYears,
 	priorOrdersEvidenceForYear,
 	processListOrder,
@@ -544,6 +544,41 @@ test("collect path does not advance a year cursor after unparseable order-date d
 		/if \(unparseableDateCount === 0\) \{[\s\S]*?last_scraped:\s*nowIso\(\),[\s\S]*?\} else \{[\s\S]*?year_cursor_not_advanced/,
 		"last_scraped must only advance on a year with zero required-row drops",
 	);
+});
+
+test("an incomplete 2025 scan retries after rollover without advancing saved success", async () => {
+	const success = {
+		frozen: false,
+		last_scraped: "2026-12-27T00:00:00.000Z",
+		order_count: 1,
+		parser_version: AMAZON_DETAIL_PARSER_VERSION,
+	};
+	const years: YearsCursor = { "2025": success };
+	assert.deepEqual(planIncrementalYears([2025], years, 2026).planned, [2025]);
+	await applyYearCompletionState({
+		newYearsState: years,
+		prior: success,
+		progress: async () => {},
+		truncated: false,
+		unparseableDateCount: 1,
+		year: 2025,
+		yearOrderCount: 2,
+	});
+	assert.deepEqual(planIncrementalYears([2025], years, 2027).planned, [2025]);
+	assert.deepEqual(years["2025"], { ...success, incomplete: true });
+	assert.equal("incomplete" in success, false);
+	await applyYearCompletionState({
+		newYearsState: years,
+		prior: years["2025"],
+		progress: async () => {},
+		truncated: false,
+		unparseableDateCount: 0,
+		year: 2025,
+		yearOrderCount: 2,
+	});
+	assert.equal(years["2025"]?.incomplete, undefined);
+	assert.equal(years["2025"]?.order_count, 2);
+	assert.deepEqual(planIncrementalYears([2025], years, 2027).planned, []);
 });
 
 test("amazon manifest: successful runs have a bounded freshness window", () => {
@@ -1472,6 +1507,19 @@ test("planIncrementalYears: a historical year read by an older parser is planned
 		skipped.map(({ year }) => year),
 		[2024],
 	);
+});
+
+test("planIncrementalYears: incomplete years are not skipped, even after a frozen prior success", () => {
+	const state: YearsCursor = {
+		"2024": {
+			frozen: true,
+			last_scraped: "2025-01-01T00:00:00.000Z",
+			order_count: 1,
+			parser_version: AMAZON_DETAIL_PARSER_VERSION,
+			incomplete: true,
+		},
+	};
+	assert.deepEqual(planIncrementalYears([2024], state, 2027).planned, [2024]);
 });
 
 // ─── Trailing orders STATE persistence when the year loop emits nothing ─────
@@ -3797,7 +3845,7 @@ test("emitOrderAndItems: items out of scope suppress the reconciliation entirely
 // goes true on the next run and a past year is frozen — and `collect()` skips
 // frozen years entirely, making the untraversed tail unreachable forever.
 
-test("applyYearCompletionState: a page-ceiling-truncated year is never recorded, so it can never freeze", async () => {
+test("applyYearCompletionState: a page-ceiling-truncated year records a retry without advancing", async () => {
 	const newYearsState: YearsCursor = {};
 	const progressCalls: string[] = [];
 	const progress = ((message: string): Promise<void> => {
@@ -3838,9 +3886,15 @@ test("applyYearCompletionState: a page-ceiling-truncated year is never recorded,
 
 	assert.deepEqual(
 		newYearsState,
-		{},
-		"a truncated year must not be written to year state at all — writing it is what lets the " +
-			"freeze-once-stable policy mark a partially-scanned past year complete forever",
+		{
+			"2024": {
+				frozen: false,
+				last_scraped: "2026-01-01T00:00:00.000Z",
+				order_count: 500,
+				incomplete: true,
+			},
+		},
+		"retain successful metadata and report the incomplete latest scan",
 	);
 	assert.ok(
 		progressCalls.some((m) =>
