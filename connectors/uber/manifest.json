@@ -206,7 +206,5 @@
 		}
 	],
 	"reason_display_messages": {
-		"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
-		"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit"
 	}
 }
