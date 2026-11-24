@@ -1568,7 +1568,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/claude_code/integration.test.ts",
-			line: 88,
+			line: 92,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "processJsonlLine(): test drives/asserts an ordered per-case side effect",

@@ -44,7 +44,11 @@ import {
 	observeJsonlFields,
 	processJsonlLine,
 } from "./index.ts";
-import { makeEmptySessionAccumulator } from "./parsers.ts";
+import {
+	buildSkillRecord,
+	makeEmptySessionAccumulator,
+	SKILL_BODY_MAX_CHARS,
+} from "./parsers.ts";
 import type { JsonlObject, SessionAccumulator } from "./types.ts";
 
 interface RecordingHarness {
@@ -111,6 +115,26 @@ function attachmentLine(overrides: Partial<JsonlObject> = {}): JsonlObject {
 		...overrides,
 	};
 }
+
+test("skill content stays valid Unicode at the inline size limit", () => {
+	const prefix = "a".repeat(SKILL_BODY_MAX_CHARS - 1);
+	const args = {
+		name: "example",
+		frontmatter: {},
+		path: "example/SKILL.md",
+		mtimeMs: 0,
+	};
+	assert.equal(
+		buildSkillRecord({ ...args, body: `${prefix}🧪` }).content,
+		prefix,
+	);
+
+	const withinLimit = `${prefix.slice(1)}🧪`;
+	assert.equal(
+		buildSkillRecord({ ...args, body: `${withinLimit}z` }).content,
+		withinLimit,
+	);
+});
 
 // ─── Invariant 1: session id must be pinned before children ─────────────────
 
