@@ -76,18 +76,35 @@ export function parseIcsDate(
  */
 export function parseIcsLine(raw: string): IcsLine | null {
 	const line = raw.trim();
-	const sepIdx = line.indexOf(":");
-	if (sepIdx < 0) {
-		return null;
+	const parts: string[] = [];
+	let quoted = false;
+	let partStart = 0;
+	let sepIdx = -1;
+	for (let i = 0; i < line.length; i += 1) {
+		const ch = line[i];
+		if (ch === '"') quoted = !quoted;
+		else if (!quoted && ch === ";") {
+			parts.push(line.slice(partStart, i));
+			partStart = i + 1;
+		} else if (!quoted && ch === ":") {
+			parts.push(line.slice(partStart, i));
+			sepIdx = i;
+			break;
+		}
 	}
-	const key = line.slice(0, sepIdx);
+	if (sepIdx < 0) return null;
 	const value = line.slice(sepIdx + 1);
-	const [name, ...paramPairs] = key.split(";");
+	const [name, ...paramPairs] = parts;
 	const params: Record<string, string | undefined> = {};
-	for (const p of paramPairs) {
-		const [k, v] = p.split("=");
-		if (k) {
-			params[k.toUpperCase()] = v;
+	for (const pair of paramPairs) {
+		const eq = pair.indexOf("=");
+		const key = eq < 0 ? pair : pair.slice(0, eq);
+		const paramValue = eq < 0 ? undefined : pair.slice(eq + 1);
+		if (key) {
+			params[key.toUpperCase()] =
+				paramValue?.startsWith('"') && paramValue.endsWith('"')
+					? paramValue.slice(1, -1)
+					: paramValue;
 		}
 	}
 	return {

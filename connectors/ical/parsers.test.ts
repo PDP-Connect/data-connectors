@@ -115,6 +115,25 @@ test("parseIcsLine: ORGANIZER;CN=Boss:mailto:boss@x.com → params.CN preserved"
 	assert.equal(got.value, "mailto:boss@x.com");
 });
 
+test("parseIcs preserves an attendee with delimiters inside a quoted common name", () => {
+	const source = [
+		"BEGIN:VCALENDAR",
+		"BEGIN:VEVENT",
+		"UID:fixture",
+		'ATTENDEE;CN="Example: Planning; Group=West";ROLE=REQ-PARTICIPANT:mailto:fixture@example.invalid',
+		"END:VEVENT",
+		"END:VCALENDAR",
+	].join("\r\n");
+	const [event] = parseIcs(source, "Fixture Calendar");
+	assert.deepEqual(event?.attendees, [
+		{
+			email: "fixture@example.invalid",
+			name: "Example: Planning; Group=West",
+			role: "REQ-PARTICIPANT",
+		},
+	]);
+});
+
 test("parseIcsLine: line without ':' → null", () => {
 	assert.equal(parseIcsLine("BEGIN_NOT_A_PROPERTY"), null);
 });
