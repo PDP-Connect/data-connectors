@@ -174,6 +174,23 @@ test("thread activity is judged by the latest reply, not the parent's own time",
 	assert.equal(slackTsSeconds("nope"), 0);
 });
 
+test("a reply timestamp exactly on the incremental cutoff keeps its thread eligible", () => {
+	const message = {
+		ts: "100.000000",
+		reply_count: 1,
+		latest_reply: "200.000000",
+	} as Parameters<typeof threadActiveSince>[0];
+	assert.equal(threadActiveSince(message, 200), true);
+	assert.equal(threadActiveSince(message, 200.000001), false);
+});
+
+test("an unmeasured latest reply does not put a thread into a positive time window", () => {
+	const message = { ts: "100.000000", reply_count: 1 } as Parameters<
+		typeof threadActiveSince
+	>[0];
+	assert.equal(threadActiveSince(message, 100), false);
+});
+
 test("the workspace record comes from auth.test and team.info, and needs a team id", () => {
 	const auth = authTestSchema.parse(fixture("auth.test"));
 	const info = teamInfoSchema.parse(fixture("team.info"));
