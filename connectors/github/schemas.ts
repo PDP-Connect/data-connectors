@@ -28,7 +28,8 @@ const urlSchema = pdppSafeText.max(4096).nullable();
 const loginSchema = pdppSafeText.max(80).nullable();
 const titleSchema = pdppSafeText.max(500).nullable();
 const descriptionSchema = pdppSafeText.max(65_000).nullable();
-const bodySchema = pdppSafeText.max(65_536).nullable(); // GitHub issue and pull request body limit
+// GitHub allows 65,536 characters in a body. Zod counts code points, so an astral character is one.
+const bodySchema = pdppSafeText.max(65_536).nullable();
 const numericSchema = z.number().int().nullable();
 const booleanSchema = z.boolean();
 const booleanNullableSchema = z.boolean().nullable();

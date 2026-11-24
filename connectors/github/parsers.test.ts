@@ -530,8 +530,8 @@ test("pullRequestRecord: merges detail fields when present", () => {
 	assert.equal(r.repository_id, "1001");
 });
 
-test("issue and pull request schemas accept the full body and reject an over-limit body", () => {
-	const body = "x".repeat(65_536);
+test("issue and pull request schemas accept a full 65,536-character body, astral characters included, and enforce the ceiling", () => {
+	const body = `${"a".repeat(65_535)}😀`;
 	const issue = issueRecord({ ...ISSUE_FIXTURE, body });
 	const pull = pullRequestRecord(
 		{ ...PR_FIXTURE, body },
@@ -540,7 +540,7 @@ test("issue and pull request schemas accept the full body and reject an over-lim
 	);
 	assert.equal(issuesSchema.parse(issue).body, body);
 	assert.equal(pullRequestsSchema.parse(pull).body, body);
-	const overLimit = `${body}x`;
+	const overLimit = `${"😀".repeat(65_536)}a`;
 	assert.equal(
 		issuesSchema.safeParse({ ...issue, body: overLimit }).success,
 		false,
@@ -561,15 +561,15 @@ test("gistRecord: maps files and counts", () => {
 	assert.equal(r.files_total_count, 2);
 });
 
-test("gistRecord: truncates at 10 files", () => {
+test("gistRecord: retains all 11 returned files", () => {
 	const files: Record<string, { filename: string; size: number }> = {};
-	for (let i = 0; i < 15; i += 1) {
+	for (let i = 0; i < 11; i += 1) {
 		files[`f${i}.txt`] = { filename: `f${i}.txt`, size: i };
 	}
 	const r = gistRecord({ id: "x", public: true, files });
-	assert.equal((r.files as unknown[]).length, 10);
-	assert.equal(r.files_truncated, true);
-	assert.equal(r.files_total_count, 15);
+	assert.equal((r.files as unknown[]).length, 11);
+	assert.equal(r.files_truncated, false);
+	assert.equal(r.files_total_count, 11);
 });
 
 // ─── laterIso / isBeforeSince / isAtOrAfterUntil ─────────────────────────
