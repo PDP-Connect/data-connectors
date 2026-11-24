@@ -26,6 +26,7 @@ import type { BrowserContext, Page } from "playwright";
 import {
 	AMAZON_LOGIN_FIELDS,
 	ensureAmazonSession,
+	pageShowsAmazonAccessRestriction,
 } from "../../packages/polyfill-connectors/src/auto-login/amazon.ts";
 import { resolveLoginCredentials } from "../../packages/polyfill-connectors/src/auto-login/login-credentials.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -418,7 +419,13 @@ async function deepSessionCheck(
 		.locator(AMAZON_SESSION_READY_SELECTOR)
 		.first()
 		.waitFor({ state: "attached", timeout: DEEP_PROBE_WAIT_MS })
-		.catch((cause: unknown) => {
+		.catch(async (cause: unknown) => {
+			if (await pageShowsAmazonAccessRestriction(page)) {
+				throw new Error(
+					"amazon_access_restricted: Amazon blocked this automated browser. Collection stopped.",
+					{ cause },
+				);
+			}
 			throw new Error(
 				`amazon_session_orders_readiness_timeout after ${String(DEEP_PROBE_WAIT_MS)}ms`,
 				{ cause },
