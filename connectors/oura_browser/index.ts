@@ -434,7 +434,7 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
       const failures = new Set(result.failedWindows.flatMap(window => window.failures));
       const onlySignIn = failures.size === 1 && failures.has("sign_in_required");
       const onlyAccess = failures.size === 1 && failures.has("access_denied");
-      const recoveryHint = onlySignIn ? { action: "refresh_credentials" as const, retryable: false }
+      const recoveryHint = () => onlySignIn ? { action: "refresh_credentials" as const, retryable: false }
         : onlyAccess ? { action: "not_retriable" as const, retryable: false }
         : { action: "retry_by_runtime" as const, retryable: true };
       const base = `Oura ${stream} did not prove complete coverage of ${startDate} to ${endDate}.`;
@@ -444,11 +444,11 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
       await ctx.emit({
         type: "SKIP_RESULT", stream, reason: "inventory_not_proven_complete",
         message,
-        recovery_hint: recoveryHint,
+        recovery_hint: recoveryHint(),
       });
       // Desktop needs its runtime failure latch set before DONE; PageShim
       // derives Partial directly from the inventory skip above.
-      if (ctx.browserSurface) await ctx.reportStreamFailure?.(stream, message, { retryable: recoveryHint.retryable, recoveryHint });
+      if (ctx.browserSurface) await ctx.reportStreamFailure?.(stream, message, { retryable: recoveryHint().retryable, recoveryHint: recoveryHint() });
       continue;
     }
     await ctx.emit({
