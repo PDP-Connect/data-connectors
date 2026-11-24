@@ -9,7 +9,7 @@
 	},
 	"connector_key": "slack-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Slack (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -418,7 +418,7 @@
 		},
 		{
 			"name": "messages",
-			"description": "Messages in the conversations you belong to, read from the same Web API the Slack web client uses: the lookback window on a conversation's first read, then everything since its checkpoint. Thread replies are read for every thread that got a reply in that time, including replies to older parents. Thread structure preserved via thread_ts.",
+			"description": "Messages in the conversations you belong to, read from the same Web API the Slack web client uses: the whole history on a conversation's first read (an owner can set a shorter lookback), then everything since its checkpoint. Thread replies are read for every thread that got a reply in that time, including replies to older parents. Thread structure preserved via thread_ts.",
 			"display": {
 				"label": "Your Slack messages",
 				"detail": "Channel, author, timestamp, text, thread parent, reply count + reply_user_ids (who replied), edited-at, client_msg_id (dedup), subtype (joins/leaves/bot/tombstone), pinned status, block-kit metadata."

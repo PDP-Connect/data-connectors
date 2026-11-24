@@ -1298,7 +1298,7 @@ test("SLACK_WORKSPACE picks a workspace by subdomain, id, name or URL", () => {
 	assert.deepEqual(selectTeams([TEAM, other], "nobody"), []);
 });
 
-test("options come from SLACK_* variables with the archive profile's defaults", () => {
+test("options default to full history and preserve explicit Slack limits", async () => {
 	const saved = { ...process.env };
 	try {
 		for (const key of Object.keys(process.env)) {
@@ -1306,23 +1306,67 @@ test("options come from SLACK_* variables with the archive profile's defaults", 
 				delete process.env[key];
 			}
 		}
-		assert.deepEqual(readSlackBrowserOptions(), DEFAULT_OPTIONS);
+		const defaults = readSlackBrowserOptions();
+		assert.deepEqual(defaults, { ...DEFAULT_OPTIONS, lookbackDays: 0, maxBackfillDays: 0 });
+
+		const channel = "C0123456789";
+		const historicalApi = (ts: string) => fakeApi((call) =>
+			call.method === "conversations.history" && call.params.channel === channel
+				? {
+						ok: true,
+						messages: Number(ts) >= Number(call.params.oldest ?? 0)
+							? [{ type: "message", ts, text: "Synthetic historical message" }]
+							: [],
+						has_more: false,
+						response_metadata: { next_cursor: "" },
+					}
+				: undefined,
+		);
+		const oldTs = `${FIXTURE_NOW_SECONDS - 400 * DAY}.000100`;
+		const first = harness(["messages"]);
+		await run(first, historicalApi(oldTs), defaults);
+		assert.ok(first.of("messages").some((message) => message.id === `${channel}:${oldTs}`));
+
+		const cursor = FIXTURE_NOW_SECONDS - 200 * DAY;
+		const gapTs = `${cursor + DAY}.000100`;
+		const resumed = harness(["messages"], { state: { messages: {
+			channel_last_ts: { [channel]: `${cursor}.000100` },
+			floor_ts: 0,
+			format: 1,
+			replies_checked_ts: cursor,
+		} } });
+		const resumedApi = await run(resumed, historicalApi(gapTs), defaults);
+		assert.equal(historyCalls(resumedApi, channel)[0]?.params.oldest, String(cursor - 7 * DAY));
+		assert.ok(resumed.of("messages").some((message) => message.id === `${channel}:${gapTs}`));
+		assert.ok(!resumed.progress.some((p) => p.message.includes("SLACK_MAX_BACKFILL_DAYS")));
+
+		// A checkpoint written under the old 7-day floor does not cover full history,
+		// so the first run after the change reads the conversation from the start once.
+		const sevenDayState = harness(["messages"], { state: { messages: {
+			channel_last_ts: { [channel]: `${cursor}.000100` },
+			floor_ts: FIXTURE_NOW_SECONDS - 7 * DAY,
+			format: 1,
+			replies_checked_ts: cursor,
+		} } });
+		const sevenDayApi = await run(sevenDayState, historicalApi(oldTs), defaults);
+		assert.equal(historyCalls(sevenDayApi, channel)[0]?.params.oldest, undefined);
+		assert.ok(sevenDayState.of("messages").some((message) => message.id === `${channel}:${oldTs}`));
 		process.env.SLACK_LOOKBACK_DAYS = "30";
 		process.env.SLACK_CHANNEL_TYPES = "public,IM,bogus";
 		process.env.SLACK_CHANNEL_ALLOWLIST = "general, eng-alerts";
 		process.env.SLACK_WORKSPACE = " acme ";
-		process.env.SLACK_MAX_BACKFILL_DAYS = "0";
+		process.env.SLACK_MAX_BACKFILL_DAYS = "90";
 		assert.deepEqual(readSlackBrowserOptions(), {
 			channelAllowlist: ["general", "eng-alerts"],
 			channelTypes: ["public", "im"],
 			lookbackDays: 30,
-			maxBackfillDays: 0,
+			maxBackfillDays: 90,
 			workspace: "acme",
 		});
 		process.env.SLACK_LOOKBACK_DAYS = "-3";
 		process.env.SLACK_MAX_BACKFILL_DAYS = "-1";
-		assert.equal(readSlackBrowserOptions().lookbackDays, 7);
-		assert.equal(readSlackBrowserOptions().maxBackfillDays, 90);
+		assert.equal(readSlackBrowserOptions().lookbackDays, 0);
+		assert.equal(readSlackBrowserOptions().maxBackfillDays, 0);
 	} finally {
 		for (const key of Object.keys(process.env)) {
 			if (key.startsWith("SLACK_")) {
@@ -1707,7 +1751,7 @@ test("the catch-up is clamped only by the max backfill and the requested start",
 		},
 	};
 	const clamped = harness(["messages"], { state });
-	const api = await run(clamped);
+	const api = await run(clamped, fakeApi(), { maxBackfillDays: 90 });
 	assert.equal(
 		historyCalls(api, "C0123456789")[0]?.params.oldest,
 		String(FIXTURE_NOW_SECONDS - 90 * DAY),
