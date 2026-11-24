@@ -320,3 +320,25 @@ test("FORMAT-CONFORMANCE: memory stays bounded (streaming, not whole-document) o
 		await rm(dir, { recursive: true, force: true });
 	}
 });
+
+test("XML tag parsing waits for a quoted attribute and closing delimiter", async () => {
+	const { nextTag, parseAttrs } = await import("./parsers.ts");
+	const partial = '<Record memo="synthetic >';
+	assert.equal(nextTag(partial, 0), null);
+	const complete = partial + ' text"/>';
+	const tag = nextTag(complete, 0);
+	assert.equal(tag?.end, complete.length);
+	assert.equal(tag?.selfClosing, true);
+	assert.deepEqual(parseAttrs(tag?.attrs ?? null), {
+		memo: "synthetic > text",
+	});
+});
+
+test("XML attribute decoding declines the whole element when one value is unreadable", async () => {
+	const { parseAttrs } = await import("./parsers.ts");
+	assert.equal(parseAttrs('label="synthetic" value="&#0;"'), null);
+	assert.deepEqual(parseAttrs('label="synthetic" value="&#65;"'), {
+		label: "synthetic",
+		value: "A",
+	});
+});
