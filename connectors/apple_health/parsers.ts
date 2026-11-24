@@ -601,7 +601,8 @@ export function isoDate(v: string | undefined): string | null {
 	// Apple Health dates look like "2024-06-05 13:45:22 -0700"
 	// JavaScript can roll an impossible local date into the following month.
 	// Validate its calendar fields before applying the source UTC offset.
-	const calendarDate = APPLE_HEALTH_CALENDAR_DATE_RE.exec(v);
+	const text = v.trim();
+	const calendarDate = APPLE_HEALTH_CALENDAR_DATE_RE.exec(text);
 	if (calendarDate) {
 		const year = Number(calendarDate[1]);
 		const month = Number(calendarDate[2]) - 1;
@@ -616,7 +617,7 @@ export function isoDate(v: string | undefined): string | null {
 			return null;
 		}
 	}
-	const d = new Date(v);
+	const d = new Date(text);
 	if (Number.isNaN(d.getTime())) {
 		return null;
 	}

@@ -41,6 +41,13 @@ const ENTRYPOINT = connectorEntrypoint("apple_health");
 test("FORMAT-CONFORMANCE: invalid calendar dates do not become valid record timestamps", () => {
 	assert.equal(isoDate("2031-02-29 10:00:00 +0000"), null);
 	assert.equal(isoDate("2032-02-30 10:00:00 +0000"), null);
+	// Surrounding whitespace must not slip an impossible date past the check.
+	assert.equal(isoDate(" 2031-02-29 10:00:00 +0000"), null);
+	assert.equal(isoDate("2031-02-29 10:00:00 +0000 "), null);
+	assert.equal(
+		isoDate(" 2032-02-29 23:30:00 -0700"),
+		"2032-03-01T06:30:00.000Z",
+	);
 	assert.equal(
 		isoDate("2032-02-29 23:30:00 -0700"),
 		"2032-03-01T06:30:00.000Z",
