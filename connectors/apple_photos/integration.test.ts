@@ -17,6 +17,7 @@ import {
 	buildExportDirFixture,
 } from "./fixtures.ts";
 import { photosSchema } from "./schemas.ts";
+import { walkDir } from "./walk.ts";
 
 const ENTRYPOINT = connectorEntrypoint("apple_photos");
 
@@ -83,6 +84,72 @@ function runApplePhotos(
 		},
 	});
 }
+
+test("apple_photos walker skips a vanished supported photo and keeps the remaining photo", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: "vanished.jpg", contents: Buffer.from("fictional") },
+		{ relPath: "later.jpg", contents: Buffer.from("fixture") },
+	]);
+	try {
+		const missing = Object.assign(new Error("synthetic missing file"), { code: "ENOENT" });
+		const remaining = { mtime: new Date("2024-06-05T13:45:22.000Z"), size: 7 };
+		const seen: string[] = [];
+		const paths: string[] = [];
+		const unsupported = new Map<string, number>();
+		for await (const file of walkDir(dir, unsupported, undefined, async (path) => {
+			seen.push(path);
+			if (path === join(dir, "vanished.jpg")) throw missing;
+			return remaining;
+		})) {
+			paths.push(file.path);
+		}
+		assert.deepEqual(seen.sort(), [join(dir, "later.jpg"), join(dir, "vanished.jpg")]);
+		assert.deepEqual(paths, [join(dir, "later.jpg")]);
+		assert.equal(unsupported.size, 0);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos walker does not count vanished unsupported files after a cursor", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: "vanished.txt", contents: Buffer.from("fictional") },
+		{ relPath: "later.jpg", contents: Buffer.from("fixture") },
+	]);
+	try {
+		const missing = Object.assign(new Error("synthetic missing file"), { code: "ENOENT" });
+		const remaining = { mtime: new Date("2024-06-05T13:45:22.000Z"), size: 7 };
+		const seen: string[] = [];
+		const paths: string[] = [];
+		const unsupported = new Map<string, number>();
+		for await (const file of walkDir(dir, unsupported, "2024-06-01T00:00:00.000Z", async (path) => {
+			seen.push(path);
+			if (path === join(dir, "vanished.txt")) throw missing;
+			return remaining;
+		})) {
+			paths.push(file.path);
+		}
+		assert.deepEqual(seen.sort(), [join(dir, "later.jpg"), join(dir, "vanished.txt")]);
+		assert.deepEqual(paths, [join(dir, "later.jpg")]);
+		assert.equal(unsupported.size, 0);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos walker rethrows a supported-file permission failure", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: "blocked.jpg", contents: Buffer.from("fictional") },
+	]);
+	try {
+		const denied = Object.assign(new Error("synthetic permission failure"), { code: "EACCES" });
+		const unsupported = new Map<string, number>();
+		const files = walkDir(dir, unsupported, undefined, async () => { throw denied; });
+		await assert.rejects(files.next(), (error: unknown) => error === denied);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
 
 test("apple_photos SKIP_RESULTs export_not_found when the export dir does not exist", async () => {
 	const nonexistentDir = join(
