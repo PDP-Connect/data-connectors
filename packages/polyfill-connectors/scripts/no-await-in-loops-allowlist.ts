@@ -280,7 +280,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/amazon/integration.test.ts",
-			line: 493,
+			line: 494,
 			column: 19,
 			category: "test_assertion_sequencing",
 			note: "processListOrder(): test drives/asserts an ordered per-case side effect",
