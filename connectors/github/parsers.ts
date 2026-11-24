@@ -27,7 +27,6 @@ import type {
 
 export const API_BASE = "https://api.github.com";
 const NEXT_LINK_PATTERN = /<([^>]+)>; rel="next"/;
-const BODY_MAX_CHARS = 20_000;
 const GIST_FILES_CAP = 10;
 
 // ─── Link header parsing ────────────────────────────────────────────────
@@ -95,7 +94,7 @@ export function repoFullFromUrl(url: string | null | undefined): string | null {
 }
 
 export function truncateBody(body: string | null | undefined): string | null {
-	return typeof body === "string" ? body.slice(0, BODY_MAX_CHARS) : null;
+	return typeof body === "string" ? body : null;
 }
 
 // ─── Record builders ────────────────────────────────────────────────────
