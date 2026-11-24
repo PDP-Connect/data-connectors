@@ -8,7 +8,7 @@ import type {
 	InteractionRequest,
 	InteractionResponse,
 } from "../connector-runtime.ts";
-import { ensureAmazonSession } from "./amazon.ts";
+import { ensureAmazonSession, isAmazonAccessRestrictedText } from "./amazon.ts";
 
 const ORDERS_URL = "https://www.amazon.com/your-orders/orders";
 const SIGNIN_URL = "https://www.amazon.com/ap/signin";
@@ -60,8 +60,10 @@ function makeInteractionHarness(
  */
 function makeChallengePage({
 	becomeLoggedInAfterGoto,
+	pageText = "",
 }: {
 	becomeLoggedInAfterGoto: number;
+	pageText?: string;
 }): {
 	gotoCalls: string[];
 	markLoggedIn: () => void;
@@ -134,6 +136,12 @@ function makeChallengePage({
 			return Promise.resolve(null);
 		},
 		locator(_selector: string): Locator {
+			if (_selector === "body") {
+				return {
+					...emptyLocator,
+					innerText: () => Promise.resolve(pageText),
+				} as Locator;
+			}
 			if (_selector.includes("orderTypeMenuContainer")) {
 				return emptyLocator as Locator;
 			}
@@ -387,6 +395,49 @@ test("ensureAmazonSession emits manual_action when the sign-in form is replaced 
 		);
 		// Re-probe navigated to the orders page after the manual action.
 		assert.ok(gotoCalls.includes(ORDERS_URL));
+	});
+});
+
+test("Amazon access restriction requires both diagnostic phrases", () => {
+	assert.equal(
+		isAmazonAccessRestrictedText("Access Restricted: Unauthorized AI Agent"),
+		true,
+	);
+	assert.equal(
+		isAmazonAccessRestrictedText("Access restricted: unauthorized agent"),
+		true,
+	);
+	assert.equal(isAmazonAccessRestrictedText("Access restricted"), false);
+	assert.equal(
+		isAmazonAccessRestrictedText("Sign in to see your orders"),
+		false,
+	);
+	assert.equal(isAmazonAccessRestrictedText("Your orders"), false);
+});
+
+test("ensureAmazonSession reports an explicit automated-browser block without challenge advice", async () => {
+	await withClearedStreamingEnv(async () => {
+		const { page } = makeChallengePage({
+			becomeLoggedInAfterGoto: Number.POSITIVE_INFINITY,
+			pageText: "Access Restricted: Unauthorized AI Agent",
+		});
+		const interactions = makeInteractionHarness();
+		await assert.rejects(
+			ensureAmazonSession({
+				context: makeContext(),
+				credentials: AMAZON_TEST_CREDENTIALS,
+				fieldTimeoutMs: 1,
+				page,
+				sendInteraction: interactions.sendInteraction,
+			}),
+			/amazon_login_unexpected_ui/u,
+		);
+		assert.equal(interactions.requests.length, 1);
+		assert.equal(interactions.requests[0]?.kind, "manual_action");
+		assert.equal(
+			interactions.requests[0]?.message,
+			"Amazon blocked this automated browser (Access restricted).",
+		);
 	});
 });
 

@@ -229,6 +229,25 @@ async function probeAmazonOrdersPageInPlace(page: Page): Promise<boolean> {
  * not an instruction to end the run. The message never interpolates the stored
  * credentials, and the sign-in URL handed to the operator carries no secrets.
  */
+export function isAmazonAccessRestrictedText(text: string): boolean {
+	return (
+		/access restricted/i.test(text) &&
+		/unauthorized\s+(?:AI\s+)?agent/i.test(text)
+	);
+}
+
+/** Read bounded visible text for diagnosis only. A failed read gives no new diagnosis. */
+export async function pageShowsAmazonAccessRestriction(
+	page: Pick<Page, "locator">,
+): Promise<boolean> {
+	try {
+		const text = await page.locator("body").innerText({ timeout: 1_000 });
+		return isAmazonAccessRestrictedText(text.slice(0, 500));
+	} catch {
+		return false;
+	}
+}
+
 async function requestManualLoginForChallenge({
 	assist,
 	capture,
@@ -252,13 +271,14 @@ async function requestManualLoginForChallenge({
 		ordersUrl,
 		...getManualHandoffOptions({ assist, capture, completeAssistance }),
 		handoffReason: "captcha",
-		message:
-			`Amazon did not render the expected sign-in form (${reason}). ` +
-			"This usually means Amazon is showing a CAPTCHA/puzzle or an approve-on-device challenge to the automated browser. " +
-			(assist && completeAssistance
-				? "Complete Amazon sign-in in the secure browser. The import will continue automatically when sign-in is detected. "
-				: "If this run opened a visible browser, complete Amazon sign-in there and respond success. ") +
-			"If it is headless, cancel this interaction and rerun with PDPP_BROWSER_HEADLESS=0 (or unset it) on a browser-capable deployment.",
+		message: (await pageShowsAmazonAccessRestriction(page))
+			? "Amazon blocked this automated browser (Access restricted)."
+			: `Amazon did not render the expected sign-in form (${reason}). ` +
+				"This usually means Amazon is showing a CAPTCHA/puzzle or an approve-on-device challenge to the automated browser. " +
+				(assist && completeAssistance
+					? "Complete Amazon sign-in in the secure browser. The import will continue automatically when sign-in is detected. "
+					: "If this run opened a visible browser, complete Amazon sign-in there and respond success. ") +
+				"If it is headless, cancel this interaction and rerun with PDPP_BROWSER_HEADLESS=0 (or unset it) on a browser-capable deployment.",
 		page,
 		sendInteraction,
 	});
