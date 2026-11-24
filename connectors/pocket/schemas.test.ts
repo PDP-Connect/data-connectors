@@ -78,6 +78,33 @@ test("items schema rejects a non-URL url (raw title leaked into url field)", () 
 	);
 });
 
+test("items schema preserves omitted status and URL in archived imports", () => {
+	const { status: _status, url: _url, ...withoutMetadata } = ITEM_RECORD;
+	const item = itemsSchema.parse(withoutMetadata);
+	assert.equal(Object.hasOwn(item, "status"), false);
+	assert.equal(Object.hasOwn(item, "url"), false);
+});
+
+test("items schema preserves observed zero counts and rejects invalid counts", () => {
+	const empty = itemsSchema.parse({
+		...ITEM_RECORD,
+		word_count: 0,
+		reading_time_minutes: 0,
+	});
+	assert.equal(empty.word_count, 0);
+	assert.equal(empty.reading_time_minutes, 0);
+	for (const field of ["word_count", "reading_time_minutes"] as const) {
+		for (const value of [-1, 0.5]) {
+			const result = itemsSchema.safeParse({ ...ITEM_RECORD, [field]: value });
+			assert.equal(result.success, false);
+			assert.deepEqual(
+				result.error?.issues.map((issue) => issue.path),
+				[[field]],
+			);
+		}
+	}
+});
+
 test("validateRecord routes by stream and passes unknown streams through", () => {
 	assert.equal(validateRecord("items", ITEM_RECORD).ok, true);
 	assert.equal(validateRecord("highlights", { id: "1" }).ok, true);
