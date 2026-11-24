@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import type { Stats } from "node:fs";
+import type { Dir, Stats } from "node:fs";
 import { opendir, stat } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { isBeforeCursor, SUPPORTED_EXTENSIONS } from "./parsers.ts";
@@ -37,8 +37,27 @@ export async function* walkDir(
 	unsupported: Map<string, number>,
 	since: string | undefined,
 	statFile: (path: string) => Promise<Pick<Stats, "mtime" | "size">> = stat,
+	openDir: (path: string) => Promise<Dir> = opendir,
 ): AsyncGenerator<DiscoveredFile> {
-	const handle = await opendir(dir);
+	// The root must open; a failure there is the caller's error to report.
+	yield* walkOpened(
+		await openDir(dir),
+		dir,
+		unsupported,
+		since,
+		statFile,
+		openDir,
+	);
+}
+
+async function* walkOpened(
+	handle: Dir,
+	dir: string,
+	unsupported: Map<string, number>,
+	since: string | undefined,
+	statFile: (path: string) => Promise<Pick<Stats, "mtime" | "size">>,
+	openDir: (path: string) => Promise<Dir>,
+): AsyncGenerator<DiscoveredFile> {
 	for await (const entry of handle) {
 		const entryPath = join(dir, entry.name);
 		// macOS keeps these as directories as well as files; skip both.
@@ -46,7 +65,22 @@ export async function* walkDir(
 			continue;
 		}
 		if (entry.isDirectory()) {
-			yield* walkDir(entryPath, unsupported, since, statFile);
+			let child: Dir;
+			try {
+				child = await openDir(entryPath);
+			} catch (error) {
+				// A folder removed mid-walk is no longer there to read.
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+				throw error;
+			}
+			yield* walkOpened(
+				child,
+				entryPath,
+				unsupported,
+				since,
+				statFile,
+				openDir,
+			);
 			continue;
 		}
 		if (!entry.isFile()) {

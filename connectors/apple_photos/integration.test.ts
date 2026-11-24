@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { opendir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -132,6 +132,49 @@ test("apple_photos walker does not count vanished unsupported files after a curs
 		assert.deepEqual(seen.sort(), [join(dir, "later.jpg"), join(dir, "vanished.txt")]);
 		assert.deepEqual(paths, [join(dir, "later.jpg")]);
 		assert.equal(unsupported.size, 0);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos walker skips a folder that vanishes before it opens and keeps its siblings", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: "gone/inside.jpg", contents: Buffer.from("fictional") },
+		{ relPath: "later.jpg", contents: Buffer.from("fixture") },
+	]);
+	try {
+		const missing = Object.assign(new Error("synthetic missing folder"), { code: "ENOENT" });
+		const remaining = { mtime: new Date("2024-06-05T13:45:22.000Z"), size: 7 };
+		const opened: string[] = [];
+		const paths: string[] = [];
+		const open = async (path: string) => {
+			opened.push(path);
+			if (path === join(dir, "gone")) throw missing;
+			return opendir(path);
+		};
+		for await (const file of walkDir(dir, new Map(), undefined, async () => remaining, open)) {
+			paths.push(file.path);
+		}
+		assert.deepEqual(opened.sort(), [dir, join(dir, "gone")].sort());
+		assert.deepEqual(paths, [join(dir, "later.jpg")]);
+		// The root still fails closed, and so does any other folder error.
+		await assert.rejects(
+			walkDir(dir, new Map(), undefined, async () => remaining, async () => { throw missing; }).next(),
+			(error: unknown) => error === missing,
+		);
+		const denied = Object.assign(new Error("synthetic permission failure"), { code: "EACCES" });
+		await assert.rejects(
+			(async () => {
+				const failing = async (path: string) => {
+					if (path === join(dir, "gone")) throw denied;
+					return opendir(path);
+				};
+				for await (const _ of walkDir(dir, new Map(), undefined, async () => remaining, failing)) {
+					// drain
+				}
+			})(),
+			(error: unknown) => error === denied,
+		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
