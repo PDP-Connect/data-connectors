@@ -2,12 +2,16 @@
 const ORDER_COMPLETE = /^(?:refunded|refund issued|return complete)[.!]?$/i;
 const ITEM_COMPLETE =
 	/\b(?:refunded|refund issued|return complete|returned)\b/i;
-// A negation before the phrase, with at most one word between ("Not returned",
-// "No refund issued", "Not yet refunded"), means it has not happened.
+// These item labels describe an incomplete return or an adjustment, not a
+// completed item return. They also override a conflicting order label.
 const NEGATED_COMPLETE =
-	/\b(?:not|no|never)\s+(?:\w+\s+)?(?:refunded|refund issued|return complete|returned)\b/i;
-// Eligibility controls say what a buyer may still do, not what happened.
-const ELIGIBILITY = /^\s*return (?:or replace items|window)/i;
+	/\b(?:not|no|never)\s+(?:\w+\s+)?(?:refunded|refund issued|return complete|returned)\b|\b(?:not|never)\s+(?:been\s+)?picked up and returned\b/i;
+const FUTURE_COMPLETE =
+	/\b(?:will|may|can|could|should|would|to)\s+be\s+(?:returned|refunded)\b|\brefund\s+(?:will|may|can|could|should|would|to)\s+be\s+issued\b/i;
+const SHIPPING_ONLY =
+	/\b(?:shipping|postage)(?:\s+(?:fee|charge|cost))?\s+only\b|\b(?:refunded|refund issued)(?:\s+for)?\s+(?:the\s+)?(?:shipping|postage)\b/i;
+const PENDING_ITEM =
+	/\b(?:return|refund)\s+(?:requested|started|pending|in progress|scheduled|initiated|authorized)\b/i;
 
 function statusText(value: string | null | undefined): string | null {
 	const text = value?.trim();
@@ -25,18 +29,15 @@ export function deriveItemReturnState({
 }): { returned: boolean; refund_status: string | null } {
 	const item = statusText(itemRefundText);
 	const order = statusText(orderStatus);
-	if (item && ITEM_COMPLETE.test(item) && !NEGATED_COMPLETE.test(item)) {
+	const itemIncomplete = item !== null &&
+		(NEGATED_COMPLETE.test(item) || FUTURE_COMPLETE.test(item) || SHIPPING_ONLY.test(item));
+	if (item && ITEM_COMPLETE.test(item) && !itemIncomplete) {
 		return { returned: true, refund_status: item };
 	}
-	const itemNegated = item !== null && NEGATED_COMPLETE.test(item);
-	// An explicit "Not returned" on the item outranks the order-level label.
-	if (!itemNegated && itemCount === 1 && order && ORDER_COMPLETE.test(order)) {
+	const itemPending = item !== null && PENDING_ITEM.test(item);
+	// An attributable order label is fallback evidence, not an override for an item status.
+	if (!itemIncomplete && !itemPending && itemCount === 1 && order && ORDER_COMPLETE.test(order)) {
 		return { returned: true, refund_status: order };
 	}
-	const itemInformative = item && !ELIGIBILITY.test(item) ? item : null;
-	return {
-		returned: false,
-		refund_status:
-			itemCount === 1 ? (item ?? order) : (itemInformative ?? order ?? item),
-	};
+	return { returned: false, refund_status: item ?? (itemCount === 1 ? order : null) };
 }

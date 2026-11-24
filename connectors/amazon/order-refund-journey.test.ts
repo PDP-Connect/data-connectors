@@ -38,7 +38,7 @@ function recording() {
 for (const [name, returned, refund, count] of [
 	["kept", false, "Return or replace items", 1],
 	["refunded", true, "Refunded", 1],
-	["multi-refunded", false, "Refunded", 3],
+	["multi-refunded", false, null, 3],
 ] as const) {
 	test(`refund evidence reaches emitted order items: ${name}`, async () => {
 		const { order, detail } = fixture(name);

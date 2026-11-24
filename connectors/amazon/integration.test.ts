@@ -355,7 +355,7 @@ test("emitOrderAndItems: refunded single-item order marks the item returned", as
 	assert.equal(items[0]?.data.refund_status, "Refunded");
 });
 
-test("emitOrderAndItems: refunded multi-item order keeps status without marking individual returns", async () => {
+test("emitOrderAndItems: refunded multi-item order marks no item and lends it no label", async () => {
 	const { deps, emitted } = makeRecordingDeps({ wantsOrders: false });
 	const listOrder = makeListOrder({
 		orderId: "fictional-multi",
@@ -371,11 +371,12 @@ test("emitOrderAndItems: refunded multi-item order keeps status without marking 
 	assert.deepEqual(
 		items.map(({ data }) => [data.returned, data.refund_status]),
 		[
-			[false, "Refunded"],
-			[false, "Refunded"],
-			[false, "Refunded"],
+			[false, null],
+			[false, null],
+			[false, null],
 		],
 	);
+	// The order-level status stays on the order record, not on its items.
 });
 
 test("emitOrderAndItems: both streams disabled → nothing emitted", async () => {

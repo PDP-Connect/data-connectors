@@ -55,13 +55,14 @@ const cases = [
 		returned: false,
 		refund: "Cancelled",
 	},
-	// One order status cannot say which of three items was refunded.
+	// One order status cannot say which of three items was refunded, so no
+	// item takes the order label.
 	{
 		name: "multi-refunded",
 		status: "Refunded",
 		count: 3,
 		returned: false,
-		refund: "Refunded",
+		refund: null,
 	},
 ] as const;
 
