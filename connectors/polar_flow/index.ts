@@ -130,7 +130,7 @@ export const PACING: Pacing = {
 	sleep: politeDelay,
 };
 /**
- * A first import reads up to two years of sessions, oldest first, each with a details answer of
+ * A first import reads sessions from the history floor, oldest first (over several runs), each with a details answer of
  * about 500 KB an hour. Heart rate samples are read only for sessions of the last
  * HEART_RATE_RECENT_DAYS days: a remote run starts from scratch every time, so a budget spent on
  * the oldest sessions would leave the newest without samples on every run. The whole run must
