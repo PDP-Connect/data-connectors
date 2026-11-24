@@ -201,6 +201,50 @@ test("dailyRecord: HRV's normal range and zero readings", () => {
 	assert.equal(dailyRecord({ rhr: 50 }), null);
 });
 
+test("planned workouts report unreadable rows without discarding a readable sibling", () => {
+	const results = plannedRecords({
+		entities: [
+			null,
+			{ happenDay: 20250230, idInPlan: 1 },
+			{ happenDay: 20250228 },
+			{ happenDay: 20250228, idInPlan: 2 },
+		],
+		programs: [],
+	});
+	assert.deepEqual(
+		results.map(({ ok }) => ok),
+		[false, false, false, true],
+	);
+	const last = results.at(-1);
+	assert.ok(last?.ok);
+	assert.equal(last.record.id, "2025-02-28::2");
+});
+
+test("a calendar entry with no matching program does not borrow another workout's details", () => {
+	const [result] = plannedRecords({
+		entities: [{ happenDay: 20250228, idInPlan: 1, planId: 8 }],
+		programs: [
+			{
+				idInPlan: 1,
+				planId: 9,
+				name: "Other fixture workout",
+				sportType: 1,
+				trainingLoad: 73,
+			},
+		],
+	});
+	assert.ok(result?.ok);
+	assert.equal(result.record.id, "2025-02-28:8:1");
+	assert.deepEqual(
+		[
+			result.record.name,
+			result.record.sport,
+			result.record.planned_training_load,
+		],
+		[null, null, null],
+	);
+});
+
 test("plannedRecords joins entries to workouts by place in plan and plan id", () => {
 	const value = schedule(fixture("schedule.json"));
 	assert.ok(value);
