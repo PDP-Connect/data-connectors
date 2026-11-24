@@ -9260,7 +9260,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.29",
+				"version": "0.2.30",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -9460,7 +9460,7 @@
 				],
 				"reason_display_messages": {
 					"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
-					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your DoorDash order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up more history.",
+					"doordash_orders_scroll_response_missing": "DoorDash stopped answering partway through your order history, so older orders were not read this time. Nothing was lost; the next run reads the whole history again.",
 					"shape_check_failed": "The data didn't look like we expected"
 				}
 			}
@@ -21184,7 +21184,7 @@
 				},
 				"connector_key": "polar-flow",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/polar-flow",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Polar Flow",
 				"brand": {
 					"icon": "icon.svg",
@@ -21219,7 +21219,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection reads the profile, training sessions, daily activity, sleep and Nightly Recharge that flow.polar.com loads for the owner's own signed-in session, from inside that page; the sleep report comes from sleep-api.flow.polar.com, which accepts the same session from that page. Every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on Polar's own sign-in page. The first run reads from the start of the grant or, without one, the last two years of training sessions, the last 90 days of daily activity and the last year of sleep and Nightly Recharge, oldest first. Each later run re-reads the last days before where the last one stopped (two weeks of sessions, three days of activity, a week of sleep and Nightly Recharge, which devices may sync late) and continues to today. A day whose record did not read cleanly is reported and read once more on the next run. One run reads at most 40 months of sessions, 400 days of activity, 5 years of sleep and 20 four-week windows of Nightly Recharge; the next run continues from there. Requests go one at a time with pauses."
+						"rationale": "Collection reads the profile, training sessions, daily activity, sleep and Nightly Recharge that flow.polar.com loads for the owner's own signed-in session, from inside that page; the sleep report comes from sleep-api.flow.polar.com, which accepts the same session from that page. Every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on Polar's own sign-in page. The first run reads from the start of the grant or, without one, from 1 January 2012 for every stream, oldest first and spread over several runs when the history is long. Each later run re-reads the last days before where the last one stopped (two weeks of sessions, three days of activity, a week of sleep and Nightly Recharge, which devices may sync late) and continues to today. A day whose record did not read cleanly is reported and read once more on the next run. One run reads at most 40 months of sessions, 400 days of activity, 5 years of sleep and 20 four-week windows of Nightly Recharge; the next run continues from there. Requests go one at a time with pauses."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -25155,7 +25155,7 @@
 				},
 				"connector_key": "slack-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-				"version": "0.1.4",
+				"version": "0.1.5",
 				"display_name": "Slack (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25569,7 +25569,7 @@
 					},
 					{
 						"name": "messages",
-						"description": "Messages in the conversations you belong to, read from the same Web API the Slack web client uses: the lookback window on a conversation's first read, then everything since its checkpoint. Thread replies are read for every thread that got a reply in that time, including replies to older parents. Thread structure preserved via thread_ts.",
+						"description": "Messages in the conversations you belong to, read from the same Web API the Slack web client uses: the whole history on a conversation's first read (an owner can set a shorter lookback), then everything since its checkpoint. Thread replies are read for every thread that got a reply in that time, including replies to older parents. Thread structure preserved via thread_ts.",
 						"display": {
 							"label": "Your Slack messages",
 							"detail": "Channel, author, timestamp, text, thread parent, reply count + reply_user_ids (who replied), edited-at, client_msg_id (dedup), subtype (joins/leaves/bot/tombstone), pinned status, block-kit metadata."

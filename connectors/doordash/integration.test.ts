@@ -29,11 +29,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import {
-	collectAllStreams,
-	collectOrderNodes,
-	MAX_SCROLL_PAGES,
-} from "./index.ts";
+import { collectAllStreams, collectOrderNodes } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DoorDashOrderNode } from "./types.ts";
 
@@ -122,11 +118,11 @@ test("collectOrderNodes: single page, no scroll continuation when the scroll yie
 		waitForResponseFn: async (_p, action) => {
 			waitCalls += 1;
 			await action();
-			return waitCalls === 1 ? firstBody : null;
+			return waitCalls === 1 ? firstBody : graphqlEnvelope([]);
 		},
 	});
 	assert.equal(result.nodes.length, 2);
-	assert.equal(result.truncated, false);
+	assert.equal(result.incompletePage, null);
 	assert.equal(
 		waitCalls,
 		2,
@@ -140,7 +136,7 @@ test("collectOrderNodes: dedupes overlapping orderUuid across pages", async () =
 		graphqlEnvelope([makeOrderNode("order-1"), makeOrderNode("order-2")]),
 		// Scroll refetch overlaps order-2, adds order-3.
 		graphqlEnvelope([makeOrderNode("order-2"), makeOrderNode("order-3")]),
-		null,
+		graphqlEnvelope([]),
 	];
 	let call = 0;
 	const result = await collectOrderNodes({
@@ -158,10 +154,10 @@ test("collectOrderNodes: dedupes overlapping orderUuid across pages", async () =
 		result.nodes.map((n) => n.orderUuid),
 		["order-1", "order-2", "order-3"],
 	);
-	assert.equal(result.truncated, false);
+	assert.equal(result.incompletePage, null);
 });
 
-test("collectOrderNodes: hits the page ceiling and reports truncated", async () => {
+test("collectOrderNodes: walks 45 scrolls before an observed empty result", async () => {
 	const page = fakePage();
 	let call = 0;
 	const result = await collectOrderNodes({
@@ -171,13 +167,12 @@ test("collectOrderNodes: hits the page ceiling and reports truncated", async () 
 		waitForResponseFn: async (_p, action) => {
 			await action();
 			call += 1;
-			// Every page (including the ceiling page) returns exactly one NEW
-			// order, so the ceiling — not an empty page — is what stops the walk.
-			return graphqlEnvelope([makeOrderNode(`order-${call}`)]);
+			return graphqlEnvelope(call <= 46 ? [makeOrderNode(`order-${call}`)] : []);
 		},
 	});
-	assert.equal(result.truncated, true);
-	assert.equal(result.nodes.length, MAX_SCROLL_PAGES + 1);
+	assert.equal(result.incompletePage, null);
+	assert.equal(result.nodes.length, 46);
+	assert.equal(call, 47);
 });
 
 test("collectOrderNodes: no response observed at all returns zero nodes, not truncated", async () => {
@@ -192,7 +187,7 @@ test("collectOrderNodes: no response observed at all returns zero nodes, not tru
 		},
 	});
 	assert.equal(result.nodes.length, 0);
-	assert.equal(result.truncated, false);
+	assert.equal(result.incompletePage, null);
 });
 
 // ─── collectAllStreams: scope filtering + RECORD/split behavior ─────────
@@ -212,10 +207,13 @@ test("collectOrderNodes: no response observed at all returns zero nodes, not tru
 async function runCollectAllStreamsWithNodes(
 	nodes: DoorDashOrderNode[],
 	requestedStreams: string[],
+	missingAtCall?: number,
+	priorScrolls: DoorDashOrderNode[][] = [],
 ): Promise<ReturnType<typeof makeRecordingEmit>> {
 	const harness = makeRecordingEmit(validateRecord);
 	const page = fakePage();
 	const ctx = makeCtx(harness, requestedStreams, page);
+	let waitCalls = 0;
 	// Patch collectOrderNodes indirectly by driving collectAllStreams with a
 	// page whose waitForResponse-shaped calls are impossible to hit in a
 	// browserless test; instead, call the two pure halves collectAllStreams
@@ -225,6 +223,8 @@ async function runCollectAllStreamsWithNodes(
 		predicate: (res: { url: () => string }) => boolean,
 	) => {
 		void predicate;
+		waitCalls += 1;
+		if (waitCalls === missingAtCall) throw new Error("synthetic missing response");
 		let resolved = false;
 		return {
 			json: async () => {
@@ -232,13 +232,36 @@ async function runCollectAllStreamsWithNodes(
 					return null;
 				}
 				resolved = true;
-				return graphqlEnvelope(nodes);
+				return graphqlEnvelope(priorScrolls[waitCalls - 2] ?? nodes);
 			},
 		};
 	};
 	await collectAllStreams(ctx, async () => undefined);
 	return harness;
 }
+
+test("collectAllStreams: a missing scroll response reports partial coverage on both streams", async () => {
+	const harness = await runCollectAllStreamsWithNodes(
+		[makeOrderNode("fixture-1")],
+		["orders", "order_items"],
+		4,
+		[[makeOrderNode("fixture-2")], [makeOrderNode("fixture-3")]],
+	);
+	assert.deepEqual(harness.protocolMessages.filter((message) => message.type === "SKIP_RESULT").map(({stream, reason}) => [stream, reason]), [
+		["orders", "doordash_orders_scroll_response_missing"],
+		["order_items", "doordash_orders_scroll_response_missing"],
+	]);
+});
+
+test("collectAllStreams: counts unnamed items in progress without emitting a nameless record", async () => {
+	const harness = await runCollectAllStreamsWithNodes([
+		makeOrderNode("fixture", { orderItems: [{ name: " " }] }),
+	], ["order_items"]);
+	assert.equal(harness.emitted.length, 0);
+	assert.ok(harness.protocolMessages.some((message) =>
+		message.type === "PROGRESS" && message.message === "Skipped 1 DoorDash line item(s) without a name",
+	));
+});
 
 test("collectAllStreams: requesting only 'orders' emits orders and no order_items", async () => {
 	const harness = await runCollectAllStreamsWithNodes(

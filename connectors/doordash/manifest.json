@@ -9,7 +9,7 @@
 	},
 	"connector_key": "doordash",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-	"version": "0.2.29",
+	"version": "0.2.30",
 	"display_name": "DoorDash",
 	"brand": {
 		"icon": "icon.svg",
@@ -209,7 +209,7 @@
 	],
 	"reason_display_messages": {
 		"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
-		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your DoorDash order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up more history.",
+		"doordash_orders_scroll_response_missing": "DoorDash stopped answering partway through your order history, so older orders were not read this time. Nothing was lost; the next run reads the whole history again.",
 		"shape_check_failed": "The data didn't look like we expected"
 	}
 }
