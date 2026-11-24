@@ -49,9 +49,10 @@ const manifest = JSON.parse(
 );
 
 test("run budget copy describes saved progress without promising the rest on a later run", () => {
-	const message = manifest.reason_display_messages.run_budget_reached;
-	assert.doesNotMatch(message, /for the rest|tomorrow/i);
-	assert.match(message, /saved/i);
+	assert.equal(
+		manifest.reason_display_messages.run_budget_reached,
+		"This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. What was read is saved. A later run may read some of the same posts again.",
+	);
 });
 
 /** A response holding only a top and a bottom cursor: the end of a list. */
