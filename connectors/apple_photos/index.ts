@@ -226,7 +226,14 @@ async function* walkDir(
 			unsupported.set(bucket, (unsupported.get(bucket) ?? 0) + 1);
 			continue;
 		}
-		const st = await stat(entryPath);
+		let st: Awaited<ReturnType<typeof stat>>;
+		try {
+			st = await stat(entryPath);
+		} catch (error) {
+			// A photo removed mid-walk is gone; any other stat failure is real.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			throw error;
+		}
 		yield {
 			path: entryPath,
 			sizeBytes: st.size,
