@@ -226,11 +226,11 @@
 				"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
 				"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
 				"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
-				"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
+				"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved. The next run starts with the servers this run did not reach; a server left incomplete is read again from your newest message and the host skips what it already has.",
 				"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
 				"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
 				"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
-				"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
+				"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved. The next run starts with any servers it did not reach; a server left incomplete is read again from your newest message."
 			}
 		}
 	},
@@ -239,7 +239,7 @@
 		"manifest": {
 			"connector_key": "doordash",
 			"reason_display_messages": {
-				"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
+				"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — running it again will not help until the connector is updated.",
 				"doordash_orders_scroll_response_missing": "DoorDash stopped answering partway through your order history, so older orders were not read this time. Nothing was lost; the next run reads the whole history again.",
 				"shape_check_failed": "The data didn't look like we expected"
 			}

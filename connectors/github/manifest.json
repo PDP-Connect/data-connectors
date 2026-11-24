@@ -834,10 +834,10 @@
 		{
 			"name": "events",
 			"required": true,
-			"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector.",
+			"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector. Within those 90 days GitHub also returns at most the 300 most recent events, so older activity in that window may be missing too.",
 			"display": {
 				"label": "Your recent activity",
-				"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window."
+				"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window and its 300-event limit."
 			},
 			"semantics": "append_only",
 			"schema": {

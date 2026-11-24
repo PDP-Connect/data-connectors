@@ -45,7 +45,7 @@
 			"rate_limit_sensitivity": "medium",
 			"bot_detection_sensitivity": "medium",
 			"background_safe": false,
-			"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers the lookback window; a later read starts from its own checkpoint, reaching back at most the max backfill after a long pause."
+			"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers all available history unless the owner sets a lookback; a later read starts from its own checkpoint and reaches back without a limit after a long pause unless the owner sets a maximum backfill."
 		},
 		"public_listing": {
 			"tier": "development"

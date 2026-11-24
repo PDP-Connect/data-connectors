@@ -8304,7 +8304,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection reads the account, activity list, daily metrics and training calendar that t.coros.com (COROS Training Hub) loads for the owner's own signed-in session, from inside that page, with the access token the app keeps in its own cookie, on the account's regional API host; every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on COROS's own sign-in page. The first run reads activities from the start of the grant, or all of them when the grant sets no start; daily metrics from the start of the grant or the last 180 days; and the training calendar from four weeks back to four weeks ahead. Later runs re-read the last two weeks of activities, the last week of daily metrics and the calendar's coming four weeks, then continue from where the last run stopped. One run makes at most 400 requests, one at a time with pauses; past that, the next run continues."
+						"rationale": "Collection reads the account, activity list, daily metrics and training calendar that t.coros.com (COROS Training Hub) loads for the owner's own signed-in session, from inside that page, with the access token the app keeps in its own cookie, on the account's regional API host; every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on COROS's own sign-in page. The first run reads activities from the start of the grant, or all of them when the grant sets no start; daily metrics from the start of the grant, or from 1 January 2016 when the grant sets no start, the same as activities; and the training calendar from four weeks back to four weeks ahead. Later runs re-read the last two weeks of activities, the last week of daily metrics and the calendar's coming four weeks, then continue from where the last run stopped. One run makes at most 400 requests, one at a time with pauses; past that, the next run continues."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -8829,7 +8829,7 @@
 						"rate_limit_sensitivity": "high",
 						"bot_detection_sensitivity": "high",
 						"background_safe": false,
-						"rationale": "Discord's terms forbid automating a user account outside its OAuth2 and bot APIs, and Discord can terminate an account for it, so a run happens only when the owner starts one, never in the background and at most once a day. Collection runs in the owner's own signed-in discord.com session; every request the connector makes is a GET, one at a time from inside the page, 3 to 5 seconds apart. Prompting an idle client into the in-app Shop link makes the Discord client save its own settings state (a PATCH the client issues, not the connector); that client-side write is an accepted side effect decided by the product owner on 2026-10-09. A run reads the owner's profile, server list and linked accounts, then the owner's own messages from the last 90 days, at most about 1,000 messages and 25 servers per run; a saved queue continues with the remaining servers on later runs, and only a fully readable walk that reached a server's range end records coverage, so a server cut short by an interruption, an unreadable group, the budget or a refusal is read from its newest message again next run. Discord's search listing stops at offset 9,975, which the product owner accepts as a server's range end. Direct messages, group DMs and the friends list are never read. A sign-in prompt, a captcha, an account check or a second rate limit ends the run without a retry."
+						"rationale": "Discord's terms forbid automating a user account outside its OAuth2 and bot APIs, and Discord can terminate an account for it, so a run happens only when the owner starts one, never in the background and at most once a day. Collection runs in the owner's own signed-in discord.com session; every request the connector makes is a GET, one at a time from inside the page, 3 to 5 seconds apart. Prompting an idle client into the in-app Shop link makes the Discord client save its own settings state (a PATCH the client issues, not the connector); that client-side write is an accepted side effect decided by the product owner on 2026-10-09. A run reads the owner's profile, server list and linked accounts, then the owner's own messages from the last 90 days, at most about 1,000 messages and 25 servers per run; a saved queue continues with the remaining servers on later runs, and only a fully readable walk that reached a server's range end records coverage, so a server cut short by an interruption, an unreadable group, the budget or a refusal is read from its newest message again next run. Discord's search listing stops at offset 9,975; a server that reaches it is reported as incomplete, not as fully read. Direct messages, group DMs and the friends list are never read. A sign-in prompt, a captcha, an account check or a second rate limit ends the run without a retry."
 					},
 					"public_listing": {
 						"tier": "development",
@@ -9091,7 +9091,7 @@
 					{
 						"name": "messages",
 						"required": false,
-						"description": "Messages the owner themselves wrote in servers, from the most recent 90 days. Other people's messages are never collected, and neither are direct messages or group DMs. A run saves at most about 1,000 messages from at most 25 servers; later runs continue with the remaining servers. Discord's search listing stops at offset 9,975, accepted as a server's range end; a server whose walk is cut short by an interruption, an unreadable group, the budget or a refusal is read from its newest message again on the next run.",
+						"description": "Messages the owner themselves wrote in servers, from the most recent 90 days. Other people's messages are never collected, and neither are direct messages or group DMs. A run saves at most about 1,000 messages from at most 25 servers; later runs continue with the remaining servers. Discord's search listing stops at offset 9,975; a server that reaches it is reported as incomplete. A server whose walk is cut short by an interruption, an unreadable group, the budget or a refusal is reported as incomplete too, and a later run reads it again from its newest message.",
 						"display": {
 							"label": "Your messages in servers",
 							"detail": "The text you wrote, when you sent and edited it, the server and channel, and the names and sizes of files you attached. No direct messages, and nothing written by anyone else."
@@ -9221,11 +9221,11 @@
 					"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
 					"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
 					"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
-					"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
+					"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved. The next run starts with the servers this run did not reach; a server left incomplete is read again from your newest message and the host skips what it already has.",
 					"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
 					"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
 					"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
-					"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
+					"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved. The next run starts with any servers it did not reach; a server left incomplete is read again from your newest message."
 				},
 				"mobile": {
 					"pageshim": {
@@ -9459,7 +9459,7 @@
 					}
 				],
 				"reason_display_messages": {
-					"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — we'll try again on the next scheduled run.",
+					"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — running it again will not help until the connector is updated.",
 					"doordash_orders_scroll_response_missing": "DoorDash stopped answering partway through your order history, so older orders were not read this time. Nothing was lost; the next run reads the whole history again.",
 					"shape_check_failed": "The data didn't look like we expected"
 				}
@@ -10303,7 +10303,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "high",
 						"background_safe": false,
-						"rationale": "Collection reads the daily summaries, sleep, HRV, training status and activities that connect.garmin.com loads for the owner's own signed-in session, from inside that page, with the page's own request token; every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on Garmin's own sign-in page. The first run reads from the start of the grant, or the last 90 days when the grant sets no start, oldest first. Each later run first re-reads recent days and then continues from where the last run stopped. It re-reads the last week of daily summaries and training status, which Garmin may still be scoring. It re-reads sleep, HRV and activities from four weeks before the last run's day, so a night or an activity that a watch syncs up to four weeks late is still collected. Days whose records did not read cleanly are kept and read again on later runs until they do, up to 366 such days per stream: past that, the oldest are no longer kept, and the run reports how many. For sleep, HRV and activities, the whole four-week window that held such a record is kept. A run stops re-reading kept days for a stream once a week of them, or one four-week window, still fails. One run reads at most 90 days per daily stream and 40 four-week windows per range stream, re-reads included. A window holding more activities than one request returns is read again in smaller parts. Requests go one at a time with pauses."
+						"rationale": "Collection reads the daily summaries, sleep, HRV, training status and activities that connect.garmin.com loads for the owner's own signed-in session, from inside that page, with the page's own request token; every request is a read. The first run and an expired session need the owner to sign in through the browser handoff, on Garmin's own sign-in page. The first run reads from the start of the grant, or the last 90 days when the grant sets no start, oldest first. Each later run first re-reads recent days and then continues from where the last run stopped. It re-reads the last week of daily summaries and training status, which Garmin may still be scoring. It re-reads sleep, HRV and activities from four weeks before the last run's day, so a night or an activity that a watch syncs up to four weeks late is still collected. Days whose records did not read cleanly are kept and read again on later runs until they do, and the run reports how many records were unreadable. For sleep, HRV and activities, the whole four-week window that held such a record is kept. A run stops re-reading kept days for a stream once a week of them, or one four-week window, still fails. One run reads at most 90 days per daily stream and 40 four-week windows per range stream, re-reads included. A window holding more activities than one request returns is read again in smaller parts. Requests go one at a time with pauses."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -11628,10 +11628,10 @@
 					{
 						"name": "events",
 						"required": true,
-						"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector.",
+						"description": "The authenticated user's public activity (pushes, PRs, issues, stars, releases, and similar). GitHub's Events API only retains roughly the last 90 days; history older than that is not available from GitHub to any caller and is not a gap in this connector. Within those 90 days GitHub also returns at most the 300 most recent events, so older activity in that window may be missing too.",
 						"display": {
 							"label": "Your recent activity",
-							"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window."
+							"detail": "Event type, timestamp, and repository for each public activity event, limited to GitHub's ~90-day retention window and its 300-event limit."
 						},
 						"semantics": "append_only",
 						"schema": {
@@ -19914,7 +19914,7 @@
 								"secret": true,
 								"autocomplete": "off",
 								"help_url": "https://www.notion.so/developers/tokens",
-								"help_text": "Go to Notion Developers (https://www.notion.so/developers/tokens), create a New token with read access, copy the token, and paste it here. The token acts as you and accesses all pages in your workspace without requiring manual connections.",
+								"help_text": "Go to Notion Developers (https://www.notion.so/developers/tokens), create a New token with read access, copy the token, and paste it here. The token can only see the pages and databases you share with it: share each page you want collected with the integration in Notion first.",
 								"env": ["NOTION_API_TOKEN"]
 							}
 						]
@@ -19947,7 +19947,7 @@
 						"description": "Notion pages and database items accessible to the integration.",
 						"display": {
 							"label": "Your Notion pages",
-							"detail": "Page title, parent, archived flag, created/edited timestamps, URL. Block content (rich text) is fetched per-page separately."
+							"detail": "Page title, parent, archived flag, created/edited timestamps, URL. Block content is not collected; only page titles and metadata are."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -25187,7 +25187,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers the lookback window; a later read starts from its own checkpoint, reaching back at most the max backfill after a long pause."
+						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers all available history unless the owner sets a lookback; a later read starts from its own checkpoint and reaches back without a limit after a long pause unless the owner sets a maximum backfill."
 					},
 					"public_listing": {
 						"tier": "development"
