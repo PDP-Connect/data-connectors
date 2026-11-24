@@ -296,6 +296,24 @@ test("apple_photos treats a .DS_Store-only export as having no unsupported files
 	}
 });
 
+test("apple_photos skips macOS metadata directories and does not count what is inside them", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: ".Spotlight-V100/Store-V2/index.db", contents: Buffer.from("x") },
+		{ relPath: ".fseventsd/0000000000000001", contents: Buffer.from("x") },
+		{ relPath: ".Trashes/501/removed.jpg", contents: Buffer.from("x") },
+		{ relPath: ".AppleDouble/._IMG_0001.jpg", contents: Buffer.from("x") },
+		{ relPath: ".TemporaryItems/folders.501/tmp.bin", contents: Buffer.from("x") },
+		{ relPath: ".DocumentRevisions-V100/db.sqlite", contents: Buffer.from("x") },
+	]);
+	try {
+		const result = await runApplePhotos(dir, ["photos"]);
+		assert.equal(records(result.messages, "photos").length, 0);
+		assert.deepEqual(skips(result.messages), []);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
 test("apple_photos groups ordinary extensionless and unusual files without exposing their names", async () => {
 	const dir = buildExportDirFixture([
 		{ relPath: ".Spotlight-V100", contents: Buffer.from("") },

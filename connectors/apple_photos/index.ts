@@ -97,6 +97,9 @@ const NON_MEDIA_MACOS_METADATA = new Set([
 	".Spotlight-V100",
 	".fseventsd",
 	".Trashes",
+	".AppleDouble",
+	".TemporaryItems",
+	".DocumentRevisions-V100",
 ]);
 
 /** The configured export directory path, regardless of whether it currently exists. */
@@ -190,6 +193,10 @@ async function* walkDir(
 	const handle = await opendir(dir);
 	for await (const entry of handle) {
 		const entryPath = join(dir, entry.name);
+		// macOS keeps these as directories as well as files; skip both.
+		if (NON_MEDIA_MACOS_METADATA.has(entry.name)) {
+			continue;
+		}
 		if (entry.isDirectory()) {
 			yield* walkDir(entryPath, unsupported, since);
 			continue;
@@ -198,11 +205,15 @@ async function* walkDir(
 			continue;
 		}
 		if (!hasSupportedExtension(entry.name)) {
-			if (NON_MEDIA_MACOS_METADATA.has(entry.name)) {
-				continue;
-			}
 			if (since !== undefined) {
-				const modified = (await stat(entryPath)).mtime.toISOString();
+				let modified: string;
+				try {
+					modified = (await stat(entryPath)).mtime.toISOString();
+				} catch (error) {
+					// A file removed mid-walk is no longer there to skip.
+					if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+					throw error;
+				}
 				if (isBeforeCursor(modified, since)) continue;
 			}
 			const extension = extname(entry.name).toLowerCase();

@@ -28,7 +28,7 @@ import {
 	repoRecord,
 	reviewerLogins,
 	starredRecord,
-	truncateBody,
+	normalizeBody,
 	userRecord,
 	userStatsRecord,
 } from "./parsers.ts";
@@ -237,18 +237,18 @@ test("repoFullFromUrl: null in → null out", () => {
 	assert.equal(repoFullFromUrl(null), null);
 });
 
-// ─── truncateBody ────────────────────────────────────────────────────────
+// ─── normalizeBody ────────────────────────────────────────────────────────
 
-test("truncateBody: preserves the full body through the schema limit", () => {
+test("normalizeBody: preserves the full body through the schema limit", () => {
 	const body = `${"x".repeat(19_999)}😀${"y".repeat(45_535)}`;
 	assert.equal(body.length, 65_536);
-	assert.equal(truncateBody(body), body);
-	assert.equal(truncateBody(""), "");
+	assert.equal(normalizeBody(body), body);
+	assert.equal(normalizeBody(""), "");
 });
 
-test("truncateBody: non-string → null", () => {
-	assert.equal(truncateBody(null), null);
-	assert.equal(truncateBody(undefined), null);
+test("normalizeBody: non-string → null", () => {
+	assert.equal(normalizeBody(null), null);
+	assert.equal(normalizeBody(undefined), null);
 });
 
 // ─── userRecord ──────────────────────────────────────────────────────────

@@ -2270,7 +2270,7 @@ async function expandAdsDialog(
   return waitForGrowth(before, deadline, false);
  };
  const walk = await walkPagesWithCeiling({
-  maxPages: Number.MAX_SAFE_INTEGER,
+  maxPages: NO_PAGE_CEILING,
   fetchPage: async () => {
    const before = await sample(true);
    if (!before.clicked) { failed ||= before.failed; return false; }

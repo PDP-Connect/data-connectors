@@ -223,7 +223,7 @@ async function searchAll(
 			page_index: pageIndex,
 			item_count: json.results?.length ?? 0,
 			total_seen: results.length,
-			cursor_present: Boolean(json.has_more && json.next_cursor),
+			cursor_present: Boolean(json.next_cursor),
 		});
 		const nextCursor = json.next_cursor;
 		if (json.has_more !== true) {

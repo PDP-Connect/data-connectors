@@ -93,7 +93,7 @@ export function repoFullFromUrl(url: string | null | undefined): string | null {
 	return url.replace(`${API_BASE}/repos/`, "");
 }
 
-export function truncateBody(body: string | null | undefined): string | null {
+export function normalizeBody(body: string | null | undefined): string | null {
 	return typeof body === "string" ? body : null;
 }
 
@@ -222,7 +222,7 @@ export function issueRecord(it: GitHubIssue): Record<string, unknown> {
 		id: String(it.id),
 		number: it.number ?? null,
 		title: it.title ?? null,
-		body: truncateBody(it.body),
+		body: normalizeBody(it.body),
 		state: it.state ?? null,
 		state_reason: it.state_reason ?? null,
 		user_login: it.user?.login ?? null,
@@ -251,7 +251,7 @@ function pullRequestCoreFields(it: GitHubIssue): Record<string, unknown> {
 		id: String(it.id),
 		number: it.number ?? null,
 		title: it.title ?? null,
-		body: truncateBody(it.body),
+		body: normalizeBody(it.body),
 		state: it.state ?? null,
 		state_reason: it.state_reason ?? null,
 		user_login: it.user?.login ?? null,
