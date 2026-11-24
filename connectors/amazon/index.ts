@@ -2193,6 +2193,8 @@ function markYearIncomplete(
 ): void {
 	years[String(year)] = {
 		...(prior ?? { frozen: false, last_scraped: "", order_count: 0 }),
+		// An incomplete year is not done, so it must not read as frozen.
+		frozen: false,
 		incomplete: true,
 	};
 }
@@ -2441,7 +2443,8 @@ async function runYear(
  *   - Any year ≥2 years ago that already has a `last_scraped` timestamp in
  *     prior state, read by the current parser version, is skipped — it was
  *     captured on a previous run and re-scraping it on every incremental run
- *     is unbounded behaviour. A year read by an older parser (no
+ *     is unbounded behaviour (unless its latest scan is marked `incomplete`,
+ *     which is always replanned). A year read by an older parser (no
  *     `parser_version`, or a smaller one) is planned once, so a parser fix
  *     reaches stored history.
  *   - Any year ≥2 years ago with NO prior `last_scraped` (newly discovered)

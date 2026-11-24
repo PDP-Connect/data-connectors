@@ -86,6 +86,7 @@ import {
 	scrapeListPage,
 	shouldEmitTrailingOrdersState,
 	walkTimeSpent,
+	type YearState,
 	type YearsCursor,
 } from "./index.ts";
 import { buildOrderRecord, parseOrderDate } from "./parsers.ts";
@@ -4126,4 +4127,27 @@ test("collectAmazonProfile: a page-read failure emits SKIP_RESULT with zero cove
 		assert.equal(coverage.considered, 1);
 		assert.equal(coverage.covered, 0);
 	}
+});
+
+test("an incomplete rescan of a frozen year stores it as not frozen", async () => {
+	const frozenPrior: YearState = {
+		frozen: true,
+		last_scraped: "2026-01-02T00:00:00.000Z",
+		order_count: 2,
+		parser_version: AMAZON_DETAIL_PARSER_VERSION,
+	};
+	const years: YearsCursor = { "2024": frozenPrior };
+	await applyYearCompletionState({
+		newYearsState: years,
+		prior: frozenPrior,
+		progress: async () => {},
+		truncated: false,
+		unparseableDateCount: 1,
+		year: 2024,
+		yearOrderCount: 2,
+	});
+	assert.equal(years["2024"]?.frozen, false);
+	assert.equal(years["2024"]?.incomplete, true);
+	assert.equal(years["2024"]?.order_count, 2);
+	assert.deepEqual(planIncrementalYears([2024], years, 2027).planned, [2024]);
 });
