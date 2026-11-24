@@ -72,38 +72,41 @@ export const PROBE_PATH = "/api/account/users/current/user";
 
 type RangeStream = Exclude<Stream, "profile">;
 
+// Default history policy for Polar Flow: 2012-01-01 is the requested baseline, not an API retention claim.
+export const HISTORY_FLOOR = "2012-01-01";
+
 /** Per stream: the days one request covers, the history a first run reads, the days re-read each run. */
 export interface StreamPlan {
 	windowDays: number;
-	initialDays: number;
+	historyFloor: string;
 	overlapDays: number;
 	maxWindowsPerRun: number;
 }
 export const PLANS: Record<RangeStream, StreamPlan> = {
-	// The web app's training list asks for a month at a time; history is read two years back.
+	// The web app's training list asks for a month at a time.
 	training_sessions: {
 		windowDays: 31,
-		initialDays: 730,
+		historyFloor: HISTORY_FLOOR,
 		overlapDays: 14,
 		maxWindowsPerRun: 40,
 	},
 	// loadFour answers [day-2, day+1]: four days per request. Today is partial, so the last days are re-read.
 	daily_activity: {
 		windowDays: 4,
-		initialDays: 90,
+		historyFloor: HISTORY_FLOOR,
 		overlapDays: 3,
 		maxWindowsPerRun: 100,
 	},
 	// The sleep report answers 30 to 365 days per request.
 	sleep: {
 		windowDays: 365,
-		initialDays: 365,
+		historyFloor: HISTORY_FLOOR,
 		overlapDays: 7,
 		maxWindowsPerRun: 5,
 	},
 	nightly_recharge: {
 		windowDays: 28,
-		initialDays: 365,
+		historyFloor: HISTORY_FLOOR,
 		overlapDays: 7,
 		maxWindowsPerRun: 20,
 	},
@@ -649,7 +652,7 @@ export function localDay(now: Date, offset: string | null): string {
 /**
  * Pure: the cursor this run starts from and the days it reads. A first run, a full refresh, a
  * grant that starts before the floor or past the cursor, or a cursor ahead of the owner's today
- * reads afresh from the grant's start or `initialDays` back. Otherwise the run re-reads
+ * reads afresh from the grant's start or the configured history floor. Otherwise the run re-reads
  * `overlapDays` before `next_day` (Polar scores days late and devices sync late) and reads on.
  */
 export function planDays(
@@ -661,7 +664,7 @@ export function planDays(
 ): { cursor: Cursor; from: string; to: string } {
 	const { since, until } = grant;
 	const last = until && addDays(until, -1) < today ? addDays(until, -1) : today;
-	const start = since ?? addDays(today, 1 - plan.initialDays);
+	const start = since ?? plan.historyFloor;
 	const tomorrow = addDays(today, 1);
 	const { next_day: next, floor } = prev;
 	if (

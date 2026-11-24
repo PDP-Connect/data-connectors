@@ -27,6 +27,7 @@ import {
 	type PageFetch,
 	type PolarCollectContext,
 	pageFetch,
+	PLANS,
 	planDays,
 	probeSession,
 	readCursor,
@@ -548,7 +549,7 @@ test("windows cut a span oldest first, the last one short", () => {
 // ── Days and cursors ───────────────────────────────────────────────────────
 const PLAN = {
 	windowDays: 4,
-	initialDays: 90,
+	historyFloor: "2026-08-08",
 	overlapDays: 3,
 	maxWindowsPerRun: 100,
 };
@@ -566,13 +567,26 @@ test("localDay reads the owner's UTC offset", () => {
 	assert.equal(localDay(new Date("2026-11-05T23:59:00Z"), null), "2026-11-05");
 });
 
-test("a first run reads initialDays up to today", () => {
-	const p = planDays({}, "2026-11-05", {}, false, PLAN);
-	assert.deepEqual(p, {
-		cursor: { next_day: "2026-08-08", floor: "2026-08-08" },
-		from: "2026-08-08",
-		to: "2026-11-05",
-	});
+test("each default history starts at the policy floor, stays contiguous, and resumes", () => {
+	const floor = "2012-01-01";
+	const today = "2026-11-05";
+	for (const [stream, plan] of Object.entries(PLANS)) {
+		const first = planDays({}, today, {}, false, plan);
+		assert.deepEqual(first, { cursor: { next_day: floor, floor }, from: floor, to: today }, stream);
+		const planned = windows(first.from, first.to, plan.windowDays);
+		assert.equal(planned[0]?.from, floor, stream);
+		assert.equal(planned.at(-1)?.to, today, stream);
+		for (let i = 1; i < planned.length; i++) {
+			const next = Date.parse(planned[i]!.from);
+			const previous = Date.parse(planned[i - 1]!.to);
+			assert.equal(next - previous, 86_400_000, stream);
+		}
+		const cursor = { next_day: "2020-01-15", floor };
+		const after = planDays(cursor, today, {}, false, plan);
+		const overlap = new Date(Date.parse(cursor.next_day) - plan.overlapDays * 86_400_000)
+			.toISOString().slice(0, 10);
+		assert.deepEqual(after, { cursor, from: overlap, to: today }, stream);
+	}
 });
 
 test("a later run re-reads overlapDays before next_day and reads on", () => {
@@ -643,7 +657,9 @@ test("readCursor keeps only a cursor whose days parse and run forward", () => {
 // ── Collect ────────────────────────────────────────────────────────────────
 test("collects every stream from the fixtures, with a cursor at the owner's tomorrow", async () => {
 	const s = site();
-	const { ctx, out } = context(s, ALL);
+	// This fixture checks recent record decoding, not initial-history length.
+	const ranges = Object.fromEntries(ALL.slice(1).map((stream) => [stream, { since: "2026-11-01" }]));
+	const { ctx, out } = context(s, ALL, {}, ranges);
 	await collectPolarFlow(ctx, { sleep: instant }, NOW);
 	assert.deepEqual(skipsOf(out), []);
 
