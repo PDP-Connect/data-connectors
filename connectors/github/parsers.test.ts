@@ -32,6 +32,7 @@ import {
 	userRecord,
 	userStatsRecord,
 } from "./parsers.ts";
+import { issuesSchema, pullRequestsSchema } from "./schemas.ts";
 import type {
 	GitHubContributionsCollection,
 	GitHubEvent,
@@ -238,9 +239,11 @@ test("repoFullFromUrl: null in → null out", () => {
 
 // ─── truncateBody ────────────────────────────────────────────────────────
 
-test("truncateBody: caps at 20_000 chars", () => {
-	const long = "x".repeat(30_000);
-	assert.equal(truncateBody(long)?.length, 20_000);
+test("truncateBody: preserves the full body through the schema limit", () => {
+	const body = `${"x".repeat(19_999)}😀${"y".repeat(45_535)}`;
+	assert.equal(body.length, 65_536);
+	assert.equal(truncateBody(body), body);
+	assert.equal(truncateBody(""), "");
 });
 
 test("truncateBody: non-string → null", () => {
@@ -525,6 +528,27 @@ test("pullRequestRecord: merges detail fields when present", () => {
 	assert.equal(r.head_ref, "feature");
 	assert.deepEqual(r.requested_reviewers, ["rev1", "rev2"]);
 	assert.equal(r.repository_id, "1001");
+});
+
+test("issue and pull request schemas accept the full body and reject an over-limit body", () => {
+	const body = "x".repeat(65_536);
+	const issue = issueRecord({ ...ISSUE_FIXTURE, body });
+	const pull = pullRequestRecord(
+		{ ...PR_FIXTURE, body },
+		PR_DETAIL_FIXTURE,
+		"octocat/hello",
+	);
+	assert.equal(issuesSchema.parse(issue).body, body);
+	assert.equal(pullRequestsSchema.parse(pull).body, body);
+	const overLimit = `${body}x`;
+	assert.equal(
+		issuesSchema.safeParse({ ...issue, body: overLimit }).success,
+		false,
+	);
+	assert.equal(
+		pullRequestsSchema.safeParse({ ...pull, body: overLimit }).success,
+		false,
+	);
 });
 
 // ─── gistRecord ──────────────────────────────────────────────────────────
