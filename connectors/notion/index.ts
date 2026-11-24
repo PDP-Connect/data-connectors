@@ -402,7 +402,8 @@ async function runStream(args: RunStreamArgs): Promise<void> {
 runConnector({
 	name: "notion",
 	validateRecord,
-	retryablePattern: /ECONN|fetch failed|rate_limited/i,
+	retryablePattern:
+		/ECONN|fetch failed|rate_limited|notion_pagination_contradiction/i,
 	auth: { kind: "env", required: ["NOTION_API_TOKEN"] },
 	// Notion marks deleted items with archived=true rather than omitting them.
 	isTombstone: (_stream, d) => d.archived === true,

@@ -186,6 +186,7 @@ test("real Notion connector fails closed when has_more is true without a cursor"
 	);
 	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
 	assert.equal(lastDone(result.messages).status, "failed");
+	assert.equal(lastDone(result.messages).error?.retryable, true);
 });
 
 test("real Notion connector fails closed when a terminal page supplies a cursor", async () => {
@@ -197,6 +198,7 @@ test("real Notion connector fails closed when a terminal page supplies a cursor"
 	);
 	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
 	assert.equal(lastDone(result.messages).status, "failed");
+	assert.equal(lastDone(result.messages).error?.retryable, true);
 });
 
 test("real Notion connector fails closed when the provider repeats a cursor", async () => {
@@ -208,6 +210,7 @@ test("real Notion connector fails closed when the provider repeats a cursor", as
 	);
 	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
 	assert.equal(lastDone(result.messages).status, "failed");
+	assert.equal(lastDone(result.messages).error?.retryable, false);
 });
 
 test("real Notion connector protocol emits coverage and STATE after complete pages/databases enumeration", async () => {
