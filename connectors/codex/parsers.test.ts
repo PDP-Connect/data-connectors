@@ -460,7 +460,7 @@ test("extendTimestampRange: orders sub-millisecond instants and retains original
 			"2026-04-21T19:00:00.123456789002-0500",
 		],
 		["2026-04-22T00:00:00Z", "2026-04-22T00:00:00.0000000000001Z"],
-	]) {
+	] as const) {
 		for (const timestamps of [
 			[later, earlier],
 			[earlier, later],
