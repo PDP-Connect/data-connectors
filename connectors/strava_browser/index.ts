@@ -935,9 +935,10 @@ export async function collectStravaBrowser(
 	}
 
 	const listComplete = wasInventoryComplete || (listFinished && !failure);
+	const coveragePartial = Boolean(failure) || unreadable > 0 || unplaced > 0;
 	// An incomplete widening has not earned the new coverage boundary.
 	const requestedSince =
-		rangeExpanded && !(listFinished && !failure)
+		rangeExpanded && (!listFinished || coveragePartial)
 			? (stored.requested_since ?? null)
 			: rangeSince;
 	const cursor: ActivitiesState = {
@@ -949,7 +950,7 @@ export async function collectStravaBrowser(
 	const requestedFrom = timeRange?.since ?? "none";
 	const requestedTo = timeRange?.until ?? "none";
 	const coverageStatus =
-		failure || unreadable > 0 || unplaced > 0
+		coveragePartial
 			? "partial"
 			: listed.length === 0
 				? "empty"

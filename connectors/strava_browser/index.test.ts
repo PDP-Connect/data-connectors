@@ -732,6 +732,43 @@ test("an interrupted widening keeps the prior since and retries the full list", 
 	);
 });
 
+for (const issue of ["unreadable", "unplaced"] as const) {
+	test(`a widened list with an ${issue} activity keeps the prior boundary`, async () => {
+		const page = JSON.parse(PAGES["2"] as string) as {
+			models: Array<Record<string, unknown>>;
+		};
+		if (issue === "unreadable") {
+			page.models.push({});
+		} else {
+			delete page.models[0]?.start_date_local_raw;
+		}
+		const priorSince = "2026-09-02";
+		const log: string[] = [];
+		const h = harness(
+			["activities"],
+			{
+				activities: {
+					known_ids: ["90000000005", "90000000004"],
+					pending_detail_ids: [],
+					list_complete: true,
+					requested_since: priorSince,
+				},
+			},
+			{ since: "2026-09-01" },
+		);
+		const lines = await captureDiagnostics(() =>
+			withStrava(listFetcher({ ...PAGES, "2": JSON.stringify(page) }, log), () =>
+				collectStravaBrowser(h.ctx, FAST),
+			),
+		);
+		assert.equal(log.length, 2);
+		const coverage = coverageOf(lines);
+		assert.equal(coverage.status, "partial");
+		assert.equal(coverage.unreadable, issue === "unreadable" ? 1 : 0);
+		assert.equal((h.cursor() as { requested_since: string | null }).requested_since, priorSince);
+	});
+}
+
 test("an unreadable row marks the run summary partial", async () => {
 	const page = JSON.parse(PAGES["1"] as string) as { models: unknown[] };
 	page.models.push({});
