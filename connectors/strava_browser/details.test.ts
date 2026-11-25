@@ -50,6 +50,26 @@ test("maps only valid ids to displayed owner gear names", () => {
 	assert.equal(parseGearNames("not json"), null);
 });
 
+test("malformed heart-rate response is not a valid stream with no samples", () => {
+	for (const body of ["{", "null", "[]", "42"]) {
+		assert.equal(parseHeartRateStream(body), null);
+	}
+	assert.deepEqual(parseHeartRateStream('{"heartrate":{"data":[]}}'), {
+		average: null,
+		maximum: null,
+	});
+});
+
+test("malformed gear rows do not hide a valid localized label", () => {
+	const body = JSON.stringify([
+		null,
+		{ id: 7, display_name: "   " },
+		{ id: 8, display_name: "  Vélo fictif  " },
+		{ id: 9, display_name: 123 },
+	]);
+	assert.deepEqual(parseGearNames(body), new Map([["8", "Vélo fictif"]]));
+});
+
 test("heart-rate statistics use only valid samples, including recorded zero", () => {
 	const samples = [0, 90, { value: 150 }, null, -1, "180", {}, { value: -2 }];
 	for (const heartrate of [samples, { data: samples }]) {
