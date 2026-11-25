@@ -197,6 +197,58 @@ test("listEventsPage throws CalendarApiError on other non-2xx statuses", async (
 	);
 });
 
+test("listEventsPage preserves an all-day date and exclusive end as date-only values", async () => {
+	const transport = makeFetch([
+		jsonResponse({
+			items: [
+				{
+					id: "synthetic-all-day",
+					start: { date: "2026-07-10" },
+					end: { date: "2026-07-11" },
+				},
+			],
+		}),
+	]);
+	const client = new GoogleCalendarClient({
+		accessToken: "synthetic-calendar-test",
+		fetch: transport.fetch,
+	});
+	const { events } = await client.listEventsPage("synthetic-calendar");
+	assert.equal(events.length, 1);
+	assert.deepEqual(events[0]?.start, {
+		date: "2026-07-10",
+		dateTime: null,
+		timeZone: null,
+	});
+	assert.deepEqual(events[0]?.end, {
+		date: "2026-07-11",
+		dateTime: null,
+		timeZone: null,
+	});
+});
+
+test("listEventsPage preserves source order when filtering non-string recurrence entries", async () => {
+	const transport = makeFetch([
+		jsonResponse({
+			items: [
+				{
+					id: "synthetic-recurring",
+					recurrence: ["RRULE:FREQ=WEEKLY", 23, "EXDATE:20260717", null],
+				},
+			],
+		}),
+	]);
+	const client = new GoogleCalendarClient({
+		accessToken: "synthetic-calendar-test",
+		fetch: transport.fetch,
+	});
+	const { events } = await client.listEventsPage("synthetic-calendar");
+	assert.equal(events.length, 1);
+	assert.deepEqual(events[0]?.recurrence, [
+		"RRULE:FREQ=WEEKLY",
+		"EXDATE:20260717",
+	]);
+});
 test("constructor rejects an empty access token", () => {
 	assert.throws(
 		() => new GoogleCalendarClient({ accessToken: "  " }),
