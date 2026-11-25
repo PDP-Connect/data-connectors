@@ -3759,7 +3759,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/netflix_export/index.ts",
-			line: 393,
+			line: 399,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
@@ -4690,7 +4690,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 467,
+			line: 490,
 			column: 15,
 			category: "provider_pacing_backpressure",
 			note: "fetchGetTrip()/fetchFareBreakdown() per trip id, and emitRecord('trips'|'receipts', ...) after each — one detail-fetch loop shared by both streams, politely paced between trips (D5 revised: trips hydrates from GetTrip, receipts from GetReceipt).",
