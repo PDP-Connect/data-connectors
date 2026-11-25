@@ -70,6 +70,24 @@ const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
 const TEMP_NAME_BROWSER = `zz_init_browser_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";
 
+test("connector-init identifies an unsupported scaffold option", () => {
+	assert.throws(() => parseArgs(["synthetic_reader", "--template", "sample"]), {
+		name: "Error",
+		message: "unrecognized argument: --template",
+	});
+});
+
+test("connector-init identifies invalid stream names even in browser scaffold mode", () => {
+	assert.throws(
+		() =>
+			parseArgs(["synthetic_reader", "--browser", "--stream", "Book-Notes"]),
+		(error: unknown) =>
+			error instanceof InitArgsError &&
+			error.message ===
+				'invalid stream name "Book-Notes": must be lowercase snake_case (e.g. "items")',
+	);
+});
+
 test("API scaffold reports transient HTTP failures as retryable and client errors as terminal", () => {
 	withPrivateConnectorTree(() => {
 		const args = parseArgs([TEMP_NAME]);
