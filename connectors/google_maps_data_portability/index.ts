@@ -315,11 +315,8 @@ export async function collectGoogleMapsDataPortability(
 			state,
 			timeRange,
 		});
-		await ctx.emitRecord("archive_jobs", record);
 		nextJobs[resourceGroup] = archiveCursorFromRecord(record);
-		emitted.push(resourceGroup);
-		// Save each created job before another resource can fail or consume its grant.
-		await ctx.emit({
+		const checkpoint = () => ctx.emit({
 			type: "STATE",
 			stream: "archive_jobs",
 			cursor: {
@@ -329,6 +326,16 @@ export async function collectGoogleMapsDataPortability(
 				},
 			},
 		});
+		const emitRecord = () => ctx.emitRecord("archive_jobs", record);
+		// Persist newly consumed grants before publishing their records. A polled
+		// terminal cursor must still wait for its record: otherwise a failed
+		// emission could make a retry initiate a different archive.
+		const initiatedJob = Boolean(record.archive_job_id) &&
+			!shouldPollExisting(cursorForResource(state, resourceGroup));
+		await (initiatedJob
+			? checkpoint().then(emitRecord)
+			: emitRecord().then(checkpoint));
+		emitted.push(resourceGroup);
 	}
 
 	await emitDetailCoverage(ctx, {

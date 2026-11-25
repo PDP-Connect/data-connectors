@@ -350,6 +350,118 @@ test("Google Maps Data Portability checkpoints each job before a later group fai
 	assert.equal(retry.records[0]?.data.archive_job_id, "job-starred");
 });
 
+test("Google Maps Data Portability resumes a created job after archive record emission fails", async () => {
+	const streams = [
+		{ name: "archive_jobs", resources: ["maps.starred_places"] },
+	];
+	const first = makeContext({ streams });
+	const failure = new Error("synthetic archive record rejection");
+	const failedClient = new FakeGoogleDataPortabilityClient();
+	const env = { GOOGLE_DATAPORTABILITY_ACCESS_TOKEN: "synthetic-test-token" };
+	await assert.rejects(
+		collectGoogleMapsDataPortability(
+			{
+				...first.ctx,
+				emitRecord: (stream, record) => {
+					assert.equal(stream, "archive_jobs");
+					assert.equal(record.archive_job_id, "job-starred");
+					return Promise.reject(failure);
+				},
+			},
+			{ clientFactory: () => failedClient, env },
+		),
+		(error: unknown) => error === failure,
+	);
+	const checkpoint = first.messages.find((message) => message.type === "STATE");
+	assert.ok(
+		checkpoint,
+		"the created job must be checkpointed before the failed record",
+	);
+	assert.equal(checkpoint.stream, "archive_jobs");
+	const cursor = checkpoint.cursor as {
+		google_maps_data_portability: {
+			archive_jobs: Record<string, { archive_job_id: string; state: string }>;
+		};
+	};
+	assert.equal(
+		cursor.google_maps_data_portability.archive_jobs["maps.starred_places"]
+			?.archive_job_id,
+		"job-starred",
+	);
+	assert.equal(
+		cursor.google_maps_data_portability.archive_jobs["maps.starred_places"]
+			?.state,
+		"IN_PROGRESS",
+	);
+	assert.equal(
+		first.messages.some((message) => message.type === "DETAIL_COVERAGE"),
+		false,
+	);
+
+	const retry = makeContext({ streams, state: structuredClone(cursor) });
+	const retryClient = new FakeGoogleDataPortabilityClient();
+	await collectGoogleMapsDataPortability(retry.ctx, {
+		clientFactory: () => retryClient,
+		env,
+	});
+	assert.deepEqual(retryClient.calls, [
+		{ method: "checkAccessType" },
+		{ method: "getArchiveState", input: "job-starred" },
+	]);
+	assert.equal(retry.records[0]?.data.archive_job_id, "job-starred");
+});
+
+test("Google Maps Data Portability leaves a prior resumable cursor if emitting terminal state fails", async () => {
+	const streams = [
+		{ name: "archive_jobs", resources: ["maps.starred_places"] },
+	];
+	const state = {
+		google_maps_data_portability: {
+			archive_jobs: {
+				"maps.starred_places": {
+					archive_job_id: "job-starred",
+					state: "IN_PROGRESS",
+				},
+			},
+		},
+	};
+	const failed = makeContext({ streams, state: structuredClone(state) });
+	const failure = new Error("synthetic terminal record rejection");
+	const fakeClient = new FakeGoogleDataPortabilityClient();
+	const env = { GOOGLE_DATAPORTABILITY_ACCESS_TOKEN: "synthetic-test-token" };
+	await assert.rejects(
+		collectGoogleMapsDataPortability(
+			{
+				...failed.ctx,
+				emitRecord: (_, record) => {
+					assert.equal(record.state, "COMPLETE");
+					return Promise.reject(failure);
+				},
+			},
+			{ clientFactory: () => fakeClient, env },
+		),
+		(error: unknown) => error === failure,
+	);
+	assert.equal(
+		failed.messages.filter((message) => message.type === "STATE").length,
+		0,
+	);
+	const retry = makeContext({ streams, state: structuredClone(state) });
+	await collectGoogleMapsDataPortability(retry.ctx, {
+		clientFactory: () => fakeClient,
+		env,
+	});
+	assert.equal(
+		fakeClient.calls.filter((call) => call.method === "getArchiveState").length,
+		2,
+	);
+	assert.equal(
+		fakeClient.calls.some((call) => call.method === "initiateArchive"),
+		false,
+	);
+	assert.equal(retry.records[0]?.data.state, "COMPLETE");
+});
+
 test("Google Maps Data Portability successful checkpoints accumulate both jobs without mutating earlier snapshots", async () => {
 	const fakeClient = new FakeGoogleDataPortabilityClient();
 	const { ctx, messages, records } = makeContext({
