@@ -79,6 +79,7 @@ function withOuraPages<T>(
 function withOuraEndpointPages<T>(
 	pagesByEndpoint: Record<string, OuraPageFixture[]>,
 	run: (requested: URL[]) => Promise<T>,
+	failureByEndpoint: Record<string, Error> = {},
 ): Promise<T> {
 	const original = globalThis.fetch;
 	const requested: URL[] = [];
@@ -87,6 +88,10 @@ function withOuraEndpointPages<T>(
 		const url = new URL(String(input));
 		requested.push(url);
 		const endpoint = url.pathname.split("/").at(-1) ?? "";
+		const failure = failureByEndpoint[endpoint];
+		if (failure) {
+			return Promise.reject(failure);
+		}
 		const queue = pagesByEndpoint[endpoint] ?? [];
 		const i = indexByEndpoint[endpoint] ?? 0;
 		indexByEndpoint[endpoint] = i + 1;
@@ -470,4 +475,49 @@ test("sleep emits no partial records when its daily_sleep helper walk is truncat
 		{ last_day: "2026-07-01" },
 		"the sleep cursor is held until both joined resources are complete",
 	);
+});
+
+test("a rejected daily_sleep walk holds sleep and lets readiness and activity finish", async () => {
+	const { ctx, messages, records } = makeContext({
+		state: { sleep: { last_day: "2026-07-01" } },
+		streams: [{ name: "sleep" }, { name: "readiness" }, { name: "activity" }],
+	});
+	const failures: Array<{
+		message: string;
+		retryable: boolean;
+		stream: string;
+	}> = [];
+	ctx.reportStreamFailure = (stream, message, options) => {
+		failures.push({ stream, message, retryable: options?.retryable === true });
+		return Promise.resolve();
+	};
+
+	await withOuraEndpointPages(
+		{
+			sleep: [{ data: [{ id: "s1", day: "2026-08-05" }] }],
+			daily_readiness: [{ data: [{ id: "r1", day: "2026-08-06" }] }],
+			daily_activity: [{ data: [{ id: "a1", day: "2026-08-07" }] }],
+		},
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+		{ daily_sleep: new Error("fetch failed: synthetic helper failure") },
+	);
+
+	assert.deepEqual(failures, [
+		{
+			stream: "sleep",
+			message: "Could not read Oura daily sleep scores",
+			retryable: true,
+		},
+	]);
+	assert.deepEqual(
+		records.map(({ stream }) => stream),
+		["readiness", "activity"],
+	);
+	assert.equal(lastStateCursor(messages, "sleep"), undefined);
+	assert.deepEqual(lastStateCursor(messages, "readiness"), {
+		last_day: "2026-08-06",
+	});
+	assert.deepEqual(lastStateCursor(messages, "activity"), {
+		last_day: "2026-08-07",
+	});
 });
