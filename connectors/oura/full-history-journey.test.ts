@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Mirrors the connector's index.test.ts fake-fetch, START context and one-attempt governor.
 // No provider, browser, real account or wall-clock wait is needed.
 import assert from "node:assert/strict";

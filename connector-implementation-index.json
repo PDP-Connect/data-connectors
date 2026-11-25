@@ -400,7 +400,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.68",
+				"version": "0.2.69",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -3626,7 +3626,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.27",
+				"version": "0.1.28",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -3768,7 +3768,8 @@
 					}
 				],
 				"reason_display_messages": {
-					"export_not_found": "We couldn't find an export to import"
+					"export_not_found": "We couldn't find an export to import",
+					"source_incomplete": "Some files weren't imported because their file type isn't supported"
 				}
 			}
 		},
@@ -11602,6 +11603,7 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
+						"required": false,
 						"cursor_field": "updated_at",
 						"consent_time_field": "created_at",
 						"selection": {

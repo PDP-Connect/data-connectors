@@ -808,6 +808,7 @@
 				"required": ["id"]
 			},
 			"primary_key": ["id"],
+			"required": false,
 			"cursor_field": "updated_at",
 			"consent_time_field": "created_at",
 			"selection": {
