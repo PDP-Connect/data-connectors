@@ -980,7 +980,21 @@ export function parseOrderDate(raw: string | null | undefined): string | null {
 	if (localized) {
 		return localized;
 	}
-	const d = new Date(raw);
+	const value = raw.trim();
+	const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (iso) {
+		return isoDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+	}
+	// Date parses zone-less text in the host zone. Accept it only when the text
+	// carries both a time and an explicit zone, so the UTC day is host-independent.
+	if (
+		!/(?:T|\s)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}:?\d{2}|(?:GMT|UTC)(?:[+-]\d{2}:?\d{2})?|UT|[ECMP][SD]T)$/i.test(
+			value,
+		)
+	) {
+		return null;
+	}
+	const d = new Date(value);
 	if (Number.isNaN(d.getTime())) {
 		return null;
 	}

@@ -1017,3 +1017,50 @@ test("parseAmazonProfileDom: missing nav bar entirely (selector drift) degrades 
 		store: "amazon.com",
 	});
 });
+
+test("parseOrderDate: calendar dates and explicit-zone instants are host-zone independent", () => {
+	const cases: [string | null | undefined, string | null][] = [
+		["January 5, 2024", "2024-01-05"],
+		["Jan 5, 2024", "2024-01-05"],
+		["December 31, 2023", "2023-12-31"],
+		["2024-01-05", "2024-01-05"],
+		["5 January 2024", "2024-01-05"],
+		["29 Feb 2024", "2024-02-29"],
+		["February 29, 2000", "2000-02-29"],
+		["February 29, 1900", null],
+		["February 30, 2024", null],
+		["2024-02-30", null],
+		["2023-02-29", null],
+		["2024-13-01", null],
+		["2024-01-00", null],
+		["Febtober 99, 2099", null],
+		["Fri, 05 Jan 2024 00:00:00 GMT", "2024-01-05"],
+		["2024-01-05T00:00:00Z", "2024-01-05"],
+		["2024-01-05T00:00:00+09:00", "2024-01-04"],
+		["2024-01-05T23:00:00-06:00", "2024-01-06"],
+		["2024-01-05T00:00:00", null],
+		["not a date at all", null],
+		["", null],
+		[null, null],
+		[undefined, null],
+	];
+	const previousTZ = process.env.TZ;
+	try {
+		for (const zone of ["UTC", "America/Chicago", "Asia/Tokyo"]) {
+			process.env.TZ = zone;
+			for (const [raw, expected] of cases) {
+				assert.equal(
+					parseOrderDate(raw),
+					expected,
+					"TZ=" + zone + " input=" + JSON.stringify(raw),
+				);
+			}
+		}
+	} finally {
+		if (previousTZ === undefined) {
+			delete process.env.TZ;
+		} else {
+			process.env.TZ = previousTZ;
+		}
+	}
+});
