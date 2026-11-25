@@ -298,20 +298,26 @@ test("collectAllStreams: trips DETAIL_COVERAGE is self-mapped (state_stream === 
 
 test("collectAllStreams: an activity with no usable trip id is dropped, not emitted with a fabricated id", async () => {
 	const { fetchPath } = makeScriptedFetch({
-		activitiesPages: [{ body: activitiesBody([{ title: "no id" }]) }],
+		activitiesPages: [
+			{ body: activitiesBody([{ title: "no id" }, { uuid: "trip-1" }]) },
+		],
+		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
 	});
 	const { ctx, emitted, messages } = makeCtx(["trips"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
-	assert.equal(emitted.length, 0);
+	assert.equal(emitted.length, 1);
 	const coverage = messages.find(
 		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "trips",
 	);
 	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
-	assert.equal(
-		coverage.considered,
-		0,
-		"the id-less activity was never buffered",
+	assert.equal(coverage.considered, 1, "only the valid trip was buffered");
+	assert.equal(coverage.covered, 1);
+	assert.deepEqual(coverage.required_keys, ["trip-1"]);
+	assert.deepEqual(
+		emitted.map((record) => record.data.id),
+		["trip-1"],
 	);
+	assert.deepEqual(coverage.hydrated_keys, ["trip-1"]);
 });
 
 // ─── Real pagination (nextPageToken) ────────────────────────────────────────
@@ -631,4 +637,96 @@ test("collectAllStreams: a genuinely empty feed emits zero-key coverage", async 
 	assert.equal(coverage.covered, 0);
 	assert.deepEqual(coverage.required_keys, []);
 	assert.deepEqual(coverage.hydrated_keys, []);
+});
+
+test("collectAllStreams: id-less-only activity history refuses without emitting", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ title: "no id" }]) }],
+	});
+	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+	await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), {
+		message:
+			"uber_graphql_error [endpoint Activities]: no activity carried a trip id",
+	});
+	assert.deepEqual(calls, ["Activities"]);
+	assert.deepEqual(emitted, []);
+	assert.deepEqual(messages, []);
+});
+
+[
+	{ operation: "GetTrip", status: 401, prefix: "uber_session_expired" },
+	{ operation: "GetTrip", status: 429, prefix: "uber_rate_limited" },
+	{ operation: "GetReceipt", status: 403, prefix: "uber_session_expired" },
+	{ operation: "GetReceipt", status: 429, prefix: "uber_rate_limited" },
+	{ operation: "GetTrip", status: 200, prefix: "uber_transport_error" },
+	{ operation: "GetReceipt", status: 200, prefix: "uber_transport_error" },
+].forEach(({ operation, status, prefix }) => {
+	test(`collectAllStreams: ${operation} ${prefix} stops before the next trip`, async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [
+				{ body: activitiesBody([{ uuid: "trip-1" }, { uuid: "trip-2" }]) },
+			],
+			getTrip: {
+				"trip-1": {
+					status: operation === "GetTrip" ? status : 200,
+					body: getTripBody({ status: "COMPLETED" }),
+				},
+				"trip-2": { body: getTripBody({ status: "COMPLETED" }) },
+			},
+			getReceipt: {
+				"trip-1": {
+					status: operation === "GetReceipt" ? status : 200,
+					body: getReceiptBody(RECEIPT_HTML("$10.00")),
+				},
+				"trip-2": { body: getReceiptBody(RECEIPT_HTML("$20.00")) },
+			},
+		});
+		const scripted: UberPageFetch = async (name, query, variables) => {
+			const response = await fetchPath(name, query, variables);
+			if (prefix === "uber_transport_error" && name === operation) {
+				throw new Error(
+					`uber_transport_error [endpoint ${name}]: synthetic offline`,
+				);
+			}
+			return response;
+		};
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await assert.rejects(
+			collectAllStreams(ctx, scripted, NO_DELAY),
+			(error: unknown) =>
+				error instanceof Error && error.message.startsWith(prefix),
+		);
+		assert.deepEqual(
+			calls,
+			operation === "GetTrip"
+				? ["Activities", "GetTrip:trip-1"]
+				: ["Activities", "GetTrip:trip-1", "GetReceipt:trip-1"],
+		);
+		assert.equal(emitted.length, operation === "GetTrip" ? 0 : 1);
+		assert.ok(emitted.every((record) => record.stream === "trips"));
+		assert.deepEqual(messages, []);
+	});
+});
+
+test("collectAllStreams: GetTrip HTTP 404 remains a per-trip coverage gap", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-1" }, { uuid: "trip-2" }]) },
+		],
+		getTrip: {
+			"trip-1": { status: 404, body: "not found" },
+			"trip-2": { body: getTripBody({ status: "COMPLETED" }) },
+		},
+	});
+	const { ctx, emitted, messages } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.deepEqual(calls, ["Activities", "GetTrip:trip-1", "GetTrip:trip-2"]);
+	assert.equal(emitted.length, 1);
+	const coverage = messages.find(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, 2);
+	assert.equal(coverage.covered, 1);
+	assert.deepEqual(coverage.hydrated_keys, ["trip-2"]);
 });

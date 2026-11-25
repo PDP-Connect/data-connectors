@@ -318,6 +318,14 @@ function assertUberOk(
 	}
 }
 
+/** Session-wide failures must reach the runtime rather than become per-trip gaps. */
+function isRunLevelUberError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /^(uber_session_expired|uber_rate_limited|uber_transport_error)/.test(
+		message,
+	);
+}
+
 /**
  * Fetch the Activities GraphQL feed page by page via the real
  * `nextPageToken` cursor (live-verified 2026-09-22). Dedupes by trip id
@@ -332,6 +340,7 @@ export async function fetchAllActivities(
 	const seenContinuations = new Set<string>();
 	const all: UberActivity[] = [];
 	const seenIds = new Set<string>();
+	let rawItemsSeen = 0;
 	let nextPageToken: string | undefined;
 	const walk = await walkPagesWithCeiling({
 		maxPages: MAX_ACTIVITY_PAGES,
@@ -378,6 +387,7 @@ export async function fetchAllActivities(
 			}
 			const page = past.activities ?? [];
 			for (const activity of page) {
+				rawItemsSeen += 1;
 				const id = activityTripId(activity);
 				if (id && !seenIds.has(id)) {
 					seenIds.add(id);
@@ -404,6 +414,11 @@ export async function fetchAllActivities(
 			return true;
 		},
 	});
+	if (rawItemsSeen > 0 && seenIds.size === 0) {
+		throw new Error(
+			"uber_graphql_error [endpoint Activities]: no activity carried a trip id",
+		);
+	}
 	return { activities: all, truncated: walk.truncated };
 }
 
@@ -420,7 +435,7 @@ async function fetchGetTrip(
 	return parsed.data?.getTrip;
 }
 
-/** One trip's fare-breakdown lines from GetReceipt. Never throws; an empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
+/** One trip's fare-breakdown lines from GetReceipt. An empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
 async function fetchFareBreakdown(
 	fetchPath: UberPageFetch,
 	tripId: string,
@@ -473,7 +488,10 @@ export async function collectAllStreams(
 		if (wantTrips) {
 			try {
 				getTrip = await fetchGetTrip(fetchPath, tripId);
-			} catch {
+			} catch (error) {
+				if (isRunLevelUberError(error)) {
+					throw error;
+				}
 				getTrip = undefined;
 			}
 			const record = getTrip
@@ -489,7 +507,10 @@ export async function collectAllStreams(
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
 			try {
 				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
-			} catch {
+			} catch (error) {
+				if (isRunLevelUberError(error)) {
+					throw error;
+				}
 				fareBreakdown = [];
 			}
 			const receipt = receiptRecord(tripId, fareBreakdown);
