@@ -740,6 +740,27 @@ test("parseCurrentActivityDom: merchant punctuation is not a debit sign", () => 
 	}
 });
 
+test("parseCurrentActivityDom: explicit signs beat debit wording in both row layouts", () => {
+	for (const [description, amount, expected] of [
+		["Debit card refund", "+$12.34", 1234],
+		["Debit card refund", "+ $12.34", 1234],
+		["Synthetic refund", "-$12.34", -1234],
+		["Synthetic refund", "($12.34)", -1234],
+		["Synthetic debit", "$12.34", -1234],
+		["Synthetic refund", "$12.34", 1234],
+	] as const) {
+		for (const html of [
+			`<table><tr><td>Apr 13, 2026</td> <td>${description}</td> <td>${amount}</td> <td>Posted</td></tr></table>`,
+			`<table><tr class="mds-activity-table__row" data-values="Apr 13, 2026, ${description}, ${amount}, Posted"></tr></table>`,
+		]) {
+			const rows = parseCurrentActivityDom(html, "2026-05-15");
+			assert.equal(rows.length, 1, html);
+			assert.equal(rows[0]?.amount_cents, expected, html);
+			assert.equal(rows[0]?.description, description, html);
+		}
+	}
+});
+
 test("parseCurrentActivityDom: pending counts are not amounts or debit signs", () => {
 	assert.deepEqual(
 		parseCurrentActivityDom(

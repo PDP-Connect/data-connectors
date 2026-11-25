@@ -378,10 +378,11 @@ function parseVisibleAmount(text: string): number | null {
 		return null;
 	}
 	const [raw] = match;
+	const leading = raw.trimStart()[0];
 	const sign =
-		raw.trimStart().startsWith("-") ||
-		raw.trimStart().startsWith("(") ||
-		ACTIVITY_DEBIT_WORD_RE.test(text)
+		leading === "-" ||
+		leading === "(" ||
+		(leading !== "+" && ACTIVITY_DEBIT_WORD_RE.test(text))
 			? -1
 			: 1;
 	const normalized = raw.replace(/[$,\s+()\-]/g, "");
