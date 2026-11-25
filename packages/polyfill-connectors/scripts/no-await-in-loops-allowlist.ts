@@ -4837,7 +4837,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/usaa/statement-pdfs.ts",
-			line: 767,
+			line: 774,
 			column: 4,
 			category: "ordered_browser_interaction",
 			note: "hydrateOneStatement(): sequential Playwright action against the shared page/context",
