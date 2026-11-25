@@ -273,7 +273,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/amazon/index.ts",
-			line: 2690,
+			line: 2694,
 			column: 6,
 			category: "dependent_pagination",
 			note: "collect(): progress(): next request depends on the prior page's cursor/offset/response",
