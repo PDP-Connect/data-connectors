@@ -104,6 +104,32 @@ function run(exportDir: string, opts: { peakRssPollIntervalMs?: number } = {}) {
 	});
 }
 
+test("coverage still counts occurrences of a named unit after the label tally fills", async () => {
+	const { newGapCounts, tallyUnconvertibleUnit } = await import("./parsers.ts");
+	const gaps = newGapCounts();
+	for (let index = 0; index < 20; index += 1)
+		tallyUnconvertibleUnit(`unit-${index}`, gaps);
+	tallyUnconvertibleUnit("another-unit", gaps);
+	tallyUnconvertibleUnit("unit-0", gaps);
+	assert.equal(gaps.unrecognizedUnits.size, 20);
+	assert.equal(gaps.unrecognizedUnits.get("unit-0"), 2);
+	assert.equal(gaps.unrecognizedUnitsUnnamed, 1);
+});
+
+test("coverage keeps record-type and unit gaps separate when the labels match", async () => {
+	const { newGapCounts, tallyUnconvertibleUnit, tallyUnrecognizedType } =
+		await import("./parsers.ts");
+	const gaps = newGapCounts();
+	tallyUnrecognizedType("SyntheticFutureType", gaps);
+	tallyUnconvertibleUnit("SyntheticFutureType", gaps);
+	tallyUnconvertibleUnit("SyntheticFutureType", gaps);
+	assert.deepEqual(
+		[...gaps.unrecognizedRecordTypes],
+		[["SyntheticFutureType", 1]],
+	);
+	assert.deepEqual([...gaps.unrecognizedUnits], [["SyntheticFutureType", 2]]);
+});
+
 test("FORMAT-CONFORMANCE: synthetic multi-year, multi-source export.xml (~5k records) parses end to end with honest gap reporting", {
 	timeout: 60_000,
 }, async () => {
