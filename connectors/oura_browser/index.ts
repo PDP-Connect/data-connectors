@@ -21,6 +21,9 @@ const API = "https://api.ouraring.com/v2/usercollection";
 const HISTORY_FLOOR = "2015-01-01";
 const MUTABLE_OVERLAP_DAYS = 2;
 const CHUNK_DAYS = 30;
+// Consecutive fresh-token pages without a new row before a walk is called
+// stuck. A progress guard, not a page or row limit.
+const NO_PROGRESS_PAGE_GUARD = 16;
 
 interface DailySleep {
   contributors?: Record<string, unknown>;
@@ -122,6 +125,8 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
   endpoint: string, start: string, end: string): Promise<CollectionResult<T>> {
   const rows: T[] = [];
   const seen = new Set<string>();
+  const rowIds = new Set<string>();
+  let noProgressPages = 0;
   let nextToken: string | null = null;
   while (true) {
     const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
@@ -143,6 +148,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       const payload = value as Record<string, unknown>;
       if (!Array.isArray(payload.data)) return { rows, complete: false };
       let invalidRow = false;
+      const idsBefore = rowIds.size;
       for (const row of payload.data) {
         // A row without an identity or a calendar day cannot be placed in the
         // inventory, so its page cannot prove the inventory complete.
@@ -152,6 +158,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
           continue;
         }
         rows.push(row as T);
+        rowIds.add(row.id);
       }
       if (invalidRow) return { rows, complete: false };
       // A terminal next_token is Oura's only source evidence of a complete inventory.
@@ -159,6 +166,9 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       if (payload.next_token === null) return { rows, complete: true };
       if (typeof payload.next_token !== "string" || !payload.next_token || seen.has(payload.next_token))
         return { rows, complete: false };
+      // Fresh tokens that never bring a new row would otherwise page forever.
+      noProgressPages = rowIds.size === idsBefore ? noProgressPages + 1 : 0;
+      if (noProgressPages > NO_PROGRESS_PAGE_GUARD) return { rows, complete: false };
       nextToken = payload.next_token;
       seen.add(nextToken);
     } finally { await response.dispose().catch(() => {}); }

@@ -77,13 +77,26 @@ test("a first run starts at the full history floor and keeps windows contiguous"
 });
 
 test("a terminal page after 60 fake pages completes the collection", async () => {
+  const [readiness] = replay.daily_readiness;
   const h = harness({ streams: ["readiness"], answers: (_endpoint, token) => {
     const pageNumber = token === null ? 1 : Number(token);
-    return { data: [], next_token: pageNumber < 60 ? String(pageNumber + 1) : null };
+    return { data: [{ ...readiness, id: id(pageNumber) }], next_token: pageNumber < 60 ? String(pageNumber + 1) : null };
   } });
   await collectOuraBrowser(h.ctx, ACCESS);
   assert.equal(h.calls.length, 60);
   assert.ok(h.messages.some(message => message.type === "STATE"));
+});
+
+test("fresh page tokens that bring no new row stop the walk without STATE", async () => {
+  const h = harness({ streams: ["readiness"], answers: (_endpoint, token) => {
+    const pageNumber = token === null ? 1 : Number(token);
+    return { data: replay.daily_readiness, next_token: String(pageNumber + 1) };
+  } });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  // One page with the row, then 17 pages that add nothing.
+  assert.equal(h.calls.length, 18);
+  assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+  assert.equal(h.messages.find((message) => message.type === "SKIP_RESULT")?.reason, "inventory_not_proven_complete");
 });
 
 test("API v2 replay preserves every legacy document and mapped field", async () => {
