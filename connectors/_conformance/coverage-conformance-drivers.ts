@@ -1375,7 +1375,6 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"github.starred",
 	"github.issues",
 	"github.pull_requests",
-	"github.gists",
 	"github.user",
 	"github.user_stats",
 	"github.contributions",
