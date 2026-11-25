@@ -842,6 +842,30 @@ test("issueRecord: missing PR draft stays unknown", () => {
 	assert.equal(issueRecord({ ...withoutDraft, draft: false }).draft, false);
 });
 
+test("pullRequestRecord: missing draft stays unknown, and the list item beats detail", () => {
+	const withoutDraft = { ...PR_FIXTURE };
+	delete withoutDraft.draft;
+	const unknown = pullRequestRecord(withoutDraft, null, "octocat/hello");
+	assert.equal(unknown.draft, null);
+	assert.equal(pullRequestsSchema.safeParse(unknown).success, true);
+	assert.equal(
+		pullRequestRecord(
+			withoutDraft,
+			{ ...PR_DETAIL_FIXTURE, draft: true },
+			"octocat/hello",
+		).draft,
+		true,
+	);
+	assert.equal(
+		pullRequestRecord(
+			{ ...withoutDraft, draft: false },
+			{ ...PR_DETAIL_FIXTURE, draft: true },
+			"octocat/hello",
+		).draft,
+		false,
+	);
+});
+
 test("truncateBody: keeps the whole body, including a character past 20,000 UTF-16 units", () => {
 	const body = `${"x".repeat(19_999)}😀tail`;
 	assert.equal(truncateBody(body), body);

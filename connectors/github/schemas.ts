@@ -177,7 +177,7 @@ export const pullRequestsSchema = z.object({
 	created_at: isoDateSchema,
 	updated_at: isoDateSchema,
 	closed_at: isoDateSchema,
-	draft: booleanSchema,
+	draft: booleanNullableSchema,
 	merged_at: isoDateSchema,
 	merged_by_login: loginSchema,
 	commits_count: numericSchema,

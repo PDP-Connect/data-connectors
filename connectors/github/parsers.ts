@@ -276,7 +276,10 @@ function pullRequestDetailFields(
 	detail: GitHubPullDetail | null,
 ): Record<string, unknown> {
 	return {
-		draft: Boolean(it.draft ?? detail?.draft),
+		// The list item wins; a draft state neither source reports stays unknown.
+		draft:
+			[it.draft, detail?.draft].find((value) => typeof value === "boolean") ??
+			null,
 		merged_at: detail?.merged_at ?? null,
 		merged_by_login: detail?.merged_by?.login ?? null,
 		commits_count: detail?.commits ?? null,
