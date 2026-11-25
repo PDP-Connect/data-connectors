@@ -22,6 +22,28 @@ test("parses calories from the activity detail HTML shape", () => {
 	assert.equal(parseActivityCalories("<html></html>"), null);
 });
 
+test("calorie detail preserves a grouped fractional reading", () => {
+	assert.equal(
+		parseActivityCalories(
+			'<div class="spans5">Calories</div><div class="spans3"><strong> 1,234.5 </strong></div>',
+		),
+		1234.5,
+	);
+});
+
+test("calorie detail ignores the numeric value next to a different metric label", () => {
+	const html =
+		'<div class="spans5">Distance</div><div class="spans3"><strong>99</strong></div>';
+	assert.equal(parseActivityCalories(html), null);
+	assert.equal(
+		parseActivityCalories(
+			html +
+				'<div class="spans5">Calories</div><div class="spans3"><strong>42</strong></div>',
+		),
+		42,
+	);
+});
+
 test("summarizes the activity page's heartrate stream samples", () => {
 	assert.deepEqual(
 		parseHeartRateStream(fixture("activity-heartrate-stream-synthetic.json")),
