@@ -66,6 +66,7 @@ import {
 	type DetailStatus,
 	lastActivityOf,
 	mergeListItems,
+	OPAQUE_ID,
 	type ProfileSourceStatus,
 	readClientContext,
 	readConversationListPage,
@@ -625,6 +626,8 @@ async function readPagedCounts(
 	};
 	let cursor: string | null = null;
 	const seen = new Set<string>();
+	// Keys of the tasks read so far; kept only to measure progress.
+	const taskKeys = new Set<string>();
 	let noProgressPages = 0;
 	for (let page = 0; ; page += 1) {
 		if (deps.runBudget?.reason() === "max_wall_clock")
@@ -652,15 +655,20 @@ async function readPagedCounts(
 		}
 		acc.count += n;
 		if (typeof j.file_count === "number") acc.files += j.file_count;
-		const projectsBefore = acc.project_ids.length;
+		const knownBefore = acc.project_ids.length + taskKeys.size;
 		if (Array.isArray(j.project_ids)) {
 			for (const id of j.project_ids) {
 				if (
 					typeof id === "string" &&
-					/^[A-Za-z0-9_-]{1,128}$/.test(id) &&
+					OPAQUE_ID.test(id) &&
 					!acc.project_ids.includes(id)
 				)
 					acc.project_ids.push(id);
+			}
+		}
+		if (Array.isArray(j.task_keys)) {
+			for (const key of j.task_keys) {
+				if (typeof key === "string" && OPAQUE_ID.test(key)) taskKeys.add(key);
 			}
 		}
 		if (isRecord(j.by_status)) {
@@ -669,11 +677,7 @@ async function readPagedCounts(
 					acc.by_status[k] = (acc.by_status[k] ?? 0) + v;
 			}
 		}
-		// Tasks carry no ids to compare, so an echoed cursor counts as done.
-		const fresh =
-			projection === "project_sidebar"
-				? acc.project_ids.length - projectsBefore
-				: 0;
+		const fresh = acc.project_ids.length + taskKeys.size - knownBefore;
 		const step = nextCursorStep(j, seen, cursor, n, fresh);
 		if ("done" in step) return { value: acc, status: step.done };
 		noProgressPages = fresh === 0 ? noProgressPages + 1 : 0;

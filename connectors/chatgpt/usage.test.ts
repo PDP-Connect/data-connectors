@@ -538,6 +538,9 @@ test("beta features keep only enabled slug keys; side endpoints keep counts and 
 	const tasks = await inPage("/tasks", "task_stats");
 	assert.deepEqual(tasks.json, {
 		task_count: 3,
+		task_keys: ["2026-09-01", "2026-09-02", "2026-09-03"].map(
+			(day) => `created-${Date.parse(`${day}T08:00:00Z`)}`,
+		),
 		by_status: { active: 2, other: 1 },
 		cursor: null,
 		has_more: false,
@@ -2054,7 +2057,7 @@ function progressPagerHarness(
 					? { items: page.ids.map((id) => listItem(rawConvId(id))) }
 					: target === "sidebar"
 						? { item_count: page.ids.length, file_count: 0, project_ids: page.ids.map((id) => "g-p-Progress" + id) }
-						: { task_count: page.ids.length, by_status: {} };
+						: { task_count: page.ids.length, task_keys: page.ids.map((id) => `task${id}`), by_status: {} };
 				return Promise.resolve({ status: 200, json: { ...body, has_more: page.has_more, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) } });
 			}
 			if (isSidebar) return Promise.resolve({ status: 200, json: {
@@ -2119,4 +2122,42 @@ test("usage project listing stops on fresh cursors that add no conversation", as
 	const listing = sub(sub(summary, "coverage"), "project_listing");
 	assert.equal(listing.failed, 1);
 	assert.equal(sub(summary, "coverage").listing_complete, false);
+});
+
+test("usage tasks read past the no-progress guard while each page adds a task", async () => {
+	const h = progressPagerHarness("tasks", (page) => ({ ids: [page], has_more: page < 23, cursor: `t${page + 1}` }), 24, {
+		profileOnly: true,
+	});
+	await h.run();
+	assert.equal(h.pages(), 24);
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(profile?.scheduled_task_count, 24);
+	assert.equal(sub(profile, "source_status").tasks, "ok");
+});
+
+test("usage tasks stop on fresh cursors that add no task", async () => {
+	const h = progressPagerHarness("tasks", (page) => ({ ids: [1], has_more: true, cursor: `t${page + 1}` }), 18, {
+		profileOnly: true,
+	});
+	await h.run();
+	assert.equal(h.pages(), 18);
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(sub(profile, "source_status").tasks, "partial");
+});
+
+test("task keys come from the task id or creation time, never its text", async () => {
+	installFakeSite({
+		"/tasks": () =>
+			json({
+				tasks: [
+					{ id: "task-a", created_at: "2026-10-01T00:00:00Z", title: "CANARY title" },
+					{ created_at: "2026-10-02T00:00:00Z", prompt: "CANARY prompt", status: "paused" },
+					{ title: "CANARY no id or time" },
+				],
+			}),
+	});
+	const projected = (await inPage("/tasks", "task_stats")).json as { task_count: number; task_keys: string[] };
+	assert.equal(projected.task_count, 3);
+	assert.deepEqual(projected.task_keys, ["task-a", `created-${Date.parse("2026-10-02T00:00:00Z")}`]);
+	assert.equal(JSON.stringify(projected).includes("CANARY"), false);
 });
