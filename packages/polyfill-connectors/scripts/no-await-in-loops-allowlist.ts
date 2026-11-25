@@ -2800,7 +2800,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_contacts/api.ts",
-			line: 303,
+			line: 306,
 			column: 26,
 			category: "dependent_pagination",
 			note: "listContactGroups(): next request depends on the prior page's cursor/offset/response",

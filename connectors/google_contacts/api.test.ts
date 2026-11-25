@@ -81,6 +81,31 @@ test("listConnectionsPage sends syncToken and requestSyncToken, and parses a per
 	);
 });
 
+test("listConnectionsPage rejects an invalid connections field", async () => {
+	const transport = makeFetch([jsonResponse({ connections: null })]);
+	const client = new GooglePeopleClient({
+		accessToken: "fixture-only",
+		fetch: transport.fetch,
+	});
+	await assert.rejects(
+		() => client.listConnectionsPage({}),
+		/google_people_invalid_connections/,
+	);
+});
+
+test("listConnectionsPage accepts an omitted connections field on an empty page", async () => {
+	const transport = makeFetch([
+		jsonResponse({ nextSyncToken: "fixture-checkpoint" }),
+	]);
+	const client = new GooglePeopleClient({
+		accessToken: "fixture-only",
+		fetch: transport.fetch,
+	});
+	const page = await client.listConnectionsPage({});
+	assert.deepEqual(page.people, []);
+	assert.equal(page.nextSyncToken, "fixture-checkpoint");
+});
+
 test("listConnectionsPage surfaces PersonMetadata.deleted as a tombstone", async () => {
 	const transport = makeFetch([
 		jsonResponse({
