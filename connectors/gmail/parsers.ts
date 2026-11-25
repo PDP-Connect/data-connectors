@@ -388,16 +388,28 @@ export function decodeBodyPart(
 	encoding: string | null,
 	charset: string | null,
 ): string {
+	return decodeBodyPartWithStatus(buffer, encoding, charset).text;
+}
+
+/** Like decodeBodyPart, with a fixed status and no source text in the diagnostic. */
+export function decodeBodyPartWithStatus(
+	buffer: Buffer | null | undefined,
+	encoding: string | null,
+	charset: string | null,
+): {
+	text: string;
+	status: "decoded" | "unsupported_charset" | "transfer_decode_failed";
+} {
 	if (!buffer?.length) {
-		return "";
+		return { text: "", status: "decoded" };
 	}
-	const cs = (charset || "utf8") as BufferEncoding;
+	const cs = charset || "utf8";
+	let decodedBytes = buffer;
 	try {
 		const enc = (encoding || "").toLowerCase();
 		if (enc === "base64") {
-			return Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-		}
-		if (enc === "quoted-printable") {
+			decodedBytes = Buffer.from(buffer.toString("ascii"), "base64");
+		} else if (enc === "quoted-printable") {
 			const raw = buffer.toString("ascii");
 			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
 			// Decode the =HH sequences as raw bytes, then interpret in charset.
@@ -416,12 +428,21 @@ export function decodeBodyPart(
 					i += 1;
 				}
 			}
-			return Buffer.from(bytes).toString(cs);
+			decodedBytes = Buffer.from(bytes);
 		}
-		return buffer.toString(cs);
 	} catch {
-		return buffer.toString("utf8");
+		return { text: buffer.toString("utf8"), status: "transfer_decode_failed" };
 	}
+	if (!Buffer.isEncoding(cs)) {
+		return {
+			text: decodedBytes.toString("utf8"),
+			status: "unsupported_charset",
+		};
+	}
+	return {
+		text: decodedBytes.toString(cs as BufferEncoding),
+		status: "decoded",
+	};
 }
 
 /**

@@ -19,6 +19,7 @@ import {
 	canonicalLabelName,
 	classifyBodySource,
 	decodeBodyPart,
+	decodeBodyPartWithStatus,
 	decodeBodystructureForAttachments,
 	envelopeParticipants,
 	findFirstPartByType,
@@ -425,6 +426,27 @@ test("decodeBodyPart: quoted-printable decodes =HH + soft-break", () => {
 	// "Hello=20World" (QP space) + soft break
 	const qp = Buffer.from("Hello=\r\n=20World", "ascii");
 	assert.equal(decodeBodyPart(qp, "quoted-printable", "utf8"), "Hello World");
+});
+
+test("decodeBodyPart identifies an unsupported charset after decoding MIME transfer", () => {
+	for (const [encoding, encoded] of [
+		["base64", Buffer.from("café", "utf8").toString("base64")],
+		["quoted-printable", "caf=C3=A9"],
+	] as const) {
+		const input = Buffer.from(encoded, "ascii");
+		assert.deepEqual(
+			decodeBodyPartWithStatus(input, encoding, "x-fixture-unknown"),
+			{
+				text: "café",
+				status: "unsupported_charset",
+			},
+		);
+		assert.deepEqual(decodeBodyPartWithStatus(input, encoding, "utf8"), {
+			text: "café",
+			status: "decoded",
+		});
+		assert.equal(decodeBodyPart(input, encoding, "x-fixture-unknown"), "café");
+	}
 });
 
 test("decodeBodyPart: null/empty → empty string", () => {
