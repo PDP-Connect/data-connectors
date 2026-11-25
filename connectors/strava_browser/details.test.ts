@@ -68,3 +68,15 @@ test("empty or wholly invalid heart-rate streams have null statistics", () => {
 		});
 	}
 });
+
+test("reports a present unreadable heart-rate container separately from no samples", () => {
+	for (const heartrate of [null, 90, {}, { data: "unreadable" }]) {
+		assert.equal(parseHeartRateStream(JSON.stringify({ heartrate })), null);
+	}
+	for (const payload of [{}, { heartrate: [] }, { heartrate: { data: [] } }]) {
+		assert.deepEqual(parseHeartRateStream(JSON.stringify(payload)), {
+			average: null,
+			maximum: null,
+		});
+	}
+});
