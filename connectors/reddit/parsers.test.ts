@@ -308,6 +308,31 @@ test("voteStatsRecord: score and num_comments, valid for all three vote-shaped s
 	}
 });
 
+test("submitted stats retain explicit zero measurements", () => {
+	const record = submittedStatsRecord({
+		name: "t3_synthetic",
+		created_utc: 1_700_000_000,
+		score: 0,
+		num_comments: 0,
+		upvote_ratio: 0,
+		gilded: 0,
+	});
+	assert.deepEqual(record, {
+		id: "t3_synthetic",
+		created_utc: "2023-11-14T22:13:20.000Z",
+		score: 0,
+		num_comments: 0,
+		upvote_ratio: 0,
+		gilded: 0,
+	});
+});
+
+test("deduplication keeps a post and comment with the same suffix", () => {
+	const post = { kind: "t3" as const, data: { name: "t3_synthetic" } };
+	const comment = { kind: "t1" as const, data: { name: "t1_synthetic" } };
+	assert.deepEqual(dedupeByFullname([post, comment, post]), [post, comment]);
+});
+
 test("stats schemas reject a content-stream fullname kind mismatch", () => {
 	assert.equal(
 		validateRecord("submitted_stats", {
