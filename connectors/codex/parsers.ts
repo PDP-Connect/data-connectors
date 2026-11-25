@@ -378,6 +378,26 @@ export interface TimestampRange {
 	lastTs: string | null;
 }
 
+function compareTimestampInstants(
+	left: string,
+	leftIso: string,
+	right: string | null,
+	rightIso: string,
+): number {
+	const milliseconds = Date.parse(leftIso) - Date.parse(rightIso);
+	if (milliseconds !== 0) return milliseconds;
+	// Integral-minute offsets leave digits below a millisecond unchanged.
+	const tail = (value: string | null) =>
+		(/\.(\d+)(?:Z|[+-]\d{2}:?\d{2})$/.exec(value ?? "")?.[1] ?? "").slice(3);
+	const l = tail(left);
+	const r = tail(right);
+	for (let i = 0; i < Math.max(l.length, r.length); i++) {
+		const difference = (l.charCodeAt(i) || 48) - (r.charCodeAt(i) || 48);
+		if (difference !== 0) return difference;
+	}
+	return 0;
+}
+
 export function extendTimestampRange(
 	range: TimestampRange,
 	ts: string | null,
@@ -386,13 +406,18 @@ export function extendTimestampRange(
 	if (ts === null || iso === null) {
 		return;
 	}
-	const instant = Date.parse(iso);
 	const first = timestampToIso(range.firstTs);
 	const last = timestampToIso(range.lastTs);
-	if (first === null || instant < Date.parse(first)) {
+	if (
+		first === null ||
+		compareTimestampInstants(ts, iso, range.firstTs, first) < 0
+	) {
 		range.firstTs = ts;
 	}
-	if (last === null || instant > Date.parse(last)) {
+	if (
+		last === null ||
+		compareTimestampInstants(ts, iso, range.lastTs, last) > 0
+	) {
 		range.lastTs = ts;
 	}
 }

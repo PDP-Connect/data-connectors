@@ -452,6 +452,34 @@ test("extendTimestampRange: compares instants but preserves original offset stri
 	}
 });
 
+test("extendTimestampRange: orders sub-millisecond instants and retains original strings", () => {
+	for (const [earlier, later] of [
+		["2026-04-22T00:00:00.000001Z", "2026-04-22T00:00:00.000002Z"],
+		[
+			"2026-04-22T01:00:00.123456789001+01:00",
+			"2026-04-21T19:00:00.123456789002-0500",
+		],
+		["2026-04-22T00:00:00Z", "2026-04-22T00:00:00.0000000000001Z"],
+	]) {
+		for (const timestamps of [
+			[later, earlier],
+			[earlier, later],
+		]) {
+			const range: TimestampRange = { firstTs: null, lastTs: null };
+			for (const timestamp of timestamps)
+				extendTimestampRange(range, timestamp);
+			assert.deepEqual(range, { firstTs: earlier, lastTs: later });
+		}
+	}
+});
+
+test("extendTimestampRange: trailing zeros and offsets do not break an exact tie", () => {
+	const first = "2026-04-22T01:00:00.000010+0100";
+	const range: TimestampRange = { firstTs: first, lastTs: first };
+	extendTimestampRange(range, "2026-04-22T00:00:00.00001Z");
+	assert.deepEqual(range, { firstTs: first, lastTs: first });
+});
+
 test("extendTimestampRange: invalid calendar day never becomes an endpoint", () => {
 	const empty: TimestampRange = { firstTs: null, lastTs: null };
 	extendTimestampRange(empty, "2026-02-30T10:00:00Z");
