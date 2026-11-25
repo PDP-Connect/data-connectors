@@ -300,10 +300,19 @@ test("Google Maps Data Portability reports zero authorized groups without accept
 				GOOGLE_DATAPORTABILITY_ACCESS_TOKEN: "ya29.access",
 			},
 		}),
-		/google_dataportability_no_authorized_resource_groups/,
+		{
+			code: "google_dataportability_no_authorized_resource_groups",
+			message: /Choose groups that are already covered, then try again\./,
+			retryable: false,
+		},
 	);
 
+	assert.deepEqual(fakeClient.calls, [{ method: "checkAccessType" }]);
 	assert.equal(records.length, 0);
+	assert.equal(
+		messages.some((msg) => msg.type === "STATE"),
+		false,
+	);
 	const coverage = messages.find((msg) => msg.type === "DETAIL_COVERAGE");
 	assert.ok(coverage);
 	assert.deepEqual(coverage.required_keys, ["maps.photos_videos"]);
