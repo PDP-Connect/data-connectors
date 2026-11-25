@@ -214,6 +214,29 @@ test("profile metadata distinguishes absent, malformed, and ambiguous rosters", 
 	);
 });
 
+test("duplicate wrapped roster files stay ambiguous even when both names match", () => {
+	const first = { users: [{ full_name: "Fictional Owner" }] };
+	const second = { users: [{ full_name: "Fictional Owner" }] };
+	assert.deepEqual(
+		resolveExportedProfile([first, second], "Fictional Owner", true),
+		{ fullName: null, nameSource: "none", metadataStatus: "ambiguous" },
+	);
+});
+
+test("a blank wrapped roster permits fallback only for the current export", () => {
+	const files = [{ users: [{ full_name: "  " }] }];
+	assert.deepEqual(resolveExportedProfile(files, "Fictional Owner", true), {
+		fullName: "Fictional Owner",
+		nameSource: "browser_menu",
+		metadataStatus: "malformed",
+	});
+	assert.deepEqual(resolveExportedProfile(files, "Fictional Owner", false), {
+		fullName: null,
+		nameSource: "none",
+		metadataStatus: "malformed",
+	});
+});
+
 // ─── flattenMessageText ─────────────────────────────────────────────────
 
 test("flattenMessageText: prefers text field over content blocks", () => {
