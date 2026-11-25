@@ -95,7 +95,12 @@ function lastDone(
 }
 
 async function runRealNotionConnector(
-	mode: "complete" | "provider_failure" | "contradictory_pagination",
+	mode:
+		| "complete"
+		| "provider_failure"
+		| "contradictory_pagination"
+		| "malformed_success"
+		| "verified_empty",
 ) {
 	const harnessDir = await mkdtemp(join(tmpdir(), "pdpp-notion-protocol-"));
 	const wrapperPath = join(harnessDir, "notion-wrapper.mjs");
@@ -111,6 +116,10 @@ globalThis.fetch = async (_input, init) => {
   const body = JSON.parse(init?.body ?? "{}");
   const object = body.filter?.value;
   const isPage = object === "page";
+  if (mode === "malformed_success" || mode === "verified_empty") {
+    const page = mode === "verified_empty" ? { results: [], has_more: false, next_cursor: null } : {};
+    return new Response(JSON.stringify(page), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (mode === "contradictory_pagination" && isPage) {
     return new Response(JSON.stringify({
       has_more: true,
@@ -184,6 +193,25 @@ await import(${JSON.stringify(entrypointUrl)});
 		await rm(harnessDir, { force: true, recursive: true });
 	}
 }
+
+test("real Notion connector distinguishes malformed success from verified empty search", async () => {
+	const malformed = await runRealNotionConnector("malformed_success");
+	assert.equal(malformed.code, 1);
+	assert.equal(lastDone(malformed.messages).status, "failed");
+	assert.equal(
+		protocolMessagesFor(malformed.messages, "DETAIL_COVERAGE").length,
+		0,
+	);
+	assert.equal(protocolMessagesFor(malformed.messages, "STATE").length, 0);
+
+	const empty = await runRealNotionConnector("verified_empty");
+	assert.equal(empty.code, 0);
+	assert.equal(
+		protocolMessagesFor(empty.messages, "DETAIL_COVERAGE").length,
+		2,
+	);
+	assert.equal(protocolMessagesFor(empty.messages, "STATE").length, 2);
+});
 
 test("real Notion connector fails closed when has_more is true without a cursor", async () => {
 	const result = await runRealNotionConnector("contradictory_pagination");
