@@ -2097,3 +2097,26 @@ for (const partial of [false, true]) {
 		}
 	});
 }
+
+// One page with a new item, then fresh cursors that add nothing: the walk
+// stops once more than 16 pages in a row make no progress, and is partial.
+test("usage sidebar stops on fresh cursors that add no project", async () => {
+	const h = progressPagerHarness("sidebar", (page) => ({ ids: [1], has_more: true, cursor: `c${page + 1}` }), 18, {
+		profileOnly: true,
+	});
+	await h.run();
+	assert.equal(h.pages(), 18);
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(sub(profile, "source_status").projects, "partial");
+});
+
+test("usage project listing stops on fresh cursors that add no conversation", async () => {
+	const h = progressPagerHarness("project", (page) => ({ ids: [1], has_more: true, cursor: `c${page + 1}` }), 18);
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+	await h.run();
+	assert.equal(h.pages(), 18);
+	const [summary] = records(h.harness, "usage_summary");
+	const listing = sub(sub(summary, "coverage"), "project_listing");
+	assert.equal(listing.failed, 1);
+	assert.equal(sub(summary, "coverage").listing_complete, false);
+});
