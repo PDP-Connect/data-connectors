@@ -8,6 +8,7 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import {
 	dollarsToCents,
+	normalizeVenmoDate,
 	parseTransactionStory,
 	profileRecord,
 	userRecord,
@@ -381,7 +382,27 @@ test("a charge retains payer direction and only the allowed counterparty fields"
 	});
 });
 
-test("a transaction preserves explicit offsets across all projected dates", () => {
+test("explicit offsets become UTC with the source's fractional digits", () => {
+	assert.equal(
+		normalizeVenmoDate("2026-01-02T01:00:00.123456+05:30"),
+		"2026-01-01T19:30:00.123456Z",
+	);
+	assert.equal(
+		normalizeVenmoDate("2026-12-31T22:30:00-04:00"),
+		"2027-01-01T02:30:00Z",
+	);
+	assert.equal(
+		normalizeVenmoDate("2026-01-02T08:10:00.5Z"),
+		"2026-01-02T08:10:00.5Z",
+	);
+	// Date would roll February 30 into March; an impossible value is not rewritten.
+	assert.equal(
+		normalizeVenmoDate("2026-02-30T01:00:00+05:30"),
+		"2026-02-30T01:00:00+05:30",
+	);
+});
+
+test("a transaction stores every projected date in UTC", () => {
 	const created = "2026-01-02T13:07:59.001+05:30";
 	const updated = "2026-01-02T04:07:59.123-04:00";
 	const completed = "2026-01-02T08:10:00.000123";
@@ -396,9 +417,12 @@ test("a transaction preserves explicit offsets across all projected dates", () =
 	);
 	assert.equal(parsed.kind, "record");
 	if (parsed.kind !== "record") return;
-	assert.equal(parsed.record.date_created, created);
-	assert.equal(parsed.record.date_updated, updated);
+	assert.equal(parsed.record.date_created, "2026-01-02T07:37:59.001Z");
+	assert.equal(parsed.record.date_updated, "2026-01-02T08:07:59.123Z");
 	assert.equal(parsed.record.date_completed, completed + "Z");
+	for (const key of ["date_created", "date_updated", "date_completed"]) {
+		assert.match(String(parsed.record[key]), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
+	}
 });
 
 test("transaction device metadata distinguishes absent and explicit null observations", () => {
