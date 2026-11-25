@@ -362,6 +362,104 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 	);
 });
 
+test("same-day sleep sessions keep distinct ids and share the daily aggregate", async () => {
+	const { ctx, records } = makeContext({ streams: [{ name: "sleep" }] });
+	await withOuraEndpointPages(
+		{
+			sleep: [
+				{
+					data: [
+						{
+							id: "00000000-0000-4000-8000-000000000001",
+							day: "2026-08-05",
+							type: "long_sleep",
+						},
+						{
+							id: "00000000-0000-4000-8000-000000000002",
+							day: "2026-08-05",
+							type: "late_nap",
+						},
+					],
+					next_token: null,
+				},
+			],
+			daily_sleep: [
+				{
+					data: [
+						{
+							id: "aggregate-fixture",
+							day: "2026-08-05",
+							score: 81,
+							contributors: { efficiency: 88 },
+						},
+					],
+					next_token: null,
+				},
+			],
+		},
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+	);
+	assert.deepEqual(
+		records.map(({ stream, data }) => [
+			stream,
+			data.id,
+			data.type,
+			data.sleep_score,
+			data.contributors,
+		]),
+		[
+			[
+				"sleep",
+				"00000000-0000-4000-8000-000000000001",
+				"long_sleep",
+				81,
+				{ efficiency: 88 },
+			],
+			[
+				"sleep",
+				"00000000-0000-4000-8000-000000000002",
+				"late_nap",
+				81,
+				{ efficiency: 88 },
+			],
+		],
+	);
+});
+
+test("an exhausted activity response keeps the newest day when the last row is older", async () => {
+	const { ctx, records, messages } = makeContext({
+		state: { activity: { last_day: "2026-08-01" } },
+	});
+	await withOuraPages(
+		[
+			{
+				data: [
+					{
+						id: "00000000-0000-4000-8000-000000000003",
+						day: "2026-08-06",
+						score: 80,
+					},
+					{
+						id: "00000000-0000-4000-8000-000000000004",
+						day: "2026-08-03",
+						score: 79,
+					},
+				],
+				next_token: null,
+			},
+		],
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+	);
+	assert.deepEqual(
+		records.map(({ data }) => data.day),
+		["2026-08-06", "2026-08-03"],
+	);
+	assert.deepEqual(lastStateCursor(messages, "activity"), {
+		last_day: "2026-08-06",
+	});
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+});
+
 test("sleep joins its per-session document with the same day's daily_sleep score and contributors", async () => {
 	const { ctx, records } = makeContext({ streams: [{ name: "sleep" }] });
 	await withOuraEndpointPages(
