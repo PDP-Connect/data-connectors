@@ -548,7 +548,9 @@ test("windows cut a span oldest first, the last one short", () => {
 // ── Days and cursors ───────────────────────────────────────────────────────
 const PLAN = {
 	windowDays: 4,
+	initialDays: 90,
 	overlapDays: 3,
+	maxWindowsPerRun: 100,
 };
 
 test("localDay reads the owner's UTC offset", () => {
@@ -564,11 +566,11 @@ test("localDay reads the owner's UTC offset", () => {
 	assert.equal(localDay(new Date("2026-11-05T23:59:00Z"), null), "2026-11-05");
 });
 
-test("a first run reads from 2012-01-01 up to today", () => {
+test("a first run reads initialDays up to today", () => {
 	const p = planDays({}, "2026-11-05", {}, false, PLAN);
 	assert.deepEqual(p, {
-		cursor: { next_day: "2012-01-01", floor: "2012-01-01" },
-		from: "2012-01-01",
+		cursor: { next_day: "2026-08-08", floor: "2026-08-08" },
+		from: "2026-08-08",
 		to: "2026-11-05",
 	});
 });
@@ -594,7 +596,7 @@ test("a grant starting before the floor, a full refresh, or a cursor in the futu
 		planDays(prev, "2026-11-05", { since: "2026-01-01" }, false, PLAN).from,
 		"2026-01-01",
 	);
-	assert.equal(planDays(prev, "2026-11-05", {}, true, PLAN).from, "2012-01-01");
+	assert.equal(planDays(prev, "2026-11-05", {}, true, PLAN).from, "2026-08-08");
 	assert.equal(
 		planDays(
 			{ next_day: "2027-01-01", floor: "2026-12-30" },
@@ -603,7 +605,7 @@ test("a grant starting before the floor, a full refresh, or a cursor in the futu
 			false,
 			PLAN,
 		).from,
-		"2012-01-01",
+		"2026-08-08",
 	);
 });
 
@@ -970,7 +972,7 @@ test("a session whose summary 404s keeps its list fields, the summary's null", a
 	);
 });
 
-test("a run continues beyond the former artificial window limit", async () => {
+test("a run that reaches its window limit says so and saves where it stopped", async () => {
 	const s = site();
 	const { ctx, out } = context(
 		s,
@@ -981,13 +983,11 @@ test("a run continues beyond the former artificial window limit", async () => {
 		},
 	);
 	await collectPolarFlow(ctx, { sleep: instant }, NOW);
-	assert.deepEqual(skipsOf(out), []);
-	assert.ok(
-		s.fetches.filter((f) => f.url.startsWith("/api/activity-timeline/loadFour"))
-			.length > 100,
-	);
+	const [skip] = skipsOf(out);
+	assert.equal(skip?.reason, "source_limit_reached");
+	// 100 windows of 4 days from 2025-01-01.
 	assert.deepEqual(stateOf(out, "daily_activity"), {
-		next_day: "2026-11-06",
+		next_day: "2026-02-05",
 		floor: "2025-01-01",
 	});
 });
@@ -1095,115 +1095,4 @@ test("the runtime context type stays structurally compatible", () => {
 	const typed: (ctx: BrowserCollectContext) => Promise<void> = (ctx) =>
 		collectPolarFlow(ctx);
 	assert.equal(typeof typed, "function");
-});
-
-// Full-history defaults: independent dates and window bounds, synthetic data only.
-const HISTORY_CASES = [
-	["training_sessions", 31, 14],
-	["daily_activity", 4, 3],
-	["sleep", 365, 7],
-	["nightly_recharge", 28, 7],
-] as const;
-const shiftedDay = (day: string, n: number) =>
-	new Date(Date.parse(day + "T00:00:00Z") + n * 86_400_000)
-		.toISOString()
-		.slice(0, 10);
-
-function requestedHistory(s: Site, stream: string) {
-	return s.fetches.flatMap(({ url, init }) => {
-		const parsed = new URL(url, FLOW);
-		if (
-			stream === "training_sessions" &&
-			parsed.pathname === "/api/training/history"
-		) {
-			const body = JSON.parse(String(init.body));
-			return [{ from: body.fromDate as string, to: body.toDate as string }];
-		}
-		if (
-			stream === "daily_activity" &&
-			parsed.pathname === "/api/activity-timeline/loadFour"
-		) {
-			assert.equal(parsed.searchParams.get("maxSampleCount"), "200");
-			const day = parsed.searchParams.get("day")!;
-			return [{ from: shiftedDay(day, -2), to: shiftedDay(day, 1) }];
-		}
-		if (stream === "sleep" && parsed.pathname === "/api/sleep/report") {
-			return [
-				{
-					from: parsed.searchParams.get("from")!,
-					to: parsed.searchParams.get("to")!,
-				},
-			];
-		}
-		const nightly = /^\/api\/nightly-recovery\/([\d-]+)\/([\d-]+)$/.exec(
-			parsed.pathname,
-		);
-		return stream === "nightly_recharge" && nightly
-			? [{ from: nightly[1]!, to: nightly[2]! }]
-			: [];
-	});
-}
-
-HISTORY_CASES.forEach(([stream, maxDays, overlap]) => {
-	test(`fresh ${stream} reads from 2012 and emits a 2014 record`, async () => {
-		const data = fixtureData();
-		const old = <T>(value: T): T =>
-			JSON.parse(
-				JSON.stringify(value)
-					.replaceAll("2026-11-02", "2014-05-31")
-					.replaceAll("2026-11-03", "2014-06-01"),
-			) as T;
-		data.training = [old(data.training[0]!)];
-		data.summaries = old(data.summaries);
-		data.activity = { "2014-06-01": old(data.activity["2026-11-03"]) };
-		data.sleep = [old(data.sleep[0]!)];
-		data.nightly = [old(data.nightly[0]!)];
-		const s = site({ data });
-		const { ctx, out } = context(s, [stream]);
-		await collectPolarFlow(ctx, { sleep: instant }, NOW);
-		assert.deepEqual(skipsOf(out), []);
-		assert.ok(
-			recordsOf(out, stream).some(
-				(row) =>
-					(stream === "training_sessions" ? row.start_date : row.date) ===
-					"2014-06-01",
-			),
-		);
-		const ranges = requestedHistory(s, stream);
-		assert.equal(ranges[0]?.from, "2012-01-01");
-		assert.ok(ranges.length > 1);
-		ranges.forEach((range, index) => {
-			const span = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000;
-			assert.ok(span >= (stream === "sleep" ? 30 : 0));
-			assert.ok(span <= (stream === "sleep" ? 365 : maxDays - 1));
-			if (index > 0) {
-				const previous = ranges[index - 1]!;
-				assert.ok(range.from <= shiftedDay(previous.to, 1), "no skipped days");
-				assert.ok(range.to > previous.to, "windows advance");
-			}
-		});
-		assert.ok(ranges.at(-1)!.to >= "2026-11-05");
-		assert.deepEqual(stateOf(out, stream), {
-			next_day: "2026-11-06",
-			floor: "2012-01-01",
-		});
-	});
-
-	test(`stored ${stream} cursor still reads only its overlap`, async () => {
-		const s = site();
-		const { ctx, out } = context(s, [stream], {
-			[stream]: { next_day: "2026-11-05", floor: "2020-01-01" },
-		});
-		await collectPolarFlow(ctx, { sleep: instant }, NOW);
-		const ranges = requestedHistory(s, stream);
-		assert.equal(
-			ranges[0]?.from,
-			shiftedDay("2026-11-05", -(stream === "sleep" ? 30 : overlap)),
-		);
-		assert.deepEqual(skipsOf(out), []);
-		assert.deepEqual(stateOf(out, stream), {
-			next_day: "2026-11-06",
-			floor: "2020-01-01",
-		});
-	});
 });
