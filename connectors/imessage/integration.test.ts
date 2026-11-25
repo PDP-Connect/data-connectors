@@ -64,6 +64,41 @@ test("iMessage record validation expects a normalized read time when present", (
 	);
 });
 
+test("iMessage participant validation rejects a malformed chat identifier", () => {
+	const participant = {
+		id: "fixture-participant",
+		chat_id: "1",
+		handle: null,
+		is_from_me: false,
+	};
+	assert.equal(validateRecord("participants", participant).ok, true);
+	assert.equal(
+		validateRecord("participants", { ...participant, chat_id: "not-numeric" })
+			.ok,
+		false,
+	);
+});
+
+test("iMessage attachment validation rejects a fractional byte count", () => {
+	const attachment = {
+		id: "a".repeat(64),
+		message_id: null,
+		chat_id: null,
+		filename: "fixture.txt",
+		content_type: "text/plain",
+		size_bytes: 1,
+		content_sha256: null,
+		hydration_status: "deferred",
+		hydration_error: null,
+		blob_ref: null,
+	};
+	assert.equal(validateRecord("attachments", attachment).ok, true);
+	assert.equal(
+		validateRecord("attachments", { ...attachment, size_bytes: 1.5 }).ok,
+		false,
+	);
+});
+
 const ENTRYPOINT = connectorEntrypoint("imessage");
 
 function records(
