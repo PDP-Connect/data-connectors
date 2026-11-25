@@ -935,7 +935,11 @@ export async function collectStravaBrowser(
 	}
 
 	const listComplete = wasInventoryComplete || (listFinished && !failure);
-	const requestedSince = rangeSince;
+	// An incomplete widening has not earned the new coverage boundary.
+	const requestedSince =
+		rangeExpanded && !(listFinished && !failure)
+			? (stored.requested_since ?? null)
+			: rangeSince;
 	const cursor: ActivitiesState = {
 		known_ids: [...knownIds],
 		pending_detail_ids: pendingIds,
