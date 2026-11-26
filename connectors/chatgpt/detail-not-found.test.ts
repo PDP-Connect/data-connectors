@@ -59,6 +59,8 @@ interface RunSetup {
 	 * "incomplete" a 200 with no mapping.
 	 */
 	status: (id: string) => number | "incomplete";
+	/** Search pages from this cursor on answer a 200 with no items list. */
+	malformedSearchFrom?: number;
 }
 
 interface RunResult {
@@ -77,6 +79,12 @@ function makeApi(setup: RunSetup, detailReads: string[]): ChatGptApi {
 				const cursor = Number(
 					new URLSearchParams(path.split("?")[1]).get("cursor"),
 				);
+				if (
+					setup.malformedSearchFrom !== undefined &&
+					cursor >= setup.malformedSearchFrom
+				) {
+					return Promise.resolve({ status: 200, json: {} });
+				}
 				// The connector asks for SEARCH_PAGE_SIZE rows per cursor page.
 				return Promise.resolve({
 					status: 200,
@@ -557,4 +565,26 @@ test("detail 404: a stored owed id outside the bound fails the run instead of be
 			assert.equal(wroteMessagesState(failed.protocolMessages), false);
 		}),
 	);
+});
+
+test("detail 404: a truncated messages listing still reports the owed conversations as skipped", async () => {
+	const written = await stateAfterHealthyRun({ detail_not_found: ["conv-owed"] });
+	const listed = listOf(SEARCH_PAGE_SIZE);
+	const result = await run(
+		{
+			// 30 healthy conversations, then a malformed second page.
+			search: [...listed, listItem("conv-later", "2026-04-23T00:00:00Z")],
+			malformedSearchFrom: SEARCH_PAGE_SIZE,
+			status: (id) => (id === "conv-owed" ? 404 : 200),
+		},
+		{ messages: written.messages },
+		{ requested: new Map([["messages", { name: "messages" }]]) },
+	);
+	assert.ok(result.detailReads.includes("conv-owed"));
+	assert.deepEqual(owedIds(result.state), ["conv-owed"]);
+	const coverage = messagesCoverage(result);
+	assert.deepEqual(coverage?.required_keys, ["conv-owed"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["conv-owed"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	assert.equal(coverage?.covered, 0);
 });

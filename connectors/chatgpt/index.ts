@@ -6075,6 +6075,20 @@ function makeConversationDetailCoverage(
 	});
 }
 
+/**
+ * A scoped receipt for a run with no forward coverage to report: the owed
+ * conversations, required and skipped, with no messages this run.
+ */
+function makeOwedOnlyCoverage(owed: readonly string[]): DetailCoverageMessage {
+	return makeConversationDetailCoverage([...owed], {
+		deferred: false,
+		gapKeys: [],
+		hydratedKeys: [],
+		sourceUnrepresentableKeys: [],
+		notFoundKeys: [...owed],
+	});
+}
+
 function makeConversationListCoverage(
 	considered: number,
 	covered = considered,
@@ -7895,16 +7909,7 @@ async function walkConversationsAndMessages(
 		if (detailNotFound) {
 			const settlement = finishDetailNotFound(detailNotFound);
 			if (settlement.missing.length > 0) {
-				// A scoped receipt: these are owed and have no messages this run.
-				await deps.emit(
-					makeConversationDetailCoverage(settlement.missing, {
-						deferred: false,
-						gapKeys: [],
-						hydratedKeys: [],
-						sourceUnrepresentableKeys: [],
-						notFoundKeys: settlement.missing,
-					}),
-				);
+				await deps.emit(makeOwedOnlyCoverage(settlement.missing));
 			}
 			if (detailNotFound.prior.size > 0 || settlement.table.length > 0) {
 				notFoundTable = settlement.table;
@@ -8317,6 +8322,10 @@ async function emitMessagesCoverageAndState(
 				]
 			: [...messageDetailConversations.map((c) => c.id), ...extraRequiredKeys];
 		await deps.emit(makeConversationDetailCoverage(requiredKeys, coverage));
+	} else if (notFoundTable && notFoundTable.length > 0) {
+		// A truncated walk saw a prefix, so it claims no forward coverage, but
+		// the owed conversations are still reported missing.
+		await deps.emit(makeOwedOnlyCoverage(notFoundTable));
 	}
 	const maxMessagesUpdate = messagesListTruncated
 		? oldestAvailableConversationCursor(
