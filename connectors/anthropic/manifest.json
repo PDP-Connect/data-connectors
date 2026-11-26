@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/anthropic"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.68",
+	"version": "0.2.69",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {

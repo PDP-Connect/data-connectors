@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/venmo"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/venmo",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "venmo",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-	"version": "0.2.31",
+	"version": "0.2.32",
 	"display_name": "Venmo",
 	"brand": {
 		"icon": "icon.svg",

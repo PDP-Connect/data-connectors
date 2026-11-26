@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/slack"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/slack",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "slack",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-	"version": "0.7.2",
+	"version": "0.7.3",
 	"display_name": "Slack",
 	"brand": {
 		"icon": "icon.svg",

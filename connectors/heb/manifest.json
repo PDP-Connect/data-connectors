@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/heb"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/heb",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.31",
+	"version": "0.6.32",
 	"display_name": "H-E-B",
 	"brand": {
 		"icon": "icon.svg",

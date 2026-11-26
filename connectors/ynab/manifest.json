@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/ynab"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/ynab",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "ynab",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-	"version": "0.3.27",
+	"version": "0.3.28",
 	"display_name": "YNAB",
 	"brand": {
 		"icon": "icon.svg",

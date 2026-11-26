@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/chase"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/chase",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.2.23",
+	"version": "0.2.24",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",

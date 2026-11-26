@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/google-takeout"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/google-takeout",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "google-takeout",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-	"version": "0.1.28",
+	"version": "0.1.29",
 	"display_name": "Google Takeout",
 	"brand": {
 		"icon": "icon.svg",

@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/pocket"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/pocket",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "pocket",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-	"version": "0.1.26",
+	"version": "0.1.27",
 	"display_name": "Pocket",
 	"brand": {
 		"icon": "icon.svg",

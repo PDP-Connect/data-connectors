@@ -5,6 +5,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/amazon",
 			"entry": "./connectors/amazon/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/amazon"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/amazon",
 				"source": {
@@ -15,7 +16,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.2.28",
+				"version": "0.2.29",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -390,6 +391,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/anthropic",
 			"entry": "./connectors/anthropic/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/anthropic"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/anthropic",
 				"source": {
@@ -400,7 +402,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.68",
+				"version": "0.2.69",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -1561,6 +1563,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/apple-contacts",
 			"entry": "./connectors/apple_contacts/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/apple-contacts"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/apple-contacts",
 				"source": {
@@ -1571,7 +1576,7 @@
 				},
 				"connector_key": "apple-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-contacts",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Apple Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -1971,6 +1976,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/apple-health",
 			"entry": "./connectors/apple_health/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/apple-health"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/apple-health",
 				"source": {
@@ -1981,7 +1989,7 @@
 				},
 				"connector_key": "apple-health",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
-				"version": "0.2.10",
+				"version": "0.2.11",
 				"display_name": "Apple Health",
 				"brand": {
 					"icon": "icon.svg",
@@ -3616,6 +3624,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/apple-photos",
 			"entry": "./connectors/apple_photos/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/apple-photos"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/apple-photos",
 				"source": {
@@ -3626,7 +3637,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.27",
+				"version": "0.1.28",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -4051,6 +4062,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/chase",
 			"entry": "./connectors/chase/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/chase"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/chase",
 				"source": {
@@ -4061,7 +4073,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.23",
+				"version": "0.2.24",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -4655,6 +4667,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/chatgpt",
 			"entry": "./connectors/chatgpt/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/chatgpt"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/chatgpt",
 				"source": {
@@ -4665,7 +4678,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.15",
+				"version": "0.3.16",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -6277,6 +6290,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/claude-code",
 			"entry": "./connectors/claude_code/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/claude-code"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/claude-code",
 				"source": {
@@ -6287,7 +6303,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.30",
+				"version": "0.3.31",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -7383,6 +7399,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/codex",
 			"entry": "./connectors/codex/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/codex"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/codex",
 				"source": {
@@ -7393,7 +7410,7 @@
 				},
 				"connector_key": "codex",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-				"version": "0.3.15",
+				"version": "0.3.16",
 				"display_name": "OpenAI Codex CLI",
 				"brand": {
 					"icon": "icon.svg",
@@ -9250,6 +9267,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/doordash",
 			"entry": "./connectors/doordash/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/doordash"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/doordash",
 				"source": {
@@ -9260,7 +9278,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.29",
+				"version": "0.2.30",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -10793,6 +10811,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/github",
 			"entry": "./connectors/github/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/github"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/github",
 				"source": {
@@ -10803,7 +10822,7 @@
 				},
 				"connector_key": "github",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-				"version": "0.7.7",
+				"version": "0.7.8",
 				"display_name": "GitHub",
 				"brand": {
 					"icon": "icon.svg",
@@ -12626,6 +12645,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/gmail",
 			"entry": "./connectors/gmail/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/gmail"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/gmail",
 				"source": {
@@ -12636,7 +12656,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.31",
+				"version": "0.2.32",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -13303,6 +13323,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/google-calendar",
 			"entry": "./connectors/google_calendar/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/google-calendar"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/google-calendar",
 				"source": {
@@ -13313,7 +13336,7 @@
 				},
 				"connector_key": "google-calendar",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-calendar",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Google Calendar",
 				"brand": {
 					"icon": "icon.svg",
@@ -13579,6 +13602,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/google-contacts",
 			"entry": "./connectors/google_contacts/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/google-contacts"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/google-contacts",
 				"source": {
@@ -13589,7 +13615,7 @@
 				},
 				"connector_key": "google-contacts",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-contacts",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Google Contacts",
 				"brand": {
 					"icon": "icon.svg",
@@ -13821,6 +13847,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/google-maps",
 			"entry": "./connectors/google_maps/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/google-maps"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/google-maps",
 				"source": {
@@ -13831,7 +13860,7 @@
 				},
 				"connector_key": "google-maps",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Google Maps Timeline Import",
 				"brand": {
 					"icon": "icon.svg",
@@ -14102,6 +14131,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
 			"entry": "./connectors/google_maps_data_portability/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/google-maps-data-portability"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
 				"source": {
@@ -14112,7 +14144,7 @@
 				},
 				"connector_key": "google-maps-data-portability",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Google Maps Data Portability",
 				"brand": {
 					"icon": "icon.svg",
@@ -14346,6 +14378,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/google-messages",
 			"entry": "./connectors/google_messages/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/google-messages"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/google-messages",
 				"source": {
@@ -14356,7 +14391,7 @@
 				},
 				"connector_key": "google-messages",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-messages",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Google Messages (via gmcli)",
 				"brand": {
 					"icon": "icon.svg",
@@ -14510,6 +14545,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/google-takeout",
 			"entry": "./connectors/google_takeout/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/google-takeout"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/google-takeout",
 				"source": {
@@ -14520,7 +14558,7 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Google Takeout",
 				"brand": {
 					"icon": "icon.svg",
@@ -14843,6 +14881,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/groupme",
 			"entry": "./connectors/groupme/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/groupme"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/groupme",
 				"source": {
@@ -14853,7 +14892,7 @@
 				},
 				"connector_key": "groupme",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "GroupMe",
 				"brand": {
 					"icon": "icon.svg",
@@ -15304,6 +15343,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/heb",
 			"entry": "./connectors/heb/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/heb"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/heb",
 				"source": {
@@ -15314,7 +15354,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.31",
+				"version": "0.6.32",
 				"display_name": "H-E-B",
 				"brand": {
 					"icon": "icon.svg",
@@ -15904,6 +15944,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/ical",
 			"entry": "./connectors/ical/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/ical"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/ical",
 				"source": {
@@ -15914,7 +15955,7 @@
 				},
 				"connector_key": "ical",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Calendar (iCal)",
 				"brand": {
 					"icon": "icon.svg",
@@ -16261,6 +16302,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/imessage",
 			"entry": "./connectors/imessage/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/imessage"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/imessage",
 				"source": {
@@ -16271,7 +16313,7 @@
 				},
 				"connector_key": "imessage",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "iMessage (macOS)",
 				"brand": {
 					"icon": "icon.svg",
@@ -17418,6 +17460,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/jellyfin",
 			"entry": "./connectors/jellyfin/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/jellyfin"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/jellyfin",
 				"source": {
@@ -17428,7 +17471,7 @@
 				},
 				"connector_key": "jellyfin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-				"version": "0.2.21",
+				"version": "0.2.22",
 				"display_name": "Jellyfin",
 				"brand": {
 					"icon": "icon.svg",
@@ -17678,6 +17721,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/linkedin",
 			"entry": "./connectors/linkedin/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/linkedin"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/linkedin",
 				"source": {
@@ -17688,7 +17732,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.44",
+				"version": "0.3.45",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -18142,6 +18186,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/loom",
 			"entry": "./connectors/loom/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/loom"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/loom",
 				"source": {
@@ -18152,7 +18197,7 @@
 				},
 				"connector_key": "loom",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Loom",
 				"brand": {
 					"icon": "icon.svg",
@@ -18308,6 +18353,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/meta",
 			"entry": "./connectors/meta/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/meta"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/meta",
 				"source": {
@@ -18318,7 +18364,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.43",
+				"version": "0.4.44",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19702,6 +19748,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/netflix-export",
 			"entry": "./connectors/netflix_export/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/netflix-export"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/netflix-export",
 				"source": {
@@ -19712,7 +19761,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.29",
+				"version": "0.1.30",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -19877,6 +19926,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/notion",
 			"entry": "./connectors/notion/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/notion"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/notion",
 				"source": {
@@ -19887,7 +19937,7 @@
 				},
 				"connector_key": "notion",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Notion",
 				"brand": {
 					"icon": "icon.svg",
@@ -20096,6 +20146,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/oura",
 			"entry": "./connectors/oura/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/oura"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/oura",
 				"source": {
@@ -20106,7 +20157,7 @@
 				},
 				"connector_key": "oura",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-				"version": "0.1.29",
+				"version": "0.1.30",
 				"display_name": "Oura",
 				"brand": {
 					"icon": "icon.svg",
@@ -21045,6 +21096,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/pocket",
 			"entry": "./connectors/pocket/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/pocket"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/pocket",
 				"source": {
@@ -21055,7 +21107,7 @@
 				},
 				"connector_key": "pocket",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/pocket",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Pocket",
 				"brand": {
 					"icon": "icon.svg",
@@ -22298,6 +22350,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/reddit",
 			"entry": "./connectors/reddit/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/reddit"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/reddit",
 				"source": {
@@ -22308,7 +22361,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.8",
+				"version": "0.4.9",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -23098,6 +23151,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/shopify",
 			"entry": "./connectors/shopify/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/shopify"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 				"source": {
@@ -23108,7 +23162,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.39",
+				"version": "0.2.40",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -23233,6 +23287,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/signal",
 			"entry": "./connectors/signal/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/signal"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/signal",
 				"source": {
@@ -23243,7 +23298,7 @@
 				},
 				"connector_key": "signal",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/signal",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Signal Desktop",
 				"brand": {
 					"icon": "icon.svg",
@@ -23546,6 +23601,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/slack",
 			"entry": "./connectors/slack/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/slack"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/slack",
 				"source": {
@@ -23556,7 +23612,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.7.2",
+				"version": "0.7.3",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -26341,6 +26397,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/spotify",
 			"entry": "./connectors/spotify/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/spotify"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/spotify",
 				"source": {
@@ -26351,7 +26408,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.59",
+				"version": "0.1.60",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -26846,6 +26903,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/steam",
 			"entry": "./connectors/steam/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/steam"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/steam",
 				"source": {
@@ -26856,7 +26914,7 @@
 				},
 				"connector_key": "steam",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Steam",
 				"brand": {
 					"icon": "icon.svg",
@@ -27238,6 +27296,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/strava",
 			"entry": "./connectors/strava/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/strava"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/strava",
 				"source": {
@@ -27248,7 +27307,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.34",
+				"version": "1.0.35",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -28387,6 +28446,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/twitter-archive",
 			"entry": "./connectors/twitter_archive/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/twitter-archive"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/twitter-archive",
 				"source": {
@@ -28397,7 +28459,7 @@
 				},
 				"connector_key": "twitter-archive",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Twitter/X Archive",
 				"brand": {
 					"icon": "icon.svg",
@@ -28568,6 +28630,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/uber",
 			"entry": "./connectors/uber/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/uber"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/uber",
 				"source": {
@@ -28578,7 +28641,7 @@
 				},
 				"connector_key": "uber",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-				"version": "1.0.28",
+				"version": "1.0.29",
 				"display_name": "Uber",
 				"brand": {
 					"icon": "icon.svg",
@@ -28785,6 +28848,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/usaa",
 			"entry": "./connectors/usaa/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/usaa"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/usaa",
 				"source": {
@@ -28795,7 +28859,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.24",
+				"version": "0.2.25",
 				"display_name": "USAA",
 				"brand": {
 					"icon": "icon.svg",
@@ -29447,6 +29511,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/venmo",
 			"entry": "./connectors/venmo/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/venmo"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/venmo",
 				"source": {
@@ -29457,7 +29522,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.31",
+				"version": "0.2.32",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -29843,6 +29908,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/whatsapp",
 			"entry": "./connectors/whatsapp/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/whatsapp"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/whatsapp",
 				"source": {
@@ -29853,7 +29919,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.27",
+				"version": "0.2.28",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
@@ -30650,6 +30716,9 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/wholefoods",
 			"entry": "./connectors/wholefoods/index.ts",
 			"manifest": {
+				"legacy_source_ids": [
+					"https://registry.pdpp.dev/connectors/wholefoods"
+				],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/wholefoods",
 				"source": {
@@ -30660,7 +30729,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.49",
+				"version": "0.3.50",
 				"display_name": "Whole Foods",
 				"brand": {
 					"icon": "icon.svg",
@@ -30999,6 +31068,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/whoop",
 			"entry": "./connectors/whoop/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/whoop"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/whoop",
 				"source": {
@@ -31009,7 +31079,7 @@
 				},
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.30",
+				"version": "0.1.31",
 				"display_name": "WHOOP",
 				"brand": {
 					"icon": "icon.svg",
@@ -32612,6 +32682,7 @@
 			"connectorId": "https://registry.pdpp.dev/connectors/ynab",
 			"entry": "./connectors/ynab/index.ts",
 			"manifest": {
+				"legacy_source_ids": ["https://registry.pdpp.dev/connectors/ynab"],
 				"protocol_version": "0.1.0",
 				"connector_id": "https://registry.pdpp.dev/connectors/ynab",
 				"source": {
@@ -32622,7 +32693,7 @@
 				},
 				"connector_key": "ynab",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-				"version": "0.3.27",
+				"version": "0.3.28",
 				"display_name": "YNAB",
 				"brand": {
 					"icon": "icon.svg",

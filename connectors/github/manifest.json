@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/github"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/github",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "github",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-	"version": "0.7.7",
+	"version": "0.7.8",
 	"display_name": "GitHub",
 	"brand": {
 		"icon": "icon.svg",

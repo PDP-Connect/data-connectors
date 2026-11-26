@@ -778,3 +778,28 @@ test("new-reader compatibility: the committed pre-binding-instances schema fixtu
     assert.equal(validate(manifest), true, `${path}: expected the new schema to still accept this unmodified manifest`);
   }
 });
+
+test("legacy_source_ids rejects malformed and duplicate identities", () => {
+  for (const ids of [null, "urn:source:old", ["relative"], ["urn:source:old", "urn:source:old"], [""]]) {
+    assert.equal(validate({ legacy_source_ids: ids }), false, JSON.stringify(ids));
+  }
+  assert.equal(validate({ legacy_source_ids: [] }), true);
+  assert.equal(validate({ legacy_source_ids: ["urn:source:old"] }), true);
+});
+
+test("each of the 45 historical source identities has exactly one manifest owner", async () => {
+  const { createHash } = await import("node:crypto");
+  const manifests = connectorManifests().map(({ manifest }) => manifest);
+  const entries = manifests.flatMap((m) => (m.legacy_source_ids ?? []).map((id) => [m.connector_key, id]));
+  assert.equal(entries.length, 45);
+  assert.equal(new Set(entries.map(([, id]) => id)).size, 45);
+  entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  assert.equal(createHash("sha256").update(JSON.stringify(entries)).digest("hex"),
+    "7e8f726725b7a14705571339c84a52d8f05888ffc0996b77cce3d4ae13dae9e6");
+  for (const [key, id] of entries) {
+    const owner = manifests.find((m) => m.connector_key === key);
+    assert.equal(owner.connector_id, id);
+    assert.equal(validate(owner), true, JSON.stringify(validate.errors));
+    assert.equal(manifests.some((m) => m.connector_key !== key && m.source?.id === id), false);
+  }
+});

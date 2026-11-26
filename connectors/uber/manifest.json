@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/uber"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/uber",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "uber",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-	"version": "1.0.28",
+	"version": "1.0.29",
 	"display_name": "Uber",
 	"brand": {
 		"icon": "icon.svg",

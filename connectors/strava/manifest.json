@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/strava"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/strava",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "strava",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-	"version": "1.0.34",
+	"version": "1.0.35",
 	"display_name": "Strava",
 	"brand": {
 		"icon": "icon.svg",

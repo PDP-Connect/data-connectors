@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/shopify"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/shopify",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "shopify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-	"version": "0.2.39",
+	"version": "0.2.40",
 	"display_name": "Shopify Shop",
 	"brand": {
 		"icon": "icon.svg",

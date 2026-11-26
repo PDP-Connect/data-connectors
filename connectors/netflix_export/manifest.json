@@ -1,4 +1,5 @@
 {
+	"legacy_source_ids": ["https://registry.pdpp.dev/connectors/netflix-export"],
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/netflix-export",
 	"source": {
@@ -9,7 +10,7 @@
 	},
 	"connector_key": "netflix-export",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-	"version": "0.1.29",
+	"version": "0.1.30",
 	"display_name": "Netflix Export",
 	"brand": {
 		"icon": "icon.svg",
