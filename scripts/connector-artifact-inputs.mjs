@@ -448,8 +448,8 @@ function sourceDeclarationMember(member) {
 
 /**
  * The allowlist data at `commit` that can affect `profile`'s artifact: the
- * rows of every connector with the same `source.id`, and the manifests of the
- * publishable ones. Membership follows source-declaration-members.mjs. A
+ * publishable rows with the same `source.id`, and their manifests. Membership
+ * follows source-declaration-members.mjs. A
  * change to a member changes the declaration every member ships, so it must
  * select every member. Rows for other sources, and the allowlist's comments
  * and formatting, are not inputs: adding a connector for a new source does not
@@ -465,12 +465,13 @@ async function sourceSliceInputs(commit, profile, options) {
   const rows = [];
   const inputs = [];
   for (const { manifest, connectorKey, exclusionReason } of inventory) {
+    if (exclusionReason !== null) continue;
     const own = connectorKey === profile.connector_key;
     const path = `connectors/${manifest}/manifest.json`;
     const member = own ? profile : readManifestAtCommit(commit, path, options);
     if (member.source?.id !== profile.source?.id) continue;
     rows.push({ connectorKey, manifest, exclusionReason });
-    if (own || declaresAlone || exclusionReason !== null) continue;
+    if (own || declaresAlone) continue;
     inputs.push([
       `${path}#declaration-member`,
       Buffer.from(JSON.stringify(sourceDeclarationMember(member))),

@@ -872,33 +872,40 @@ test("ordinary and unknown synthetic identities pass the publish guard", async (
   }
 });
 
-test("a refresh drops a previously published scaffold entry and the next run is stable", async () => {
+test("a refresh drops each previously published scaffold from the default selection", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
   try {
     fixtureManifest(root);
     const current = await generate(root, registry.registry);
     const [synthetic] = current.connectors;
+    const scaffolds = [
+      ["google-maps-data-portability", "Google Maps Data Portability"],
+      ["loom", "Loom"],
+      ["pocket", "Pocket"],
+    ];
     const previous = {
       ...structuredClone(current),
-      connectors: [
-        structuredClone(synthetic),
-        {
-          ...structuredClone(synthetic),
-          connector_key: "loom",
-          connector_id: "https://registry.pdpp.dev/connectors/loom",
-          display_name: "Loom",
-        },
-      ],
+      connectors: scaffolds.map(([connector_key, display_name]) => ({
+        ...structuredClone(synthetic), connector_key,
+        connector_id: `https://registry.pdpp.dev/connectors/${connector_key}`,
+        display_name,
+      })),
     };
 
-    const refreshed = await generate(root, registry.registry, { previousCatalog: previous });
-    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), ["public-name"]);
-    assert.deepEqual(refreshed.connectors[0].latest, synthetic.latest);
-    assert.equal(refreshed.generated_at, "2026-09-15T16:34:18.001Z");
-
-    const retry = await generate(root, registry.registry, { previousCatalog: refreshed });
-    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(refreshed));
+    const refreshed = await generateConnectorCatalog({
+      registry: registry.registry,
+      namespace: "acme",
+      sourceCommit: SOURCE_COMMIT,
+      generatedAt: GENERATED_AT,
+      previousCatalog: previous,
+      scheme: "http",
+      allowInsecureLoopback: true,
+    });
+    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), []);
+    for (const [connectorKey] of scaffolds) {
+      assert.equal(refreshed.connectors.some((connector) => connector.connector_key === connectorKey), false);
+    }
   } finally {
     await registry.stop();
     rmSync(root, { recursive: true, force: true });

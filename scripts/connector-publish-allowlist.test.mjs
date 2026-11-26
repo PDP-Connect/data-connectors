@@ -9,12 +9,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
 
-test("connectors with no owner data stay out of the publishable catalog set", () => {
+test("scaffold connectors stay out of publication with explicit exclusion reasons", () => {
   for (const manifest of ["google_maps_data_portability", "loom", "pocket"]) {
     assert.equal(PUBLISHABLE_CONNECTORS.some((entry) => entry.manifest === manifest), false, manifest);
+    const exclusion = PUBLISH_EXCLUSIONS.find((entry) => entry.manifest === manifest);
+    assert.ok(exclusion?.exclusionReason, manifest);
     const profile = JSON.parse(readFileSync(join(manifests, manifest, "manifest.json"), "utf8"));
     assert.equal(profile.capabilities.public_listing.tier, "development", manifest);
   }
+  assert.match(PUBLISH_EXCLUSIONS.find((entry) => entry.manifest === "pocket").exclusionReason, /service has shut down/);
   assert.deepEqual(KNOWN_SCAFFOLD_CONNECTORS, ["google_maps_data_portability", "loom", "pocket"]);
 });
 
@@ -71,13 +74,13 @@ test("C-T2 every non-allowlisted manifest has a recorded exclusion reason", () =
     assert.ok(profile.connector_id.endsWith(`/${row.connectorKey}`), row.manifest);
     assert.match(row.manifest, /^[a-z0-9][a-z0-9_]*$/);
     assert.match(row.connectorKey, /^[a-z0-9][a-z0-9-]{0,63}$/);
-    if (!PUBLISHABLE_CONNECTORS.includes(row) && !KNOWN_SCAFFOLD_CONNECTORS.includes(row.manifest)) {
+    if (!PUBLISHABLE_CONNECTORS.includes(row)) {
       assert.equal(typeof row.exclusionReason, "string", row.manifest);
       assert.ok(row.exclusionReason.trim().length > 0, row.manifest);
     }
   }
   assert.deepEqual(PUBLISH_EXCLUSIONS.map((row) => row.manifest).sort(),
-    ["github", "google_messages", "signal", "slack", "youtube_takeout"]);
+    ["github", "google_maps_data_portability", "google_messages", "loom", "pocket", "signal", "slack", "youtube_takeout"]);
 });
 
 function workflow(name) {

@@ -17,16 +17,20 @@ function readManifest(directory) {
  * that keeps a held artifact (for example the GitHub PAT connector, whose
  * streams conflict with github-browser's) out of the published declaration.
  */
-export function sourceDeclarationMembers(profile) {
-	const own = CONNECTOR_PUBLISH_INVENTORY.find(
+export function sourceDeclarationMembers(
+	profile,
+	inventory = CONNECTOR_PUBLISH_INVENTORY,
+	readMember = readManifest,
+) {
+	const own = inventory.find(
 		({ connectorKey }) => connectorKey === profile.connector_key,
 	);
 	if (!own || own.exclusionReason !== null) {
 		return [profile];
 	}
-	return CONNECTOR_PUBLISH_INVENTORY.filter(({ exclusionReason }) => exclusionReason === null)
+	return inventory.filter(({ exclusionReason }) => exclusionReason === null)
 		.map(({ manifest, connectorKey }) =>
-			connectorKey === profile.connector_key ? profile : readManifest(manifest),
+			connectorKey === profile.connector_key ? profile : readMember(manifest),
 		)
 		.filter((manifest) => manifest.source?.id === profile.source?.id);
 }

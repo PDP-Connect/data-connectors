@@ -16,8 +16,9 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (loom, Google Maps Data Portability, Pocket) — all of which MUST stay
- *      outside the owner-selectable listing until they emit owner data.
+ *      (Loom, Google Maps Data Portability, Pocket). Loom and Maps remain
+ *      excluded until they return owner records; Pocket remains excluded
+ *      because its service is retired.
  *
  * `testFile` names each connector's own named collection/integration test —
  * the behavioral oracle for whether it really collects real data. This
@@ -64,10 +65,11 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		shopify: { testFile: "connectors/shopify/index.test.ts" },
 	};
 /**
- * Connectors that emit no owner-data records (skip-only, control-plane-only,
- * or retired sources) MUST stay outside `PRODUCTION_READY_CONNECTORS` and the
- * owner-selectable listing until they emit owner data. Lifecycle tier alone
- * cannot express this: real collectors can also be Development tier.
+ * Connectors excluded from the publishable and owner-selectable sets. Loom is
+ * skip-only; Google Maps Data Portability returns export-job status, not Maps
+ * records. Pocket still has an items path, but its service has shut down, so
+ * it is excluded as a retired connector. Lifecycle tier alone cannot express
+ * these cases: real collectors can also be Development tier.
  */
 export const KNOWN_SCAFFOLD_CONNECTORS = [
 	"google_maps_data_portability",

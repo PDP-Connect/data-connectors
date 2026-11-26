@@ -302,6 +302,31 @@ test("sibling runtime metadata does not change shared SourceDeclaration identity
   }
 });
 
+test("adding an excluded same-source scaffold preserves a published sibling's artifact hash", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write(
+      "connectors/loom/manifest.json",
+      JSON.stringify({
+        connector_key: "loom",
+        source: { id: SOURCES.oura },
+        version: "0.1.0",
+        streams: [{ name: "loom_records", schema: { type: "object" } }],
+      }),
+    );
+    repo.writeAllowlist([
+      ...CONNECTORS.map((connector) => ({ ...connector, exclusionReason: null })),
+      { manifest: "loom", connectorKey: "loom", exclusionReason: "collects no owner data yet" },
+    ]);
+    const afterCommit = repo.commit("add excluded same-source scaffold");
+    const after = await artifactInputHash({ commit: afterCommit, manifest: "oura", cwd: repo.dir });
+    assert.equal(after, before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("extending PageShim support does not change an already eligible artifact identity", async () => {
   const repo = makeRepo();
   try {

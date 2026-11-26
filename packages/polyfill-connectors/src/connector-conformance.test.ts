@@ -15,16 +15,16 @@
  * Every manifest connector key MUST resolve to exactly one of four disjoint
  * buckets: `PRODUCTION_READY_CONNECTORS` (Supported or Preview, real),
  * `REAL_UNLISTED_CONNECTORS` (Development, real), or
- * `KNOWN_SCAFFOLD_CONNECTORS` (Development, emits no owner-data records).
+ * `KNOWN_SCAFFOLD_CONNECTORS` (Development, no owner records yet or retired).
  * Every manifest must join one bucket; Development is not a silent opt-out.
  *
  * This test does not run any connector's `collect()` or reprove its
  * behavior — each real connector's own named test file (parsers/integration/
  * schemas) remains the behavioral oracle for owner-data collection. Scaffold
- * membership is the explicit repo-owned assertion that no owner data is
- * emitted; this gate proves that assertion stays out of the owner listing. It
- * also proves the roster and the manifest
- * listing state agree, and that the named oracle file exists.
+ * membership records why a connector stays out of the owner listing: it may
+ * emit no owner records yet, or its service may be retired. This gate proves
+ * those entries stay out of the owner listing. It also proves the roster and
+ * manifest listing state agree, and that each named oracle file exists.
  */
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -121,7 +121,7 @@ test("known scaffold connectors are not in the production-ready roster", () => {
 	assert.deepEqual(
 		overlap,
 		[],
-		`connector(s) with no owner-data records present in PRODUCTION_READY_CONNECTORS: ${overlap.join(", ")} — emit owner data before joining this roster`,
+		`excluded connector(s) present in PRODUCTION_READY_CONNECTORS: ${overlap.join(", ")}`,
 	);
 });
 
@@ -130,11 +130,11 @@ test("known scaffold connectors are not publicly listed", () => {
 	assert.deepEqual(
 		listedScaffolds,
 		[],
-		`connector(s) with no owner-data records have an owner-visible lifecycle tier: ${listedScaffolds.join(", ")} — they must stay out of the owner-selectable listing`,
+		`excluded connector(s) have an owner-visible lifecycle tier: ${listedScaffolds.join(", ")} — they must stay out of the owner-selectable listing`,
 	);
 });
 
-test("the no-owner-data roster reflects skip-only, control-plane-only, and retired connectors", () => {
+test("the scaffold roster reflects skip-only, control-plane-only, and retired connectors", () => {
 	assert.deepEqual(KNOWN_SCAFFOLD_CONNECTORS, [
 		"google_maps_data_portability",
 		"loom",
@@ -180,7 +180,7 @@ test("known scaffold connectors do not appear in REAL_UNLISTED_CONNECTORS", () =
 	assert.deepEqual(
 		overlap,
 		[],
-		`connector(s) with no owner-data records present in REAL_UNLISTED_CONNECTORS: ${overlap.join(", ")} — emit owner data before claiming to be a real but unlisted collector`,
+		`excluded connector(s) present in REAL_UNLISTED_CONNECTORS: ${overlap.join(", ")}`,
 	);
 });
 
@@ -216,7 +216,7 @@ test("every manifest connector key resolves to exactly one conformance roster bu
 		[],
 		`connector(s) with a manifest but no conformance roster bucket: ${unaccountedFor.join(", ")}. ` +
 			"Add an owner-visible connector to PRODUCTION_READY_CONNECTORS, a Development collector to REAL_UNLISTED_CONNECTORS, " +
-			"or a connector that emits no owner-data records to KNOWN_SCAFFOLD_CONNECTORS.",
+			"or an excluded or retired connector to KNOWN_SCAFFOLD_CONNECTORS.",
 	);
 	assert.deepEqual(
 		inMultipleBuckets,
