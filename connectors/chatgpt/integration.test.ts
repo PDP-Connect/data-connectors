@@ -8729,7 +8729,15 @@ test("runConversationsAndMessagesStreams: recovers pending conversation detail g
 	);
 });
 
-test("runConversationsAndMessagesStreams: a pending gap whose conversation now answers 404 is settled, not re-owed", async () => {
+/**
+ * A run whose only work is one pending `messages` gap, and whose detail
+ * answers 404. The forward listing is empty, so nothing but the recovery
+ * pass can account for the conversation in the run's coverage.
+ */
+async function runPendingGapAnswering404(
+	state: CollectContext["state"],
+	extra: Partial<StreamDeps> = {},
+): Promise<ReturnType<typeof makeRecordingEmit>> {
 	const harness = makeRecordingEmit(validateRecord);
 	const goneConvo = makeConvo({ id: "convo-gone", update_time: 1_700_000_100 });
 	const api: ChatGptApi = {
@@ -8757,34 +8765,42 @@ test("runConversationsAndMessagesStreams: a pending gap whose conversation now a
 		requested: new Map(
 			["conversations", "messages"].map((name) => [name, { name }]),
 		),
+		...extra,
 	};
+	await runConversationsAndMessagesStreams(deps, state, {
+		detailPacing: { random: () => 0, sleep: () => undefined },
+	});
+	return harness;
+}
 
-	await runConversationsAndMessagesStreams(
-		deps,
-		{},
-		{ detailPacing: { random: () => 0, sleep: () => undefined } },
-	);
+test("runConversationsAndMessagesStreams: a pending gap whose conversation answers 404 stays owed", async () => {
+	const harness = await runPendingGapAnswering404({});
 
-	assert.deepEqual(
-		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP_RECOVERED"),
-		[
-			{
-				type: "DETAIL_GAP_RECOVERED",
-				reference_only: true,
-				gap_id: "gap_gone",
-				stream: "messages",
-				record_key: "convo-gone",
-			},
-		],
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+		"one 404 does not settle the gap",
 	);
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP"),
 		false,
-		"a gone conversation is not re-gapped",
+		"the pending gap is not written twice",
 	);
 	assert.equal(
 		harness.emitted.some((r) => r.stream === "messages"),
 		false,
+	);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.equal(
+		(
+			messagesState?.cursor as
+				| { detail_not_found?: Record<string, { n: number }> }
+				| undefined
+		)?.detail_not_found?.["convo-gone"]?.n,
+		1,
 	);
 });
 

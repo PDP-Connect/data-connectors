@@ -125,6 +125,11 @@ import type {
 } from "./types.ts";
 import { drainDetailWindows } from "./detail-lane-drain.ts";
 import {
+	DetailNotFoundTracker,
+	type NotFoundSettlement,
+	type NotFoundTable,
+} from "./detail-not-found.ts";
+import {
 	chatGptUsageFetchInBrowser,
 	usageCaptureBody,
 	usageCaptureRoute,
@@ -2395,6 +2400,11 @@ function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
 /** Per-run dependency bag threaded through every emit-path helper. Mirrors
  *  the amazon/chase pattern: one stable bag so collect() becomes pure
  *  orchestration and the helpers are individually testable. */
+export {
+	NOT_FOUND_SETTLE_RUNS,
+	NOT_FOUND_TRACKED_MAX,
+} from "./detail-not-found.ts";
+
 export interface StreamDeps {
 	api: ChatGptApi;
 	/** Optional clock seam for deterministic list retry tests. */
@@ -2414,6 +2424,8 @@ export interface StreamDeps {
 	omittedMessageContent?: OmittedMessageContentTally;
 	/** Source parent node id each message was emitted with this run, by record id; the stream is append-only. */
 	emittedMessageParentsThisRun?: Map<string, string | null>;
+	/** The run's 404/410 detail answers and the obligations it inherited; see detail-not-found.ts. */
+	detailNotFound?: DetailNotFoundTracker;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -5673,9 +5685,10 @@ interface ConversationDetailCoverage {
 	// explicitly skipped.
 	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 	sourceUnrepresentableKeys: Array<string | number>;
-	// Listed conversations whose detail answered 404/410 (see
-	// `skipDeletedConversation`). Skipped for good, like the keys above.
-	deletedKeys: Array<string | number>;
+	// Listed conversations whose detail answered 404/410 this run (see
+	// `skipNotFoundConversation`). Reported skipped; the messages cursor keeps
+	// owing them until detail-not-found.ts settles them.
+	notFoundKeys: Array<string | number>;
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -5781,47 +5794,47 @@ export type ConversationDetailOutcome =
 	// The source cannot represent a body (unknown-shape fallback cut): a refetch
 	// returns the same bytes, so no retryable gap is owed.
 	| SourceUnrepresentableOutcome
-	| ConversationDeletedOutcome;
+	| ConversationNotFoundOutcome;
 
 /**
- * A listed conversation whose detail answered 404 or 410: the source says it is
- * gone (deleted or archived away after the list was read, or a list entry the
- * source never cleaned up). A refetch returns the same answer, so it is neither
- * hydrated nor owed a retryable gap; the run records it as skipped.
+ * A listed conversation whose detail answered 404 or 410. The conversation may
+ * be gone, but ChatGPT also answers 404 transiently or for a session in another
+ * account or workspace context, so one answer does not settle it: the run skips
+ * it, and the messages cursor owes it a read on later runs (detail-not-found.ts).
  */
-type ConversationDeletedOutcome = { complete: false; deleted: true };
+type ConversationNotFoundOutcome = { complete: false; notFound: true };
 
-const CONVERSATION_DELETED_OUTCOME: ConversationDeletedOutcome = {
+const CONVERSATION_NOT_FOUND_OUTCOME: ConversationNotFoundOutcome = {
 	complete: false,
-	deleted: true,
+	notFound: true,
 };
 
-function isConversationDeleted(
+function isConversationNotFound(
 	outcome: object,
-): outcome is ConversationDeletedOutcome {
-	return "deleted" in outcome;
+): outcome is ConversationNotFoundOutcome {
+	return "notFound" in outcome;
 }
 
 /**
- * The messages pass's answer to a detail that proves the conversation is gone.
- * The conversation keeps its list-only record (the list still names it), no
- * message is emitted, and no DETAIL_GAP is written: a gap would be re-fetched
- * every run and answer 404 again. The caller declares the key skipped in
- * DETAIL_COVERAGE, so the stream reads as covered short of it, not complete.
+ * The messages pass's answer to a 404/410 detail. The conversation keeps its
+ * list-only record, no message is emitted, and no DETAIL_GAP is written (a host
+ * that does not serve gaps back would lose it; the cursor carries the retry
+ * instead). The caller declares the key skipped in DETAIL_COVERAGE, so the
+ * stream reads as covered short of it, not complete.
  */
-async function skipDeletedConversation(
+async function skipNotFoundConversation(
 	c: ConversationListItem,
 	status: number,
 	emitConversation: (
 		c: ConversationListItem,
 		detail: ConversationDetail | null,
 	) => Promise<void>,
-): Promise<ConversationDeletedOutcome> {
+): Promise<ConversationNotFoundOutcome> {
 	chatGptDiagnostic(
-		`conversation_gone: a listed conversation's detail returned http ${status}; its messages are skipped`,
+		`conversation_not_found: a listed conversation's detail returned http ${status}; its messages are skipped this run`,
 	);
 	await emitConversation(c, null);
-	return CONVERSATION_DELETED_OUTCOME;
+	return CONVERSATION_NOT_FOUND_OUTCOME;
 }
 
 /**
@@ -6056,7 +6069,7 @@ function makeConversationDetailCoverage(
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 		optionalSkipKeys: [
 			...optionalSkipKeysFor(coverage.sourceUnrepresentableKeys),
-			...coverage.deletedKeys,
+			...coverage.notFoundKeys,
 		],
 		considered: requiredKeys.length,
 		covered: coverage.hydratedKeys.length,
@@ -6129,7 +6142,7 @@ export async function runMessagesAndConversationsWithDetail(
 		hydratedKeys: [],
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 		sourceUnrepresentableKeys: [],
-		deletedKeys: [],
+		notFoundKeys: [],
 	};
 	// Cumulative served-429 density signal. Each `rate_limited` cooldown the lane
 	// surfaces (one per served 429, success-after-backoff included) bumps the
@@ -7080,6 +7093,13 @@ export async function runMessagesAndConversationsWithDetail(
 				const conversationGone =
 					deps.conversationDetailOnly !== true &&
 					isDeletedConversationStatus(detail.status);
+				if (deps.conversationDetailOnly !== true) {
+					deps.detailNotFound?.recordDetail(
+						c.id,
+						detail.status,
+						safeConversationListItemHint(c),
+					);
+				}
 				if (detail.status !== 200 && !degradesToListOnly && !conversationGone) {
 					providerBudget?.recordFailure();
 					await emitChatGptProviderBudgetTransitions({
@@ -7105,7 +7125,7 @@ export async function runMessagesAndConversationsWithDetail(
 					detail.providerFetchMs ?? detailMs,
 				);
 				const detailOutcome = conversationGone
-					? await skipDeletedConversation(c, detail.status, emitConversation)
+					? await skipNotFoundConversation(c, detail.status, emitConversation)
 					: await processConversationDetail(
 							detailDeps,
 							c,
@@ -7136,11 +7156,13 @@ export async function runMessagesAndConversationsWithDetail(
 				if (detailOutcome.complete) {
 					hydratedKeys.add(c.id);
 					coverage.hydratedKeys.push(c.id);
+					deps.detailNotFound?.recordRead(c.id);
 				} else if (isSourceUnrepresentable(detailOutcome)) {
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					coverage.sourceUnrepresentableKeys.push(c.id);
-				} else if (isConversationDeleted(detailOutcome)) {
-					coverage.deletedKeys.push(c.id);
+					deps.detailNotFound?.recordRead(c.id);
+				} else if (isConversationNotFound(detailOutcome)) {
+					coverage.notFoundKeys.push(c.id);
 				} else {
 					// processConversationDetail already emitted the DETAIL_GAP.
 					gapKeys.add(c.id);
@@ -7390,7 +7412,7 @@ async function recoverPendingConversationDetailGapPage(
 	// gap on this page is drained AND the shared run budget still allows fetching,
 	// so the older window is never re-listed while newer per-key gaps remain owed
 	// (which would strand the chunk).
-	const recoveryItems = messagesGaps
+	const servedItems = messagesGaps
 		.map((gap) => ({ gap, conversation: conversationListItemFromGap(gap) }))
 		.filter(
 			(
@@ -7400,6 +7422,15 @@ async function recoverPendingConversationDetailGapPage(
 				conversation: ConversationListItem;
 			} => item.conversation !== null,
 		);
+	// A gap whose detail answered 404/410 earlier in this run stays pending until
+	// the run settles it, so a later page serves it again: do not refetch it.
+	const recoveryItems = servedItems.filter(
+		(item) =>
+			deps.detailNotFound?.answeredNotFound(item.conversation.id) !== true,
+	);
+	if (recoveryItems.length === 0 && servedItems.length > 0) {
+		return { recovered: 0, stoppedWithPending: true };
+	}
 
 	let recovered = 0;
 	let stoppedWithPending = false;
@@ -7417,9 +7448,15 @@ async function recoverPendingConversationDetailGapPage(
 		const settled = new Set([
 			...hydrated,
 			...coverage.sourceUnrepresentableKeys.map(String),
-			// A gone conversation answers the same on every refetch.
-			...coverage.deletedKeys.map(String),
 		]);
+		// A 404/410 does not settle the gap on sight: it stays pending, and the
+		// run closes it only if detail-not-found.ts settles the conversation.
+		const notFound = new Set(coverage.notFoundKeys.map(String));
+		for (const { gap, conversation } of recoveryItems) {
+			if (notFound.has(conversation.id)) {
+				deps.detailNotFound?.holdGap(conversation.id, gap.gap_id);
+			}
+		}
 		for (const { gap, conversation } of recoveryItems) {
 			if (!settled.has(conversation.id)) {
 				continue;
@@ -7439,7 +7476,7 @@ async function recoverPendingConversationDetailGapPage(
 		// per-key gap remains owed OR the recovery run capped (signalled by a fresh
 		// backlog key), so the rewritten backlog is attacked next run.
 		stoppedWithPending =
-			settled.size < recoveryItems.length ||
+			settled.size + notFound.size < recoveryItems.length ||
 			coverage.backlogGapKey !== undefined;
 		if (stoppedWithPending) {
 			return { recovered, stoppedWithPending };
@@ -7524,9 +7561,11 @@ function persistChatGptPacingStateOnly(
 	deps: StreamDeps,
 	priorMessagesCursor: string | null,
 	backfill: ConversationBackfill | null,
+	// The updated 404 obligations, or null when the run changed none.
+	notFoundTable: NotFoundTable | null,
 ): void {
 	const pacingFields = buildChatGptPacingStateFields(deps.providerBudget);
-	if (Object.keys(pacingFields).length === 0) {
+	if (Object.keys(pacingFields).length === 0 && notFoundTable === null) {
 		return;
 	}
 	deps.emit({
@@ -7535,9 +7574,81 @@ function persistChatGptPacingStateOnly(
 		cursor: {
 			last_update_time: priorMessagesCursor,
 			...(backfill === null ? {} : { backfill }),
+			...notFoundCursorFields(notFoundTable),
 			...pacingFields,
 		},
 	});
+}
+
+function notFoundCursorFields(table: NotFoundTable | null | undefined): {
+	detail_not_found?: NotFoundTable;
+} {
+	return table && Object.keys(table).length > 0
+		? { detail_not_found: table }
+		: {};
+}
+
+/**
+ * Decide this run's 404 obligations (detail-not-found.ts) once every messages
+ * detail pass is done. A run whose every requested detail answered 404/410 is
+ * not an account whose conversations were all deleted: it fails, before any
+ * cursor moves. Closes the held gaps of settled conversations.
+ */
+async function settleDetailNotFound(
+	deps: StreamDeps,
+	tracker: DetailNotFoundTracker,
+	absent: (id: string) => boolean,
+): Promise<NotFoundSettlement> {
+	const everyNotFound = tracker.everyDetailNotFound();
+	if (everyNotFound) {
+		throw new Error(
+			`every conversation detail this run requested (${everyNotFound.details}, not counting retries of earlier 404s) answered http 404 or 410; the session cannot read this account's conversations`,
+		);
+	}
+	const settlement = tracker.settle(absent, new Date().toISOString());
+	if (settlement.settled.length > 0) {
+		chatGptDiagnostic(
+			`conversation_not_found_settled: ${settlement.settled.length} conversation(s) stopped answering their detail (410, gone from a complete listing, or 404 on several runs); their messages are skipped for good`,
+		);
+	}
+	if (settlement.overflow.length > 0) {
+		chatGptDiagnostic(
+			`conversation_not_found_overflow: ${settlement.overflow.length} conversation(s) answered 404 beyond the tracked limit and were settled without further retries`,
+		);
+	}
+	await Promise.all(
+		settlement.settled.flatMap((id) => {
+			const gapId = tracker.heldGapFor(id);
+			return gapId === undefined
+				? []
+				: [
+						deps.emit({
+							type: "DETAIL_GAP_RECOVERED",
+							reference_only: true,
+							gap_id: gapId,
+							stream: "messages",
+							record_key: id,
+						}),
+					];
+		}),
+	);
+	return settlement;
+}
+
+/**
+ * The ids a complete listing returned this run, or null when no listing this
+ * run can prove a conversation is no longer listed: the primary walk was
+ * truncated, resumed mid-list, or returned nothing.
+ */
+function completeListingIds(
+	primary: ConversationListResult,
+	resumed: boolean,
+	alsoListed: readonly ConversationListItem[],
+): ReadonlySet<string> | null {
+	if (primary.truncated || resumed || primary.items.length === 0) {
+		return null;
+	}
+	return new Set([...primary.items, ...alsoListed].map((c) => c.id));
 }
 
 /**
@@ -7665,10 +7776,17 @@ async function walkConversationsAndMessages(
 				backfill?: unknown;
 				primary_backfill?: unknown;
 				enumeration_version?: unknown;
+				detail_not_found?: unknown;
 		  }
 		| undefined;
 	const wantsConversations = deps.requested.has("conversations");
 	const wantsMessages = deps.requested.has("messages");
+	const detailNotFound = wantsMessages
+		? new DetailNotFoundTracker(messagesCursor?.detail_not_found)
+		: undefined;
+	if (detailNotFound) {
+		runDeps.detailNotFound = detailNotFound;
+	}
 	// What the cursor says has had its detail read (model counts). A cursor in
 	// the published shape keeps its watermark and says no history is read.
 	let priorDetailProgress = readDetailProgress(conversationsCursor);
@@ -7808,7 +7926,27 @@ async function walkConversationsAndMessages(
 		// Forward walk suppressed; persist the learned interval so warm-start
 		// survives, then return — deferred work stays durable DETAIL_GAPs for the
 		// next run. (See shouldSuppressForwardWalkAfterRecovery for the two cases.)
-		persistChatGptPacingStateOnly(deps, priorMessagesCursor, savedBackfill);
+		let notFoundTable: NotFoundTable | null = null;
+		if (detailNotFound) {
+			// No listing ran, so nothing is proved absent.
+			const settlement = await settleDetailNotFound(
+				runDeps,
+				detailNotFound,
+				() => false,
+			);
+			if (
+				detailNotFound.prior.size > 0 ||
+				Object.keys(settlement.table).length > 0
+			) {
+				notFoundTable = settlement.table;
+			}
+		}
+		persistChatGptPacingStateOnly(
+			deps,
+			priorMessagesCursor,
+			savedBackfill,
+			notFoundTable,
+		);
 		return;
 	}
 	// Finish search's saved suffix before restarting primary, so primary
@@ -7874,6 +8012,18 @@ async function walkConversationsAndMessages(
 			emitConversation,
 			options.detailPacing,
 		);
+		const notFound = detailNotFound
+			? await readOwedNotFoundConversations(runDeps, detailNotFound, {
+					coverage,
+					forward: messageDetailConversations,
+					listedIds: completeListingIds(primaryList, primaryBackfill !== null, [
+						...messageDetailConversations,
+						...conversationsToSync,
+					]),
+					emitConversation,
+					pacing: options.detailPacing,
+				})
+			: null;
 		messageDetailDeferred = coverage.deferred;
 		await emitMessagesCoverageAndState(deps, {
 			messageDetailConversations,
@@ -7881,6 +8031,8 @@ async function walkConversationsAndMessages(
 			messagesListTruncated,
 			backfill,
 			priorMessagesCursor,
+			extraRequiredKeys: notFound?.extraRequiredKeys ?? [],
+			notFoundTable: notFound?.table ?? null,
 		});
 	}
 
@@ -7948,6 +8100,66 @@ async function walkConversationsAndMessages(
 			);
 		}
 	}
+}
+
+/**
+ * After the forward walk, read the conversations the cursor still owes after a
+ * 404 and settle the run's obligations. Returns the owed keys to add to the
+ * required set and the table for the cursor.
+ */
+async function readOwedNotFoundConversations(
+	runDeps: StreamDeps,
+	tracker: DetailNotFoundTracker,
+	{
+		coverage,
+		forward,
+		listedIds,
+		emitConversation,
+		pacing,
+	}: {
+		coverage: ConversationDetailCoverage;
+		forward: readonly ConversationListItem[];
+		listedIds: ReadonlySet<string> | null;
+		emitConversation: (
+			c: ConversationListItem,
+			detail: ConversationDetail | null,
+		) => Promise<void>;
+		pacing: ConversationDetailPacingOptions | undefined;
+	},
+): Promise<{ extraRequiredKeys: string[]; table: NotFoundTable }> {
+	const absent = (id: string): boolean =>
+		listedIds !== null && !listedIds.has(id);
+	const forwardIds = new Set(forward.map((c) => c.id));
+	const extraRequiredKeys: string[] = [];
+	// A deferred forward pass met source pressure or a spent budget: do not
+	// send more requests into it. The obligations wait, unchanged.
+	const owed =
+		coverage.deferred || runDeps.runBudget?.shouldStop() === true
+			? []
+			: tracker.owed(
+					new Set([...forwardIds, ...[...tracker.prior.keys()].filter(absent)]),
+				);
+	if (owed.length > 0) {
+		const owedCoverage = await runMessagesAndConversationsWithDetail(
+			runDeps,
+			owed,
+			// A record the first 404 already emitted list-only is not re-emitted
+			// from the stored hint; a clean read emits it with its detail.
+			(c, detail) =>
+				detail === null ? Promise.resolve() : emitConversation(c, detail),
+			pacing,
+		);
+		coverage.hydratedKeys.push(...owedCoverage.hydratedKeys);
+		coverage.gapKeys.push(...owedCoverage.gapKeys);
+		coverage.sourceUnrepresentableKeys.push(
+			...owedCoverage.sourceUnrepresentableKeys,
+		);
+		coverage.notFoundKeys.push(...owedCoverage.notFoundKeys);
+		coverage.deferred ||= owedCoverage.deferred;
+		extraRequiredKeys.push(...owed.map((c) => c.id));
+	}
+	const settlement = await settleDetailNotFound(runDeps, tracker, absent);
+	return { extraRequiredKeys, table: settlement.table };
 }
 
 /**
@@ -8102,12 +8314,18 @@ async function emitMessagesCoverageAndState(
 		messagesListTruncated,
 		backfill,
 		priorMessagesCursor,
+		extraRequiredKeys,
+		notFoundTable,
 	}: {
 		messageDetailConversations: ConversationListItem[];
 		coverage: ConversationDetailCoverage;
 		messagesListTruncated: boolean;
 		backfill: ConversationBackfill | null;
 		priorMessagesCursor: string | null;
+		// Owed 404 conversations this run read outside the forward walk.
+		extraRequiredKeys: readonly string[];
+		// The messages cursor's 404 obligations after this run.
+		notFoundTable: NotFoundTable | null;
 	},
 ): Promise<void> {
 	if (!messagesListTruncated) {
@@ -8126,10 +8344,10 @@ async function emitMessagesCoverageAndState(
 					...coverage.gapKeys,
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					...coverage.sourceUnrepresentableKeys,
-					...coverage.deletedKeys,
+					...coverage.notFoundKeys,
 					coverage.backlogGapKey,
 				]
-			: messageDetailConversations.map((c) => c.id);
+			: [...messageDetailConversations.map((c) => c.id), ...extraRequiredKeys];
 		await deps.emit(makeConversationDetailCoverage(requiredKeys, coverage));
 	}
 	const maxMessagesUpdate = messagesListTruncated
@@ -8151,6 +8369,7 @@ async function emitMessagesCoverageAndState(
 		cursor: {
 			last_update_time: maxMessagesUpdate,
 			...(backfill === null ? {} : { backfill }),
+			...notFoundCursorFields(notFoundTable),
 			...buildChatGptPacingStateFields(deps.providerBudget),
 		},
 	});
