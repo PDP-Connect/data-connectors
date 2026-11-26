@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-maps-data-portability",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "Google Maps Data Portability",
 	"brand": {
 		"icon": "icon.svg",
@@ -31,6 +31,7 @@
 		]
 	},
 	"capabilities": {
+		"collection": { "implemented": false },
 		"auth": {
 			"kind": "oauth",
 			"exchanger_kind": "oauth2_access_type_resource_groups",

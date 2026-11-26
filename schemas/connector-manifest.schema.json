@@ -10,6 +10,12 @@
       "properties": {
         "bindings": { "$ref": "#/$defs/bindings" }
       }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "collection": { "$ref": "#/$defs/collectionCapability" }
+      }
     }
   },
   "allOf": [
@@ -30,6 +36,15 @@
     }
   ],
   "$defs": {
+    "collectionCapability": {
+      "type": "object",
+      "description": "Section 3.4: capabilities.collection.implemented says whether the connector collects records today. false means a placeholder or retired connector that cannot return owner data, and a consumer MUST NOT offer it for setup. The manifest test in this repository requires every connector manifest to declare it.",
+      "additionalProperties": false,
+      "required": ["implemented"],
+      "properties": {
+        "implemented": { "type": "boolean" }
+      }
+    },
     "bindings": {
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/bindingMapKey" },

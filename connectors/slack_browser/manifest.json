@@ -9,7 +9,7 @@
 	},
 	"connector_key": "slack-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"display_name": "Slack (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -35,6 +35,7 @@
 		]
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "manual",

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "jellyfin",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/jellyfin",
-	"version": "0.2.21",
+	"version": "0.2.22",
 	"display_name": "Jellyfin",
 	"brand": {
 		"icon": "icon.svg",
@@ -82,6 +82,7 @@
 		}
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": [],
 		"refresh_policy": {
 			"recommended_mode": "automatic",

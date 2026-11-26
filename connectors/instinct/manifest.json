@@ -9,7 +9,7 @@
 	},
 	"connector_key": "instinct",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-	"version": "0.1.10",
+	"version": "0.1.11",
 	"display_name": "Instinct",
 	"brand": {
 		"icon": "icon.svg",
@@ -28,6 +28,7 @@
 		}
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "automatic",

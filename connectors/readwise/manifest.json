@@ -9,7 +9,7 @@
 	},
 	"connector_key": "readwise",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/readwise",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Readwise",
 	"brand": {
 		"icon": "icon.svg",
@@ -48,6 +48,7 @@
 		}
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": [],
 		"refresh_policy": {
 			"recommended_mode": "automatic",

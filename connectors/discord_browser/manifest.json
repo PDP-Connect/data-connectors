@@ -9,7 +9,7 @@
 	},
 	"connector_key": "discord-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-	"version": "0.1.20",
+	"version": "0.1.21",
 	"display_name": "Discord (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -28,6 +28,7 @@
 		}
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "manual",

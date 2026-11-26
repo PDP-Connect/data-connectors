@@ -7,7 +7,7 @@
 	},
 	"connector_key": "whoop-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whoop-browser",
-	"version": "0.1.9",
+	"version": "0.1.10",
 	"display_name": "WHOOP (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -20,6 +20,7 @@
 		}
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "manual",

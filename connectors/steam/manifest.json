@@ -9,7 +9,7 @@
 	},
 	"connector_key": "steam",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-	"version": "0.1.26",
+	"version": "0.1.27",
 	"display_name": "Steam",
 	"brand": {
 		"icon": "icon.svg",
@@ -58,6 +58,7 @@
 		"steam_optional_resource_unavailable": "Steam did not make this optional account data available"
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": [],
 		"refresh_policy": {
 			"recommended_mode": "automatic",

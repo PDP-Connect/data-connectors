@@ -927,6 +927,14 @@ declared constraint.
 `credentials`, `otp`, and `manual_action`. A connector MUST NOT emit an
 `INTERACTION.kind` that the manifest does not declare.
 
+`capabilities.collection.implemented` is an OPTIONAL boolean in the profile.
+`true` says the connector collects records today. `false` says it does not, for
+example a placeholder that only reports a skip, or a connector for a service
+that no longer exists. A consumer MUST NOT offer setup for a connector whose
+manifest declares `false`, and MUST treat an absent declaration as "not
+stated". Every manifest in this repository declares it, and its manifest test
+fails when one does not.
+
 `protocol_capabilities` declares optional wire features that the connector
 requires. A runtime MUST advertise its supported protocol version and
 capabilities before placement. It MUST reject a connector with an unsupported

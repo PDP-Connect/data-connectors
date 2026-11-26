@@ -9,7 +9,7 @@
 	},
 	"connector_key": "netflix-export",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-	"version": "0.1.29",
+	"version": "0.1.30",
 	"display_name": "Netflix Export",
 	"brand": {
 		"icon": "icon.svg",
@@ -65,6 +65,7 @@
 		}
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": [],
 		"refresh_policy": {
 			"recommended_mode": "manual",

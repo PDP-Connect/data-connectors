@@ -9,7 +9,7 @@
 	},
 	"connector_key": "doordash",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-	"version": "0.2.29",
+	"version": "0.2.30",
 	"display_name": "DoorDash",
 	"brand": {
 		"icon": "icon.svg",
@@ -55,6 +55,7 @@
 		}
 	},
 	"capabilities": {
+		"collection": { "implemented": true },
 		"human_interaction": ["manual_action", "otp"],
 		"refresh_policy": {
 			"recommended_mode": "manual",
