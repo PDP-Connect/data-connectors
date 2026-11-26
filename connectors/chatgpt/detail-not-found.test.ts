@@ -245,6 +245,7 @@ test("detail 404: an owed conversation absent from a complete listing is settled
 	);
 	assert.deepEqual(second.detailReads, []);
 	assert.deepEqual(owedIds(second.state), []);
+	assert.deepEqual(messagesCoverage(second)?.optional_skip_keys, ["conv-B"]);
 });
 
 test("detail 404: an owed conversation still in a complete listing is fetched again", async () => {

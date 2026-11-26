@@ -7651,6 +7651,26 @@ function completeListingIds(
 	return new Set([...primary.items, ...alsoListed].map((c) => c.id));
 }
 
+/** Add keys this run looked at outside the forward walk to its coverage, as skipped. */
+function addMissingNotFoundKeys(
+	coverage: ConversationDetailCoverage,
+	missing: readonly string[],
+	alreadyRequired: ReadonlySet<string>,
+): string[] {
+	const accounted = new Set([
+		...alreadyRequired,
+		...[
+			...coverage.hydratedKeys,
+			...coverage.gapKeys,
+			...coverage.sourceUnrepresentableKeys,
+			...coverage.notFoundKeys,
+		].map(String),
+	]);
+	const added = missing.filter((id) => !accounted.has(id));
+	coverage.notFoundKeys.push(...added);
+	return added;
+}
+
 /**
  * After the gap-recovery pass, decide whether to SKIP the forward walk. Two cases:
  *   1. §4.3/§4.4 recoveryOnly — the source-pressure cooldown is active, so the
@@ -7934,6 +7954,18 @@ async function walkConversationsAndMessages(
 				detailNotFound,
 				() => false,
 			);
+			if (settlement.missing.length > 0) {
+				// A scoped receipt: recovery read these and got no messages.
+				await deps.emit(
+					makeConversationDetailCoverage(settlement.missing, {
+						deferred: false,
+						gapKeys: [],
+						hydratedKeys: [],
+						sourceUnrepresentableKeys: [],
+						notFoundKeys: settlement.missing,
+					}),
+				);
+			}
 			if (
 				detailNotFound.prior.size > 0 ||
 				Object.keys(settlement.table).length > 0
@@ -8104,8 +8136,9 @@ async function walkConversationsAndMessages(
 
 /**
  * After the forward walk, read the conversations the cursor still owes after a
- * 404 and settle the run's obligations. Returns the owed keys to add to the
- * required set and the table for the cursor.
+ * 404, settle the run's obligations, and fold what this run looked at outside
+ * the forward walk into its coverage. Returns the keys to add to the required
+ * set and the table for the cursor.
  */
 async function readOwedNotFoundConversations(
 	runDeps: StreamDeps,
@@ -8159,6 +8192,13 @@ async function readOwedNotFoundConversations(
 		extraRequiredKeys.push(...owed.map((c) => c.id));
 	}
 	const settlement = await settleDetailNotFound(runDeps, tracker, absent);
+	extraRequiredKeys.push(
+		...addMissingNotFoundKeys(
+			coverage,
+			settlement.missing,
+			new Set([...forwardIds, ...extraRequiredKeys]),
+		),
+	);
 	return { extraRequiredKeys, table: settlement.table };
 }
 
@@ -8322,7 +8362,7 @@ async function emitMessagesCoverageAndState(
 		messagesListTruncated: boolean;
 		backfill: ConversationBackfill | null;
 		priorMessagesCursor: string | null;
-		// Owed 404 conversations this run read outside the forward walk.
+		// Keys read outside the forward walk this run (owed 404s, recovery 404s).
 		extraRequiredKeys: readonly string[];
 		// The messages cursor's 404 obligations after this run.
 		notFoundTable: NotFoundTable | null;

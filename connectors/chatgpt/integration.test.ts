@@ -100,6 +100,7 @@ import {
 	createChatGptApi,
 	createOmittedMessageContentTally,
 	estimateChatGptDetailMinutesRemaining,
+	NOT_FOUND_SETTLE_RUNS,
 	normalizeChatGptTerminalError,
 	processConversationDetail,
 	readChatGptPersistedPacing,
@@ -8773,7 +8774,16 @@ async function runPendingGapAnswering404(
 	return harness;
 }
 
-test("runConversationsAndMessagesStreams: a pending gap whose conversation answers 404 stays owed", async () => {
+function messagesCoverageOf(
+	harness: ReturnType<typeof makeRecordingEmit>,
+): Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> | undefined {
+	return harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			m.type === "DETAIL_COVERAGE" && m.stream === "messages",
+	);
+}
+
+test("runConversationsAndMessagesStreams: a pending gap whose conversation answers 404 stays owed and its messages are reported missing", async () => {
 	const harness = await runPendingGapAnswering404({});
 
 	assert.equal(
@@ -8790,6 +8800,87 @@ test("runConversationsAndMessagesStreams: a pending gap whose conversation answe
 		harness.emitted.some((r) => r.stream === "messages"),
 		false,
 	);
+	const coverage = messagesCoverageOf(harness);
+	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.equal(
+		(
+			messagesState?.cursor as
+				| { detail_not_found?: Record<string, { n: number }> }
+				| undefined
+		)?.detail_not_found?.["convo-gone"]?.n,
+		1,
+	);
+});
+
+test("runConversationsAndMessagesStreams: a recovery-only run that settles a 404 gap still reports its messages missing", async () => {
+	// The conversation has answered 404 on every run short of the last one.
+	const harness = await runPendingGapAnswering404({
+		messages: {
+			last_update_time: null,
+			detail_not_found: {
+				"convo-gone": {
+					n: NOT_FOUND_SETTLE_RUNS - 1,
+					first_seen: "2026-01-01T00:00:00.000Z",
+					item: { id: "convo-gone", update_time: 1_700_000_100 },
+				},
+			},
+		},
+	});
+
+	assert.deepEqual(
+		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		[
+			{
+				type: "DETAIL_GAP_RECOVERED",
+				reference_only: true,
+				gap_id: "gap_gone",
+				stream: "messages",
+				record_key: "convo-gone",
+			},
+		],
+	);
+	assert.equal(
+		harness.emitted.some((r) => r.stream === "messages"),
+		false,
+	);
+	// Closing the gap is not a confirmed-empty stream: the outcome stays partial.
+	const coverage = messagesCoverageOf(harness);
+	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.equal(
+		(messagesState?.cursor as { detail_not_found?: unknown } | undefined)
+			?.detail_not_found,
+		undefined,
+		"the settled conversation is no longer owed",
+	);
+});
+
+test("runConversationsAndMessagesStreams: a recovery-only run whose pending gap answers 404 emits a partial receipt and keeps the obligation", async () => {
+	const harness = await runPendingGapAnswering404({}, { recoveryOnly: true });
+
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+	);
+	const coverage = messagesCoverageOf(harness);
+	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
 	const messagesState = harness.protocolMessages.findLast(
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "messages",
