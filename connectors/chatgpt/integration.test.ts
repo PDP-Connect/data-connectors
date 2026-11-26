@@ -8729,6 +8729,65 @@ test("runConversationsAndMessagesStreams: recovers pending conversation detail g
 	);
 });
 
+test("runConversationsAndMessagesStreams: a pending gap whose conversation now answers 404 is settled, not re-owed", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const goneConvo = makeConvo({ id: "convo-gone", update_time: 1_700_000_100 });
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (path === "/conversation/convo-gone") {
+				return Promise.resolve({ status: 404, json: null });
+			}
+			if (path.startsWith("/conversations/search?")) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: [], has_missing_conversations: false, total: 0 },
+				});
+			}
+			return Promise.resolve(makeDetailOk());
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		detailGaps: [makeDetailGapFromConvo("gap_gone", goneConvo)],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+
+	await runConversationsAndMessagesStreams(
+		deps,
+		{},
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+
+	assert.deepEqual(
+		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		[
+			{
+				type: "DETAIL_GAP_RECOVERED",
+				reference_only: true,
+				gap_id: "gap_gone",
+				stream: "messages",
+				record_key: "convo-gone",
+			},
+		],
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+		"a gone conversation is not re-gapped",
+	);
+	assert.equal(
+		harness.emitted.some((r) => r.stream === "messages"),
+		false,
+	);
+});
+
 test("runConversationsAndMessagesStreams: drains paged pending message gaps beyond the first 100 in one run", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const conversations = Array.from({ length: 125 }, (_, index) =>
@@ -9650,7 +9709,7 @@ test("runMessagesAndConversationsWithDetail: batch hydration ETA counts conversa
 
 test("runConversationsAndMessagesStreams: terminal detail http failure remains fail-closed", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const listItem = makeConvo({ id: "convo-terminal-404" });
+	const listItem = makeConvo({ id: "convo-terminal-400" });
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
@@ -9665,7 +9724,9 @@ test("runConversationsAndMessagesStreams: terminal detail http failure remains f
 					},
 				});
 			}
-			return Promise.resolve({ status: 404, json: null });
+			// A 400 is a per-conversation failure that does not prove the
+			// conversation is gone (404/410 do, and are skipped).
+			return Promise.resolve({ status: 400, json: null });
 		},
 	};
 	const deps: StreamDeps = {
@@ -9680,7 +9741,7 @@ test("runConversationsAndMessagesStreams: terminal detail http failure remains f
 
 	await assert.rejects(
 		runConversationsAndMessagesStreams(deps, {}),
-		/required conversation detail convo-terminal-404/,
+		/required conversation detail convo-terminal-400 failed with http 400/,
 	);
 
 	assert.equal(

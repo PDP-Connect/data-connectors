@@ -704,28 +704,116 @@ test("runConversationsAndMessagesStreams: conversations alone does not retry a 4
 	assert.deepEqual(detailReads, ["conv-A"]);
 });
 
-test("runConversationsAndMessagesStreams: both streams still fail the run on a 404 detail", async () => {
+function messagesCoverage(
+	protocolMessages: EmittedMessage[],
+): Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> | undefined {
+	return protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			m.type === "DETAIL_COVERAGE" && m.stream === "messages",
+	);
+}
+
+test("runConversationsAndMessagesStreams: both streams skip a conversation whose detail is a 404 or 410 and record it as skipped", async () => {
+	await Promise.all(
+		[404, 410].map(async (status) => {
+			const list = [
+				makeListItem("conv-A", "2026-04-22T09:00:00Z"),
+				makeListItem("conv-B", "2026-04-22T10:00:00Z"),
+				makeListItem("conv-C", "2026-04-22T11:00:00Z"),
+			];
+			const { api, detailReads } = makeDetailLoggingApi(
+				list,
+				detailFailingFor("conv-B", status),
+			);
+			const { deps, emitted, protocolMessages } = makeDeps(api, [
+				"conversations",
+				"messages",
+			]);
+
+			await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+			// Read once: a gone conversation is not retried in-run.
+			assert.deepEqual(detailReads.sort(), ["conv-A", "conv-B", "conv-C"]);
+			const conversations = emitted.filter((r) => r.stream === "conversations");
+			assert.deepEqual(
+				conversations.map((r) => r.data.id).sort(),
+				["conv-A", "conv-B", "conv-C"],
+				`http ${status}: the gone conversation keeps its list-only record`,
+			);
+			const messageConversations = new Set(
+				emitted
+					.filter((r) => r.stream === "messages")
+					.map((r) => r.data.conversation_id),
+			);
+			assert.deepEqual([...messageConversations].sort(), ["conv-A", "conv-C"]);
+			// No retryable gap: a refetch answers the same, so it would be owed forever.
+			assert.equal(
+				protocolMessages.some((m) => m.type === "DETAIL_GAP"),
+				false,
+				`http ${status}: no DETAIL_GAP for a gone conversation`,
+			);
+			const coverage = messagesCoverage(protocolMessages);
+			assert.ok(coverage, `http ${status}: messages DETAIL_COVERAGE emitted`);
+			assert.deepEqual(coverage.optional_skip_keys, ["conv-B"]);
+			assert.deepEqual([...coverage.hydrated_keys].sort(), [
+				"conv-A",
+				"conv-C",
+			]);
+			assert.equal(coverage.considered, 3);
+			assert.equal(coverage.covered, 2);
+			assert.equal(
+				protocolMessages.some(
+					(m: EmittedMessage) => m.type === "STATE" && m.stream === "messages",
+				),
+				true,
+				`http ${status}: the run completes and checkpoints messages`,
+			);
+		}),
+	);
+});
+
+test("runConversationsAndMessagesStreams: messages alone skips a 404 detail instead of failing the run", async () => {
 	const list = [
 		makeListItem("conv-A", "2026-04-22T09:00:00Z"),
 		makeListItem("conv-B", "2026-04-22T10:00:00Z"),
 	];
-	const { api } = makeDetailLoggingApi(list, detailFailingFor("conv-B", 404));
-	const { deps } = makeDeps(api, ["conversations", "messages"]);
+	const { api } = makeDetailLoggingApi(list, detailFailingFor("conv-A", 404));
+	const { deps, emitted, protocolMessages } = makeDeps(api, ["messages"]);
 
-	await assert.rejects(
-		runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
-		/required conversation detail conv-B failed with http 404/,
+	await runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS });
+
+	assert.deepEqual(
+		[
+			...new Set(
+				emitted
+					.filter((r) => r.stream === "messages")
+					.map((r) => r.data.conversation_id),
+			),
+		],
+		["conv-B"],
 	);
+	assert.deepEqual(messagesCoverage(protocolMessages)?.optional_skip_keys, [
+		"conv-A",
+	]);
 });
 
-test("runConversationsAndMessagesStreams: messages alone still fails the run on a 404 detail", async () => {
-	const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
-	const { api } = makeDetailLoggingApi(list, detailFailingFor("conv-A", 404));
-	const { deps } = makeDeps(api, ["messages"]);
+test("runConversationsAndMessagesStreams: messages still fail the run on another per-conversation 4xx detail", async () => {
+	await Promise.all(
+		[400, 422].map(async (status) => {
+			const list = [makeListItem("conv-A", "2026-04-22T09:00:00Z")];
+			const { api } = makeDetailLoggingApi(
+				list,
+				detailFailingFor("conv-A", status),
+			);
+			const { deps } = makeDeps(api, ["conversations", "messages"]);
 
-	await assert.rejects(
-		runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
-		/required conversation detail conv-A failed with http 404/,
+			await assert.rejects(
+				runStreams(deps, {}, { detailPacing: NO_DETAIL_WAITS }),
+				new RegExp(
+					`required conversation detail conv-A failed with http ${status}`,
+				),
+			);
+		}),
 	);
 });
 

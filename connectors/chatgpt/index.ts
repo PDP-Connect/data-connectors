@@ -5673,6 +5673,9 @@ interface ConversationDetailCoverage {
 	// explicitly skipped.
 	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 	sourceUnrepresentableKeys: Array<string | number>;
+	// Listed conversations whose detail answered 404/410 (see
+	// `skipDeletedConversation`). Skipped for good, like the keys above.
+	deletedKeys: Array<string | number>;
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -5777,7 +5780,49 @@ export type ConversationDetailOutcome =
 	| { complete: false; reason: ConversationDetailIncompleteReason }
 	// The source cannot represent a body (unknown-shape fallback cut): a refetch
 	// returns the same bytes, so no retryable gap is owed.
-	| SourceUnrepresentableOutcome;
+	| SourceUnrepresentableOutcome
+	| ConversationDeletedOutcome;
+
+/**
+ * A listed conversation whose detail answered 404 or 410: the source says it is
+ * gone (deleted or archived away after the list was read, or a list entry the
+ * source never cleaned up). A refetch returns the same answer, so it is neither
+ * hydrated nor owed a retryable gap; the run records it as skipped.
+ */
+type ConversationDeletedOutcome = { complete: false; deleted: true };
+
+const CONVERSATION_DELETED_OUTCOME: ConversationDeletedOutcome = {
+	complete: false,
+	deleted: true,
+};
+
+function isConversationDeleted(
+	outcome: object,
+): outcome is ConversationDeletedOutcome {
+	return "deleted" in outcome;
+}
+
+/**
+ * The messages pass's answer to a detail that proves the conversation is gone.
+ * The conversation keeps its list-only record (the list still names it), no
+ * message is emitted, and no DETAIL_GAP is written: a gap would be re-fetched
+ * every run and answer 404 again. The caller declares the key skipped in
+ * DETAIL_COVERAGE, so the stream reads as covered short of it, not complete.
+ */
+async function skipDeletedConversation(
+	c: ConversationListItem,
+	status: number,
+	emitConversation: (
+		c: ConversationListItem,
+		detail: ConversationDetail | null,
+	) => Promise<void>,
+): Promise<ConversationDeletedOutcome> {
+	chatGptDiagnostic(
+		`conversation_gone: a listed conversation's detail returned http ${status}; its messages are skipped`,
+	);
+	await emitConversation(c, null);
+	return CONVERSATION_DELETED_OUTCOME;
+}
 
 /**
  * Retryable gap for a conversation whose detail arrived but whose messages are
@@ -6009,7 +6054,10 @@ function makeConversationDetailCoverage(
 		hydratedKeys: coverage.hydratedKeys,
 		gapKeys: coverage.gapKeys,
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
-		optionalSkipKeys: optionalSkipKeysFor(coverage.sourceUnrepresentableKeys),
+		optionalSkipKeys: [
+			...optionalSkipKeysFor(coverage.sourceUnrepresentableKeys),
+			...coverage.deletedKeys,
+		],
 		considered: requiredKeys.length,
 		covered: coverage.hydratedKeys.length,
 	});
@@ -6081,6 +6129,7 @@ export async function runMessagesAndConversationsWithDetail(
 		hydratedKeys: [],
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 		sourceUnrepresentableKeys: [],
+		deletedKeys: [],
 	};
 	// Cumulative served-429 density signal. Each `rate_limited` cooldown the lane
 	// surfaces (one per served 429, success-after-backoff included) bumps the
@@ -7021,12 +7070,17 @@ export async function runMessagesAndConversationsWithDetail(
 				// A detail fetched only for the conversations stream feeds two optional
 				// fields. One conversation's own failure (a 404 for a conversation
 				// deleted mid-run) leaves that record list-only (null fields); it
-				// does not fail the run. The messages path still throws: a missing
-				// detail there would silently lose message records.
+				// does not fail the run. The messages path skips a conversation the
+				// source says is gone (404/410) and records it as skipped; any other
+				// failure still throws, since a missing detail there would silently
+				// lose message records.
 				const degradesToListOnly =
 					deps.conversationDetailOnly === true &&
 					isPerConversationDetailFailure(detail.status);
-				if (detail.status !== 200 && !degradesToListOnly) {
+				const conversationGone =
+					deps.conversationDetailOnly !== true &&
+					isDeletedConversationStatus(detail.status);
+				if (detail.status !== 200 && !degradesToListOnly && !conversationGone) {
 					providerBudget?.recordFailure();
 					await emitChatGptProviderBudgetTransitions({
 						emit: deps.emit,
@@ -7050,12 +7104,14 @@ export async function runMessagesAndConversationsWithDetail(
 					detailMs,
 					detail.providerFetchMs ?? detailMs,
 				);
-				const detailOutcome = await processConversationDetail(
-					detailDeps,
-					c,
-					detail,
-					emitConversation,
-				);
+				const detailOutcome = conversationGone
+					? await skipDeletedConversation(c, detail.status, emitConversation)
+					: await processConversationDetail(
+							detailDeps,
+							c,
+							detail,
+							emitConversation,
+						);
 				// §10-D: suppress additive-decrease during the cooldown-exempt recovery
 				// lane so the shared pacer interval is not un-learned. Throttles still
 				// fire (recovery may decelerate, never accelerate the pacer).
@@ -7083,6 +7139,8 @@ export async function runMessagesAndConversationsWithDetail(
 				} else if (isSourceUnrepresentable(detailOutcome)) {
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					coverage.sourceUnrepresentableKeys.push(c.id);
+				} else if (isConversationDeleted(detailOutcome)) {
+					coverage.deletedKeys.push(c.id);
 				} else {
 					// processConversationDetail already emitted the DETAIL_GAP.
 					gapKeys.add(c.id);
@@ -7359,6 +7417,8 @@ async function recoverPendingConversationDetailGapPage(
 		const settled = new Set([
 			...hydrated,
 			...coverage.sourceUnrepresentableKeys.map(String),
+			// A gone conversation answers the same on every refetch.
+			...coverage.deletedKeys.map(String),
 		]);
 		for (const { gap, conversation } of recoveryItems) {
 			if (!settled.has(conversation.id)) {
@@ -8066,6 +8126,7 @@ async function emitMessagesCoverageAndState(
 					...coverage.gapKeys,
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					...coverage.sourceUnrepresentableKeys,
+					...coverage.deletedKeys,
 					coverage.backlogGapKey,
 				]
 			: messageDetailConversations.map((c) => c.id);
