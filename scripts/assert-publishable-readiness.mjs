@@ -19,16 +19,13 @@ import {
 //
 // Rows are judged against the canonical inventory, never against what a row
 // says about itself. A known identity must match on both names. An excluded
-// entry is refused whatever the row claims. Known scaffolds are checked later,
-// against the tier in their published artifact metadata.
+// entry is refused whatever the row claims. Scaffolds are refused because
+// they emit no owner-data records; lifecycle tier is a separate fact.
 
 const DIRECTORY = /^[a-z0-9][a-z0-9_]*$/;
 const PUBLIC_KEY = /^[a-z0-9][a-z0-9-]*$/;
 const SCAFFOLD_DIRECTORIES = new Set(KNOWN_SCAFFOLD_CONNECTORS);
-const DEVELOPMENT_DIRECTORIES = new Set([
-  ...KNOWN_SCAFFOLD_CONNECTORS,
-  ...Object.keys(REAL_UNLISTED_CONNECTORS),
-]);
+const DEVELOPMENT_DIRECTORIES = new Set(Object.keys(REAL_UNLISTED_CONNECTORS));
 const SCAFFOLD_KEYS = new Set(
   CONNECTOR_PUBLISH_INVENTORY
     .filter(({ manifest }) => SCAFFOLD_DIRECTORIES.has(manifest))
@@ -43,6 +40,9 @@ export function assertPublishableRow(row) {
     (exclusionReason !== null && (typeof exclusionReason !== "string" || exclusionReason.trim() === ""))
   ) {
     throw new Error(`refusing to publish malformed connector row ${JSON.stringify(row ?? null)}`);
+  }
+  if (SCAFFOLD_DIRECTORIES.has(manifest) || SCAFFOLD_KEYS.has(connectorKey)) {
+    throw new Error(`refusing to publish connector '${connectorKey}': it collects no owner data yet`);
   }
   const byDirectory = CONNECTOR_PUBLISH_INVENTORY.find((entry) => entry.manifest === manifest);
   const byKey = CONNECTOR_PUBLISH_INVENTORY.find((entry) => entry.connectorKey === connectorKey);
@@ -62,8 +62,7 @@ export function assertDevelopmentTier(row, metadata) {
   const { manifest, connectorKey } = row ?? {};
   if (
     !DEVELOPMENT_DIRECTORIES.has(manifest) &&
-    !DEVELOPMENT_DIRECTORIES.has(connectorKey) &&
-    !SCAFFOLD_KEYS.has(connectorKey)
+    !DEVELOPMENT_DIRECTORIES.has(connectorKey)
   ) {
     return;
   }

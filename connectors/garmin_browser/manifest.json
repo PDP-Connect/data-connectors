@@ -7,7 +7,7 @@
 	},
 	"connector_key": "garmin-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
-	"version": "0.1.10",
+	"version": "0.1.9",
 	"display_name": "Garmin (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -20,7 +20,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "manual",

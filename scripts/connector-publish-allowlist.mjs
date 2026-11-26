@@ -5,6 +5,7 @@
 
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
 
 /**
  * The complete Collection Profile manifest inventory and its publish policy.
@@ -106,7 +107,9 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
 );
 
 export const PUBLISHABLE_CONNECTORS = Object.freeze(
-  CONNECTOR_PUBLISH_INVENTORY.filter(({ exclusionReason }) => exclusionReason === null),
+  CONNECTOR_PUBLISH_INVENTORY.filter(({ manifest, exclusionReason }) =>
+    exclusionReason === null && !KNOWN_SCAFFOLD_CONNECTORS.includes(manifest),
+  ),
 );
 
 export const PUBLISH_EXCLUSIONS = Object.freeze(
@@ -127,11 +130,9 @@ export function getPublishShards(count = 6) {
   }
   return shards;
 }
-
 function githubMatrix(rows) {
   return { include: rows };
 }
-
 function emitMatrix(matrix) {
   const value = JSON.stringify(matrix);
   if (process.env.GITHUB_OUTPUT) {

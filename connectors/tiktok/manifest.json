@@ -9,7 +9,7 @@
 	},
 	"connector_key": "tiktok",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-	"version": "0.3.16",
+	"version": "0.3.15",
 	"display_name": "TikTok (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -28,7 +28,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "manual",

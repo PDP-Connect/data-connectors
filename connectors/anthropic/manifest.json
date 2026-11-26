@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.69",
+	"version": "0.2.68",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -35,7 +35,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"host_blob_write": {
 			"version": 1,
 			"max_blob_bytes": 33554432,

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "reddit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-	"version": "0.4.9",
+	"version": "0.4.8",
 	"display_name": "Reddit",
 	"brand": {
 		"icon": "icon.svg",
@@ -67,7 +67,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"human_interaction": ["manual_action", "otp"],
 		"refresh_policy": {
 			"recommended_mode": "automatic",

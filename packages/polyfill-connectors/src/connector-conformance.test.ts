@@ -15,13 +15,15 @@
  * Every manifest connector key MUST resolve to exactly one of four disjoint
  * buckets: `PRODUCTION_READY_CONNECTORS` (Supported or Preview, real),
  * `REAL_UNLISTED_CONNECTORS` (Development, real), or
- * `KNOWN_SCAFFOLD_CONNECTORS` (Development, unconditional SKIP_RESULT stub).
+ * `KNOWN_SCAFFOLD_CONNECTORS` (Development, emits no owner-data records).
  * Every manifest must join one bucket; Development is not a silent opt-out.
  *
  * This test does not run any connector's `collect()` or reprove its
- * behavior — each connector's own named test file (parsers/integration/
- * schemas) remains the sole behavioral oracle for whether it really
- * collects real data. This gate only proves the roster and the manifest
+ * behavior — each real connector's own named test file (parsers/integration/
+ * schemas) remains the behavioral oracle for owner-data collection. Scaffold
+ * membership is the explicit repo-owned assertion that no owner data is
+ * emitted; this gate proves that assertion stays out of the owner listing. It
+ * also proves the roster and the manifest
  * listing state agree, and that the named oracle file exists.
  */
 import assert from "node:assert/strict";
@@ -119,7 +121,7 @@ test("known scaffold connectors are not in the production-ready roster", () => {
 	assert.deepEqual(
 		overlap,
 		[],
-		`scaffold connector(s) present in PRODUCTION_READY_CONNECTORS: ${overlap.join(", ")} — a scaffold must prove real collection before joining the roster`,
+		`connector(s) with no owner-data records present in PRODUCTION_READY_CONNECTORS: ${overlap.join(", ")} — emit owner data before joining this roster`,
 	);
 });
 
@@ -128,7 +130,25 @@ test("known scaffold connectors are not publicly listed", () => {
 	assert.deepEqual(
 		listedScaffolds,
 		[],
-		`scaffold connector(s) have an owner-visible lifecycle tier: ${listedScaffolds.join(", ")} — a scaffold must remain Development`,
+		`connector(s) with no owner-data records have an owner-visible lifecycle tier: ${listedScaffolds.join(", ")} — they must stay out of the owner-selectable listing`,
+	);
+});
+
+test("the no-owner-data roster reflects skip-only, control-plane-only, and retired connectors", () => {
+	assert.deepEqual(KNOWN_SCAFFOLD_CONNECTORS, [
+		"google_maps_data_portability",
+		"loom",
+		"pocket",
+	]);
+	for (const key of KNOWN_SCAFFOLD_CONNECTORS) {
+		assert.equal(publicTier(key), "development", key);
+	}
+	const mapsManifest = readManifest("google_maps_data_portability") as {
+		capabilities?: { public_listing?: { proof_gate?: unknown } };
+	} | null;
+	assert.match(
+		String(mapsManifest?.capabilities?.public_listing?.proof_gate),
+		/only archive job metadata \(control plane\) is available/i,
 	);
 });
 
@@ -160,7 +180,7 @@ test("known scaffold connectors do not appear in REAL_UNLISTED_CONNECTORS", () =
 	assert.deepEqual(
 		overlap,
 		[],
-		`scaffold connector(s) present in REAL_UNLISTED_CONNECTORS: ${overlap.join(", ")} — a scaffold must prove real collection before claiming to be real-but-unlisted`,
+		`connector(s) with no owner-data records present in REAL_UNLISTED_CONNECTORS: ${overlap.join(", ")} — emit owner data before claiming to be a real but unlisted collector`,
 	);
 });
 
@@ -196,7 +216,7 @@ test("every manifest connector key resolves to exactly one conformance roster bu
 		[],
 		`connector(s) with a manifest but no conformance roster bucket: ${unaccountedFor.join(", ")}. ` +
 			"Add an owner-visible connector to PRODUCTION_READY_CONNECTORS, a Development collector to REAL_UNLISTED_CONNECTORS, " +
-			"or an unconditional stub to KNOWN_SCAFFOLD_CONNECTORS.",
+			"or a connector that emits no owner-data records to KNOWN_SCAFFOLD_CONNECTORS.",
 	);
 	assert.deepEqual(
 		inMultipleBuckets,
@@ -221,7 +241,7 @@ test("every manifest connector key resolves to exactly one conformance roster bu
 	);
 });
 
-test("Development catalog entries stay unlisted, and Loom remains scaffolded", () => {
+test("Development collectors stay unlisted, and Loom remains scaffolded", () => {
 	assert.deepEqual(REAL_UNLISTED_CONNECTORS.wholefoods, {
 		testFile: "connectors/wholefoods/integration.test.ts",
 	});

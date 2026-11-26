@@ -14,7 +14,7 @@ A connector directory exists and the runtime can start it, even if it only emits
 |---|---|
 | Manifest exists and declares at least one stream | The `manifest` step of `conformance <connector>` |
 | Connector directory and at least one `*.test.ts` file exist | The `tests` step of `conformance <connector>` |
-| If the connector does not collect yet, it is listed in `KNOWN_SCAFFOLD_CONNECTORS` (`src/connector-conformance-roster.ts`) and has `public_listing.tier: "development"` | Manual roster edit. `connector-conformance.test.ts` checks that the two agree |
+| If the connector emits no owner-data records yet, it is listed in `KNOWN_SCAFFOLD_CONNECTORS` (`src/connector-conformance-roster.ts`) and has `public_listing.tier: "development"` | Manual roster edit. `connector-conformance.test.ts` checks that the two agree |
 
 ## Development, real collector not run against a live account
 

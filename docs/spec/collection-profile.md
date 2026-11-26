@@ -927,16 +927,6 @@ declared constraint.
 `credentials`, `otp`, and `manual_action`. A connector MUST NOT emit an
 `INTERACTION.kind` that the manifest does not declare.
 
-`capabilities.collection.implemented` is an OPTIONAL boolean in the profile.
-`true` says the connector offers at least one implemented owner-data stream: a
-stream that returns records of the owner's own data from the source. `false`
-says it does not. Control-plane or operational records, such as the state of an
-export job, do not make a connector `true`. A placeholder that only reports a
-skip, and a connector for a service that no longer exists, are `false`. A
-consumer MUST NOT offer setup for a connector whose manifest declares `false`,
-and MUST treat an absent declaration as "not stated". Every manifest in this
-repository declares it, and its manifest test fails when one does not.
-
 `protocol_capabilities` declares optional wire features that the connector
 requires. A runtime MUST advertise its supported protocol version and
 capabilities before placement. It MUST reject a connector with an unsupported

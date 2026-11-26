@@ -187,14 +187,6 @@ export const connectorManifestSchema = {
           "$ref": "#/$defs/bindings"
         }
       }
-    },
-    "capabilities": {
-      "type": "object",
-      "properties": {
-        "collection": {
-          "$ref": "#/$defs/collectionCapability"
-        }
-      }
     }
   },
   "allOf": [
@@ -235,19 +227,6 @@ export const connectorManifestSchema = {
     }
   ],
   "$defs": {
-    "collectionCapability": {
-      "type": "object",
-      "description": "Section 3.4: capabilities.collection.implemented is true when the connector offers at least one implemented owner-data stream, and false otherwise. Control-plane or operational records (for example the state of an export job), skip-only scaffolds and retired services do not qualify. A consumer MUST NOT offer setup for a connector that declares false. The manifest test in this repository requires every connector manifest to declare it.",
-      "additionalProperties": false,
-      "required": [
-        "implemented"
-      ],
-      "properties": {
-        "implemented": {
-          "type": "boolean"
-        }
-      }
-    },
     "bindings": {
       "type": "object",
       "propertyNames": {

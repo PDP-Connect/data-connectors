@@ -1422,16 +1422,12 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	// `required: false` (matching its sibling timeline_segments), so it is not
 	// a required stream and this allowlist — which only tracks UNEXERCISED
 	// REQUIRED streams — must not claim it.
-	"google_maps_data_portability.archive_jobs",
 	// Google Takeout (REAL_UNLISTED_CONNECTORS): export-file snapshot-import
 	// receipts, no driver yet.
 	"google_takeout.location_history",
 	"google_takeout.youtube_watch_history",
 	"google_takeout.search_history",
 	"google_takeout.photos",
-	// Pocket is retained as a Development parser, but Mozilla shut down the
-	// upstream API; no live driver can exercise a collection boundary.
-	"pocket.items",
 	"heb.orders",
 	"heb.order_items",
 	// iCal / iMessage / Signal (REAL_UNLISTED_CONNECTORS): file/subprocess-based

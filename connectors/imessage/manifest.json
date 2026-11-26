@@ -9,7 +9,7 @@
 	},
 	"connector_key": "imessage",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-	"version": "0.1.27",
+	"version": "0.1.26",
 	"display_name": "iMessage (macOS)",
 	"brand": {
 		"icon": "icon.svg",
@@ -24,7 +24,6 @@
 		"environment_variables": ["IMESSAGE_DB_PATH", "IMESSAGE_ATTACHMENTS_ROOT"]
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"human_interaction": [],
 		"proven": {
 			"local_collector": true

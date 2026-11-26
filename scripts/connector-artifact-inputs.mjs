@@ -3,7 +3,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -289,10 +289,20 @@ async function publishInventoryAtCommit(commit, options) {
   const path = "scripts/connector-publish-allowlist.mjs";
   const allowlist = readFileAtCommit(commit, path, options);
   if (allowlist === null) throw new ArtifactInputError(`cannot read ${path} at ${commit}`);
+  const rosterPath = `${PACKAGE_ROOT}/src/connector-conformance-roster.ts`;
+  const needsRoster = allowlist.includes("connector-conformance-roster.ts");
+  const roster = needsRoster ? readFileAtCommit(commit, rosterPath, options) : null;
+  if (needsRoster && roster === null) {
+    throw new ArtifactInputError(`cannot read ${rosterPath} at ${commit}`);
+  }
   const dir = mkdtempSync(join(tmpdir(), "connector-publish-allowlist-"));
   try {
-    const file = join(dir, "connector-publish-allowlist.mjs");
+    const file = join(dir, path);
+    const rosterFile = join(dir, rosterPath);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    if (roster !== null) mkdirSync(join(dir, PACKAGE_ROOT, "src"), { recursive: true });
     writeFileSync(file, allowlist);
+    if (roster !== null) writeFileSync(rosterFile, roster);
     return (await import(pathToFileURL(file).href)).CONNECTOR_PUBLISH_INVENTORY;
   } finally {
     rmSync(dir, { recursive: true, force: true });

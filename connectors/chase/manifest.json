@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chase",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-	"version": "0.2.24",
+	"version": "0.2.23",
 	"display_name": "Chase",
 	"brand": {
 		"icon": "icon.svg",
@@ -56,7 +56,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"human_interaction": ["otp", "manual_action"],
 		"browser_surface_kind": "chase_current_activity",
 		"refresh_policy": {

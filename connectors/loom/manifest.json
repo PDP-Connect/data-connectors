@@ -9,7 +9,7 @@
 	},
 	"connector_key": "loom",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-	"version": "0.1.27",
+	"version": "0.1.26",
 	"display_name": "Loom",
 	"brand": {
 		"icon": "icon.svg",
@@ -26,7 +26,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": false },
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "manual",

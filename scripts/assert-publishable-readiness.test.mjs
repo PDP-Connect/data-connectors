@@ -11,7 +11,11 @@ import {
   assertPublishableRow,
   assertDevelopmentTier,
 } from "./assert-publishable-readiness.mjs";
-import { PUBLISH_EXCLUSIONS, PUBLISHABLE_CONNECTORS } from "./connector-publish-allowlist.mjs";
+import {
+  CONNECTOR_PUBLISH_INVENTORY,
+  PUBLISH_EXCLUSIONS,
+  PUBLISHABLE_CONNECTORS,
+} from "./connector-publish-allowlist.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -27,32 +31,39 @@ test("every publishable connector passes, and the CLI reports the same set", () 
   assert.match(result.stdout, new RegExp(`${PUBLISHABLE_CONNECTORS.length} connectors pass`));
 });
 
-test("a known scaffold is publishable only under its canonical identity", () => {
-  assert.doesNotThrow(() =>
-    assertPublishableRow({ manifest: "loom", connectorKey: "loom", exclusionReason: null }),
+test("publishable connectors all emit owner data", () => {
+  assert.deepEqual(
+    PUBLISHABLE_CONNECTORS.filter(({ manifest }) => KNOWN_SCAFFOLD_CONNECTORS.includes(manifest)).map(({ manifest }) => manifest),
+    [],
   );
-  for (const row of [
-    { manifest: "loom", connectorKey: "amazon" },
-    { manifest: "amazon", connectorKey: "loom" },
-    { manifest: "loom", connectorKey: "loom-copy" },
-  ]) {
-    assert.throws(
-      () => assertPublishableRow(row),
-      /identity does not match the publish inventory/,
-      JSON.stringify(row),
-    );
+});
+
+test("publish readiness refuses each scaffold by directory and key", () => {
+  for (const manifest of KNOWN_SCAFFOLD_CONNECTORS) {
+    const row = CONNECTOR_PUBLISH_INVENTORY.find((entry) => entry.manifest === manifest);
+    assert.ok(row, manifest);
+    for (const candidate of [
+      { manifest, connectorKey: "synthetic" },
+      { manifest: "synthetic", connectorKey: row.connectorKey },
+    ]) {
+      assert.throws(
+        () => assertPublishableRow(candidate),
+        /collects no owner data yet/,
+        JSON.stringify(candidate),
+      );
+    }
   }
 });
 
 test("Development roster entries cannot claim Preview or Supported in published metadata", () => {
   assert.doesNotThrow(() => assertDevelopmentTier(
-    { manifest: "loom", connectorKey: "loom" },
+    { manifest: "wholefoods", connectorKey: "wholefoods" },
     { tier: "development" },
   ));
   for (const tier of ["preview", "supported"]) {
     assert.throws(
-      () => assertDevelopmentTier({ manifest: "loom", connectorKey: "loom" }, { tier }),
-      /refusing to list Development connector 'loom'/,
+      () => assertDevelopmentTier({ manifest: "wholefoods", connectorKey: "wholefoods" }, { tier }),
+      /refusing to list Development connector 'wholefoods'/,
       tier,
     );
   }

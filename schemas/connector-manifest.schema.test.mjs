@@ -317,24 +317,6 @@ test("every connector manifest validates against the manifest schema, with no ex
   }
 });
 
-test("every connector manifest declares capabilities.collection.implemented as a boolean", () => {
-  for (const { path, manifest } of connectorManifests()) {
-    const declared = manifest.capabilities?.collection?.implemented;
-    assert.equal(typeof declared, "boolean", `${path}: capabilities.collection.implemented must be true or false`);
-  }
-});
-
-test("capabilities.collection.implemented rejects a missing or non-boolean value", () => {
-  const withCollection = (collection) => ({ capabilities: { collection } });
-  assert.equal(validate(withCollection({ implemented: true })), true);
-  assert.equal(validate(withCollection({ implemented: false })), true);
-  assert.equal(validate(withCollection({})), false, "collection without implemented");
-  for (const bad of ["true", "false", 1, 0, null]) {
-    assert.equal(validate(withCollection({ implemented: bad })), false, String(bad));
-  }
-  assert.equal(validate(withCollection({ implemented: true, status: "scaffold" })), false, "extra key");
-});
-
 test("the legacy dual placement is accepted: host_http_request validates on both browser and network", () => {
   assert.equal(validate(manifestWith({ browser: { required: true, features: ["host_http_request"] } })), true);
   assert.equal(validate(manifestWith({ network: { required: true, features: ["host_http_request"] } })), true);

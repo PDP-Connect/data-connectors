@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Hand-maintained roster of real owner-visible connectors: every Supported
- * or Preview manifest that is expected to collect data rather than emit an
- * unconditional `SKIP_RESULT` placeholder.
+ * Hand-maintained roster of owner-visible connectors: every Supported or
+ * Preview manifest that emits owner-data records.
  *
  * This is executable data, not documentation, and one of three disjoint,
  * exhaustive roster categories `connector-conformance.test.ts` checks every
@@ -17,8 +16,8 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (loom) — all
- *      of which MUST remain Development until they collect.
+ *      (loom, Google Maps Data Portability, Pocket) — all of which MUST stay
+ *      outside the owner-selectable listing until they emit owner data.
  *
  * `testFile` names each connector's own named collection/integration test —
  * the behavioral oracle for whether it really collects real data. This
@@ -65,11 +64,16 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		shopify: { testFile: "connectors/shopify/index.test.ts" },
 	};
 /**
- * Connectors that are scaffolded (unconditional `SKIP_RESULT`, no real
- * collection) and MUST stay outside `PRODUCTION_READY_CONNECTORS` and outside
- * the owner-selectable listing until they actually collect.
+ * Connectors that emit no owner-data records (skip-only, control-plane-only,
+ * or retired sources) MUST stay outside `PRODUCTION_READY_CONNECTORS` and the
+ * owner-selectable listing until they emit owner data. Lifecycle tier alone
+ * cannot express this: real collectors can also be Development tier.
  */
-export const KNOWN_SCAFFOLD_CONNECTORS = ["loom"] as const;
+export const KNOWN_SCAFFOLD_CONNECTORS = [
+	"google_maps_data_portability",
+	"loom",
+	"pocket",
+] as const;
 
 /**
  * Connectors with a REAL collector (verified: no unconditional `SKIP_RESULT`
@@ -94,9 +98,6 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	fitbit: { testFile: "connectors/fitbit/index.test.ts" },
 	google_calendar: { testFile: "connectors/google_calendar/index.test.ts" },
 	google_contacts: { testFile: "connectors/google_contacts/index.test.ts" },
-	google_maps_data_portability: {
-		testFile: "connectors/google_maps_data_portability/api.test.ts",
-	},
 	google_messages: {
 		testFile: "connectors/google_messages/integration.test.ts",
 	},
@@ -140,7 +141,6 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	whoop_browser: { testFile: "connectors/whoop_browser/index.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
-	pocket: { testFile: "connectors/pocket/schemas.test.ts" },
 	tiktok: { testFile: "connectors/tiktok/parsers.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
 	x_browser: { testFile: "connectors/x_browser/index.test.ts" },

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "groupme",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/groupme",
-	"version": "0.1.27",
+	"version": "0.1.26",
 	"display_name": "GroupMe",
 	"brand": {
 		"icon": "icon.svg",
@@ -45,7 +45,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"auth": {
 			"kind": "env",
 			"required": ["GROUPME_ACCESS_TOKEN"]

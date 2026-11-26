@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.3.16",
+	"version": "0.3.15",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
@@ -33,7 +33,6 @@
 		}
 	},
 	"capabilities": {
-		"collection": { "implemented": true },
 		"host_blob_write": {
 			"version": 1,
 			"max_blob_bytes": 33554432,

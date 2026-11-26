@@ -189,6 +189,15 @@ test("catalog generation is deterministic, follows anonymous auth, and sorts sem
   }
 });
 
+test("catalog generation refuses a scaffold supplied through an override row", async () => {
+  await assert.rejects(
+    generate(undefined, "127.0.0.1:1", {
+      connectors: [{ manifest: "loom", connectorKey: "loom" }],
+    }),
+    /collects no owner data yet/,
+  );
+});
+
 test("latest metadata comes from the published artifact, not an unpublished source manifest", async () => {
   const root = fixtureDirectory();
   const registry = new FixtureRegistry({ challenge: true });
@@ -765,17 +774,16 @@ test("the installer-side catalog schema accepts the real github_browser and stra
   }
 });
 
-test("catalog metadata keeps Loom and Whole Foods at Development", async () => {
+test("catalog metadata keeps real Development collectors at Development", async () => {
   const registry = new FixtureRegistry({ challenge: true });
   const rows = [
-    { manifest: "loom", connectorKey: "loom" },
     { manifest: "wholefoods", connectorKey: "wholefoods" },
   ];
   for (const { connectorKey } of rows) {
-    const version = connectorKey === "loom" ? "0.1.0" : "0.1.1";
+    const version = "0.1.1";
     publishArtifact(registry, {
       connectorKey,
-      displayName: connectorKey === "loom" ? "Loom" : "Whole Foods",
+      displayName: "Whole Foods",
       version,
       tier: "development",
     });
@@ -787,30 +795,27 @@ test("catalog metadata keeps Loom and Whole Foods at Development", async () => {
     assert.equal(assertCatalog(catalog), catalog);
     assert.deepEqual(
       catalog.connectors.map(({ connector_key, tier }) => ({ connector_key, tier })),
-      [
-        { connector_key: "loom", tier: "development" },
-        { connector_key: "wholefoods", tier: "development" },
-      ],
+      [{ connector_key: "wholefoods", tier: "development" }],
     );
   } finally {
     await registry.stop();
   }
 });
 
-test("catalog refuses a Development connector whose published artifact claims Supported", async () => {
+test("catalog refuses a real Development connector whose artifact claims Supported", async () => {
   const registry = new FixtureRegistry({ challenge: true });
   publishArtifact(registry, {
-    connectorKey: "loom",
-    displayName: "Loom",
+    connectorKey: "wholefoods",
+    displayName: "Whole Foods",
     version: "0.1.0",
     tier: "supported",
   });
-  registry.tagLists.set("acme/connector/loom", { tags: ["0.1.0"] });
+  registry.tagLists.set("acme/connector/wholefoods", { tags: ["0.1.0"] });
   try {
     await registry.start();
     await assert.rejects(
-      generate(null, registry.registry, { connectors: [{ manifest: "loom", connectorKey: "loom" }] }),
-      /refusing to list Development connector 'loom'/,
+      generate(null, registry.registry, { connectors: [{ manifest: "wholefoods", connectorKey: "wholefoods" }] }),
+      /refusing to list Development connector 'wholefoods'/,
     );
   } finally {
     await registry.stop();
