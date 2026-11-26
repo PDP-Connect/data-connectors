@@ -252,3 +252,23 @@ test("validateNetflixExportArtifact reports ambiguous_date_order (not empty, not
 	assert.equal(validation.detected_schema, "direct_history");
 	assert.match(validation.remediation ?? "", /ambiguous|day above 12/i);
 });
+
+test("raw CSV over the parser cap reports too_large without an upload-size override", () => {
+	// Exercise parseCSVContentForValidation's own 50 MiB gate, not maxFileBytes
+	// or the archive extraction gate, both of which already classify correctly.
+	const csv =
+		"Title,Date\nInvented Moon Garden,2024-06-05\n" +
+		"x".repeat(50 * 1024 * 1024);
+	const result = validateNetflixExportArtifact(csv, {
+		fileName: "NetflixViewingHistory.csv",
+	});
+	assert.equal(result.status, "too_large");
+	assert.match(result.remediation ?? "", /too large|safely process/i);
+	const unsupported = validateNetflixExportArtifact(
+		"Unrecognized,Header\nInvented,Row",
+		{
+			fileName: "NetflixViewingHistory.csv",
+		},
+	);
+	assert.equal(unsupported.status, "unsupported");
+});

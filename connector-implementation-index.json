@@ -15,7 +15,7 @@
 				},
 				"connector_key": "amazon",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/amazon",
-				"version": "0.2.22",
+				"version": "0.2.30",
 				"display_name": "Amazon",
 				"brand": {
 					"icon": "icon.svg",
@@ -82,13 +82,13 @@
 					{
 						"name": "orders",
 						"required": true,
-						"description": "Amazon retail orders scraped from Your Orders.",
+						"description": "Amazon retail orders scraped from Your Orders, on the Amazon store the account shops on (amazon.com, amazon.ca, amazon.co.uk, ...), every year the store lists.",
 						"compaction_fingerprint": {
 							"exclude_keys": ["fetched_at"]
 						},
 						"display": {
 							"label": "Your Amazon orders",
-							"detail": "Order IDs, dates, totals, delivery status, shipping summaries, payment method summary, recipient name. Per-item breakdowns live in the order_items stream."
+							"detail": "Order IDs, dates, totals, delivery status, shipping summaries, the shipping address postal code (ZIP or postal code only), payment method summary, recipient name, and the Amazon store. Per-item breakdowns live in the order_items stream."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -122,6 +122,10 @@
 								"shipping_address_summary": {
 									"type": ["string", "null"]
 								},
+								"shipping_postal_code": {
+									"type": ["string", "null"],
+									"description": "Postal code of the order's shipping address (ZIP, Canadian or UK postcode, ...), in the store country's format. Null when the order shows no shipping address."
+								},
 								"payment_method_summary": {
 									"type": ["string", "null"]
 								},
@@ -133,6 +137,10 @@
 								},
 								"item_count": {
 									"type": ["integer", "null"]
+								},
+								"store": {
+									"type": ["string", "null"],
+									"description": "The Amazon store the order was placed on, such as amazon.com or amazon.ca."
 								}
 							},
 							"required": ["id", "order_date"]
@@ -171,10 +179,12 @@
 									"status_detail",
 									"recipient_name",
 									"shipping_address_summary",
+									"shipping_postal_code",
 									"payment_method_summary",
 									"gift_order",
 									"digital_order",
-									"item_count"
+									"item_count",
+									"store"
 								]
 							}
 						],
@@ -292,10 +302,10 @@
 					},
 					{
 						"name": "profile",
-						"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership).",
+						"description": "Best-effort account profile read from the Amazon nav bar (display name, Prime membership, default delivery postal code, store).",
 						"display": {
 							"label": "Your Amazon account",
-							"detail": "Display name and Prime membership status, as shown in the Amazon nav bar. Both are null when not observable, never guessed."
+							"detail": "Display name, Prime membership status, the postal code of the default delivery address (no street address), and the Amazon store, as shown in the Amazon nav bar. Each is null when not observable, never guessed."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -310,6 +320,14 @@
 								},
 								"is_prime": {
 									"type": ["boolean", "null"]
+								},
+								"postal_code": {
+									"type": ["string", "null"],
+									"description": "Postal code of the account's default delivery address, from the nav bar's Deliver to location. Null when not shown."
+								},
+								"store": {
+									"type": ["string", "null"],
+									"description": "The Amazon store the profile was read on, such as amazon.ca."
 								}
 							},
 							"required": ["id"]
@@ -361,7 +379,9 @@
 					"renderer_diagnostics_failed": "We couldn't inspect an empty orders page, so we stopped before advancing",
 					"selector_drift": "The page layout changed and we couldn't find what we needed",
 					"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
-					"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
+					"unparseable_order_date": "We skipped some orders because their dates couldn't be read",
+					"amazon_no_orders_on_store": "This Amazon account shows no orders on the store we read. If you shop on another Amazon store, pick that store and connect again",
+					"amazon_stopped_early": "Amazon stopped showing older orders part way. We kept the orders read so far; connect again later to read the rest"
 				}
 			}
 		},
@@ -380,7 +400,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.67",
+				"version": "0.2.69",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -507,7 +527,7 @@
 						},
 						"display": {
 							"label": "Your Claude plan",
-							"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates."
+							"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates and the card-issuing country (payment_country); an export has no payment data."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -575,6 +595,11 @@
 									},
 									"required": ["plan_type", "changes_at"],
 									"additionalProperties": false
+								},
+								"payment_country": {
+									"type": ["string", "null"],
+									"pattern": "^[A-Z]{2}$",
+									"description": "Country that issued the card on file (from the payment method), as an ISO 3166-1 alpha-2 code. Not the account holder's address; null for accounts without a card. A country code can help re-identify a person when combined with other fields; only the country is read, never the card brand, last four digits or type."
 								}
 							},
 							"required": ["id"]
@@ -1090,7 +1115,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.17",
+				"version": "0.3.23",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -1356,7 +1381,7 @@
 						},
 						"display": {
 							"label": "Your Claude plan",
-							"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. Payment details and billing identifiers are not collected. One record per chat-capable organization; only conversations and usage remain scoped to the original selected organization."
+							"detail": "Which plan the organization is on (free, Pro, Max, Team…), its rate-limit tier, whether the subscription is active, its billing period and renewal date, and when the organization was created. will_renew is inferred for an active subscription only (a next charge and no end date) and is empty otherwise. cancels_at and scheduled_plan_change are always empty: Claude exposes no source for them. Usage limits are in usage_limits. payment_country is the country that issued the card on file (a two-letter code); no other payment detail is collected, and billing identifiers are not collected. One record per chat-capable organization; only conversations and usage remain scoped to the original selected organization."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1424,6 +1449,11 @@
 									},
 									"required": ["plan_type", "changes_at"],
 									"additionalProperties": false
+								},
+								"payment_country": {
+									"type": ["string", "null"],
+									"pattern": "^[A-Z]{2}$",
+									"description": "Country that issued the card on file (from the payment method), as an ISO 3166-1 alpha-2 code. Not the account holder's address; null for accounts without a card. A country code can help re-identify a person when combined with other fields; only the country is read, never the card brand, last four digits or type."
 								}
 							},
 							"required": ["id"]
@@ -3596,7 +3626,7 @@
 				},
 				"connector_key": "apple-photos",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "Apple Photos",
 				"brand": {
 					"icon": "icon.svg",
@@ -3738,7 +3768,8 @@
 					}
 				],
 				"reason_display_messages": {
-					"export_not_found": "We couldn't find an export to import"
+					"export_not_found": "We couldn't find an export to import",
+					"source_incomplete": "Some files weren't imported because their file type isn't supported"
 				}
 			}
 		},
@@ -4031,7 +4062,7 @@
 				},
 				"connector_key": "chase",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chase",
-				"version": "0.2.23",
+				"version": "0.2.24",
 				"display_name": "Chase",
 				"brand": {
 					"icon": "icon.svg",
@@ -4635,7 +4666,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.15",
+				"version": "0.3.19",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -5693,7 +5724,7 @@
 												},
 												"truncated": {
 													"type": "boolean",
-													"description": "True when the run-wide budget (100 projects, 400 project pages) left projects or pages unread."
+													"description": "True when an explicit caller budget left projects or pages unread. By default all sidebar projects and their cursor pages are read; source failures, cursor cycles and the run wall-clock stop are reported separately."
 												},
 												"conversations_added": {
 													"type": "integer",
@@ -7363,7 +7394,7 @@
 				},
 				"connector_key": "codex",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-				"version": "0.3.15",
+				"version": "0.3.16",
 				"display_name": "OpenAI Codex CLI",
 				"brand": {
 					"icon": "icon.svg",
@@ -8770,7 +8801,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9230,7 +9261,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.29",
+				"version": "0.2.30",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -10773,7 +10804,7 @@
 				},
 				"connector_key": "github",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github",
-				"version": "0.7.7",
+				"version": "0.7.9",
 				"display_name": "GitHub",
 				"brand": {
 					"icon": "icon.svg",
@@ -11215,7 +11246,7 @@
 						"description": "Issues and pull requests across all repos the user has access to, authored by or assigned to them. GitHub's /issues endpoint returns both issues and PRs; the is_pull_request flag lets downstream consumers split them.",
 						"display": {
 							"label": "Your issues and PRs",
-							"detail": "Issue/PR number, title, body (capped at 20000 chars), labels, assignees, milestone, reactions, comment count, repository, state, timestamps, and a flag indicating which are pull requests."
+							"detail": "Issue/PR number, title, body, labels, assignees, milestone, reactions, comment count, repository, state, timestamps, and a flag indicating which are pull requests."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -11543,6 +11574,9 @@
 											},
 											"raw_url": {
 												"type": ["string", "null"]
+											},
+											"truncated": {
+												"type": "boolean"
 											}
 										}
 									}
@@ -11569,6 +11603,7 @@
 							"required": ["id"]
 						},
 						"primary_key": ["id"],
+						"required": false,
 						"cursor_field": "updated_at",
 						"consent_time_field": "created_at",
 						"selection": {
@@ -11907,7 +11942,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.20",
+				"version": "0.3.21",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -12606,7 +12641,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.32",
+				"version": "0.2.33",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",
@@ -14082,7 +14117,7 @@
 				},
 				"connector_key": "google-maps-data-portability",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps-data-portability",
-				"version": "0.1.25",
+				"version": "0.1.26",
 				"display_name": "Google Maps Data Portability",
 				"brand": {
 					"icon": "icon.svg",
@@ -14326,7 +14361,7 @@
 				},
 				"connector_key": "google-messages",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-messages",
-				"version": "0.1.2",
+				"version": "0.1.3",
 				"display_name": "Google Messages (via gmcli)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19065,7 +19100,7 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.12",
+				"version": "0.1.13",
 				"display_name": "Muse (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19682,7 +19717,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.29",
+				"version": "0.1.31",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -19857,7 +19892,7 @@
 				},
 				"connector_key": "notion",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/notion",
-				"version": "0.1.25",
+				"version": "0.1.27",
 				"display_name": "Notion",
 				"brand": {
 					"icon": "icon.svg",
@@ -20754,7 +20789,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.10",
+				"version": "0.1.11",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -21154,7 +21189,7 @@
 				},
 				"connector_key": "polar-flow",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/polar-flow",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Polar Flow",
 				"brand": {
 					"icon": "icon.svg",
@@ -21362,10 +21397,10 @@
 					{
 						"name": "training_sessions",
 						"required": false,
-						"description": "Training sessions in Polar Flow, from a watch, a sensor or entered by hand: the sport, when each started on the owner's local clock, its duration, distance, calories, average and highest heart rate, training load, the device that recorded it, its name and the owner's note. GPS routes, samples, laps and zones are not read.",
+						"description": "Training sessions in Polar Flow, from a watch, a sensor or entered by hand: the sport, when each started on the owner's local clock, its duration, distance, calories, average and highest heart rate, training load, the device that recorded it, its name, the owner's note, and its heart rate sample by sample (every second on a recorded session). GPS routes, the other samples (speed, power, altitude, cadence), laps and zones are not read.",
 						"display": {
 							"label": "Your Polar training sessions",
-							"detail": "Sport, start time, duration, distance, calories, heart rate and training load for each session. No routes or locations."
+							"detail": "Sport, start time, duration, distance, calories, training load and second-by-second heart rate for each session. No routes or locations."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -21451,6 +21486,50 @@
 								"has_training_target": {
 									"type": ["boolean", "null"],
 									"description": "Whether the session was done against a planned training target."
+								},
+								"heart_rate_samples": {
+									"type": ["array", "null"],
+									"minItems": 1,
+									"maxItems": 100,
+									"description": "The session's heart rate as Polar recorded it, one evenly spaced series per exercise (a multisport session has several), oldest first: every sample, at 1 second on a recorded session. A series longer than 43200 samples (12 hours at 1 second) is thinned evenly, keeping every k-th sample and a k times longer interval, so it still spans the session. Null when the session recorded no heart rate (a manual entry, no sensor). Absent on records collected before version 0.1.2.",
+									"items": {
+										"type": "object",
+										"additionalProperties": false,
+										"required": [
+											"exercise_id",
+											"start_time_local",
+											"interval_s",
+											"bpm"
+										],
+										"properties": {
+											"exercise_id": {
+												"type": "string",
+												"pattern": "^[1-9][0-9]*$",
+												"description": "Polar's id for the exercise within the session."
+											},
+											"start_time_local": {
+												"type": ["string", "null"],
+												"description": "When the exercise started, on the owner's local clock (YYYY-MM-DDTHH:MM:SS, no zone); the first sample was recorded then."
+											},
+											"interval_s": {
+												"type": "number",
+												"exclusiveMinimum": 0,
+												"maximum": 3600,
+												"description": "Seconds between consecutive samples."
+											},
+											"bpm": {
+												"type": "array",
+												"minItems": 1,
+												"maxItems": 43200,
+												"items": {
+													"type": ["integer", "null"],
+													"minimum": 1,
+													"maximum": 300
+												},
+												"description": "Heart rate in beats per minute; bpm[i] was recorded i * interval_s seconds after start_time_local. Null where the sensor had no reading."
+											}
+										}
+									}
 								}
 							},
 							"required": [
@@ -22234,7 +22313,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.8",
+				"version": "0.4.9",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -23034,7 +23113,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.39",
+				"version": "0.2.40",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -23169,7 +23248,7 @@
 				},
 				"connector_key": "signal",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/signal",
-				"version": "0.1.1",
+				"version": "0.1.2",
 				"display_name": "Signal Desktop",
 				"brand": {
 					"icon": "icon.svg",
@@ -23482,7 +23561,7 @@
 				},
 				"connector_key": "slack",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-				"version": "0.7.2",
+				"version": "0.7.3",
 				"display_name": "Slack",
 				"brand": {
 					"icon": "icon.svg",
@@ -25081,7 +25160,7 @@
 				},
 				"connector_key": "slack-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-				"version": "0.1.4",
+				"version": "0.1.6",
 				"display_name": "Slack (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25117,7 +25196,7 @@
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "medium",
 						"background_safe": false,
-						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers the lookback window; a later read starts from its own checkpoint, reaching back at most the max backfill after a long pause."
+						"rationale": "Collection calls the Slack Web API from the owner's own signed-in app.slack.com session, the way the web client does. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff. Calls are paced and retried on Slack's rate-limit answers. A conversation's first read covers the lookback window; a later read starts from its own checkpoint without a default catch-up limit (SLACK_MAX_BACKFILL_DAYS=0). An owner may choose a positive max-backfill window; workspace retention limits what Slack can serve."
 					},
 					"public_listing": {
 						"tier": "development"
@@ -27381,7 +27460,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.48",
+				"version": "0.1.49",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -28323,7 +28402,7 @@
 				},
 				"connector_key": "twitter-archive",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/twitter-archive",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Twitter/X Archive",
 				"brand": {
 					"icon": "icon.svg",
@@ -28721,7 +28800,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.24",
+				"version": "0.2.25",
 				"display_name": "USAA",
 				"brand": {
 					"icon": "icon.svg",
@@ -29383,7 +29462,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.31",
+				"version": "0.2.32",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -29779,7 +29858,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.28",
+				"version": "0.2.29",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
@@ -30586,7 +30665,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.48",
+				"version": "0.3.49",
 				"display_name": "Whole Foods",
 				"brand": {
 					"icon": "icon.svg",
@@ -31849,7 +31928,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -32509,7 +32588,7 @@
 					"collection_interrupted": "X stopped answering normally partway through, so this run stopped straight away. What was already read is saved. Wait a while, then run it again.",
 					"list_end_unconfirmed": "X stopped loading more before the end of the list, so some older items may be missing. What was read is saved.",
 					"records_unreadable": "Some posts couldn't be read and were skipped. Everything else was collected normally.",
-					"run_budget_reached": "This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. Run it again tomorrow for the rest.",
+					"run_budget_reached": "This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. What was read is saved. A later run may read some of the same posts again.",
 					"run_stopped_early": "The run stopped before it got to this part. Nothing is wrong with it. Run it again later.",
 					"sign_in_required": "X needs you to sign in again before this can continue.",
 					"source_rate_limited": "X asked this connector to slow down, so the run stopped straight away. What was already read is saved. Wait a day before running it again.",

@@ -3192,6 +3192,8 @@ export async function processConversationDetail(
 
 const PAGINATION_SAFETY_LIMIT = 5000;
 const GIZMO_MAX_PAGES = 50;
+// Bound each search walk for scheduling; a saved boundary resumes the older history next run.
+const CONVERSATION_SEARCH_SLICE = 5000;
 
 /**
  * A 200 whose body failed to parse arrives as `res.json === null` (the api
@@ -3663,6 +3665,8 @@ export async function runSharedConversationsStream(
 interface ConversationListResult {
 	backfill: ConversationBackfill | null;
 	backfillItems?: ConversationListItem[];
+	// Verified resume progress, including the terminal replay anchor while the head is unfinished.
+	verifiedSuffixProgress?: ConversationBackfill;
 	items: ConversationListItem[];
 	truncated: boolean;
 }
@@ -4008,7 +4012,7 @@ async function listConversationsSinceCursor(
 			inOrderConversationSearchPages(recovery),
 		);
 	}
-	const pages = prefetchingConversationSearchPages(deps, width, recovery);
+	const pages = prefetchingConversationSearchPages(deps, width, recovery, startCursor);
 	// Hold this pass's skips until the list is verified, so a discarded pass
 	// never reports a failure that the in-order walk then contradicts.
 	const heldSkips: Parameters<StreamDeps["emit"]>[0][] = [];
@@ -4153,7 +4157,10 @@ async function walkConversationSearch(
 			truncated: false,
 			backfill: null,
 			...(resumeBackfill
-				? { backfillItems: [...backfillTailById.values()] }
+				? {
+						backfillItems: [...backfillTailById.values()],
+						verifiedSuffixProgress: conversationBackfillAt(conversationsById.values(), cursor),
+					}
 				: {}),
 		};
 	};
@@ -4161,6 +4168,9 @@ async function walkConversationSearch(
 	const deferred = (): ConversationListResult => ({
 		items: [...conversationsById.values()],
 		truncated: true,
+		...(resumeBackfill && contiguous && resumeBoundarySeen && conversationsById.size > 0
+			? { verifiedSuffixProgress: conversationBackfillAt(conversationsById.values(), cursor) }
+			: {}),
 		backfill:
 			conversationsById.size > 0
 				? conversationBackfillAt(conversationsById.values(), cursor)
@@ -4205,11 +4215,7 @@ async function walkConversationSearch(
 			page += 1;
 			if (!classified.ok) {
 				deps.emit(classified.skip);
-				return {
-					items: [...conversationsById.values()],
-					truncated: true,
-					backfill: conversationBackfillAt(conversationsById.values(), cursor),
-				};
+				return deferred();
 			}
 			logConversationListPageShape(classified.items, page);
 			const pageItems: ConversationListItem[] = [];
@@ -4369,11 +4375,7 @@ async function walkConversationSearch(
 			page += 1;
 			if (!classified.ok) {
 				deps.emit(classified.skip);
-				return {
-					items: [...conversationsById.values()],
-					truncated: true,
-					backfill: conversationBackfillAt(conversationsById.values(), cursor),
-				};
+				return deferred();
 			}
 			if (
 				classified.items.length === 0 &&
@@ -4432,22 +4434,27 @@ async function walkConversationSearch(
 			contiguous = false;
 		}
 		cursor = nextCursor;
-		if (cursor > PAGINATION_SAFETY_LIMIT) {
+		if (cursor - resumeStartCursor >= CONVERSATION_SEARCH_SLICE) {
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
-				message: `conversations search stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				message: `conversations search reached its ${CONVERSATION_SEARCH_SLICE}-position slice with more items remaining`,
 				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
+					action: "retry_by_runtime",
+					retryable: true,
 				},
-				diagnostics: { cursor, collected: conversationsById.size },
+				diagnostics: { cursor, start_cursor: resumeStartCursor, collected: conversationsById.size },
 			});
 			return {
 				items: [...conversationsById.values()],
 				truncated: true,
-				backfill: conversationBackfillAt(conversationsById.values(), cursor),
+				backfill: contiguous && (!resumeBackfill || resumeBoundarySeen)
+					? conversationBackfillAt(conversationsById.values(), cursor)
+					: (resumeBackfill ?? conversationBackfillAt([], 0)),
+				...(resumeBackfill && contiguous && resumeBoundarySeen
+					? { verifiedSuffixProgress: conversationBackfillAt(conversationsById.values(), cursor) }
+					: {}),
 			};
 		}
 	}
@@ -4643,6 +4650,7 @@ function prefetchingConversationSearchPages(
 	deps: StreamDeps,
 	width: number,
 	recovery: ReturnType<typeof conversationSearchRecovery>,
+	startCursor: number,
 ): ConversationSearchPages & {
 	/** Waits until no prefetched read is still in flight. */
 	settle(): Promise<void>;
@@ -4858,7 +4866,7 @@ function prefetchingConversationSearchPages(
 				const limit = inFlight.has(cursor) ? width : width - 1;
 				for (let ahead = 1; ahead < width; ahead += 1) {
 					const next = cursor + ahead * CONVERSATION_PAGE_SIZE;
-					if (outstanding >= limit || next > PAGINATION_SAFETY_LIMIT) {
+					if (outstanding >= limit || next - startCursor >= CONVERSATION_SEARCH_SLICE) {
 						break;
 					}
 					if (inFlight.has(next)) {
@@ -7688,8 +7696,11 @@ async function walkConversationsAndMessages(
 			for (const item of forward.items) {
 				merged.set(item.id, item);
 			}
+			const suffixProgress = backfill.verifiedSuffixProgress;
 			const nextBackfill = forward.truncated
-				? savedBackfill
+				? suffixProgress && suffixProgress.position_hint > savedBackfill.position_hint
+					? suffixProgress
+					: savedBackfill
 				: backfill.backfill;
 			return {
 				items: [...merged.values()],

@@ -106,7 +106,7 @@ interface RawChat {
 }
 
 interface RawMessage {
-	body: string;
+	body?: string;
 	conversation_id: string;
 	is_from_me: boolean;
 	message_id: string;
@@ -169,6 +169,29 @@ function runGoogleMessagesCustom(
 }
 
 // ─── First run: fresh state, everything is new ────────────────────────────
+
+test("caption-less media does not discard the conversation", async () => {
+	const photo = msg({ message_id: "photo", timestamp_ms: 1_754_071_453_000 });
+	delete photo.body;
+	const run = await runGoogleMessagesCustom(
+		[CHAT_ALICE],
+		[msg({ message_id: "text", timestamp_ms: 1_754_071_452_000 }), photo],
+		{},
+	);
+	assert.deepEqual(sortedIds(records(run.messages, "messages")), [
+		"photo",
+		"text",
+	]);
+	assert.equal(
+		records(run.messages, "messages").find((row) => row.id === "photo")?.body,
+		"",
+	);
+	assert.equal(skips(run.messages).length, 0);
+	assert.equal(
+		run.messages.findLast((m) => m.type === "DONE")?.status,
+		"succeeded",
+	);
+});
 
 test("first run: no prior state, every message emitted and a STATE watermark is committed", async () => {
 	const run1 = await runGoogleMessagesCustom(
@@ -580,14 +603,30 @@ test("a message the shape check rejects is considered but NOT covered", async ()
 	];
 
 	const run = await runGoogleMessagesCustom(chats, messages, {});
-
-	const dropped = skips(run.messages).find(
-		(s) => s.reason === "shape_check_failed",
-	);
+	assert.deepEqual(sortedIds(records(run.messages, "messages")), ["msg_ok"]);
+	const cursor = stateFor(run.messages, "messages") as {
+		fingerprints: Record<string, string>;
+	};
+	assert.equal(Object.hasOwn(cursor.fingerprints, "msg_bad"), false);
 	assert.ok(
-		dropped,
-		"the poisoned message must be dropped by the runtime's shape check, not stored",
+		run.messages.some(
+			(m) =>
+				m.type === "PROGRESS" &&
+				m.message === "Saved 1 new or changed message from Google Messages",
+		),
 	);
+	const repaired = await runGoogleMessagesCustom(
+		chats,
+		messages.map((message) =>
+			message.message_id === "msg_bad"
+				? { ...message, body: "repaired body" }
+				: message,
+		),
+		projectState(run.messages),
+	);
+	assert.deepEqual(sortedIds(records(repaired.messages, "messages")), [
+		"msg_bad",
+	]);
 
 	const coverage = run.messages.find(
 		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>

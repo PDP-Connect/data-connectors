@@ -14,11 +14,11 @@ import { establishSession } from "../../packages/polyfill-connectors/src/session
 import {
 	collectAnthropicLive,
 	ensureAnthropicLiveSession,
-	MAX_CONVERSATIONS_PER_RUN,
 	probeAnthropicLiveSession,
 } from "./index.ts";
 import {
 	at,
+	CAP_ENV,
 	type Conv,
 	conv,
 	harness,
@@ -26,7 +26,9 @@ import {
 	ORG,
 	ORGS,
 	stampMessage,
+	TEST_CAP,
 	uuid,
+	withEnv,
 } from "./test-support.ts";
 
 const CHAT = ["conversations", "messages"];
@@ -64,16 +66,20 @@ test("a resumed run keeps the unread history of a conversation that failed after
 	assert.deepEqual(resumed.ids("messages"), [uuid(2001), uuid(2002)]);
 });
 
-test("a backlog over the per-run cap is finished on the next run with every message", async () => {
-	const convs = backlog(MAX_CONVERSATIONS_PER_RUN + 1);
+test("a backlog over the opt-in per-run count cap is finished on the next run with every message", async () => {
+	const convs = backlog(TEST_CAP + 1);
 	const first = harness(convs, { streams: CHAT });
-	await collectAnthropicLive(first.ctx);
-	assert.equal(first.ids("conversations").length, MAX_CONVERSATIONS_PER_RUN);
+	await withEnv({ [CAP_ENV]: String(TEST_CAP) }, () =>
+		collectAnthropicLive(first.ctx),
+	);
+	assert.equal(first.ids("conversations").length, TEST_CAP);
 	assert.equal(first.skips()[0]?.reason, "anthropic_live_backlog_deferred");
 
 	const next = harness(convs, { streams: CHAT, state: first.nextState() });
-	await collectAnthropicLive(next.ctx);
-	const last = MAX_CONVERSATIONS_PER_RUN + 1;
+	await withEnv({ [CAP_ENV]: String(TEST_CAP) }, () =>
+		collectAnthropicLive(next.ctx),
+	);
+	const last = TEST_CAP + 1;
 	assert.deepEqual(next.detailReads(), [uuid(last)]);
 	assert.deepEqual(next.ids("messages"), [
 		uuid(last * 1000 + 1),
@@ -83,14 +89,14 @@ test("a backlog over the per-run cap is finished on the next run with every mess
 });
 
 test("conversations that share an update time are all read across capped runs", async () => {
-	const convs = Array.from({ length: MAX_CONVERSATIONS_PER_RUN + 1 }, (_, i) =>
-		conv(i + 1, 10),
-	);
+	const convs = Array.from({ length: TEST_CAP + 1 }, (_, i) => conv(i + 1, 10));
 	const seen = new Set<string>();
 	let state: Record<string, unknown> = {};
 	for (let run = 0; run < 3; run++) {
 		const h = harness(convs, { streams: CHAT, state });
-		await collectAnthropicLive(h.ctx);
+		await withEnv({ [CAP_ENV]: String(TEST_CAP) }, () =>
+			collectAnthropicLive(h.ctx),
+		);
 		for (const id of h.ids("conversations")) seen.add(id);
 		state = h.nextState();
 	}

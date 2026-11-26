@@ -32,6 +32,7 @@ import {
 	userRecord,
 	userStatsRecord,
 } from "./parsers.ts";
+import { issuesSchema, pullRequestsSchema } from "./schemas.ts";
 import type {
 	GitHubContributionsCollection,
 	GitHubEvent,
@@ -238,9 +239,20 @@ test("repoFullFromUrl: null in → null out", () => {
 
 // ─── truncateBody ────────────────────────────────────────────────────────
 
-test("truncateBody: caps at 20_000 chars", () => {
+test("issue and PR records keep a 30,000-character body", () => {
 	const long = "x".repeat(30_000);
-	assert.equal(truncateBody(long)?.length, 20_000);
+	assert.equal(issueRecord({ ...ISSUE_FIXTURE, body: long }).body, long);
+	assert.equal(
+		pullRequestRecord({ ...PR_FIXTURE, body: long }, null, null).body,
+		long,
+	);
+});
+
+test("truncateBody: preserves the full body through the schema limit", () => {
+	const body = `${"x".repeat(19_999)}😀${"y".repeat(45_535)}`;
+	assert.equal(body.length, 65_536);
+	assert.equal(truncateBody(body), body);
+	assert.equal(truncateBody(""), "");
 });
 
 test("truncateBody: non-string → null", () => {
@@ -527,6 +539,27 @@ test("pullRequestRecord: merges detail fields when present", () => {
 	assert.equal(r.repository_id, "1001");
 });
 
+test("issue and pull request schemas accept the full body and reject an over-limit body", () => {
+	const body = "x".repeat(65_536);
+	const issue = issueRecord({ ...ISSUE_FIXTURE, body });
+	const pull = pullRequestRecord(
+		{ ...PR_FIXTURE, body },
+		PR_DETAIL_FIXTURE,
+		"octocat/hello",
+	);
+	assert.equal(issuesSchema.parse(issue).body, body);
+	assert.equal(pullRequestsSchema.parse(pull).body, body);
+	const overLimit = `${body}x`;
+	assert.equal(
+		issuesSchema.safeParse({ ...issue, body: overLimit }).success,
+		false,
+	);
+	assert.equal(
+		pullRequestsSchema.safeParse({ ...pull, body: overLimit }).success,
+		false,
+	);
+});
+
 // ─── gistRecord ──────────────────────────────────────────────────────────
 
 test("gistRecord: maps files and counts", () => {
@@ -537,15 +570,15 @@ test("gistRecord: maps files and counts", () => {
 	assert.equal(r.files_total_count, 2);
 });
 
-test("gistRecord: truncates at 10 files", () => {
+test("gistRecord emits all twelve file entries", () => {
 	const files: Record<string, { filename: string; size: number }> = {};
-	for (let i = 0; i < 15; i += 1) {
+	for (let i = 0; i < 12; i += 1) {
 		files[`f${i}.txt`] = { filename: `f${i}.txt`, size: i };
 	}
 	const r = gistRecord({ id: "x", public: true, files });
-	assert.equal((r.files as unknown[]).length, 10);
-	assert.equal(r.files_truncated, true);
-	assert.equal(r.files_total_count, 15);
+	assert.equal((r.files as unknown[]).length, 12);
+	assert.equal(r.files_truncated, false);
+	assert.equal(r.files_total_count, 12);
 });
 
 // ─── laterIso / isBeforeSince / isAtOrAfterUntil ─────────────────────────
@@ -799,4 +832,51 @@ test("organizationRecord: missing optional fields become null", () => {
 	const rec = organizationRecord(org);
 	assert.equal(rec.description, null);
 	assert.equal(rec.avatar_url, null);
+});
+
+test("issueRecord: missing PR draft stays unknown", () => {
+	const withoutDraft = { ...PR_FIXTURE };
+	delete withoutDraft.draft;
+	assert.equal(issueRecord(withoutDraft).draft, null);
+	assert.equal(issueRecord({ ...withoutDraft, draft: true }).draft, true);
+	assert.equal(issueRecord({ ...withoutDraft, draft: false }).draft, false);
+});
+
+test("pullRequestRecord: missing draft stays unknown, and the list item beats detail", () => {
+	const withoutDraft = { ...PR_FIXTURE };
+	delete withoutDraft.draft;
+	const unknown = pullRequestRecord(withoutDraft, null, "octocat/hello");
+	assert.equal(unknown.draft, null);
+	assert.equal(pullRequestsSchema.safeParse(unknown).success, true);
+	assert.equal(
+		pullRequestRecord(
+			withoutDraft,
+			{ ...PR_DETAIL_FIXTURE, draft: true },
+			"octocat/hello",
+		).draft,
+		true,
+	);
+	assert.equal(
+		pullRequestRecord(
+			{ ...withoutDraft, draft: false },
+			{ ...PR_DETAIL_FIXTURE, draft: true },
+			"octocat/hello",
+		).draft,
+		false,
+	);
+});
+
+test("truncateBody: keeps the whole body, including a character past 20,000 UTF-16 units", () => {
+	const body = `${"x".repeat(19_999)}😀tail`;
+	assert.equal(truncateBody(body), body);
+	assert.equal(truncateBody(null), null);
+});
+
+test("laterIso: compares mixed precision and preserves original strings", () => {
+	const seconds = "2026-11-15T14:00:00Z";
+	const millis = "2026-11-15T14:00:00.500Z";
+	assert.equal(laterIso(seconds, millis), millis);
+	assert.equal(laterIso(millis, seconds), millis);
+	assert.equal(laterIso("not-a-date", millis), "not-a-date");
+	assert.equal(laterIso(seconds, "not-a-date"), "not-a-date");
 });

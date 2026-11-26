@@ -183,17 +183,155 @@ test("apple_photos extracts filename/size/hash/mtime/content_type for fixture fi
 	}
 });
 
-test("apple_photos ignores unsupported file extensions", async () => {
+test("apple_photos collects all four additional media extensions", async () => {
+	const samples = [
+		["sample.webp", "image/webp"],
+		["sample.webm", "video/webm"],
+		["sample.avi", "video/x-msvideo"],
+		["sample.mkv", "video/x-matroska"],
+	] as const;
+	const dir = buildExportDirFixture(
+		samples.map(([relPath]) => ({
+			relPath,
+			contents: Buffer.from(relPath),
+		})),
+	);
+	try {
+		const result = await runApplePhotos(dir, ["photos"]);
+		const actual = records(result.messages, "photos").map((record) => [
+			record.filename,
+			record.content_type,
+		]);
+		assert.deepEqual(actual.sort(), [...samples].sort());
+		assert.equal(skips(result.messages).length, 0);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos reports grouped unsupported extensions and partial coverage", async () => {
 	const dir = buildExportDirFixture([
-		{ relPath: "IMG_0001.jpg", contents: Buffer.from("real-photo") },
-		{ relPath: "readme.txt", contents: Buffer.from("not a photo") },
-		{ relPath: ".DS_Store", contents: Buffer.from("mac metadata") },
+		{ relPath: "sample.jpg", contents: Buffer.from("invented image") },
+		{ relPath: "nested/sample.DNG", contents: Buffer.from("") },
+		{ relPath: "other.dng", contents: Buffer.from("") },
+		{ relPath: "another.xyz", contents: Buffer.from("") },
 	]);
 	try {
 		const result = await runApplePhotos(dir, ["photos"]);
-		const photos = records(result.messages, "photos");
-		assert.equal(photos.length, 1);
-		assert.equal(photos[0]?.filename, "IMG_0001.jpg");
+		assert.equal(records(result.messages, "photos").length, 1);
+		const omitted = skips(result.messages);
+		assert.equal(omitted.length, 1);
+		assert.equal(omitted[0]?.reason, "source_incomplete");
+		assert.equal(
+			omitted[0]?.message,
+			"Skipped 3 files with unsupported extensions: .dng 2, .xyz 1",
+		);
+		assert.ok(
+			progressMessages(result.messages, "photos").includes(
+				"Found 1 photo in your export, 3 skipped (unsupported extensions)",
+			),
+		);
+		assert.match(
+			result.stderr,
+			/coverage \{"files_scanned":4,"reason":"unsupported_extensions","status":"partial","stream":"photos"\}/,
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos does not repeat an unsupported skip at or before its returned cursor", async () => {
+	const older = new Date("2024-06-01T00:00:00.000Z");
+	const cursorTime = new Date("2024-06-10T00:00:00.000Z");
+	const dir = buildExportDirFixture([
+		{ relPath: "old.dng", contents: Buffer.from(""), mtime: older },
+		{ relPath: "same-time.xyz", contents: Buffer.from(""), mtime: cursorTime },
+		{
+			relPath: "checkpoint.jpg",
+			contents: Buffer.from("invented image"),
+			mtime: cursorTime,
+		},
+	]);
+	try {
+		const first = await runApplePhotos(dir, ["photos"]);
+		assert.equal(
+			skips(first.messages)[0]?.message,
+			"Skipped 2 files with unsupported extensions: .dng 1, .xyz 1",
+		);
+		const checkpoint = states(first.messages).find(
+			(s) => s.stream === "photos",
+		);
+		assert.ok(checkpoint);
+		assert.deepEqual(checkpoint.cursor, {
+			last_modified: cursorTime.toISOString(),
+		});
+		const second = await runApplePhotos(dir, ["photos"], {
+			photos: checkpoint.cursor,
+		});
+		assert.equal(records(second.messages, "photos").length, 0);
+		assert.deepEqual(skips(second.messages), []);
+		assert.match(
+			second.stderr,
+			/coverage \{"files_scanned":1,"reason":"collected","status":"collected","stream":"photos"\}/,
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos treats a .DS_Store-only export as having no unsupported files", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: ".DS_Store", contents: Buffer.from("") },
+	]);
+	try {
+		const result = await runApplePhotos(dir, ["photos"]);
+		assert.equal(records(result.messages, "photos").length, 0);
+		assert.deepEqual(skips(result.messages), []);
+		assert.match(
+			result.stderr,
+			/coverage \{"files_scanned":0,"reason":"collected","status":"collected","stream":"photos"\}/,
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos groups ordinary extensionless and unusual files without exposing their names", async () => {
+	const dir = buildExportDirFixture([
+		{ relPath: ".Spotlight-V100", contents: Buffer.from("") },
+		{ relPath: ".fseventsd", contents: Buffer.from("") },
+		{ relPath: ".Trashes", contents: Buffer.from("") },
+		{ relPath: "notes", contents: Buffer.from("") },
+		{
+			relPath: "nested/object.synthetic-long-suffix",
+			contents: Buffer.from(""),
+		},
+	]);
+	try {
+		const result = await runApplePhotos(dir, ["photos"]);
+		assert.equal(records(result.messages, "photos").length, 0);
+		assert.deepEqual(
+			skips(result.messages).map(({ reason, message }) => ({
+				reason,
+				message,
+			})),
+			[
+				{
+					reason: "source_incomplete",
+					message:
+						"Skipped 2 files with unsupported extensions: (no extension) 1, (other extension) 1",
+				},
+			],
+		);
+		assert.ok(
+			progressMessages(result.messages, "photos").includes(
+				"Found 0 photos in your export, 2 skipped (unsupported extensions)",
+			),
+		);
+		assert.match(
+			result.stderr,
+			/coverage \{"files_scanned":2,"reason":"unsupported_extensions","status":"partial","stream":"photos"\}/,
+		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}

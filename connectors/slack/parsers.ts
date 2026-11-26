@@ -68,17 +68,21 @@ export function tsToIso(ts: string | null | undefined): string | null {
 		return null;
 	}
 	const sec = Number.parseFloat(ts);
-	return Number.isFinite(sec) && sec > 0
-		? new Date(sec * 1000).toISOString()
-		: null;
+	if (!Number.isFinite(sec) || sec <= 0) {
+		return null;
+	}
+	const date = new Date(sec * 1000);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 /** Epoch seconds → ISO-8601 string (or null). Zero is Slack's "unset", not
  *  1970-01-01 — see tsToIso. */
 export function epochToIso(sec: number | null | undefined): string | null {
-	return typeof sec === "number" && Number.isFinite(sec) && sec > 0
-		? new Date(sec * 1000).toISOString()
-		: null;
+	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) {
+		return null;
+	}
+	const date = new Date(sec * 1000);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 /**
@@ -317,7 +321,7 @@ function countReactions(reactions: SlackDataBlob["reactions"]): number {
 	}
 	let total = 0;
 	for (const x of reactions) {
-		total += x.count ?? x.users?.length ?? 0;
+		total += x?.count ?? x?.users?.length ?? 0;
 	}
 	return total;
 }

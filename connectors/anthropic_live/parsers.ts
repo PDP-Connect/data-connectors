@@ -213,13 +213,32 @@ export function planTypeOf(org: RawOrganization): string | null {
 	return null;
 }
 
+const PAYMENT_COUNTRY_RE = /^[A-Z]{2}$/;
+
+/**
+ * The card-issuing country from `subscription_details.payment_method`, or null
+ * when there is no card or the value is not two uppercase letters. Reads the
+ * `country` member only; no other payment field is touched.
+ */
+export function paymentCountryOf(
+	subscription: RawSubscriptionDetails | null,
+): string | null {
+	const method = subscription?.payment_method;
+	if (!isRecord(method)) return null;
+	const country = method.country;
+	return typeof country === "string" && PAYMENT_COUNTRY_RE.test(country)
+		? country
+		: null;
+}
+
 /**
  * The single `account_plan` record, field for field the chatgpt connector's.
  * `subscription` is null when subscription_details was not readable; its
  * fields are then null. `cancels_at` and `scheduled_plan_change` have no
- * observed source and are always null. `will_renew` is inferred for an
+ * observed source and are always null. `payment_country` is the card-issuing
+ * country code only, null without a card. `will_renew` is inferred for an
  * active subscription only: a next charge and no end date. Payment method and
- * billing identifiers are never read.
+ * billing identifiers other than that country are never read.
  */
 export function buildAccountPlanRecord(
 	org: RawOrganization,
@@ -256,6 +275,7 @@ export function buildAccountPlanRecord(
 		expires_at: expiresAt,
 		cancels_at: null,
 		scheduled_plan_change: null,
+		payment_country: paymentCountryOf(subscription),
 	};
 }
 
@@ -316,23 +336,37 @@ function windowRecord(
  * `usage_limits` records: one per limit claude.ai reports. Claude reports
  * the share of each limit used and when it resets, never an absolute cap.
  * Reads `limits[]`; when a response has none, falls back to the older
- * `five_hour` / `seven_day` windows. Returns null when the body is not a
- * usage object, so a drifted response is a parse error, not "no limits".
+ * `five_hour` / `seven_day` windows. Returns null for a non-usage body,
+ * any unreadable limits entry or unreadable non-null legacy window, or duplicate
+ * derived ids. A drifted response is a parse error, not "no limits" or a partial
+ * inventory. Empty limits arrays and absent/null legacy windows remain empty;
+ * existing derived id formatting is preserved.
  */
 export function buildUsageLimitRecords(raw: unknown): RecordData[] | null {
 	if (!isRecord(raw)) return null;
 	const usage = raw as RawUsage;
+	const records: RecordData[] = [];
 	if (Array.isArray(usage.limits)) {
-		return usage.limits
-			.filter(isRecord)
-			.map((limit) => limitRecord(limit as RawUsageLimit))
-			.filter((record): record is RecordData => record !== null);
+		for (const limit of usage.limits) {
+			if (!isRecord(limit)) return null;
+			const record = limitRecord(limit as RawUsageLimit);
+			if (record === null) return null;
+			records.push(record);
+		}
+	} else {
+		if (!("five_hour" in raw || "seven_day" in raw)) return null;
+		for (const [value, kind, group] of [
+			[usage.five_hour, "session", "session"],
+			[usage.seven_day, "weekly_all", "weekly"],
+		] as const) {
+			if (value === null || value === undefined) continue;
+			const record = windowRecord(value, kind, group);
+			if (record === null) return null;
+			records.push(record);
+		}
 	}
-	if (!("five_hour" in raw || "seven_day" in raw)) return null;
-	return [
-		windowRecord(usage.five_hour, "session", "session"),
-		windowRecord(usage.seven_day, "weekly_all", "weekly"),
-	].filter((record): record is RecordData => record !== null);
+	const ids = new Set(records.map((record) => record.id));
+	return ids.size === records.length ? records : null;
 }
 
 /** Accounts with chat access only; never selects the conversation/export org. */

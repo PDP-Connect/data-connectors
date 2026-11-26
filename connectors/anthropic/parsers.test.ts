@@ -26,6 +26,8 @@ import {
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	flattenMessageText,
+	INLINE_TEXT_MAX_UNITS,
+	isoOrNull,
 	omittedFieldCountOf,
 	oversizeTextOf,
 	parseClassifiedExport,
@@ -1106,4 +1108,65 @@ test("buildAccountPlanRecord: an entry without an id gives no record; a bad crea
 			buildAccountPlanRecord({ uuid: "o", created_at })?.account_created_at,
 			null,
 		);
+});
+
+test("ISO timestamps require a complete valid datetime and preserve valid input", () => {
+	for (const value of [
+		"2026-99-99T99:99:99garbage",
+		"2026-02-29T00:00:00Z",
+		"1900-02-29T00:00:00Z",
+		"2026-04-31T00:00:00Z",
+		"2026-00-01T00:00:00Z",
+		"2026-01-00T00:00:00Z",
+		"2026-01-01T24:00:00Z",
+		"2026-01-01T00:60:00Z",
+		"2026-01-01T00:00:60Z",
+		"2026-01-01T00:00:00+24:00",
+		"2026-01-01T00:00:00+05:60",
+		"2026-01-01T00:00:00",
+		"2026-01-01T00:00:00Zgarbage",
+		"2026-01-01T00:00:00Z\n",
+	]) {
+		assert.equal(isoOrNull(value), null, value);
+	}
+	for (const value of [
+		"2026-01-02T03:04:05.123456Z",
+		"2026-01-02T03:04:05+05:30",
+		"2026-01-02T03:04:05.123-04:00",
+		"2000-02-29T23:59:59Z",
+	]) {
+		assert.equal(isoOrNull(value), value);
+	}
+});
+
+test("unidentified oversized raw doc counts its omission without double-counting identified docs", () => {
+	const content = "x".repeat(INLINE_TEXT_MAX_UNITS + 1);
+	const unidentified = parseProject({
+		uuid: "synthetic-project",
+		name: "Synthetic",
+		docs: [{ filename: "synthetic.txt", content }],
+	});
+	assert.ok(unidentified);
+	assert.equal(unidentified.documents.length, 0);
+	assert.equal("content" in (unidentified.project.raw_docs?.[0] ?? {}), false);
+	assert.equal(omittedFieldCountOf(unidentified.project), 1);
+	for (const identity of [{ uuid: "synthetic-doc" }, { id: "synthetic-doc" }]) {
+		const identified = parseProject({
+			uuid: "synthetic-project",
+			name: "Synthetic",
+			docs: [{ ...identity, filename: "synthetic.txt", content }],
+		});
+		assert.ok(identified);
+		assert.equal(identified.documents.length, 1);
+		assert.equal(omittedFieldCountOf(identified.project), 0);
+		assert.equal(omittedFieldCountOf(identified.documents[0] ?? {}), 0);
+		assert.equal(oversizeTextOf(identified.documents[0] ?? {}), content);
+	}
+});
+
+test("empty archived_at is not an archived project", () => {
+	const parsed = parseProject({ uuid: "synthetic-project", archived_at: "" });
+	assert.ok(parsed);
+	assert.equal(parsed.project.is_archived, false);
+	assert.equal(parsed.project.archived_at, null);
 });

@@ -69,7 +69,7 @@
 import { existsSync } from "node:fs";
 import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -93,6 +93,12 @@ const MAX_PHOTO_BYTES_ENV = "PDPP_APPLE_PHOTOS_MAX_PHOTO_BYTES";
 // Progress cadence — emit a PROGRESS every N files so operators see motion
 // on large libraries.
 const PROGRESS_INTERVAL_FILES = 500;
+const NON_MEDIA_MACOS_METADATA = new Set([
+	".DS_Store",
+	".Spotlight-V100",
+	".fseventsd",
+	".Trashes",
+]);
 
 /** The configured export directory path, regardless of whether it currently exists. */
 function configuredExportDir(): string {
@@ -126,14 +132,20 @@ function hasSupportedExtension(filename: string): boolean {
 async function emitCoverageProgress(
 	emit: CollectContext["emit"],
 	input: {
-		filesScanned?: number;
-		reason: "collected" | "export_dir_empty" | "export_dir_missing";
-		status: "collected" | "missing";
+		photosFound?: number;
+		filesSkipped?: number;
+		reason:
+			| "collected"
+			| "export_dir_empty"
+			| "export_dir_missing"
+			| "unsupported_extensions";
+		status: "collected" | "missing" | "partial";
 	},
 ): Promise<void> {
-	const filesScanned = input.filesScanned ?? 0;
+	const photosFound = input.photosFound ?? 0;
+	const filesSkipped = input.filesSkipped ?? 0;
 	connectorDiagnostic("apple_photos", "coverage", {
-		files_scanned: filesScanned,
+		files_scanned: photosFound + filesSkipped,
 		reason: input.reason,
 		status: input.status,
 		stream: "photos",
@@ -141,13 +153,18 @@ async function emitCoverageProgress(
 	await emit({
 		type: "PROGRESS",
 		stream: "photos",
-		message: coverageMessage(input.reason, filesScanned),
+		message: coverageMessage(input.reason, photosFound, filesSkipped),
 	});
 }
 
 function coverageMessage(
-	reason: "collected" | "export_dir_empty" | "export_dir_missing",
-	filesScanned: number,
+	reason:
+		| "collected"
+		| "export_dir_empty"
+		| "export_dir_missing"
+		| "unsupported_extensions",
+	photosFound: number,
+	filesSkipped: number,
 ): string {
 	if (reason === "export_dir_missing") {
 		return "No photo export folder found";
@@ -155,7 +172,10 @@ function coverageMessage(
 	if (reason === "export_dir_empty") {
 		return "Photo export folder is empty";
 	}
-	return `Found ${filesScanned} ${filesScanned === 1 ? "photo" : "photos"} in your export`;
+	const found = `Found ${photosFound} ${photosFound === 1 ? "photo" : "photos"} in your export`;
+	return reason === "unsupported_extensions"
+		? `${found}, ${filesSkipped} skipped (unsupported extensions)`
+		: found;
 }
 
 /**
@@ -163,15 +183,37 @@ function coverageMessage(
  * file. Uses async iteration over opendir so entries are streamed rather
  * than materialized into one giant array.
  */
-async function* walkDir(dir: string): AsyncGenerator<DiscoveredFile> {
+async function* walkDir(
+	dir: string,
+	unsupported: Map<string, number>,
+	since: string | undefined,
+): AsyncGenerator<DiscoveredFile> {
 	const handle = await opendir(dir);
 	for await (const entry of handle) {
 		const entryPath = join(dir, entry.name);
 		if (entry.isDirectory()) {
-			yield* walkDir(entryPath);
+			yield* walkDir(entryPath, unsupported, since);
 			continue;
 		}
-		if (!(entry.isFile() && hasSupportedExtension(entry.name))) {
+		if (!entry.isFile()) {
+			continue;
+		}
+		if (!hasSupportedExtension(entry.name)) {
+			if (NON_MEDIA_MACOS_METADATA.has(entry.name)) {
+				continue;
+			}
+			if (since !== undefined) {
+				const modified = (await stat(entryPath)).mtime.toISOString();
+				if (isBeforeCursor(modified, since)) continue;
+			}
+			const extension = extname(entry.name).toLowerCase();
+			// Do not put arbitrary suffix text, names, or paths in a diagnostic.
+			const bucket = /^\.[a-z0-9]{1,12}$/.test(extension)
+				? extension
+				: extension
+					? "(other extension)"
+					: "(no extension)";
+			unsupported.set(bucket, (unsupported.get(bucket) ?? 0) + 1);
 			continue;
 		}
 		const st = await stat(entryPath);
@@ -228,6 +270,7 @@ runConnector({
 		const since = photosState.last_modified;
 		let latest = since;
 		let fileCount = 0;
+		const unsupported = new Map<string, number>();
 		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
 
 		const reportBlobUploadGap = makeBlobUploadGapReporter({
@@ -242,7 +285,7 @@ runConnector({
 		});
 		await progress("Reading your exported photos");
 
-		for await (const file of walkDir(dir)) {
+		for await (const file of walkDir(dir, unsupported, since)) {
 			fileCount += 1;
 			if (isBeforeCursor(file.mtimeIso, since)) {
 				continue;
@@ -278,10 +321,24 @@ runConnector({
 			pass: "emit",
 			phase: "emit",
 		});
+		const count = [...unsupported.values()].reduce((sum, n) => sum + n, 0);
+		const partial = count > 0;
+		if (partial) {
+			const details = [...unsupported.keys()]
+				.sort()
+				.map((extension) => `${extension} ${unsupported.get(extension)}`);
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "photos",
+				reason: "source_incomplete",
+				message: `Skipped ${count} ${count === 1 ? "file" : "files"} with unsupported extensions: ${details.join(", ")}`,
+			});
+		}
 		await emitCoverageProgress(emit, {
-			filesScanned: fileCount,
-			reason: "collected",
-			status: "collected",
+			photosFound: fileCount,
+			filesSkipped: count,
+			reason: partial ? "unsupported_extensions" : "collected",
+			status: partial ? "partial" : "collected",
 		});
 
 		await emit({
