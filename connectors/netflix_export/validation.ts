@@ -112,7 +112,16 @@ function buildValidationFromArtifact(
 		return { ...base, remediation: remediationFor(status), status };
 	}
 
-	const { headers, rows } = parseCSVContentForValidation(artifact.csvText);
+	const { headers, rows, error } = parseCSVContentForValidation(
+		artifact.csvText,
+	);
+	if (error?.startsWith("CSV file exceeds maximum size")) {
+		return {
+			...base,
+			remediation: remediationFor("too_large"),
+			status: "too_large",
+		};
+	}
 	const schema = detectViewingActivitySchema(headers);
 	if (!schema) {
 		// Neither direct_history nor full_export header set matched — including

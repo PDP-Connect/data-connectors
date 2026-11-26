@@ -68,6 +68,28 @@ export function normalizeInstant(value: unknown): string | null {
 	if (date === undefined || time === undefined) {
 		return null;
 	}
+	// Validate the source's calendar and clock before Date can roll them over.
+	const year = Number(date.slice(0, 4));
+	const month = Number(date.slice(5, 7));
+	const day = Number(date.slice(8, 10));
+	const hour = Number(time.slice(0, 2));
+	const minute = Number(time.slice(3, 5));
+	const second = Number(time.slice(6, 8));
+	const calendar = new Date(0);
+	// Unlike Date.UTC(year, ...), this preserves literal years 0000-0099.
+	calendar.setUTCFullYear(year, month - 1, day);
+	if (
+		month < 1 ||
+		month > 12 ||
+		calendar.getUTCFullYear() !== year ||
+		calendar.getUTCMonth() !== month - 1 ||
+		calendar.getUTCDate() !== day ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59
+	) {
+		return null;
+	}
 	// A missing zone is the list's zoneless clock, which is UTC.
 	const offset =
 		zone === undefined || zone === "Z"
