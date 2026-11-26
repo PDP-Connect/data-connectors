@@ -19,6 +19,7 @@ import {
 	readConversationDetail,
 } from "./__fixtures__/empty-conversation-details.ts";
 import {
+	NOT_FOUND_ID_MAX_LENGTH,
 	NOT_FOUND_TRACKED_MAX,
 	runConversationsAndMessagesStreams,
 	type StreamDeps,
@@ -437,4 +438,106 @@ test("detail 404: three owed retries that all answer 404 do not trip the account
 	const second = await run({ search: list, status: () => 404 }, first.state);
 	assert.deepEqual(second.detailReads.sort(), ["conv-B", "conv-C", "conv-D"]);
 	assert.deepEqual(owedIds(second.state), ["conv-B", "conv-C", "conv-D"]);
+});
+
+test("detail 404: the cursor keeps only the owed ids, never a title or other list-item text", async () => {
+	const hugeTitle = "t".repeat(800_000);
+	const list = LIST.map((c) =>
+		c.id === "conv-B"
+			? {
+					...c,
+					title: hugeTitle,
+					gizmo_id: "g-list-item-gizmo",
+					workspace_id: "ws-list-item-workspace",
+				}
+			: c,
+	);
+	const first = await run(
+		{ search: list, status: (id) => (id === "conv-B" ? 404 : 200) },
+		{},
+	);
+	const cursor = first.state.messages as { detail_not_found?: unknown };
+	assert.deepEqual(cursor.detail_not_found, ["conv-B"]);
+	const serialized = JSON.stringify(first.state.messages);
+	for (const text of [
+		"Conversation conv-B",
+		"g-list-item-gizmo",
+		"ws-list-item-workspace",
+		"conv-B-m0",
+		"ttttt",
+	]) {
+		assert.equal(serialized.includes(text), false, `STATE holds ${text}`);
+	}
+	assert.ok(
+		serialized.length < 1_000,
+		`an 800,000-character title left a ${serialized.length}-byte cursor`,
+	);
+});
+
+test("detail 404: an owed id longer than NOT_FOUND_ID_MAX_LENGTH fails the run instead of being kept or dropped", async () => {
+	assert.equal(NOT_FOUND_ID_MAX_LENGTH, 64);
+	const longId = `conv-${"x".repeat(NOT_FOUND_ID_MAX_LENGTH)}`;
+	const list = [...LIST, listItem(longId, "2026-04-22T12:00:00Z")];
+	const failed = await failingRun(
+		{ search: list, status: (id) => (id === longId ? 404 : 200) },
+		{},
+		/1 listed conversation\(s\) answered http 404 or 410 with an id the messages cursor cannot keep/,
+	);
+	assert.equal(wroteMessagesState(failed.protocolMessages), false);
+});
+
+/** The state a healthy run over LIST leaves, with `messages` fields added. */
+async function stateAfterHealthyRun(
+	messages: Record<string, unknown>,
+): Promise<CollectContext["state"]> {
+	const healthy = await run({ search: LIST, status: () => 200 }, {});
+	return {
+		...healthy.state,
+		messages: {
+			...(healthy.state.messages as Record<string, unknown>),
+			...messages,
+		},
+	};
+}
+
+test("detail 404: a cursor written with n, first_seen and item keeps its ids owed and drops the rest", async () => {
+	const written = await stateAfterHealthyRun({
+		detail_not_found: {
+			"conv-B": {
+				n: 2,
+				first_seen: "2026-04-20T00:00:00.000Z",
+				item: { id: "conv-B", title: "Conversation conv-B", update_time: 1 },
+			},
+		},
+	});
+	const stillGone = await run(
+		{ search: LIST, status: (id) => (id === "conv-B" ? 404 : 200) },
+		written,
+	);
+	assert.deepEqual(stillGone.detailReads, ["conv-B"]);
+	assert.deepEqual(
+		(stillGone.state.messages as { detail_not_found?: unknown })
+			.detail_not_found,
+		["conv-B"],
+	);
+	assert.equal(
+		JSON.stringify(stillGone.state.messages).includes("Conversation conv-B"),
+		false,
+	);
+
+	const healthy = await run({ search: LIST, status: () => 200 }, written);
+	assert.deepEqual(healthy.detailReads, ["conv-B"]);
+	assert.deepEqual(healthy.messageConversations, ["conv-B"]);
+	assert.deepEqual(owedIds(healthy.state), []);
+});
+
+test("detail 404: a cursor with no detail_not_found field owes nothing", async () => {
+	const state = await stateAfterHealthyRun({});
+	assert.equal(
+		"detail_not_found" in (state.messages as Record<string, unknown>),
+		false,
+	);
+	const result = await run({ search: LIST, status: () => 200 }, state);
+	assert.deepEqual(result.detailReads, []);
+	assert.deepEqual(owedIds(result.state), []);
 });

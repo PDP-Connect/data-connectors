@@ -34,66 +34,44 @@ export const NOT_FOUND_TRACKED_MAX = 50;
  */
 export const NOT_FOUND_GUARD_MIN_DETAILS = 3;
 
-type ListItemHint = Record<string, string | number | boolean | null>;
+/**
+ * The longest conversation id the cursor keeps. ChatGPT ids are 36-character
+ * UUIDs; the bound keeps one entry small whatever the source sends.
+ */
+export const NOT_FOUND_ID_MAX_LENGTH = 64;
 
-export interface NotFoundEntry {
-	/** Runs whose detail read answered 404/410. */
-	n: number;
-	/** When a run first saw the 404, ISO. */
-	first_seen: string;
-	/** The list item, so a later run can fetch it without listing it. */
-	item: ListItemHint;
-}
+const OWED_ID = new RegExp(`^[A-Za-z0-9_:.-]{1,${NOT_FOUND_ID_MAX_LENGTH}}$`);
 
-export type NotFoundTable = Record<string, NotFoundEntry>;
+/**
+ * What the cursor keeps: the owed conversation ids, oldest first. A detail is
+ * fetched by id alone and every emitted record key derives from the id and the
+ * detail, so nothing else is stored: no title or other conversation content.
+ */
+export type NotFoundTable = string[];
 
-function isHint(value: unknown): value is ListItemHint {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		!Array.isArray(value) &&
-		Object.values(value).every(
-			(field) =>
-				field === null ||
-				typeof field === "string" ||
-				typeof field === "number" ||
-				typeof field === "boolean",
-		)
+/**
+ * The stored obligations, as ids. Reads this shape and the earlier
+ * `{ <id>: { n, first_seen, item } }` object, whose ids stay owed and whose
+ * counters and list item (title included) are dropped. Anything else is empty.
+ */
+export function readNotFoundTable(value: unknown): Set<string> {
+	const ids = Array.isArray(value)
+		? value
+		: typeof value === "object" && value !== null
+			? Object.keys(value)
+			: [];
+	return new Set(
+		ids.filter(
+			(id): id is string => typeof id === "string" && OWED_ID.test(id),
+		),
 	);
-}
-
-/** The stored table, without malformed rows. */
-export function readNotFoundTable(value: unknown): Map<string, NotFoundEntry> {
-	const table = new Map<string, NotFoundEntry>();
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		return table;
-	}
-	for (const [id, raw] of Object.entries(value)) {
-		const entry = (raw ?? {}) as Partial<NotFoundEntry>;
-		if (
-			id.length > 0 &&
-			typeof entry.n === "number" &&
-			Number.isSafeInteger(entry.n) &&
-			entry.n > 0 &&
-			typeof entry.first_seen === "string" &&
-			!Number.isNaN(Date.parse(entry.first_seen)) &&
-			isHint(entry.item)
-		) {
-			table.set(id, {
-				n: entry.n,
-				first_seen: entry.first_seen,
-				item: entry.item,
-			});
-		}
-	}
-	return table;
 }
 
 /** One run's view of the obligations: what it inherited and what it saw. */
 export class DetailNotFoundTracker {
-	readonly prior: ReadonlyMap<string, NotFoundEntry>;
-	/** Ids whose detail answered 404/410 this run, with the list item. */
-	private readonly answered = new Map<string, ListItemHint>();
+	readonly prior: ReadonlySet<string>;
+	/** Ids whose detail answered 404/410 this run. */
+	private readonly answered = new Set<string>();
 	/** Ids whose detail this run read to a settled outcome (hydrated or unrepresentable). */
 	private readonly read = new Set<string>();
 	/** First-sight details this run requested, and how many answered 404/410. */
@@ -105,14 +83,14 @@ export class DetailNotFoundTracker {
 	}
 
 	/** A messages-pass detail answered `status` for a conversation. */
-	recordDetail(id: string, status: number, item: ListItemHint): void {
+	recordDetail(id: string, status: number): void {
 		const notFound = status === 404 || status === 410;
 		if (!this.prior.has(id)) {
 			this.freshDetails += 1;
 			if (notFound) this.freshNotFound += 1;
 		}
 		if (notFound) {
-			this.answered.set(id, item);
+			this.answered.add(id);
 		}
 	}
 
@@ -131,11 +109,11 @@ export class DetailNotFoundTracker {
 	 * forward pass already lists.
 	 */
 	owed(skip: ReadonlySet<string>): ConversationListItem[] {
-		return [...this.prior.entries()]
+		return [...this.prior]
 			.filter(
-				([id]) => !skip.has(id) && !this.answered.has(id) && !this.read.has(id),
+				(id) => !skip.has(id) && !this.answered.has(id) && !this.read.has(id),
 			)
-			.map(([id, entry]) => ({ ...entry.item, id }) as ConversationListItem);
+			.map((id) => ({ id }));
 	}
 
 	/**
@@ -143,7 +121,7 @@ export class DetailNotFoundTracker {
 	 * cleanly. Throws, before any messages STATE, when the run looks like a
 	 * session failure or would leave more than NOT_FOUND_TRACKED_MAX owed.
 	 */
-	finish(now: string): NotFoundTable {
+	finish(): NotFoundTable {
 		if (
 			this.freshDetails >= NOT_FOUND_GUARD_MIN_DETAILS &&
 			this.freshNotFound === this.freshDetails
@@ -152,21 +130,16 @@ export class DetailNotFoundTracker {
 				`every conversation detail this run requested (${this.freshDetails}, not counting retries of earlier 404s) answered http 404 or 410; the session cannot read this account's conversations`,
 			);
 		}
-		const table: NotFoundTable = {};
-		for (const id of new Set([...this.prior.keys(), ...this.answered.keys()])) {
-			if (this.read.has(id)) continue;
-			const prior = this.prior.get(id);
-			const item = this.answered.get(id);
-			table[id] =
-				item === undefined && prior
-					? prior
-					: {
-							n: (prior?.n ?? 0) + 1,
-							first_seen: prior?.first_seen ?? now,
-							item: item ?? {},
-						};
+		const table = [...new Set([...this.prior, ...this.answered])].filter(
+			(id) => !this.read.has(id),
+		);
+		const unkept = table.filter((id) => !OWED_ID.test(id));
+		if (unkept.length > 0) {
+			throw new Error(
+				`${unkept.length} listed conversation(s) answered http 404 or 410 with an id the messages cursor cannot keep (over ${NOT_FOUND_ID_MAX_LENGTH} characters or not [A-Za-z0-9_:.-]); the run fails rather than drop it`,
+			);
 		}
-		const owed = Object.keys(table).length;
+		const owed = table.length;
 		if (owed > NOT_FOUND_TRACKED_MAX) {
 			throw new Error(
 				`${owed} listed conversations are owed a detail read after http 404 or 410, more than the ${NOT_FOUND_TRACKED_MAX} the messages cursor keeps; the run fails rather than drop any`,

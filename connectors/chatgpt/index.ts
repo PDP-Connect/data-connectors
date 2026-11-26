@@ -2399,7 +2399,10 @@ function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
 /** Per-run dependency bag threaded through every emit-path helper. Mirrors
  *  the amazon/chase pattern: one stable bag so collect() becomes pure
  *  orchestration and the helpers are individually testable. */
-export { NOT_FOUND_TRACKED_MAX } from "./detail-not-found.ts";
+export {
+	NOT_FOUND_ID_MAX_LENGTH,
+	NOT_FOUND_TRACKED_MAX,
+} from "./detail-not-found.ts";
 
 export interface StreamDeps {
 	api: ChatGptApi;
@@ -7090,11 +7093,7 @@ export async function runMessagesAndConversationsWithDetail(
 					deps.conversationDetailOnly !== true &&
 					isDeletedConversationStatus(detail.status);
 				if (deps.conversationDetailOnly !== true) {
-					deps.detailNotFound?.recordDetail(
-						c.id,
-						detail.status,
-						safeConversationListItemHint(c),
-					);
+					deps.detailNotFound?.recordDetail(c.id, detail.status);
 				}
 				if (detail.status !== 200 && !degradesToListOnly && !conversationGone) {
 					providerBudget?.recordFailure();
@@ -7574,9 +7573,7 @@ function persistChatGptPacingStateOnly(
 function notFoundCursorFields(table: NotFoundTable | null | undefined): {
 	detail_not_found?: NotFoundTable;
 } {
-	return table && Object.keys(table).length > 0
-		? { detail_not_found: table }
-		: {};
+	return table && table.length > 0 ? { detail_not_found: table } : {};
 }
 
 /**
@@ -7589,8 +7586,8 @@ function finishDetailNotFound(tracker: DetailNotFoundTracker): {
 	table: NotFoundTable;
 	missing: string[];
 } {
-	const table = tracker.finish(new Date().toISOString());
-	const missing = Object.keys(table);
+	const table = tracker.finish();
+	const missing = [...table];
 	if (missing.length > 0) {
 		chatGptDiagnostic(
 			`conversation_not_found_owed: ${missing.length} listed conversation(s) still answer their detail with http 404/410 or were not retried; their messages are owed to a later run`,
@@ -7909,10 +7906,7 @@ async function walkConversationsAndMessages(
 					}),
 				);
 			}
-			if (
-				detailNotFound.prior.size > 0 ||
-				Object.keys(settlement.table).length > 0
-			) {
+			if (detailNotFound.prior.size > 0 || settlement.table.length > 0) {
 				notFoundTable = settlement.table;
 			}
 		}
@@ -8109,8 +8103,9 @@ async function readOwedNotFoundConversations(
 		const owedCoverage = await runMessagesAndConversationsWithDetail(
 			runDeps,
 			owed,
-			// A record the first 404 already emitted list-only is not re-emitted
-			// from the stored hint; a clean read emits it with its detail.
+			// The cursor keeps only the id. A clean read emits the record from its
+			// detail; a failed one emits nothing (the first 404 already emitted the
+			// list-only record).
 			(c, detail) =>
 				detail === null ? Promise.resolve() : emitConversation(c, detail),
 			pacing,
