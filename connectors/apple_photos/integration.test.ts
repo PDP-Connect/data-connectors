@@ -290,6 +290,8 @@ test("apple_photos does not repeat an unsupported skip at or before its returned
 		});
 		assert.equal(records(second.messages, "photos").length, 0);
 		assert.deepEqual(skips(second.messages), []);
+		// Nothing past the cursor qualifies, so the run reports no upload gap.
+		assert.deepEqual(uploadGaps(second.messages), []);
 		assert.match(
 			second.stderr,
 			/coverage \{"files_scanned":1,"reason":"collected","status":"collected","stream":"photos"\}/,
@@ -307,6 +309,7 @@ test("apple_photos treats a .DS_Store-only export as having no unsupported files
 		const result = await runApplePhotos(dir, ["photos"]);
 		assert.equal(records(result.messages, "photos").length, 0);
 		assert.deepEqual(skips(result.messages), []);
+		assert.deepEqual(uploadGaps(result.messages), []);
 		assert.match(
 			result.stderr,
 			/coverage \{"files_scanned":0,"reason":"collected","status":"collected","stream":"photos"\}/,
