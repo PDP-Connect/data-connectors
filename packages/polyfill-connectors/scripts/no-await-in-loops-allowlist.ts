@@ -4634,7 +4634,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/strava_browser/index.test.ts",
-			line: 935,
+			line: 972,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "Each synthetic backfill run consumes the prior run's queue checkpoint before asserting the next 100-record batch.",
