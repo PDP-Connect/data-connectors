@@ -8838,6 +8838,57 @@ test("runConversationsAndMessagesStreams: a recovery-only run whose pending gap 
 	assert.deepEqual(owedConversationIds(messagesState?.cursor), ["convo-gone"]);
 });
 
+test("runConversationsAndMessagesStreams: two 404'd pending gaps that the forward listing also lists count once each for the account guard", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const gone = ["convo-gone-1", "convo-gone-2"].map((id, index) =>
+		makeConvo({ id, update_time: 1_700_000_100 + index }),
+	);
+	const detailFetches: string[] = [];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (path.startsWith("/conversations/search?")) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: gone, has_missing_conversations: false, total: 2 },
+				});
+			}
+			if (path.startsWith("/conversations?")) {
+				return Promise.resolve({ status: 200, json: { items: [], total: 0 } });
+			}
+			detailFetches.push(path);
+			return Promise.resolve({ status: 404, json: null });
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		detailGaps: gone.map((c, index) =>
+			makeDetailGapFromConvo(`gap_gone_${index}`, c),
+		),
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	await runConversationsAndMessagesStreams(
+		deps,
+		{},
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+	assert.ok(detailFetches.length >= 2);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor).sort(), [
+		"convo-gone-1",
+		"convo-gone-2",
+	]);
+});
+
 test("runConversationsAndMessagesStreams: drains paged pending message gaps beyond the first 100 in one run", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const conversations = Array.from({ length: 125 }, (_, index) =>

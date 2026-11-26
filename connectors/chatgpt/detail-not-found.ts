@@ -27,10 +27,11 @@ import type { ConversationListItem } from "./types.ts";
 export const NOT_FOUND_TRACKED_MAX = 50;
 
 /**
- * A run that requested at least this many first-sight details (conversations
- * the cursor did not already owe) and got 404/410 for every one is an account
- * or session failure, not an account whose conversations were all deleted.
- * Retries of owed conversations do not count: they stay owed either way.
+ * A run that requested the detail of at least this many first-sight
+ * conversations (ones the cursor did not already owe), each counted once, and
+ * got 404/410 for every one is an account or session failure, not an account
+ * whose conversations were all deleted. Retries of owed conversations do not
+ * count: they stay owed either way.
  */
 export const NOT_FOUND_GUARD_MIN_DETAILS = 3;
 
@@ -80,9 +81,8 @@ export class DetailNotFoundTracker {
 	private readonly answered = new Set<string>();
 	/** Ids whose detail this run read to a settled outcome (hydrated or unrepresentable). */
 	private readonly read = new Set<string>();
-	/** First-sight details this run requested, and how many answered 404/410. */
-	private freshDetails = 0;
-	private freshNotFound = 0;
+	/** First-sight conversations (not owed before this run) whose detail this run requested. */
+	private readonly fresh = new Set<string>();
 
 	constructor(stored: unknown) {
 		const { ids, unkept } = readNotFoundTable(stored);
@@ -94,8 +94,7 @@ export class DetailNotFoundTracker {
 	recordDetail(id: string, status: number): void {
 		const notFound = status === 404 || status === 410;
 		if (!this.prior.has(id)) {
-			this.freshDetails += 1;
-			if (notFound) this.freshNotFound += 1;
+			this.fresh.add(id);
 		}
 		if (notFound) {
 			this.answered.add(id);
@@ -130,12 +129,13 @@ export class DetailNotFoundTracker {
 	 * session failure or would leave more than NOT_FOUND_TRACKED_MAX owed.
 	 */
 	finish(): NotFoundTable {
+		// Each conversation counts once, however many times this run asked for it.
 		if (
-			this.freshDetails >= NOT_FOUND_GUARD_MIN_DETAILS &&
-			this.freshNotFound === this.freshDetails
+			this.fresh.size >= NOT_FOUND_GUARD_MIN_DETAILS &&
+			[...this.fresh].every((id) => this.answeredNotFound(id))
 		) {
 			throw new Error(
-				`every conversation detail this run requested (${this.freshDetails}, not counting retries of earlier 404s) answered http 404 or 410; the session cannot read this account's conversations`,
+				`every conversation detail this run requested (${this.fresh.size}, not counting retries of earlier 404s) answered http 404 or 410; the session cannot read this account's conversations`,
 			);
 		}
 		const table = [...new Set([...this.prior, ...this.answered])].filter(
