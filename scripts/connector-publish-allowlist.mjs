@@ -130,9 +130,11 @@ export function getPublishShards(count = 6) {
   }
   return shards;
 }
+
 function githubMatrix(rows) {
   return { include: rows };
 }
+
 function emitMatrix(matrix) {
   const value = JSON.stringify(matrix);
   if (process.env.GITHUB_OUTPUT) {
