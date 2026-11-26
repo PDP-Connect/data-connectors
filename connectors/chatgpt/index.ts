@@ -126,7 +126,6 @@ import type {
 import { drainDetailWindows } from "./detail-lane-drain.ts";
 import {
 	DetailNotFoundTracker,
-	type NotFoundSettlement,
 	type NotFoundTable,
 } from "./detail-not-found.ts";
 import {
@@ -2400,10 +2399,7 @@ function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
 /** Per-run dependency bag threaded through every emit-path helper. Mirrors
  *  the amazon/chase pattern: one stable bag so collect() becomes pure
  *  orchestration and the helpers are individually testable. */
-export {
-	NOT_FOUND_SETTLE_RUNS,
-	NOT_FOUND_TRACKED_MAX,
-} from "./detail-not-found.ts";
+export { NOT_FOUND_TRACKED_MAX } from "./detail-not-found.ts";
 
 export interface StreamDeps {
 	api: ChatGptApi;
@@ -5686,8 +5682,8 @@ interface ConversationDetailCoverage {
 	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 	sourceUnrepresentableKeys: Array<string | number>;
 	// Listed conversations whose detail answered 404/410 this run (see
-	// `skipNotFoundConversation`). Reported skipped; the messages cursor keeps
-	// owing them until detail-not-found.ts settles them.
+	// `skipNotFoundConversation`), and the ones the messages cursor still owes.
+	// Reported skipped until a run reads their detail (detail-not-found.ts).
 	notFoundKeys: Array<string | number>;
 }
 
@@ -7422,8 +7418,8 @@ async function recoverPendingConversationDetailGapPage(
 				conversation: ConversationListItem;
 			} => item.conversation !== null,
 		);
-	// A gap whose detail answered 404/410 earlier in this run stays pending until
-	// the run settles it, so a later page serves it again: do not refetch it.
+	// A gap whose detail answered 404/410 earlier in this run stays pending, so a
+	// later page serves it again: do not refetch it.
 	const recoveryItems = servedItems.filter(
 		(item) =>
 			deps.detailNotFound?.answeredNotFound(item.conversation.id) !== true,
@@ -7449,14 +7445,9 @@ async function recoverPendingConversationDetailGapPage(
 			...hydrated,
 			...coverage.sourceUnrepresentableKeys.map(String),
 		]);
-		// A 404/410 does not settle the gap on sight: it stays pending, and the
-		// run closes it only if detail-not-found.ts settles the conversation.
+		// A 404/410 does not settle the gap: it stays pending, and the messages
+		// cursor owes the conversation too (detail-not-found.ts).
 		const notFound = new Set(coverage.notFoundKeys.map(String));
-		for (const { gap, conversation } of recoveryItems) {
-			if (notFound.has(conversation.id)) {
-				deps.detailNotFound?.holdGap(conversation.id, gap.gap_id);
-			}
-		}
 		for (const { gap, conversation } of recoveryItems) {
 			if (!settled.has(conversation.id)) {
 				continue;
@@ -7589,66 +7580,23 @@ function notFoundCursorFields(table: NotFoundTable | null | undefined): {
 }
 
 /**
- * Decide this run's 404 obligations (detail-not-found.ts) once every messages
- * detail pass is done. A run whose every requested detail answered 404/410 is
- * not an account whose conversations were all deleted: it fails, before any
- * cursor moves. Closes the held gaps of settled conversations.
+ * Close this run's 404 obligations (detail-not-found.ts) once every messages
+ * detail pass is done: the table for the cursor, and the owed ids to report
+ * skipped. Throws, before any messages STATE, on a session failure or more
+ * owed conversations than the cursor keeps.
  */
-async function settleDetailNotFound(
-	deps: StreamDeps,
-	tracker: DetailNotFoundTracker,
-	absent: (id: string) => boolean,
-): Promise<NotFoundSettlement> {
-	const everyNotFound = tracker.everyDetailNotFound();
-	if (everyNotFound) {
-		throw new Error(
-			`every conversation detail this run requested (${everyNotFound.details}, not counting retries of earlier 404s) answered http 404 or 410; the session cannot read this account's conversations`,
-		);
-	}
-	const settlement = tracker.settle(absent, new Date().toISOString());
-	if (settlement.settled.length > 0) {
+function finishDetailNotFound(tracker: DetailNotFoundTracker): {
+	table: NotFoundTable;
+	missing: string[];
+} {
+	const table = tracker.finish(new Date().toISOString());
+	const missing = Object.keys(table);
+	if (missing.length > 0) {
 		chatGptDiagnostic(
-			`conversation_not_found_settled: ${settlement.settled.length} conversation(s) stopped answering their detail (410, gone from a complete listing, or 404 on several runs); their messages are skipped for good`,
+			`conversation_not_found_owed: ${missing.length} listed conversation(s) still answer their detail with http 404/410 or were not retried; their messages are owed to a later run`,
 		);
 	}
-	if (settlement.overflow.length > 0) {
-		chatGptDiagnostic(
-			`conversation_not_found_overflow: ${settlement.overflow.length} conversation(s) answered 404 beyond the tracked limit and were settled without further retries`,
-		);
-	}
-	await Promise.all(
-		settlement.settled.flatMap((id) => {
-			const gapId = tracker.heldGapFor(id);
-			return gapId === undefined
-				? []
-				: [
-						deps.emit({
-							type: "DETAIL_GAP_RECOVERED",
-							reference_only: true,
-							gap_id: gapId,
-							stream: "messages",
-							record_key: id,
-						}),
-					];
-		}),
-	);
-	return settlement;
-}
-
-/**
- * The ids a complete listing returned this run, or null when no listing this
- * run can prove a conversation is no longer listed: the primary walk was
- * truncated, resumed mid-list, or returned nothing.
- */
-function completeListingIds(
-	primary: ConversationListResult,
-	resumed: boolean,
-	alsoListed: readonly ConversationListItem[],
-): ReadonlySet<string> | null {
-	if (primary.truncated || resumed || primary.items.length === 0) {
-		return null;
-	}
-	return new Set([...primary.items, ...alsoListed].map((c) => c.id));
+	return { table, missing };
 }
 
 /** Add keys this run looked at outside the forward walk to its coverage, as skipped. */
@@ -7948,14 +7896,9 @@ async function walkConversationsAndMessages(
 		// next run. (See shouldSuppressForwardWalkAfterRecovery for the two cases.)
 		let notFoundTable: NotFoundTable | null = null;
 		if (detailNotFound) {
-			// No listing ran, so nothing is proved absent.
-			const settlement = await settleDetailNotFound(
-				runDeps,
-				detailNotFound,
-				() => false,
-			);
+			const settlement = finishDetailNotFound(detailNotFound);
 			if (settlement.missing.length > 0) {
-				// A scoped receipt: recovery read these and got no messages.
+				// A scoped receipt: these are owed and have no messages this run.
 				await deps.emit(
 					makeConversationDetailCoverage(settlement.missing, {
 						deferred: false,
@@ -8048,10 +7991,6 @@ async function walkConversationsAndMessages(
 			? await readOwedNotFoundConversations(runDeps, detailNotFound, {
 					coverage,
 					forward: messageDetailConversations,
-					listedIds: completeListingIds(primaryList, primaryBackfill !== null, [
-						...messageDetailConversations,
-						...conversationsToSync,
-					]),
 					emitConversation,
 					pacing: options.detailPacing,
 				})
@@ -8136,9 +8075,9 @@ async function walkConversationsAndMessages(
 
 /**
  * After the forward walk, read the conversations the cursor still owes after a
- * 404, settle the run's obligations, and fold what this run looked at outside
- * the forward walk into its coverage. Returns the keys to add to the required
- * set and the table for the cursor.
+ * 404, close the run's obligations, and fold every owed key into its coverage
+ * as skipped. Returns the keys to add to the required set and the table for the
+ * cursor.
  */
 async function readOwedNotFoundConversations(
 	runDeps: StreamDeps,
@@ -8146,13 +8085,11 @@ async function readOwedNotFoundConversations(
 	{
 		coverage,
 		forward,
-		listedIds,
 		emitConversation,
 		pacing,
 	}: {
 		coverage: ConversationDetailCoverage;
 		forward: readonly ConversationListItem[];
-		listedIds: ReadonlySet<string> | null;
 		emitConversation: (
 			c: ConversationListItem,
 			detail: ConversationDetail | null,
@@ -8160,8 +8097,6 @@ async function readOwedNotFoundConversations(
 		pacing: ConversationDetailPacingOptions | undefined;
 	},
 ): Promise<{ extraRequiredKeys: string[]; table: NotFoundTable }> {
-	const absent = (id: string): boolean =>
-		listedIds !== null && !listedIds.has(id);
 	const forwardIds = new Set(forward.map((c) => c.id));
 	const extraRequiredKeys: string[] = [];
 	// A deferred forward pass met source pressure or a spent budget: do not
@@ -8169,9 +8104,7 @@ async function readOwedNotFoundConversations(
 	const owed =
 		coverage.deferred || runDeps.runBudget?.shouldStop() === true
 			? []
-			: tracker.owed(
-					new Set([...forwardIds, ...[...tracker.prior.keys()].filter(absent)]),
-				);
+			: tracker.owed(forwardIds);
 	if (owed.length > 0) {
 		const owedCoverage = await runMessagesAndConversationsWithDetail(
 			runDeps,
@@ -8191,7 +8124,7 @@ async function readOwedNotFoundConversations(
 		coverage.deferred ||= owedCoverage.deferred;
 		extraRequiredKeys.push(...owed.map((c) => c.id));
 	}
-	const settlement = await settleDetailNotFound(runDeps, tracker, absent);
+	const settlement = finishDetailNotFound(tracker);
 	extraRequiredKeys.push(
 		...addMissingNotFoundKeys(
 			coverage,

@@ -3,10 +3,9 @@
 
 // A listed conversation whose detail answers 404 across runs. A 404 does not
 // fail the run, but it is not proof the conversation is gone: the messages
-// stream keeps a retry obligation in its cursor, fetches the conversation again
-// on later runs whatever the watermark, and settles it only on stronger
-// evidence (a 410, absence from a complete listing, or a 404 on
-// NOT_FOUND_SETTLE_RUNS runs in a row).
+// stream keeps a retry obligation in its cursor and fetches the conversation
+// again on every later run, whatever the watermark, until a run reads its
+// detail cleanly. Nothing else ends the obligation.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -20,7 +19,6 @@ import {
 	readConversationDetail,
 } from "./__fixtures__/empty-conversation-details.ts";
 import {
-	NOT_FOUND_SETTLE_RUNS,
 	NOT_FOUND_TRACKED_MAX,
 	runConversationsAndMessagesStreams,
 	type StreamDeps,
@@ -47,13 +45,19 @@ function listItem(id: string, updateTimeIso: string): ConversationListItem {
 	};
 }
 
+/** ChatGPT's search page size (CONVERSATION_PAGE_SIZE in index.ts). */
+const SEARCH_PAGE_SIZE = 30;
+
 interface RunSetup {
 	/** What the search listing returns. */
 	search: ConversationListItem[];
 	/** What the primary offset listing returns; empty by default. */
 	primary?: ConversationListItem[];
-	/** The detail status for an id; 200 serves a one-message detail. */
-	status: (id: string) => number;
+	/**
+	 * The detail status for an id; 200 serves a one-message detail and
+	 * "incomplete" a 200 with no mapping.
+	 */
+	status: (id: string) => number | "incomplete";
 }
 
 interface RunResult {
@@ -72,10 +76,11 @@ function makeApi(setup: RunSetup, detailReads: string[]): ChatGptApi {
 				const cursor = Number(
 					new URLSearchParams(path.split("?")[1]).get("cursor"),
 				);
+				// The connector asks for SEARCH_PAGE_SIZE rows per cursor page.
 				return Promise.resolve({
 					status: 200,
 					json: {
-						items: cursor === 0 ? setup.search : [],
+						items: setup.search.slice(cursor, cursor + SEARCH_PAGE_SIZE),
 						total: cursor === 0 ? setup.search.length + 1 : setup.search.length,
 					},
 				});
@@ -96,6 +101,9 @@ function makeApi(setup: RunSetup, detailReads: string[]): ChatGptApi {
 			const id = decodeURIComponent(path.slice("/conversation/".length));
 			detailReads.push(id);
 			const status = setup.status(id);
+			if (status === "incomplete") {
+				return Promise.resolve({ status: 200, json: { id } });
+			}
 			return Promise.resolve(
 				status === 200 ? readConversationDetail(path) : { status, json: null },
 			);
@@ -158,7 +166,50 @@ function messagesCoverage(
 function owedIds(state: CollectContext["state"]): string[] {
 	const cursor = state.messages as { detail_not_found?: unknown } | undefined;
 	const owed = cursor?.detail_not_found;
+	if (Array.isArray(owed)) return owed.map(String).sort();
 	return owed && typeof owed === "object" ? Object.keys(owed).sort() : [];
+}
+
+/** A run with both streams that must fail; the protocol messages it emitted. */
+async function failingRun(
+	setup: RunSetup,
+	state: CollectContext["state"],
+	error: RegExp,
+): Promise<{ detailReads: string[]; protocolMessages: EmittedMessage[] }> {
+	const harness = makeRecordingEmit(validateRecord);
+	const detailReads: string[] = [];
+	const deps: StreamDeps = {
+		api: makeApi(setup, detailReads),
+		sleep: (): Promise<void> => Promise.resolve(),
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	await assert.rejects(
+		runConversationsAndMessagesStreams(deps, state, {
+			detailPacing: NO_DETAIL_WAITS,
+		}),
+		error,
+	);
+	return { detailReads, protocolMessages: harness.protocolMessages };
+}
+
+function wroteMessagesState(protocolMessages: EmittedMessage[]): boolean {
+	return protocolMessages.some(
+		(m) => m.type === "STATE" && m.stream === "messages",
+	);
+}
+
+function listOf(count: number): ConversationListItem[] {
+	return Array.from({ length: count }, (_, index) =>
+		listItem(
+			`conv-${String(index).padStart(3, "0")}`,
+			new Date(Date.UTC(2026, 3, 22, 0, index)).toISOString(),
+		),
+	);
 }
 
 const LIST = [
@@ -196,38 +247,63 @@ test("detail 404: a conversation that answers 404 and then a healthy detail on t
 	assert.equal(coverage?.covered, coverage?.considered);
 });
 
-test("detail 404: a conversation that answers 404 on NOT_FOUND_SETTLE_RUNS runs in a row is settled and not fetched again", async () => {
-	const setup: RunSetup = {
+test("detail 404: a conversation that answers 404 on any number of runs stays owed and a later healthy run gets its messages", async () => {
+	const notFound: RunSetup = {
 		search: LIST,
 		status: (id) => (id === "conv-B" ? 404 : 200),
 	};
-	const first = await run(setup, {});
-	const second = await run(setup, first.state);
-	const third = await run(setup, second.state);
-	assert.equal(NOT_FOUND_SETTLE_RUNS, 3);
-	assert.deepEqual(owedIds(first.state), ["conv-B"]);
-	assert.deepEqual(second.detailReads, ["conv-B"]);
-	assert.deepEqual(owedIds(second.state), ["conv-B"]);
-	assert.deepEqual(third.detailReads, ["conv-B"]);
-	assert.deepEqual(owedIds(third.state), []);
-	// The run that settles it still reports the messages missing.
-	assert.deepEqual(messagesCoverage(third)?.optional_skip_keys, ["conv-B"]);
+	let state: CollectContext["state"] = {};
+	for (let attempt = 0; attempt < 5; attempt += 1) {
+		const result = await run(notFound, state);
+		assert.deepEqual(
+			result.detailReads.includes("conv-B"),
+			true,
+			`run ${attempt + 1} fetches the owed conversation again`,
+		);
+		assert.deepEqual(owedIds(result.state), ["conv-B"]);
+		assert.deepEqual(messagesCoverage(result)?.optional_skip_keys, ["conv-B"]);
+		state = result.state;
+	}
 
-	const fourth = await run(setup, third.state);
-	assert.deepEqual(fourth.detailReads, []);
-	assert.deepEqual(owedIds(fourth.state), []);
+	const healthy = await run({ search: LIST, status: () => 200 }, state);
+	assert.deepEqual(healthy.detailReads, ["conv-B"]);
+	assert.deepEqual(healthy.messageConversations, ["conv-B"]);
+	assert.deepEqual(owedIds(healthy.state), []);
 });
 
-test("detail 404: a 410 is settled on first sight", async () => {
+test("detail 404: a run that only retries owed conversations and gets 404 twice keeps them owed for a healthy run", async () => {
+	const setup: RunSetup = {
+		search: LIST,
+		status: (id) => (id === "conv-A" ? 200 : 404),
+	};
+	const first = await run(setup, {});
+	assert.deepEqual(owedIds(first.state), ["conv-B", "conv-C"]);
+	// Nothing new is listed; the only details are the two owed retries, both 404.
+	const second = await run(setup, first.state);
+	const third = await run(setup, second.state);
+	assert.deepEqual(third.detailReads.sort(), ["conv-B", "conv-C"]);
+	assert.deepEqual(owedIds(third.state), ["conv-B", "conv-C"]);
+
+	const healthy = await run({ search: LIST, status: () => 200 }, third.state);
+	assert.deepEqual(healthy.detailReads.sort(), ["conv-B", "conv-C"]);
+	assert.deepEqual(healthy.messageConversations, ["conv-B", "conv-C"]);
+	assert.deepEqual(owedIds(healthy.state), []);
+});
+
+test("detail 404: a 410 is owed like a 404, not given up", async () => {
 	const first = await run(
 		{ search: LIST, status: (id) => (id === "conv-B" ? 410 : 200) },
 		{},
 	);
-	assert.deepEqual(owedIds(first.state), []);
+	assert.deepEqual(owedIds(first.state), ["conv-B"]);
 	assert.deepEqual(messagesCoverage(first)?.optional_skip_keys, ["conv-B"]);
+
+	const second = await run({ search: LIST, status: () => 200 }, first.state);
+	assert.deepEqual(second.messageConversations, ["conv-B"]);
+	assert.deepEqual(owedIds(second.state), []);
 });
 
-test("detail 404: an owed conversation absent from a complete listing is settled without a fetch", async () => {
+test("detail 404: an owed conversation a complete listing no longer lists is still fetched and recovered", async () => {
 	const first = await run(
 		{
 			search: LIST,
@@ -238,32 +314,86 @@ test("detail 404: an owed conversation absent from a complete listing is settled
 	);
 	assert.deepEqual(owedIds(first.state), ["conv-B"]);
 
+	// The listing is not an inventory: project, archived or other-workspace
+	// conversations can be missing from it and still read.
 	const remaining = LIST.filter((c) => c.id !== "conv-B");
 	const second = await run(
 		{ search: remaining, primary: remaining, status: () => 200 },
 		first.state,
 	);
-	assert.deepEqual(second.detailReads, []);
-	assert.deepEqual(owedIds(second.state), []);
-	assert.deepEqual(messagesCoverage(second)?.optional_skip_keys, ["conv-B"]);
-});
-
-test("detail 404: an owed conversation still in a complete listing is fetched again", async () => {
-	const first = await run(
-		{
-			search: LIST,
-			primary: LIST,
-			status: (id) => (id === "conv-B" ? 404 : 200),
-		},
-		{},
-	);
-	const second = await run(
-		{ search: LIST, primary: LIST, status: () => 200 },
-		first.state,
-	);
 	assert.deepEqual(second.detailReads, ["conv-B"]);
 	assert.deepEqual(second.messageConversations, ["conv-B"]);
 	assert.deepEqual(owedIds(second.state), []);
+	const coverage = messagesCoverage(second);
+	assert.deepEqual(coverage?.hydrated_keys, ["conv-B"]);
+	assert.deepEqual(coverage?.optional_skip_keys ?? [], []);
+	assert.equal(coverage?.covered, coverage?.considered);
+});
+
+test("detail 404: 404, 404, a 200 with no mapping, then 404 keeps the conversation owed", async () => {
+	const statuses: Array<number | "incomplete"> = [404, 404, "incomplete", 404];
+	let state: CollectContext["state"] = {};
+	for (const status of statuses) {
+		const result = await run(
+			{ search: LIST, status: (id) => (id === "conv-B" ? status : 200) },
+			state,
+		);
+		assert.deepEqual(
+			owedIds(result.state),
+			["conv-B"],
+			`after a ${status} the conversation is still owed`,
+		);
+		state = result.state;
+	}
+	const healthy = await run({ search: LIST, status: () => 200 }, state);
+	assert.deepEqual(healthy.messageConversations, ["conv-B"]);
+	assert.deepEqual(owedIds(healthy.state), []);
+});
+
+test("detail 404: a run that would owe more than NOT_FOUND_TRACKED_MAX fails before messages STATE and loses nothing", async () => {
+	assert.equal(NOT_FOUND_TRACKED_MAX, 50);
+	const list = listOf(65);
+	const notFound = new Set(list.slice(0, 60).map((c) => c.id));
+	const failed = await failingRun(
+		{ search: list, status: (id) => (notFound.has(id) ? 404 : 200) },
+		{},
+		/60 listed conversations are owed .* more than the 50/,
+	);
+	assert.equal(failed.detailReads.length, 65);
+	assert.equal(wroteMessagesState(failed.protocolMessages), false);
+
+	// The cursor did not move, so a healthy run reads every conversation.
+	const healthy = await run({ search: list, status: () => 200 }, {});
+	assert.equal(healthy.messageConversations.length, 65);
+	assert.deepEqual(owedIds(healthy.state), []);
+});
+
+test("detail 404: a new 404 on top of a full table fails instead of dropping an obligation", async () => {
+	const list = listOf(NOT_FOUND_TRACKED_MAX + 2);
+	const owed = new Set(list.slice(0, NOT_FOUND_TRACKED_MAX).map((c) => c.id));
+	const extra = list[NOT_FOUND_TRACKED_MAX]?.id;
+	const first = await run(
+		{ search: list, status: (id) => (owed.has(id) ? 404 : 200) },
+		{},
+	);
+	assert.equal(owedIds(first.state).length, NOT_FOUND_TRACKED_MAX);
+
+	const failed = await failingRun(
+		{
+			search: list,
+			status: (id) => (owed.has(id) || id === extra ? 404 : 200),
+		},
+		// Clear the watermark so the forward pass reads the extra conversation.
+		{
+			...first.state,
+			messages: {
+				...(first.state.messages as Record<string, unknown>),
+				last_update_time: null,
+			},
+		},
+		/51 listed conversations are owed/,
+	);
+	assert.equal(wroteMessagesState(failed.protocolMessages), false);
 });
 
 test("detail 404: a run whose every detail answers 404 fails instead of reporting no messages", async () => {
@@ -297,25 +427,6 @@ test("detail 404: a run whose every detail answers 404 fails instead of reportin
 	);
 });
 
-test("detail 404: a run that only retries owed conversations and gets 404 again succeeds and counts the attempt", async () => {
-	const setup: RunSetup = {
-		search: LIST,
-		status: (id) => (id === "conv-A" ? 200 : 404),
-	};
-	const first = await run(setup, {});
-	assert.deepEqual(owedIds(first.state), ["conv-B", "conv-C"]);
-	// Nothing new is listed; the only details are the two owed retries, both 404.
-	const second = await run(setup, first.state);
-	assert.deepEqual(second.detailReads.sort(), ["conv-B", "conv-C"]);
-	const owed = (
-		second.state.messages as {
-			detail_not_found: Record<string, { n: number }>;
-		}
-	).detail_not_found;
-	assert.equal(owed["conv-B"]?.n, 2);
-	assert.equal(owed["conv-C"]?.n, 2);
-});
-
 test("detail 404: three owed retries that all answer 404 do not trip the account guard", async () => {
 	const list = [...LIST, listItem("conv-D", "2026-04-22T12:00:00Z")];
 	const first = await run(
@@ -326,41 +437,4 @@ test("detail 404: three owed retries that all answer 404 do not trip the account
 	const second = await run({ search: list, status: () => 404 }, first.state);
 	assert.deepEqual(second.detailReads.sort(), ["conv-B", "conv-C", "conv-D"]);
 	assert.deepEqual(owedIds(second.state), ["conv-B", "conv-C", "conv-D"]);
-});
-
-test("detail 404: owed conversations past the cap are not fetched", async () => {
-	const owed = Object.fromEntries(
-		Array.from({ length: NOT_FOUND_TRACKED_MAX + 10 }, (_, index) => {
-			const id = `conv-owed-${String(index).padStart(3, "0")}`;
-			return [
-				id,
-				{
-					n: 1,
-					first_seen: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
-					item: { id, update_time: 1_700_000_000 + index },
-				},
-			];
-		}),
-	);
-	const result = await run(
-		{ search: [], status: () => 200 },
-		{ messages: { last_update_time: null, detail_not_found: owed } },
-	);
-	assert.equal(result.detailReads.length, NOT_FOUND_TRACKED_MAX);
-	assert.equal(result.detailReads.sort()[0], "conv-owed-000");
-	assert.equal(result.messageConversations.length, NOT_FOUND_TRACKED_MAX);
-});
-
-test("detail 404: the obligation carries first-seen time and attempts", async () => {
-	const first = await run(
-		{ search: LIST, status: (id) => (id === "conv-B" ? 404 : 200) },
-		{},
-	);
-	const entry = (
-		first.state.messages as {
-			detail_not_found: Record<string, { n: number; first_seen: string }>;
-		}
-	).detail_not_found["conv-B"];
-	assert.equal(entry?.n, 1);
-	assert.ok(entry && !Number.isNaN(Date.parse(entry.first_seen)));
 });

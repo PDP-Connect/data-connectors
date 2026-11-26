@@ -100,7 +100,6 @@ import {
 	createChatGptApi,
 	createOmittedMessageContentTally,
 	estimateChatGptDetailMinutesRemaining,
-	NOT_FOUND_SETTLE_RUNS,
 	normalizeChatGptTerminalError,
 	processConversationDetail,
 	readChatGptPersistedPacing,
@@ -8774,6 +8773,14 @@ async function runPendingGapAnswering404(
 	return harness;
 }
 
+/** Ids a messages cursor still owes a detail read after a 404. */
+function owedConversationIds(cursor: unknown): string[] {
+	const owed = (cursor as { detail_not_found?: unknown } | undefined)
+		?.detail_not_found;
+	if (Array.isArray(owed)) return owed.map(String);
+	return owed && typeof owed === "object" ? Object.keys(owed) : [];
+}
+
 function messagesCoverageOf(
 	harness: ReturnType<typeof makeRecordingEmit>,
 ): Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> | undefined {
@@ -8810,64 +8817,7 @@ test("runConversationsAndMessagesStreams: a pending gap whose conversation answe
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "messages",
 	);
-	assert.equal(
-		(
-			messagesState?.cursor as
-				| { detail_not_found?: Record<string, { n: number }> }
-				| undefined
-		)?.detail_not_found?.["convo-gone"]?.n,
-		1,
-	);
-});
-
-test("runConversationsAndMessagesStreams: a recovery-only run that settles a 404 gap still reports its messages missing", async () => {
-	// The conversation has answered 404 on every run short of the last one.
-	const harness = await runPendingGapAnswering404({
-		messages: {
-			last_update_time: null,
-			detail_not_found: {
-				"convo-gone": {
-					n: NOT_FOUND_SETTLE_RUNS - 1,
-					first_seen: "2026-01-01T00:00:00.000Z",
-					item: { id: "convo-gone", update_time: 1_700_000_100 },
-				},
-			},
-		},
-	});
-
-	assert.deepEqual(
-		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP_RECOVERED"),
-		[
-			{
-				type: "DETAIL_GAP_RECOVERED",
-				reference_only: true,
-				gap_id: "gap_gone",
-				stream: "messages",
-				record_key: "convo-gone",
-			},
-		],
-	);
-	assert.equal(
-		harness.emitted.some((r) => r.stream === "messages"),
-		false,
-	);
-	// Closing the gap is not a confirmed-empty stream: the outcome stays partial.
-	const coverage = messagesCoverageOf(harness);
-	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
-	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
-	assert.deepEqual(coverage?.hydrated_keys, []);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 0);
-	const messagesState = harness.protocolMessages.findLast(
-		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
-			m.type === "STATE" && m.stream === "messages",
-	);
-	assert.equal(
-		(messagesState?.cursor as { detail_not_found?: unknown } | undefined)
-			?.detail_not_found,
-		undefined,
-		"the settled conversation is no longer owed",
-	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor), ["convo-gone"]);
 });
 
 test("runConversationsAndMessagesStreams: a recovery-only run whose pending gap answers 404 emits a partial receipt and keeps the obligation", async () => {
@@ -8885,14 +8835,7 @@ test("runConversationsAndMessagesStreams: a recovery-only run whose pending gap 
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "messages",
 	);
-	assert.equal(
-		(
-			messagesState?.cursor as
-				| { detail_not_found?: Record<string, { n: number }> }
-				| undefined
-		)?.detail_not_found?.["convo-gone"]?.n,
-		1,
-	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor), ["convo-gone"]);
 });
 
 test("runConversationsAndMessagesStreams: drains paged pending message gaps beyond the first 100 in one run", async () => {
