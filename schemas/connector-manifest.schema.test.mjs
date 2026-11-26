@@ -800,8 +800,8 @@ test("automatic shipped manifests declare cadence, background safety and a stale
   for (const { path, manifest } of connectorManifests()) {
     const policy = manifest.capabilities?.refresh_policy;
     if (policy?.recommended_mode !== "automatic") continue;
-    assert.equal(typeof policy.recommended_interval_seconds, "number", `${path}: recommended_interval_seconds is required`);
-    assert.equal(typeof policy.minimum_interval_seconds, "number", `${path}: minimum_interval_seconds is required`);
+    assert.ok(Number.isFinite(policy.recommended_interval_seconds) && policy.recommended_interval_seconds > 0, `${path}: recommended_interval_seconds must be a positive finite number`);
+    assert.ok(Number.isFinite(policy.minimum_interval_seconds) && policy.minimum_interval_seconds > 0, `${path}: minimum_interval_seconds must be a positive finite number`);
     assert.ok(policy.recommended_interval_seconds >= policy.minimum_interval_seconds, `${path}: cadence must be at least minimum_interval_seconds`);
     assert.equal(policy.background_safe, true, `${path}: automatic policy must be background_safe`);
     assert.ok(Number.isFinite(policy.maximum_staleness_seconds) && policy.maximum_staleness_seconds > 0, `${path}: maximum_staleness_seconds must be a positive finite number`);
@@ -815,6 +815,9 @@ test("shipped interaction postures agree with human_interaction", () => {
     if (!policy) continue;
     const interactions = manifest.capabilities?.human_interaction ?? [];
     assert.ok(Array.isArray(interactions), `${path}: human_interaction must be an array`);
+    for (const interaction of interactions) {
+      assert.ok(["otp", "manual_action", "credentials"].includes(interaction), `${path}: unknown human_interaction ${interaction}`);
+    }
     const posture = policy.interaction_posture;
     if (interactions.includes("otp")) {
       assert.equal(posture, "otp_likely", `${path}: otp requires otp_likely posture`);
