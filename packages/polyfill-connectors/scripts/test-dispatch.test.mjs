@@ -10,12 +10,13 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { partitionTests } from "./test-dispatch.mjs";
+import { partitionTests, testCommands } from "./test-dispatch.mjs";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const missingVitestReason =
@@ -121,6 +122,148 @@ test("node:test commands work when Vitest is absent", () => {
 			missing.stderr,
 			/npm ci --prefix packages\/polyfill-connectors\/test-tools/,
 		);
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
+});
+
+// Exercise the actual argv entry point, not just the imported helpers.
+for (const [name, assertion, status] of [
+	["passing", "assert.equal(1, 1)", 0],
+	["failing", "assert.equal(1, 2)", 1],
+]) {
+	test(`dispatcher CLI returns ${status} for a ${name} node:test file`, () => {
+		const directory = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+		const file = join(directory, "fixture.test.mjs");
+		try {
+			writeFileSync(
+				file,
+				`import assert from "node:assert/strict";\nimport { test } from "node:test";\ntest("dispatch CLI fixture", () => { ${assertion}; });\n`,
+			);
+			const result = spawnSync(
+				process.execPath,
+				["scripts/test-dispatch.mjs", "1", file],
+				{
+					cwd: packageRoot,
+					env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+					encoding: "utf8",
+					timeout: 30_000,
+				},
+			);
+			assert.equal(result.error, undefined);
+			assert.equal(result.status, status, result.stdout + result.stderr);
+			assert.match(result.stdout, /dispatch CLI fixture/);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+}
+
+for (const value of ["0", "abc", undefined]) {
+	test(`dispatcher CLI rejects ${value ?? "missing arguments"}`, () => {
+		const directory = mkdtempSync(join(tmpdir(), "dispatch-invalid-"));
+		const file = join(directory, "fixture.test.mjs");
+		try {
+			writeFileSync(
+				file,
+				'throw new Error("invalid CLI must not launch tests");\n',
+			);
+			const result = spawnSync(
+				process.execPath,
+				[
+					"scripts/test-dispatch.mjs",
+					...(value === undefined ? [] : [value, file]),
+				],
+				{
+					cwd: packageRoot,
+					env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+					encoding: "utf8",
+					timeout: 10_000,
+				},
+			);
+			assert.equal(result.error, undefined);
+			assert.equal(result.status, 2, result.stdout + result.stderr);
+			assert.equal(
+				result.stderr.trim(),
+				"usage: node scripts/test-dispatch.mjs <concurrency> <test-files...>",
+			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+}
+
+test("command builders preserve caller concurrency for both runners", () => {
+	for (const concurrency of ["3", "7"]) {
+		const commands = testCommands(
+			["src/node.test.mjs", "src/vitest.test.mjs"],
+			concurrency,
+			new Set(["src/vitest.test.mjs"]),
+		);
+		assert.equal(commands.length, 2);
+		assert.deepEqual(
+			commands[0].args.filter((arg) => arg.startsWith("--test-concurrency=")),
+			[`--test-concurrency=${concurrency}`],
+		);
+		assert.deepEqual(
+			commands[1].args.filter((arg) => arg.startsWith("--maxWorkers=")),
+			[`--maxWorkers=${concurrency}`],
+		);
+	}
+});
+
+test("CLI forwards argv concurrency to the actual spawn boundary", () => {
+	const directory = mkdtempSync(join(tmpdir(), "dispatch-concurrency-"));
+	const preload = join(directory, "capture-spawn.mjs");
+	try {
+		// Intercept only the final process launch, leaving the CLI parser,
+		// partitioning, command builder and runTestCommands wiring intact.
+		writeFileSync(
+			preload,
+			`
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+childProcess.spawn = (command, args) => {
+	console.log(JSON.stringify({ command, args }));
+	const child = new EventEmitter();
+	queueMicrotask(() => child.emit("exit", 0, null));
+	return child;
+};
+syncBuiltinESMExports();
+`,
+		);
+		for (const concurrency of ["3", "7"]) {
+			const result = spawnSync(
+				process.execPath,
+				[
+					"--import",
+					pathToFileURL(preload).href,
+					"scripts/test-dispatch.mjs",
+					concurrency,
+					"src/node.test.mjs",
+				],
+				{
+					cwd: packageRoot,
+					env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+					encoding: "utf8",
+					timeout: 10_000,
+				},
+			);
+			assert.equal(result.error, undefined);
+			assert.equal(result.status, 0, result.stdout + result.stderr);
+			const calls = result.stdout
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			assert.equal(calls.length, 1);
+			assert.equal(calls[0].command, process.execPath);
+			assert.ok(calls[0].args.includes("src/node.test.mjs"));
+			assert.deepEqual(
+				calls[0].args.filter((arg) => arg.startsWith("--test-concurrency=")),
+				[`--test-concurrency=${concurrency}`],
+			);
+		}
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

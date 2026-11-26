@@ -111,7 +111,8 @@ export function signalEpochMsToIso(
 	if (!Number.isFinite(n) || n <= 0) {
 		return null;
 	}
-	return new Date(n).toISOString();
+	const date = new Date(n);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 export interface BuiltMessage {

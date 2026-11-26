@@ -402,6 +402,82 @@ test("parseOrdersListDom: cancelled order (no items, no total) parses alongside 
 
 // ─── parseOrderDetailDom ─────────────────────────────────────────────────
 
+function syntheticCancellationDetail(message: string, alert = ""): OrderDetail {
+	const detail = parseOrderDetailDom(`<div id="orderDetails">
+		<div data-component="cancelled">${message}</div>
+		<div data-component="alerts">${alert}</div>
+		<div data-component="chargeSummary">Grand Total: $42.99</div>
+		<div data-component="purchasedItemsRightGrid">
+			<div data-component="itemTitle"><a href="/dp/B01ABCDEFG">Synthetic remaining item</a></div>
+			<div data-component="unitPrice">$42.99</div>
+		</div>
+	</div>`);
+	assert.ok(detail);
+	return detail;
+}
+
+function assertWholeOrderCancellationControl(): void {
+	for (const text of [
+		"This order has been cancelled",
+		"Your order has been cancelled.",
+	]) {
+		const detail = syntheticCancellationDetail(text);
+		assert.equal(detail.status_detail, "This order has been cancelled");
+		assert.deepEqual(detail.items, []);
+		assert.equal(detail.grand_total, null);
+	}
+}
+
+test("parseOrderDetailDom: item cancellation preserves purchase unlike whole-order cancellation", () => {
+	assertWholeOrderCancellationControl();
+	const detail = syntheticCancellationDetail("One item has been cancelled");
+	assert.equal(detail.status_detail, "One item has been cancelled");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
+});
+
+test("parseOrderDetailDom: unrecognized cancellation wording never destroys an order", () => {
+	assertWholeOrderCancellationControl();
+	for (const text of [
+		"A delivery option has been cancelled",
+		"Not this order has been cancelled",
+		"This order has been cancelled? Contact support",
+		"Cancellation pending",
+	]) {
+		const detail = syntheticCancellationDetail(text);
+		assert.equal(detail.status_detail, null, text);
+		assert.equal(detail.grand_total, "$42.99", text);
+		assert.equal(detail.items.length, 1, text);
+		assert.equal(detail.items[0]?.asin, "B01ABCDEFG", text);
+	}
+});
+
+test("parseOrderDetailDom: unrecognized cancellation keeps independent alert evidence", () => {
+	const detail = syntheticCancellationDetail(
+		"Cancellation pending",
+		"Arriving tomorrow",
+	);
+	assert.equal(detail.status_detail, "Arriving tomorrow");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
+});
+
+test("parseOrderDetailDom: recognized item cancellation takes precedence over alerts", () => {
+	const detail = syntheticCancellationDetail(
+		"One item has been cancelled",
+		"Arriving tomorrow",
+	);
+	assert.equal(detail.status_detail, "One item has been cancelled");
+	assert.equal(detail.grand_total, "$42.99");
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.items[0]?.asin, "B01ABCDEFG");
+	assert.equal(detail.items[0]?.unit_price, "$42.99");
+});
+
 test("parseOrderDetailDom: synthetic-minimal fixture parses full OrderDetail", () => {
 	const html = readFixture("order-detail-minimal.html");
 	const d = parseOrderDetailDom(html);
@@ -856,6 +932,40 @@ test("buildOrderItemRecord: builds emit-ready shape with cents, returned flag, a
 	assert.equal(rec.refund_status, "Returned January 20");
 });
 
+test("buildOrderItemRecord: distinguishes returns from return-window wording", () => {
+	const cases: [string | null, boolean][] = [
+		["Return or replace items: Eligible through November 30, 2026", false],
+		["Return window closed on October 4, 2026", false],
+		["Eligible for Return", false],
+		["Return items: Eligible through Dec 1, 2026", false],
+		[null, false],
+		["", false],
+		["Unknown status", false],
+		["Returned January 20", true],
+		["Return started", true],
+		["Return started. Return window closed on January 5", true],
+		["Refunded. Eligible for return through February 1", true],
+		["Return window closed on Jan 5", false],
+		["Eligible for return through Feb 1", false],
+		["Return window", false],
+		["Unreturned", false],
+		["Return complete", true],
+		["Return received", true],
+		["Refund issued", true],
+		["Refunded", true],
+		["Your return is complete. Your refund has been issued.", true],
+		["Item returned", true],
+	];
+	for (const [status, returned] of cases) {
+		const rec = buildOrderItemRecord("111-2222222-3333333", "2024-01-15", {
+			name: "Widget",
+			refund_status: status,
+		});
+		assert.equal(rec.returned, returned, `status=${JSON.stringify(status)}`);
+		assert.equal(rec.refund_status, status || null);
+	}
+});
+
 test("mergeDetailByKey: buckets by ASIN first, name second", () => {
 	const items: DetailItem[] = [
 		{
@@ -940,4 +1050,51 @@ test("parseAmazonProfileDom: missing nav bar entirely (selector drift) degrades 
 		postal_code: null,
 		store: "amazon.com",
 	});
+});
+
+test("parseOrderDate: calendar dates and explicit-zone instants are host-zone independent", () => {
+	const cases: [string | null | undefined, string | null][] = [
+		["January 5, 2024", "2024-01-05"],
+		["Jan 5, 2024", "2024-01-05"],
+		["December 31, 2023", "2023-12-31"],
+		["2024-01-05", "2024-01-05"],
+		["5 January 2024", "2024-01-05"],
+		["29 Feb 2024", "2024-02-29"],
+		["February 29, 2000", "2000-02-29"],
+		["February 29, 1900", null],
+		["February 30, 2024", null],
+		["2024-02-30", null],
+		["2023-02-29", null],
+		["2024-13-01", null],
+		["2024-01-00", null],
+		["Febtober 99, 2099", null],
+		["Fri, 05 Jan 2024 00:00:00 GMT", "2024-01-05"],
+		["2024-01-05T00:00:00Z", "2024-01-05"],
+		["2024-01-05T00:00:00+09:00", "2024-01-04"],
+		["2024-01-05T23:00:00-06:00", "2024-01-06"],
+		["2024-01-05T00:00:00", null],
+		["not a date at all", null],
+		["", null],
+		[null, null],
+		[undefined, null],
+	];
+	const previousTZ = process.env.TZ;
+	try {
+		for (const zone of ["UTC", "America/Chicago", "Asia/Tokyo"]) {
+			process.env.TZ = zone;
+			for (const [raw, expected] of cases) {
+				assert.equal(
+					parseOrderDate(raw),
+					expected,
+					"TZ=" + zone + " input=" + JSON.stringify(raw),
+				);
+			}
+		}
+	} finally {
+		if (previousTZ === undefined) {
+			delete process.env.TZ;
+		} else {
+			process.env.TZ = previousTZ;
+		}
+	}
 });
