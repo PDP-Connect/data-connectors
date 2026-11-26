@@ -17,13 +17,10 @@ import { validateRecord } from "./schemas.ts";
 import { ensureOuraApiAccess, type OuraApiAccess, probeOuraPortalSession, probeOuraSignInInProgress, readOuraCachedAccess } from "./api-access.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
-// Default first-run history starts at this fixed UTC day.
-const HISTORY_FLOOR = "2015-01-01";
+// Include today in the initial 90-day snapshot.
+const INITIAL_LOOKBACK_DAYS = 89;
 const MUTABLE_OVERLAP_DAYS = 2;
 const CHUNK_DAYS = 30;
-// Consecutive fresh-token pages without a new row before a walk is called
-// stuck. A progress guard, not a page or row limit.
-const NO_PROGRESS_PAGE_GUARD = 16;
 
 interface DailySleep {
   contributors?: Record<string, unknown>;
@@ -125,10 +122,8 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
   endpoint: string, start: string, end: string): Promise<CollectionResult<T>> {
   const rows: T[] = [];
   const seen = new Set<string>();
-  const rowIds = new Set<string>();
-  let noProgressPages = 0;
   let nextToken: string | null = null;
-  while (true) {
+  for (let pages = 0; pages < 50; pages++) {
     const query = new URLSearchParams({ start_date: start, end_date: addDays(end, 1) });
     if (nextToken) query.set("next_token", nextToken);
     let response: APIResponse;
@@ -148,7 +143,6 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       const payload = value as Record<string, unknown>;
       if (!Array.isArray(payload.data)) return { rows, complete: false };
       let invalidRow = false;
-      const idsBefore = rowIds.size;
       for (const row of payload.data) {
         // A row without an identity or a calendar day cannot be placed in the
         // inventory, so its page cannot prove the inventory complete.
@@ -158,7 +152,6 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
           continue;
         }
         rows.push(row as T);
-        rowIds.add(row.id);
       }
       if (invalidRow) return { rows, complete: false };
       // A terminal next_token is Oura's only source evidence of a complete inventory.
@@ -166,13 +159,11 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       if (payload.next_token === null) return { rows, complete: true };
       if (typeof payload.next_token !== "string" || !payload.next_token || seen.has(payload.next_token))
         return { rows, complete: false };
-      // Fresh tokens that never bring a new row would otherwise page forever.
-      noProgressPages = rowIds.size === idsBefore ? noProgressPages + 1 : 0;
-      if (noProgressPages > NO_PROGRESS_PAGE_GUARD) return { rows, complete: false };
       nextToken = payload.next_token;
       seen.add(nextToken);
     } finally { await response.dispose().catch(() => {}); }
   }
+  return { rows, complete: false };
 }
 
 function day(value: string): Date {
@@ -185,8 +176,10 @@ function requestedUtcDay(value: string | undefined): string | undefined {
   return Number.isNaN(timestamp) ? undefined : new Date(timestamp).toISOString().slice(0, 10);
 }
 
-export function initialStartDate(_now?: Date): string {
-  return HISTORY_FLOOR;
+export function initialStartDate(now = new Date()): string {
+  const start = new Date(now);
+  start.setUTCDate(start.getUTCDate() - INITIAL_LOOKBACK_DAYS);
+  return start.toISOString().slice(0, 10);
 }
 
 function addDays(value: string, days: number): string {

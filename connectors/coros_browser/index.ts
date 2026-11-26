@@ -54,8 +54,10 @@ export const PROBE_PATH = "/account/query";
 export const DASHBOARD_PATH = "/dashboard/query";
 /** The activity list's largest page size in the web app. */
 export const PAGE_SIZE = 50;
-/** Before COROS sold its first watch: the floor of a first activities or daily metrics read without a grant start. */
+/** Before COROS sold its first watch: the floor of a first activities read without a grant start. */
 export const HISTORY_FLOOR = "2016-01-01";
+/** A first run without a grant start reads daily metrics this many days back. */
+export const INITIAL_METRIC_DAYS = 180;
 /** Planned workouts: a first run reads this far back and, every run, this far ahead of today. */
 export const PLAN_PAST_DAYS = 28;
 export const PLAN_AHEAD_DAYS = 28;
@@ -577,9 +579,11 @@ export function planDays(
 				: addDays(until, -1);
 	const to = last !== undefined && last < horizon ? last : horizon;
 	const initial =
-		stream === "planned_workouts"
-			? addDays(today, -PLAN_PAST_DAYS)
-			: HISTORY_FLOOR;
+		stream === "activities"
+			? HISTORY_FLOOR
+			: stream === "daily_metrics"
+				? addDays(today, -INITIAL_METRIC_DAYS)
+				: addDays(today, -PLAN_PAST_DAYS);
 	// Without a grant start the stream starts at its initial day, or at an older floor a cursor
 	// already reached; a cursor whose floor was raised by an earlier grant start does not narrow it.
 	const start =

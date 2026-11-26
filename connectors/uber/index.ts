@@ -318,14 +318,6 @@ function assertUberOk(
 	}
 }
 
-/** Session-wide failures must reach the runtime rather than become per-trip gaps. */
-function isRunLevelUberError(error: unknown): boolean {
-	const message = error instanceof Error ? error.message : String(error);
-	return /^(uber_session_expired|uber_rate_limited|uber_transport_error)/.test(
-		message,
-	);
-}
-
 /**
  * Fetch the Activities GraphQL feed page by page via the real
  * `nextPageToken` cursor (live-verified 2026-09-22). Dedupes by trip id
@@ -337,10 +329,8 @@ export async function fetchAllActivities(
 	fetchPath: UberPageFetch,
 	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<{ activities: UberActivity[]; truncated: boolean }> {
-	const seenContinuations = new Set<string>();
 	const all: UberActivity[] = [];
 	const seenIds = new Set<string>();
-	let rawItemsSeen = 0;
 	let nextPageToken: string | undefined;
 	const walk = await walkPagesWithCeiling({
 		maxPages: MAX_ACTIVITY_PAGES,
@@ -354,57 +344,19 @@ export async function fetchAllActivities(
 				...(nextPageToken ? { nextPageToken } : {}),
 			});
 			assertUberOk(status, body, "Activities");
-			const parsed = JSON.parse(body) as
-				| (UberActivitiesResponse & { errors?: { message?: unknown }[] })
-				| null;
-			if (
-				(Array.isArray(parsed?.errors) && parsed.errors.length > 0) ||
-				parsed?.data == null
-			) {
-				const message = Array.isArray(parsed?.errors)
-					? parsed.errors[0]?.message
-					: undefined;
-				const detail =
-					typeof message === "string" ? message : "Missing Activities data";
-				throw new Error(
-					`uber_graphql_error [endpoint Activities]: ${redactTransportDetail(detail).slice(0, 200)}`,
-				);
-			}
-			const activities = parsed.data.activities;
-			const past = activities?.past;
-			if (
-				typeof activities !== "object" ||
-				activities === null ||
-				Array.isArray(activities) ||
-				typeof past !== "object" ||
-				past === null ||
-				Array.isArray(past) ||
-				(past.activities !== null && !Array.isArray(past.activities))
-			) {
-				throw new Error(
-					"uber_graphql_error [endpoint Activities]: Malformed Activities data",
-				);
-			}
-			const page = past.activities ?? [];
+			const parsed = JSON.parse(body) as UberActivitiesResponse;
+			const page = parsed.data?.activities?.past?.activities ?? [];
+			let newOnPage = 0;
 			for (const activity of page) {
-				rawItemsSeen += 1;
 				const id = activityTripId(activity);
 				if (id && !seenIds.has(id)) {
 					seenIds.add(id);
 					all.push(activity);
+					newOnPage += 1;
 				}
 			}
 			const token = parsed.data?.activities?.past?.nextPageToken;
-			// Duplicate records do not prove exhaustion; only cursor progress does.
-			if (token) {
-				if (seenContinuations.has(token)) {
-					throw new Error(
-						"uber_graphql_error [endpoint Activities]: repeated continuation",
-					);
-				}
-				seenContinuations.add(token);
-			}
-			if (!token) {
+			if (!token || newOnPage === 0) {
 				return false;
 			}
 			nextPageToken = token;
@@ -414,11 +366,6 @@ export async function fetchAllActivities(
 			return true;
 		},
 	});
-	if (rawItemsSeen > 0 && seenIds.size === 0) {
-		throw new Error(
-			"uber_graphql_error [endpoint Activities]: no activity carried a trip id",
-		);
-	}
 	return { activities: all, truncated: walk.truncated };
 }
 
@@ -435,7 +382,7 @@ async function fetchGetTrip(
 	return parsed.data?.getTrip;
 }
 
-/** One trip's fare-breakdown lines from GetReceipt. An empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
+/** One trip's fare-breakdown lines from GetReceipt. Never throws; an empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
 async function fetchFareBreakdown(
 	fetchPath: UberPageFetch,
 	tripId: string,
@@ -488,10 +435,7 @@ export async function collectAllStreams(
 		if (wantTrips) {
 			try {
 				getTrip = await fetchGetTrip(fetchPath, tripId);
-			} catch (error) {
-				if (isRunLevelUberError(error)) {
-					throw error;
-				}
+			} catch {
 				getTrip = undefined;
 			}
 			const record = getTrip
@@ -507,10 +451,7 @@ export async function collectAllStreams(
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
 			try {
 				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
-			} catch (error) {
-				if (isRunLevelUberError(error)) {
-					throw error;
-				}
+			} catch {
 				fareBreakdown = [];
 			}
 			const receipt = receiptRecord(tripId, fareBreakdown);
