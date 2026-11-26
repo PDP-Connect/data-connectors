@@ -9307,7 +9307,7 @@
 					}
 				},
 				"capabilities": {
-					"human_interaction": ["manual_action", "otp"],
+					"human_interaction": ["manual_action"],
 					"refresh_policy": {
 						"recommended_mode": "manual",
 						"minimum_interval_seconds": 3600,
