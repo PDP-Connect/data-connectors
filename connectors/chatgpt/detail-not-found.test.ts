@@ -541,3 +541,20 @@ test("detail 404: a cursor with no detail_not_found field owes nothing", async (
 	assert.deepEqual(result.detailReads, []);
 	assert.deepEqual(owedIds(result.state), []);
 });
+
+test("detail 404: a stored owed id outside the bound fails the run instead of being dropped", async () => {
+	// A cursor written before the id bound (head 8647908) can hold a 65-character id.
+	const longId = "x".repeat(NOT_FOUND_ID_MAX_LENGTH + 1);
+	// Both stored shapes; each case is an independent run.
+	await Promise.all(
+		[[longId], { [longId]: { n: 1 } }].map(async (detail_not_found) => {
+			const written = await stateAfterHealthyRun({ detail_not_found });
+			const failed = await failingRun(
+				{ search: LIST, status: () => 200 },
+				written,
+				/1 listed conversation\(s\) answered http 404 or 410 with an id the messages cursor cannot keep/,
+			);
+			assert.equal(wroteMessagesState(failed.protocolMessages), false);
+		}),
+	);
+});

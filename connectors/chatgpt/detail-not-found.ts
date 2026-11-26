@@ -53,23 +53,29 @@ export type NotFoundTable = string[];
  * The stored obligations, as ids. Reads this shape and the earlier
  * `{ <id>: { n, first_seen, item } }` object, whose ids stay owed and whose
  * counters and list item (title included) are dropped. Anything else is empty.
+ * `unkept` counts stored entries the id bound rejects (a cursor written before
+ * the bound); they are never fetched or dropped, and the run fails on them.
  */
-export function readNotFoundTable(value: unknown): Set<string> {
-	const ids = Array.isArray(value)
+export function readNotFoundTable(value: unknown): {
+	ids: Set<string>;
+	unkept: number;
+} {
+	const stored = Array.isArray(value)
 		? value
 		: typeof value === "object" && value !== null
 			? Object.keys(value)
 			: [];
-	return new Set(
-		ids.filter(
-			(id): id is string => typeof id === "string" && OWED_ID.test(id),
-		),
+	const ids = stored.filter(
+		(id): id is string => typeof id === "string" && OWED_ID.test(id),
 	);
+	return { ids: new Set(ids), unkept: stored.length - ids.length };
 }
 
 /** One run's view of the obligations: what it inherited and what it saw. */
 export class DetailNotFoundTracker {
 	readonly prior: ReadonlySet<string>;
+	/** Stored entries the id bound rejects; the run fails rather than drop them. */
+	private readonly unkeptPrior: number;
 	/** Ids whose detail answered 404/410 this run. */
 	private readonly answered = new Set<string>();
 	/** Ids whose detail this run read to a settled outcome (hydrated or unrepresentable). */
@@ -79,7 +85,9 @@ export class DetailNotFoundTracker {
 	private freshNotFound = 0;
 
 	constructor(stored: unknown) {
-		this.prior = readNotFoundTable(stored);
+		const { ids, unkept } = readNotFoundTable(stored);
+		this.prior = ids;
+		this.unkeptPrior = unkept;
 	}
 
 	/** A messages-pass detail answered `status` for a conversation. */
@@ -133,10 +141,11 @@ export class DetailNotFoundTracker {
 		const table = [...new Set([...this.prior, ...this.answered])].filter(
 			(id) => !this.read.has(id),
 		);
-		const unkept = table.filter((id) => !OWED_ID.test(id));
-		if (unkept.length > 0) {
+		const unkept =
+			table.filter((id) => !OWED_ID.test(id)).length + this.unkeptPrior;
+		if (unkept > 0) {
 			throw new Error(
-				`${unkept.length} listed conversation(s) answered http 404 or 410 with an id the messages cursor cannot keep (over ${NOT_FOUND_ID_MAX_LENGTH} characters or not [A-Za-z0-9_:.-]); the run fails rather than drop it`,
+				`${unkept} listed conversation(s) answered http 404 or 410 with an id the messages cursor cannot keep (over ${NOT_FOUND_ID_MAX_LENGTH} characters or not [A-Za-z0-9_:.-]); the run fails rather than drop it`,
 			);
 		}
 		const owed = table.length;
