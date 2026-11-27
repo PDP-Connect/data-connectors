@@ -955,6 +955,9 @@ test("buildOrderItemRecord: distinguishes returns from return-window wording", (
 		["Refunded", true],
 		["Your return is complete. Your refund has been issued.", true],
 		["Item returned", true],
+		["This item can be returned until January 31", false],
+		["This item may be returned until January 31", false],
+		["Item returned on January 5", true],
 	];
 	for (const [status, returned] of cases) {
 		const rec = buildOrderItemRecord("111-2222222-3333333", "2024-01-15", {
