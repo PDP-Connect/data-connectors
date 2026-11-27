@@ -32,7 +32,10 @@ import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	createConnectorFailure,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	activityGearId,
@@ -63,6 +66,21 @@ export const PAGE_DELAY_MS = 1000;
 export const ACTIVITY_DELAY_MS = 1500;
 const RATE_LIMIT_RETRIES = 2;
 const RATE_LIMIT_DELAY_MS = 30_000;
+/**
+ * A list read that never got an answer (the fetch failed, the page was off
+ * strava.com, or the evaluate itself threw) is tried this many more times.
+ * On the mobile PageShim host the page is often still settling right after
+ * sign-in, or the app was in the background for a moment, and the fetch
+ * fails with "Load failed" or "Failed to fetch"; the next try succeeds.
+ */
+const TRANSIENT_RETRIES = 2;
+export const TRANSIENT_RETRY_DELAY_MS = 3000;
+/**
+ * The in-page list fetch gives up before the PageShim bridge's 30 s per-call
+ * timeout, so a slow answer comes back as a network_error the walk can retry
+ * instead of a bridge timeout that ends the run.
+ */
+const LIST_FETCH_TIMEOUT_MS = 25_000;
 const GEAR_LIST_DELAY_MS = 1000;
 
 /** The coverage reasons a browser run can end on; the others are export-only. */
@@ -107,6 +125,8 @@ export interface StravaCollectOptions {
 	pageDelayMs?: number;
 	activityDelayMs?: number;
 	rateLimitDelayMs?: number;
+	/** Base delay before retrying a list read that got no answer. */
+	transientRetryDelayMs?: number;
 	/**
 	 * Throw when the activity list walk stops early after listing some
 	 * activities, instead of emitting that prefix. Set by hosts that store
@@ -127,7 +147,12 @@ interface ActivitiesState {
 	requested_since?: string | null;
 }
 
-/** What the in-page fetch returns. It never throws: PageShim turns a throw into null. */
+/**
+ * What a list read returns. It never throws: a throw from the evaluate itself
+ * (a PageShim bridge timeout, a page that navigated away mid-call) and
+ * PageShim's null for an evaluate that failed in the page both become a
+ * network_error.
+ */
 type ListResponse =
 	| { kind: "wrong_origin"; origin: string }
 	| { kind: "network_error"; message: string }
@@ -219,8 +244,30 @@ async function fetchListPage(
 	page: StravaCollectContext["page"],
 	pageNumber: number,
 ): Promise<ListResponse> {
-	const result = await page.evaluate(
-		async ({ headers, origin, pageNumber, perPage }) => {
+	let result: unknown;
+	try {
+		result = await evaluateListPage(page, pageNumber);
+	} catch (error) {
+		return {
+			kind: "network_error",
+			message: error instanceof Error ? error.message : String(error),
+		};
+	}
+	// PageShim reports an evaluate that failed in the page as null.
+	return (
+		(result as ListResponse | null) ?? {
+			kind: "network_error",
+			message: "the page did not return a result",
+		}
+	);
+}
+
+function evaluateListPage(
+	page: StravaCollectContext["page"],
+	pageNumber: number,
+) {
+	return page.evaluate(
+		async ({ headers, origin, pageNumber, perPage, timeoutMs }) => {
 			if (location.origin !== origin) {
 				return { kind: "wrong_origin", origin: location.origin };
 			}
@@ -231,7 +278,7 @@ async function fetchListPage(
 				per_page: String(perPage),
 			});
 			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 30_000);
+			const timeout = setTimeout(() => controller.abort(), timeoutMs);
 			try {
 				const response = await fetch(`/athlete/training_activities?${query}`, {
 					credentials: "include",
@@ -254,14 +301,13 @@ async function fetchListPage(
 				clearTimeout(timeout);
 			}
 		},
-		{ headers: LIST_HEADERS, origin: ORIGIN, pageNumber, perPage: PER_PAGE },
-	);
-	// PageShim reports an evaluate that failed in the page as null.
-	return (
-		(result as ListResponse | null) ?? {
-			kind: "network_error",
-			message: "the page did not return a result",
-		}
+		{
+			headers: LIST_HEADERS,
+			origin: ORIGIN,
+			pageNumber,
+			perPage: PER_PAGE,
+			timeoutMs: LIST_FETCH_TIMEOUT_MS,
+		},
 	);
 }
 
@@ -561,19 +607,43 @@ async function fetchPageWithRetry(
 	ctx: StravaCollectContext,
 	pageNumber: number,
 	rateLimitDelayMs: number,
+	transientRetryDelayMs: number,
 ): Promise<PageOutcome> {
-	for (let attempt = 0; ; attempt += 1) {
+	let rateLimitAttempts = 0;
+	let transientAttempts = 0;
+	while (true) {
 		const response = await fetchListPage(ctx.page, pageNumber);
 		const rateLimited = response.kind === "response" && response.status === 429;
-		if (!rateLimited || attempt >= RATE_LIMIT_RETRIES) {
-			return classify(response);
+		if (rateLimited && rateLimitAttempts < RATE_LIMIT_RETRIES) {
+			rateLimitAttempts += 1;
+			await ctx.emit({
+				type: "PROGRESS",
+				stream: ACTIVITIES_STREAM,
+				message: `Strava asked us to slow down; waiting before page ${pageNumber} again.`,
+			});
+			await delay(rateLimitDelayMs * rateLimitAttempts);
+			continue;
 		}
-		await ctx.emit({
-			type: "PROGRESS",
-			stream: ACTIVITIES_STREAM,
-			message: `Strava asked us to slow down; waiting before page ${pageNumber} again.`,
-		});
-		await delay(rateLimitDelayMs * (attempt + 1));
+		// No answer at all: the fetch failed, the page left strava.com, or the
+		// evaluate threw. Wait, put the page back on strava.com, and ask again.
+		// An answer Strava gave (a status, a body) is never retried here.
+		const unanswered = response.kind !== "response";
+		if (unanswered && transientAttempts < TRANSIENT_RETRIES) {
+			transientAttempts += 1;
+			await ctx.emit({
+				type: "PROGRESS",
+				stream: ACTIVITIES_STREAM,
+				message: `Strava did not answer page ${pageNumber}; trying again.`,
+			});
+			await delay(transientRetryDelayMs * transientAttempts);
+			try {
+				await ensureStravaOrigin(ctx.page);
+			} catch {
+				// The next read reports where the page is.
+			}
+			continue;
+		}
+		return classify(response);
 	}
 }
 
@@ -594,6 +664,8 @@ export async function collectStravaBrowser(
 	const pageDelayMs = options.pageDelayMs ?? PAGE_DELAY_MS;
 	const activityDelayMs = options.activityDelayMs ?? ACTIVITY_DELAY_MS;
 	const rateLimitDelayMs = options.rateLimitDelayMs ?? RATE_LIMIT_DELAY_MS;
+	const transientRetryDelayMs =
+		options.transientRetryDelayMs ?? TRANSIENT_RETRY_DELAY_MS;
 	const fullRefresh = ctx.collectionMode === "full_refresh";
 	const stored =
 		(ctx.state[ACTIVITIES_STREAM] as ActivitiesState | undefined) ?? {};
@@ -625,7 +697,11 @@ export async function collectStravaBrowser(
 		fullRefresh || stored.list_complete !== true || rangeExpanded;
 	const wasInventoryComplete = stored.list_complete === true;
 
-	await ensureStravaOrigin(ctx.page);
+	try {
+		await ensureStravaOrigin(ctx.page);
+	} catch {
+		// The first list read reports where the page is, and retries.
+	}
 
 	let pageNumber = 1;
 	let pagesRead = 0;
@@ -660,7 +736,12 @@ export async function collectStravaBrowser(
 		if (pagesRead > 0) {
 			await delay(pageDelayMs);
 		}
-		const outcome = await fetchPageWithRetry(ctx, pageNumber, rateLimitDelayMs);
+		const outcome = await fetchPageWithRetry(
+			ctx,
+			pageNumber,
+			rateLimitDelayMs,
+			transientRetryDelayMs,
+		);
 		if (!outcome.ok) {
 			failure = outcome;
 			break;
@@ -742,8 +823,14 @@ export async function collectStravaBrowser(
 		pageNumber += 1;
 	}
 
-	if (failure && options.failRunOnIncompleteList && listed.length > 0) {
-		throw new Error(failure.message);
+	// Also when nothing was listed: a streaming host would otherwise store an
+	// empty `{ activities }` for a list it could not read (sign-in, HTML, a new
+	// shape), and the run would look like an account with no activities. The
+	// code tells the host which failure it was.
+	if (failure && options.failRunOnIncompleteList) {
+		throw createConnectorFailure(failure.reason, failure.message, {
+			retryable: failure.reason === "collection_interrupted",
+		});
 	}
 
 	const summaryRecords = fullRefresh ? listed : newlyListed;

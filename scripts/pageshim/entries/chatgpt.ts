@@ -7,9 +7,10 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import { applyRequestedTimeRanges } from "../requested-time-range.ts";
 
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const STREAMS = ["conversations", "messages", "memories", "account_plan"];
+const STREAMS = PAGESHIM_CONNECTOR_STREAMS;
 const env = (globalThis as { __pageshimEnv?: Record<string, string> })
 	.__pageshimEnv ?? {};
 
@@ -80,7 +81,7 @@ const count = (scope: unknown): number => {
 		},
 		toScope: (_stream, records) => ({ records }),
 		streamScopeRecords: {
-			order: ["messages", "conversations", "memories", "account_plan"],
+			order: ["messages", "conversations"],
 			summarizeCounts: (counts) => {
 				const details = Object.fromEntries(
 					STREAMS.map((stream) => [stream, counts[stream] ?? 0]),

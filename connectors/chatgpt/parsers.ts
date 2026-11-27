@@ -105,14 +105,21 @@ export function flattenTreeCurrentBranch(
  * Join the string entries of a `parts[]` array with "\n". Non-string entries
  * (asset pointers, nested objects) are left out of the join, and are kept
  * whole in `non_string_parts` (`extractNonStringParts`); empty strings are
- * kept, so the result equals the legacy collector's
- * `parts.filter(p => typeof p === "string").join("\n")`. A body whose joined
- * text is empty yields null, so the message is omitted as the legacy one is.
+ * kept for all-string bodies. Mixed bodies need actual string content: join
+ * separators alone do not establish text beside an unknown asset. An explicit
+ * empty string is text; missing parts and empty mixed/asset bodies remain unknown.
  */
 function joinStringParts(content: ChatGptContent): string | null {
 	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = parts.filter((p): p is string => typeof p === "string").join("\n");
-	return s || null;
+	const textParts = parts.filter((p): p is string => typeof p === "string");
+	if (
+		textParts.length === 0 ||
+		(textParts.length !== parts.length &&
+			textParts.every((part) => part.length === 0))
+	) {
+		return null;
+	}
+	return textParts.join("\n");
 }
 
 /** Canonical user/assistant text: `{ parts: ["...", ...] }`. */
@@ -631,7 +638,7 @@ export function extractMessageWithBlob(
 			children_ids: node.children ?? [],
 			role: m.author?.role ?? null,
 			content:
-				oversize || raw === null ? null : encodePdppSafeText(raw) || null,
+				oversize || raw === null ? null : encodePdppSafeText(raw),
 			non_string_parts: extractNonStringParts(m.content),
 			content_type: m.content?.content_type ?? null,
 			model_slug: m.metadata?.model_slug ?? null,

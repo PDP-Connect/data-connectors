@@ -174,15 +174,18 @@ export function readChannelPage(doc: Document = document): {
 		)
 			.map((node) => node.textContent?.trim() ?? "")
 			.find(Boolean) ?? null;
+	// YouTube sets an image's src only once it loads; until then `src` reads
+	// "", which is not a URL. Inline: readers run in the page without imports.
+	const avatarSrc = doc.querySelector<HTMLImageElement>(
+		"yt-img-shadow#avatar img, #avatar img",
+	)?.src;
 	return {
 		channel_id,
 		channel_url: url,
 		title,
 		handle: handle ? `@${handle}` : null,
 		avatar_url:
-			doc.querySelector<HTMLImageElement>(
-				"yt-img-shadow#avatar img, #avatar img",
-			)?.src ?? null,
+			avatarSrc && /^https?:\/\//i.test(avatarSrc) ? avatarSrc : null,
 	};
 }
 
@@ -270,6 +273,10 @@ export function readSubscriptions(doc: Document = document): Array<{
 			const subscriberCountText = node
 				.querySelector("#metadata span#video-count")
 				?.textContent?.trim();
+			// An avatar that has not loaded has no src and reads "": not a URL.
+			const avatarSrc = node.querySelector<HTMLImageElement>(
+				"yt-img-shadow img, img#img",
+			)?.src;
 			return [
 				{
 					channel_url: url.href,
@@ -279,8 +286,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 						? `@${/\/@([^/?#]+)/.exec(href)?.[1]}`
 						: null,
 					avatar_url:
-						node.querySelector<HTMLImageElement>("yt-img-shadow img, img#img")
-							?.src ?? null,
+						avatarSrc && /^https?:\/\//i.test(avatarSrc) ? avatarSrc : null,
 					description:
 						node
 							.querySelector("yt-formatted-string#description")
@@ -521,6 +527,11 @@ export function readVideos(
 				?.textContent?.trim() ||
 			spans[0]?.textContent?.trim() ||
 			null;
+		// A lazy thumbnail has no src (reads "") or a data: placeholder until it
+		// nears the viewport; neither is the video's thumbnail URL.
+		const thumbnailSrc = node.querySelector<HTMLImageElement>(
+			"img.yt-core-image, ytd-thumbnail img, img#img",
+		)?.src;
 		const views_text =
 			spans
 				.findLast((s) => /view/i.test(s.textContent ?? ""))
@@ -541,9 +552,9 @@ export function readVideos(
 					)
 					?.textContent?.trim() || null,
 			thumbnail_url:
-				node.querySelector<HTMLImageElement>(
-					"img.yt-core-image, ytd-thumbnail img, img#img",
-				)?.src ?? null,
+				thumbnailSrc && /^https?:\/\//i.test(thumbnailSrc)
+					? thumbnailSrc
+					: null,
 			watched_date_label: label,
 			views_text,
 			description:

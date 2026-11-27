@@ -81,6 +81,7 @@ import {
 	NO_DETAIL_WAITS,
 	withEmptyConversationDetails,
 } from "./__fixtures__/empty-conversation-details.ts";
+import { withEmptyPrimaryList } from "./__fixtures__/empty-primary-list.ts";
 import {
 	applyChatGptColdStatePreflight,
 	buildChatGptCollectionRateProgress,
@@ -110,7 +111,7 @@ import {
 	resolveChatGptProviderBudget,
 	resolveChatGptRateLimitDensityStop,
 	runAccountPlanStream,
-	runConversationsAndMessagesStreams,
+	runConversationsAndMessagesStreams as runUnionStreams,
 	runCustomGptsStream,
 	runCustomInstructionsStream,
 	runMemoriesStream,
@@ -131,11 +132,67 @@ import type {
 	ConversationListItem,
 } from "./types.ts";
 
+/** These scenarios isolate search/detail behavior against a healthy empty primary source. */
+const runConversationsAndMessagesStreams: typeof runUnionStreams = (
+	deps,
+	state,
+	options,
+) =>
+	runUnionStreams(
+		{ ...deps, api: withEmptyPrimaryList(deps.api) },
+		state,
+		options,
+	);
+
 interface RecordingHarness {
 	deps: StreamDeps;
 	emitted: EmittedRecord[];
 	messages: EmittedMessage[];
 	skipped: SkippedRecord[];
+}
+
+/** Search can finish before primary: only a subsequent primary pass can
+ * authorize the coverage/watermark assertions in these search replay tests. */
+async function completePrimaryAfterSearch(
+	deps: StreamDeps,
+	skipped: ReturnType<typeof makeRecordingEmit>,
+	priorWatermark: unknown,
+): Promise<ReturnType<typeof makeRecordingEmit>> {
+	assert.equal(
+		skipped.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE",
+		),
+		false,
+		"a skipped primary pass cannot certify coverage",
+	);
+	const state = skipped.protocolMessages.findLast(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(state && state.type === "STATE");
+	const cursor = state.cursor as Record<string, unknown>;
+	assert.equal(
+		cursor.last_update_time,
+		priorWatermark,
+		"unread primary keeps the watermark pinned",
+	);
+	assert.equal(cursor.backfill, undefined, "search backfill finished first");
+	const finalRun = makeRecordingEmit(validateRecord);
+	const primaryApi = withEmptyPrimaryList(deps.api);
+	let primaryReads = 0;
+	const api: ChatGptApi = {
+		...primaryApi,
+		fetch: (path, options) => {
+			if (path.startsWith("/conversations?")) primaryReads += 1;
+			return primaryApi.fetch(path, options);
+		},
+	};
+	await runUnionStreams(
+		{ ...deps, api, emit: finalRun.emit, emitRecord: finalRun.emitRecord },
+		{ conversations: cursor },
+		{ detailPacing: NO_DETAIL_WAITS },
+	);
+	assert.ok(primaryReads > 0, "coverage follows an actual primary pass");
+	return finalRun;
 }
 
 test("persistent listing circuit publishes completed metadata through successful partial DONE", async () => {
@@ -2248,8 +2305,11 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 		false,
 		"the replayed overlap was read in run 1, so run 2 does not emit it again",
 	);
+	const finalRun = await completePrimaryAfterSearch(
+		secondDeps, second, firstCursor.last_update_time,
+	);
 	// The detail pass checkpoints every 25 settled rows; the last STATE is final.
-	const finalState = second.protocolMessages
+	const finalState = finalRun.protocolMessages
 		.filter(
 			(message) =>
 				message.type === "STATE" && message.stream === "conversations",
@@ -2263,7 +2323,7 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	);
 	assert.equal(finalCursor.backfill, undefined);
 	assert.equal(
-		second.protocolMessages.some(
+		finalRun.protocolMessages.some(
 			(message) => message.type === "DETAIL_COVERAGE",
 		),
 		true,
@@ -6106,11 +6166,15 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 		deps,
 		{
 			conversations: {
+				enumeration_version: 1,
 				last_update_time: "2026-06-15T00:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
 			},
-			messages: { last_update_time: "2026-06-15T00:00:00.000Z" },
+			messages: {
+				enumeration_version: 1,
+				last_update_time: "2026-06-15T00:00:00.000Z",
+			},
 		} as CollectContext["state"],
 		{ detailPacing: { random: () => 0, sleep: () => undefined } },
 	);
@@ -6153,10 +6217,14 @@ test("runConversationsAndMessagesStreams: empty forward poll emits zero coverage
 	assert.deepEqual(
 		states.map((state) => [state.stream, state.cursor]),
 		[
-			["messages", { last_update_time: "2026-06-15T00:00:00.000Z" }],
+			[
+				"messages",
+				{ enumeration_version: 1, last_update_time: "2026-06-15T00:00:00.000Z" },
+			],
 			[
 				"conversations",
 				{
+					enumeration_version: 1,
 					last_update_time: "2026-06-15T00:00:00.000Z",
 					detail_version: 2,
 					detail_frontier: null,
@@ -6215,6 +6283,7 @@ test("runConversationsAndMessagesStreams: a malformed 200 on the shared /convers
 		states.map((state) => state.cursor),
 		[
 			{
+				enumeration_version: 1,
 				last_update_time: "2026-06-15T00:00:00.000Z",
 				detail_version: 2,
 				detail_frontier: null,
@@ -6324,7 +6393,10 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		emittedIds.has("old-40"),
 		"a conversation reordered by update is collected",
 	);
-	const secondState = second.harness.protocolMessages.find(
+	const finalRun = await completePrimaryAfterSearch(
+		second.deps, second.harness, firstCursor.last_update_time,
+	);
+	const secondState = finalRun.protocolMessages.find(
 		(message) => message.type === "STATE" && message.stream === "conversations",
 	);
 	assert.ok(secondState && secondState.type === "STATE");
@@ -6334,7 +6406,7 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		"the re-seen boundary clears backfill",
 	);
 	assert.ok(
-		second.harness.protocolMessages.some(
+		finalRun.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6411,7 +6483,12 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 	});
 	// old-0 sits before the prior suffix cursor. It already has a record, so the
 	// walk reports it in its coverage count rather than emitting it again.
-	const restartedCoverage = restartedSuffixRun.harness.protocolMessages.find(
+	const confirmedRestart = await completePrimaryAfterSearch(
+		restartedSuffixRun.deps,
+		restartedSuffixRun.harness,
+		suffixCursor.last_update_time,
+	);
+	const restartedCoverage = confirmedRestart.protocolMessages.find(
 		(
 			message,
 		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
@@ -6423,7 +6500,7 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		"the restarted walk includes rows before the prior suffix cursor",
 	);
 	assert.ok(
-		restartedSuffixRun.harness.protocolMessages.some(
+		confirmedRestart.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6466,8 +6543,13 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		undefined,
 		"the retry re-observes its persisted boundary and clears backfill",
 	);
+	const confirmedRetry = await completePrimaryAfterSearch(
+		resumedAfterRateLimit.deps,
+		resumedAfterRateLimit.harness,
+		(rateLimitedState.cursor as Record<string, unknown>).last_update_time,
+	);
 	assert.ok(
-		resumedAfterRateLimit.harness.protocolMessages.some(
+		confirmedRetry.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6539,8 +6621,11 @@ test("runConversationsAndMessagesStreams: equal-time rows moved before the resum
 		second.harness.emitted.some((record) => record.data.id === "tie-30"),
 		"the unseen equal-time row is collected after moving before the saved boundary ID",
 	);
+	const finalRun = await completePrimaryAfterSearch(
+		second.deps, second.harness, firstCursor.last_update_time,
+	);
 	assert.ok(
-		second.harness.protocolMessages.some(
+		finalRun.protocolMessages.some(
 			(message) =>
 				message.type === "DETAIL_COVERAGE" &&
 				message.stream === "conversations",
@@ -6556,11 +6641,10 @@ test("runConversationsAndMessagesStreams: equal-time rows moved before the resum
 // the instant it re-sees anything <= the new cursor, so the unseen tail is
 // permanently skipped, not just delayed. The fix is to never advance past
 // priorConversationsCursor on ANY truncation, regardless of how much of the
-// prefix was proven. This two-run oracle is the fail-before/pass-after gate:
-// run 1 proves the cursor stays PINNED after a partial-then-malformed walk;
-// run 2 proves a healthy re-list from that unchanged cursor re-observes the
-// safe prefix AND reaches the formerly-missing tail, advancing the cursor
-// exactly once, only after a genuinely clean pass.
+// prefix was proven. This three-run oracle proves the cursor stays pinned:
+// run 1 reads a partial prefix; run 2 drains search and reaches its missing
+// tail while primary is skipped; run 3 really reads primary before coverage
+// and watermark advancement can follow the completed enumeration.
 test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk leaves the list cursor pinned; a later healthy run reaches the previously-missing tail", async () => {
 	const priorCursorIso = "2026-06-01T00:00:00.000Z";
 	const priorCursorUnix = Math.floor(new Date(priorCursorIso).getTime() / 1000);
@@ -6734,41 +6818,42 @@ test("runConversationsAndMessagesStreams: CURSOR SAFETY — a truncated walk lea
 		);
 	}
 
-	const run2ListCoverage = run2.protocolMessages.find(
+	const finalRun = await completePrimaryAfterSearch(run2Deps, run2, priorCursorIso);
+	const finalListCoverage = finalRun.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			m.type === "DETAIL_COVERAGE" && m.stream === "conversations",
 	);
 	assert.ok(
-		run2ListCoverage,
+		finalListCoverage,
 		"a genuinely clean full walk must certify list coverage",
 	);
-	assert.equal(run2ListCoverage?.considered, 50);
-	assert.equal(run2ListCoverage?.covered, 50);
+	assert.equal(finalListCoverage?.considered, 50);
+	assert.equal(finalListCoverage?.covered, 50);
 
-	const run2Skip = run2.protocolMessages.find(
+	const finalSkip = finalRun.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "conversations",
 	);
 	assert.equal(
-		run2Skip,
+		finalSkip,
 		undefined,
 		"a clean run must not emit a truncation SKIP_RESULT",
 	);
 
-	const run2States = run2.protocolMessages.filter(
+	const finalStates = finalRun.protocolMessages.filter(
 		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 			m.type === "STATE" && m.stream === "conversations",
 	);
-	// Run 1 read the overlap; run 2 reads only the 20-item tail, so no checkpoint.
-	assert.equal(run2States.length, 1);
+	// The final primary pass reuses the detail reads, so no mid-pass checkpoint.
+	assert.equal(finalStates.length, 1);
 	assert.equal(
-		(run2States.at(-1)?.cursor as { last_update_time?: string } | undefined)
+		(finalStates.at(-1)?.cursor as { last_update_time?: string } | undefined)
 			?.last_update_time,
 		trueMaxUpdateIso,
 		"older backfill items do not move the newest-seen watermark backwards",
 	);
 	assert.equal(
-		(run2States.at(-1)?.cursor as { backfill?: unknown } | undefined)?.backfill,
+		(finalStates.at(-1)?.cursor as { backfill?: unknown } | undefined)?.backfill,
 		undefined,
 		"the completed backfill clears its continuation",
 	);
@@ -7146,6 +7231,73 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	);
 	assert.ok(skip);
 	assert.equal(skip.reason, "pagination_cap_truncated");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+});
+
+test("conversation search slices resume past 5000 while a truncated head still leaves coverage open", async () => {
+	const prior = "2000-01-01T00:00:00.000Z";
+	const row = (index: number) => makeConvo({
+		id: `synthetic-history-${index}`,
+		update_time: 1_700_100_000 - index,
+	});
+	const total = 17_100; // 12,000 older rows after the initial boundary.
+	const start = {
+		position_hint: 5100,
+		oldest_update_time: new Date(Number(row(5099).update_time) * 1000).toISOString(),
+		boundary_ids: [row(5099).id],
+	};
+	const run = async (backfill: typeof start, stallSuffix = false) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const cursors: number[] = [];
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				if (path.startsWith("/conversations/search?")) {
+					const cursor = Number(new URLSearchParams(path.split("?")[1]).get("cursor"));
+					cursors.push(cursor);
+					if (stallSuffix && cursor >= backfill.position_hint - 30) {
+						return { status: 503, json: null };
+					}
+					return { status: 200, json: {
+						items: Array.from({ length: Math.min(30, Math.max(0, total - cursor)) }, (_, i) => row(cursor + i)),
+						next_cursor: cursor + 30 < total ? cursor + 30 : null,
+					} };
+				}
+				if (path.startsWith("/conversation/")) return emptyConversationDetail(path);
+				throw new Error(`unexpected fetch ${path}`);
+			},
+		};
+		await runConversationsAndMessagesStreams({
+			api, emit: harness.emit, emitRecord: harness.emitRecord,
+			sleep: () => Promise.resolve(), progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		}, { conversations: {
+			enumeration_version: 1, last_update_time: prior,
+			detail_version: 2, detail_frontier: null, backfill,
+		} } as CollectContext["state"],
+		{ detailPacing: { random: () => 0, sleep: () => undefined } });
+		const states = harness.protocolMessages.filter(
+			(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+				m.type === "STATE" && m.stream === "conversations",
+		);
+		assert.ok(states.length);
+		const cursor = states.at(-1)?.cursor as { last_update_time: string; backfill: typeof start };
+		assert.equal(cursor.last_update_time, prior);
+		assert.ok(harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "pagination_cap_truncated",
+		), "head still truncates");
+		assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+		return { cursors, backfill: cursor.backfill };
+	};
+	const first = await run(start);
+	assert.ok(first.cursors.some((cursor) => cursor > 5100));
+	assert.equal(first.backfill.position_hint, 10080);
+	const second = await run(first.backfill);
+	assert.equal(second.backfill.position_hint, 15060);
+	const third = await run(second.backfill);
+	assert.ok(third.cursors.includes(total), "third suffix reads the provider's terminal probe");
+	assert.equal(third.backfill.position_hint, total);
+	assert.deepEqual((await run(start, true)).backfill, start, "a stalled suffix cannot replace its saved boundary");
 });
 
 // ─── task 16: bounded cap-tail deferral materialization ──────────────────────
@@ -8644,6 +8796,166 @@ test("runConversationsAndMessagesStreams: recovers pending conversation detail g
 	);
 });
 
+/**
+ * A run whose only work is one pending `messages` gap, and whose detail
+ * answers 404. The forward listing is empty, so nothing but the recovery
+ * pass can account for the conversation in the run's coverage.
+ */
+async function runPendingGapAnswering404(
+	state: CollectContext["state"],
+	extra: Partial<StreamDeps> = {},
+): Promise<ReturnType<typeof makeRecordingEmit>> {
+	const harness = makeRecordingEmit(validateRecord);
+	const goneConvo = makeConvo({ id: "convo-gone", update_time: 1_700_000_100 });
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (path === "/conversation/convo-gone") {
+				return Promise.resolve({ status: 404, json: null });
+			}
+			if (path.startsWith("/conversations/search?")) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: [], has_missing_conversations: false, total: 0 },
+				});
+			}
+			return Promise.resolve(makeDetailOk());
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		detailGaps: [makeDetailGapFromConvo("gap_gone", goneConvo)],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+		...extra,
+	};
+	await runConversationsAndMessagesStreams(deps, state, {
+		detailPacing: { random: () => 0, sleep: () => undefined },
+	});
+	return harness;
+}
+
+/** Ids a messages cursor still owes a detail read after a 404. */
+function owedConversationIds(cursor: unknown): string[] {
+	const owed = (cursor as { detail_not_found?: unknown } | undefined)
+		?.detail_not_found;
+	if (Array.isArray(owed)) return owed.map(String);
+	return owed && typeof owed === "object" ? Object.keys(owed) : [];
+}
+
+function messagesCoverageOf(
+	harness: ReturnType<typeof makeRecordingEmit>,
+): Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> | undefined {
+	return harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			m.type === "DETAIL_COVERAGE" && m.stream === "messages",
+	);
+}
+
+test("runConversationsAndMessagesStreams: a pending gap whose conversation answers 404 stays owed and its messages are reported missing", async () => {
+	const harness = await runPendingGapAnswering404({});
+
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+		"one 404 does not settle the gap",
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+		"the pending gap is not written twice",
+	);
+	assert.equal(
+		harness.emitted.some((r) => r.stream === "messages"),
+		false,
+	);
+	const coverage = messagesCoverageOf(harness);
+	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor), ["convo-gone"]);
+});
+
+test("runConversationsAndMessagesStreams: a recovery-only run whose pending gap answers 404 emits a partial receipt and keeps the obligation", async () => {
+	const harness = await runPendingGapAnswering404({}, { recoveryOnly: true });
+
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+	);
+	const coverage = messagesCoverageOf(harness);
+	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor), ["convo-gone"]);
+});
+
+test("runConversationsAndMessagesStreams: two 404'd pending gaps that the forward listing also lists count once each for the account guard", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const gone = ["convo-gone-1", "convo-gone-2"].map((id, index) =>
+		makeConvo({ id, update_time: 1_700_000_100 + index }),
+	);
+	const detailFetches: string[] = [];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (path.startsWith("/conversations/search?")) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: gone, has_missing_conversations: false, total: 2 },
+				});
+			}
+			if (path.startsWith("/conversations?")) {
+				return Promise.resolve({ status: 200, json: { items: [], total: 0 } });
+			}
+			detailFetches.push(path);
+			return Promise.resolve({ status: 404, json: null });
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		detailGaps: gone.map((c, index) =>
+			makeDetailGapFromConvo(`gap_gone_${index}`, c),
+		),
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	await runConversationsAndMessagesStreams(
+		deps,
+		{},
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+	assert.ok(detailFetches.length >= 2);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor).sort(), [
+		"convo-gone-1",
+		"convo-gone-2",
+	]);
+});
+
 test("runConversationsAndMessagesStreams: drains paged pending message gaps beyond the first 100 in one run", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const conversations = Array.from({ length: 125 }, (_, index) =>
@@ -9565,7 +9877,7 @@ test("runMessagesAndConversationsWithDetail: batch hydration ETA counts conversa
 
 test("runConversationsAndMessagesStreams: terminal detail http failure remains fail-closed", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const listItem = makeConvo({ id: "convo-terminal-404" });
+	const listItem = makeConvo({ id: "convo-terminal-400" });
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
@@ -9580,7 +9892,9 @@ test("runConversationsAndMessagesStreams: terminal detail http failure remains f
 					},
 				});
 			}
-			return Promise.resolve({ status: 404, json: null });
+			// A 400 is a per-conversation failure that does not prove the
+			// conversation is gone (404/410 do, and are skipped).
+			return Promise.resolve({ status: 400, json: null });
 		},
 	};
 	const deps: StreamDeps = {
@@ -9595,7 +9909,7 @@ test("runConversationsAndMessagesStreams: terminal detail http failure remains f
 
 	await assert.rejects(
 		runConversationsAndMessagesStreams(deps, {}),
-		/required conversation detail convo-terminal-404/,
+		/required conversation detail convo-terminal-400 failed with http 400/,
 	);
 
 	assert.equal(

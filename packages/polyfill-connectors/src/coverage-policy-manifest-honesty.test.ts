@@ -281,7 +281,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["github.starred", "9e311bc30648caf0"],
 	["github.issues", "78d301cf719a8421"],
 	["github.pull_requests", "d444968a557e6de5"],
-	["github.gists", "b373793ba858d2c5"],
 	// gmail.messages left this map by declaring `required: true` (it is the
 	// connector's state_stream and the parent of attachments, so a run that
 	// skipped it would not be a Gmail run at all).

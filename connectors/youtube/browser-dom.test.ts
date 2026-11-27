@@ -14,6 +14,7 @@ import {
 	readSubscriptions,
 	readVideos,
 } from "./browser-dom.ts";
+import { validateRecord } from "./schemas.ts";
 
 function dom(html: string): Document {
 	return parseHTML(`<html><body>${html}</body></html>`)
@@ -127,6 +128,88 @@ test("subscription renderers preserve displayed counts and omit missing text", (
 	assert.equal(subscriptions[3]?.subscriber_count_text, "1,2 M d’abonnés");
 	for (const subscription of subscriptions.slice(1, 3))
 		assert.equal(Object.hasOwn(subscription, "subscriber_count_text"), false);
+});
+
+test("subscription avatars that have not loaded read as null, not an empty URL", () => {
+	// The scrubbed live captures hold avatar <img> elements with no src: YouTube
+	// sets it only once the card nears the viewport. An empty src reads as "",
+	// which the URL schema rejects, so every such card was a shape-check skip.
+	for (const name of [
+		"subscriptions-before-scroll.html",
+		"subscriptions-after-scroll.html",
+	]) {
+		const html = readFileSync(
+			new URL(`./__fixtures__/real-shape/${name}`, import.meta.url),
+			"utf8",
+		);
+		const subscriptions = readSubscriptions(dom(html));
+		assert.ok(subscriptions.length > 0, name);
+		for (const channel of subscriptions) {
+			assert.equal(channel.avatar_url, null, name);
+			const { subscriber_count_text: _text, ...fields } = channel;
+			const result = validateRecord("subscriptions", {
+				id: channel.channel_url,
+				...fields,
+				subscriber_count: null,
+			});
+			assert.equal(result.ok, true, `${name}: ${JSON.stringify(result)}`);
+		}
+	}
+});
+
+test("subscription avatars keep a loaded https src", () => {
+	const [channel] = readSubscriptions(
+		dom(
+			'<ytd-channel-renderer><a id="main-link" href="/@synthetic"></a><ytd-channel-name><yt-formatted-string id="text">Synthetic</yt-formatted-string></ytd-channel-name><yt-img-shadow><img src="https://yt3.ggpht.com/synthetic=s88"></yt-img-shadow></ytd-channel-renderer>',
+		),
+	);
+	assert.equal(channel?.avatar_url, "https://yt3.ggpht.com/synthetic=s88");
+});
+
+test("video thumbnails without a loaded https src read as null", () => {
+	const lockup = (img: string) =>
+		`<yt-lockup-view-model class="content-id-abc123XYZ0"><a class="ytLockupViewModelContentImage" href="/watch?v=abc123XYZ0">${img}</a><h3 class="ytLockupMetadataViewModelHeadingReset" title="Title"></h3></yt-lockup-view-model>`;
+	const thumbnail = (img: string) =>
+		readVideos("playlist", dom(lockup(img)))[0]?.thumbnail_url;
+	assert.equal(thumbnail('<img class="yt-core-image">'), null);
+	assert.equal(thumbnail('<img class="yt-core-image" src="">'), null);
+	assert.equal(
+		thumbnail(
+			'<img class="yt-core-image" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">',
+		),
+		null,
+	);
+	assert.equal(
+		thumbnail(
+			'<img class="yt-core-image" src="https://i.ytimg.com/vi/abc123XYZ0/hqdefault.jpg">',
+		),
+		"https://i.ytimg.com/vi/abc123XYZ0/hqdefault.jpg",
+	);
+	const [legacy] = readVideos(
+		"playlist",
+		dom(
+			'<ytd-playlist-video-renderer><a id="video-title" href="/watch?v=abc123XYZ0">Old</a><ytd-thumbnail><img id="img"></ytd-thumbnail></ytd-playlist-video-renderer>',
+		),
+	);
+	assert.equal(legacy?.thumbnail_url, null);
+});
+
+test("channel page avatar without a loaded src reads as null", () => {
+	const page = (img: string) => {
+		const doc = dom(
+			`<h1>Owner</h1><yt-img-shadow id="avatar">${img}</yt-img-shadow>`,
+		);
+		Object.defineProperty(doc, "location", {
+			value: new URL("https://www.youtube.com/@owner"),
+			configurable: true,
+		});
+		return readChannelPage(doc).avatar_url;
+	};
+	assert.equal(page("<img>"), null);
+	assert.equal(
+		page('<img src="https://yt3.ggpht.com/owner=s88">'),
+		"https://yt3.ggpht.com/owner=s88",
+	);
 });
 
 test("playlist links exclude LL and WL and keep native IDs", () => {

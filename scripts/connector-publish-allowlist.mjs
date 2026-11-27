@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
  */
 export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
   [
+    ["readwise", "readwise"],
     ["amazon", "amazon"],
     ["anthropic", "anthropic"],
     ["anthropic_live", "anthropic-live"],
@@ -26,6 +27,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["chatgpt", "chatgpt"],
     ["claude_code", "claude-code"],
     ["codex", "codex"],
+    ["coros_browser", "coros-browser"],
     ["discord_browser", "discord-browser"],
     ["doordash", "doordash"],
     ["facebook", "facebook"],
@@ -58,6 +60,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["linkedin", "linkedin"],
     ["loom", "loom"],
     ["meta", "meta"],
+    ["mountain_project", "mountain-project"],
     ["muse", "muse"],
     ["netflix_export", "netflix-export"],
     ["notion", "notion"],
@@ -65,6 +68,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["oura_browser", "oura-browser"],
     ["perplexity", "perplexity"],
     ["pocket", "pocket"],
+    ["polar_flow", "polar-flow"],
     ["reddit", "reddit"],
     ["shopify", "shopify"],
     [
@@ -77,6 +81,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
       "slack",
       "Requires slackdump from PATH or $SLACKDUMP_BIN and a code-relative config asset; the OCI builder does not implement a per-platform tool layer or asset rewrite yet.",
     ],
+    ["slack_browser", "slack-browser"],
     ["spotify", "spotify"],
     ["steam", "steam"],
     ["strava", "strava"],

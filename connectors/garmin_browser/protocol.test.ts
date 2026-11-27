@@ -570,14 +570,17 @@ test("garmin_browser: every reason the connector can emit has its own copy, and 
 	for (const reason of reasons) assert.ok(!reserved.includes(reason), reason);
 });
 
-test("garmin_browser: a manual, development-tier browser profile with no PageShim, mobile, brand or credential surface", () => {
+test("garmin_browser: a manual, development-tier browser profile with the Garmin brand and no PageShim, mobile or credential surface", () => {
 	// No `features`: declaring PageShim's would make this a PageShim target. No filesystem.
 	assert.deepEqual(manifest.runtime_requirements.bindings, {
 		network: { required: true },
 		browser: { required: true },
 	});
 	assert.equal("mobile" in manifest, false);
-	assert.equal("brand" in manifest, false);
+	assert.deepEqual(manifest.brand, {
+		icon: "icon.svg",
+		background_color: "#000000",
+	});
 	const { capabilities } = manifest;
 	assert.deepEqual(capabilities.human_interaction, ["manual_action"]);
 	assert.equal(capabilities.refresh_policy.recommended_mode, "manual");

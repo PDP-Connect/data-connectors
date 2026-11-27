@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import {
 	assertSynthesizedCall,
 	buildAccountPlanRecord,
@@ -39,12 +40,84 @@ import {
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
+	ChatGptContent,
 	ChatGptMessage,
 	ChatGptNode,
 	ConversationListItem,
 	RawAccountsCheckBody,
 	RawGizmo,
 } from "./types.ts";
+
+for (const contentType of ["text", "multimodal_text"]) {
+	for (const [name, parts, expected] of [
+		["explicit empty", [""], ""],
+		["absent parts", undefined, null],
+		["empty array", [], null],
+		["object only", [{}], null],
+		["mixed empty and object", ["", {}], null],
+		["mixed separated empty strings and object", ["", {}, ""], null],
+		["object before multiple empty strings", [{}, "", ""], null],
+		["mixed empty strings and multiple objects", ["", {}, "", {}], null],
+		["all-string newline", ["", ""], "\n"],
+		["mixed actual text and object", ["text", {}, ""], "text\n"],
+		["mixed whitespace text and object", [" ", {}, ""], " \n"],
+	] as const) {
+		test(`empty text fidelity: ${contentType} ${name} through wire schema`, () => {
+			const content: ChatGptContent = {
+				content_type: contentType,
+				...(parts === undefined ? {} : { parts: [...parts] }),
+			};
+			assert.equal(extractContentParts(content).raw, expected);
+			assert.equal(extractContent(content), expected);
+			const node: ChatGptNode = {
+				parent: null,
+				children: [],
+				message: { id: "synthetic", author: { role: "user" }, content },
+			};
+			const extracted = extractMessage(
+				"synthetic",
+				node,
+				"synthetic-conversation",
+				true,
+			);
+			assert.ok(extracted);
+			assert.equal(extracted.content, expected);
+			const wire = toMessageRecord(extracted, "synthetic-conversation");
+			assert.equal(wire.content, expected);
+			assert.equal(validateRecord("messages", wire).ok, true);
+		});
+	}
+}
+
+test("missing and unsupported content do not assert empty text", () => {
+	for (const content of [
+		undefined,
+		{ content_type: "unsupported", parts: [""] },
+	]) {
+		if (content === undefined) {
+			assert.equal(extractContentParts(content).raw, null);
+			assert.equal(extractContent(content), null);
+		}
+		assert.notEqual(extractContent(content), "");
+		const node: ChatGptNode = {
+			parent: null,
+			children: [],
+			message: {
+				id: "synthetic",
+				author: { role: "user" },
+				...(content ? { content } : {}),
+			},
+		};
+		const extracted = extractMessage(
+			"synthetic", node, "synthetic-conversation", true,
+		);
+		assert.ok(extracted);
+		const wire = toMessageRecord(extracted, "synthetic-conversation");
+		assert.notEqual(wire.content, "");
+		if (content === undefined) assert.equal(wire.content, null);
+		assert.equal(validateRecord("messages", wire).ok, true);
+	}
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
@@ -144,7 +217,7 @@ const LEGACY_JOIN_CASES: Array<[string, unknown[], string | null]> = [
 	["a leading empty string adds a newline", ["", " a "], "\n a "],
 	["empty strings between strings", ["a", "", "b"], "a\n\nb"],
 	["two empty strings give a lone newline", ["", ""], "\n"],
-	["one empty string is empty", [""], null],
+	["one explicit empty string is text", [""], ""],
 	["no parts", [], null],
 	["whitespace-only strings are kept", ["", "   "], "\n   "],
 	["only object parts are empty", [{}, {}], null],
@@ -344,6 +417,30 @@ test("messages manifest: primary key is [id], and every field a wire record carr
 	}
 });
 
+test("messages declaration accepts the explicit empty string emitted on the wire", () => {
+	const manifest = JSON.parse(
+		readFileSync(join(__dirname, "manifest.json"), "utf8"),
+	) as {
+		streams: Array<{ name: string; schema: Record<string, unknown> }>;
+	};
+	const messages = manifest.streams.find((stream) => stream.name === "messages");
+	assert.ok(messages);
+	// The runtime schema above also checks formats; here check the real public
+	// declaration, including nullable content, without custom annotation keywords.
+	const validate = new Ajv2020({
+		strict: false, validateFormats: false,
+	}).compile(messages.schema);
+	for (const contentType of ["text", "multimodal_text"]) {
+		const node = textNode("");
+		if (node.message?.content) node.message.content.content_type = contentType;
+		const extracted = extractMessage("n1", node, "c1", true);
+		assert.ok(extracted);
+		const wire = toMessageRecord(extracted, "c1");
+		assert.equal(wire.content, "");
+		assert.equal(validate(wire), true, JSON.stringify(validate.errors));
+	}
+});
+
 test("extractContent: a body without a parts array is empty", () => {
 	assert.equal(extractContent({ content_type: "text" }), null);
 	assert.equal(extractContent({ content_type: "multimodal_text" }), null);
@@ -351,7 +448,7 @@ test("extractContent: a body without a parts array is empty", () => {
 
 test("extractContent: no text parts → null; whitespace-only text is kept as written", () => {
 	assert.equal(extractContent({ content_type: "text", parts: [] }), null);
-	assert.equal(extractContent({ content_type: "text", parts: [""] }), null);
+	assert.equal(extractContent({ content_type: "text", parts: [""] }), "");
 	assert.equal(
 		extractContent({ content_type: "text", parts: ["", "   "] }),
 		"\n   ",

@@ -98,6 +98,11 @@ export const MAX_LIST_PAGES = 50;
 // Bounded per-run detail budget (design doc "Collector plan" §3): blast-radius
 // stop, not an attempt at exhaustive backfill in one run.
 const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
+// H-E-B's detail page carries no completeness signal, so a hydrated order stays
+// a pending gap and the old-gap pass retries it on every run. Left unbounded, a
+// backlog of 100 such gaps spends the whole budget before the scan for new
+// orders starts. A run that also scans forward lets the pass spend half.
+const MAX_RECOVERY_ATTEMPTS_PER_RUN = MAX_DETAIL_ATTEMPTS_PER_RUN / 2;
 // ~60 days overlap re-scans recently-seen orders to catch status transitions
 // (design doc "Collector plan" §4).
 const CHECKPOINT_OVERLAP_DAYS = 60;
@@ -1767,6 +1772,7 @@ async function recoverPendingOrderItemDetailGapPage(
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
 	gaps: readonly BrowserCollectContext["detailGaps"][number][],
+	attemptCeiling: number,
 ): Promise<{ recovered: number; reDeferred: number; skipped: number }> {
 	let recovered = 0;
 	let reDeferred = 0;
@@ -1777,6 +1783,13 @@ async function recoverPendingOrderItemDetailGapPage(
 			if (gap.stream === "order_items" && gap.status === "pending") {
 				skipped += 1;
 			}
+			continue;
+		}
+		if (flags.detailAttempts >= attemptCeiling) {
+			// Past this run's share of the budget. The host takes back a lease the
+			// run did not settle without counting an attempt, and serves the gaps
+			// with the fewest attempts first, so these come first next run.
+			skipped += 1;
 			continue;
 		}
 		const result = await resolveOrderDetail(page, flags, locator.orderId, {
@@ -1871,6 +1884,7 @@ export async function recoverPendingOrderItemDetailGaps(
 	page: Page,
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
+	attemptCeiling = MAX_DETAIL_ATTEMPTS_PER_RUN,
 ): Promise<{ recovered: number; stoppedWithPending: boolean }> {
 	let recovered = 0;
 	let gaps = deps.detailGaps;
@@ -1880,6 +1894,7 @@ export async function recoverPendingOrderItemDetailGaps(
 			deps,
 			flags,
 			gaps,
+			attemptCeiling,
 		);
 		recovered += result.recovered;
 		if (!deps.requestDetailGapPage) {
@@ -1935,7 +1950,18 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 			suppressForward,
 		};
 	}
-	const recovery = await recoverPendingOrderItemDetailGaps(page, deps, flags);
+	// A recovery-only run has no forward scan to leave budget for.
+	const recovery = await recoverPendingOrderItemDetailGaps(
+		page,
+		deps,
+		flags,
+		options.recoveryOnly === true
+			? MAX_DETAIL_ATTEMPTS_PER_RUN
+			: Math.min(
+					MAX_DETAIL_ATTEMPTS_PER_RUN,
+					flags.detailAttempts + MAX_RECOVERY_ATTEMPTS_PER_RUN,
+				),
+	);
 	const detailBudgetExhausted =
 		flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN;
 	const suppressForward =
@@ -2046,16 +2072,52 @@ async function emitOrderAndItems(
 				card_units: listOrder.itemCount,
 				product_rows: detail.items.length,
 				fulfilled_units: fulfilledUnits ?? "unknown",
+				...(fulfilledUnits === null ? quantityShapeCounts(detail.items) : {}),
 				reason: "unit_and_row_counts_differ",
 			});
-			await deps.progress("An order's item count did not match its details");
 		}
-		deps.itemCountTallies?.push({
-			orderId: listOrder.orderId,
-			declaredItemCount: listOrder.itemCount,
-			collectedItemCount: fulfilledUnits ?? detail.items.length,
-		});
+		// Units are known only when every row has a whole quantity. Without them
+		// the card's count has nothing to be compared with: a 2x line is one row
+		// and a weighed line is a fraction, so a row count cannot show that items
+		// are missing. Only a known shortfall reaches the owner or the run tally.
+		if (fulfilledUnits !== null) {
+			if (
+				listOrder.itemCount !== null &&
+				fulfilledUnits < listOrder.itemCount
+			) {
+				await deps.progress("An order's item count did not match its details");
+			}
+			deps.itemCountTallies?.push({
+				orderId: listOrder.orderId,
+				declaredItemCount: listOrder.itemCount,
+				collectedItemCount: fulfilledUnits,
+			});
+		}
 	}
+}
+
+/** How each row's quantity parsed, as counts only, so an order whose
+ *  fulfilled units are unknown says why in its diagnostic line. */
+function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
+	fractional_qty_rows: number;
+	unparsed_qty_rows: number;
+	whole_qty_rows: number;
+} {
+	const counts = {
+		fractional_qty_rows: 0,
+		unparsed_qty_rows: 0,
+		whole_qty_rows: 0,
+	};
+	for (const { quantity } of items) {
+		if (quantity === null) {
+			counts.unparsed_qty_rows += 1;
+		} else if (Number.isSafeInteger(quantity)) {
+			counts.whole_qty_rows += 1;
+		} else {
+			counts.fractional_qty_rows += 1;
+		}
+	}
+	return counts;
 }
 
 /** Process one list-page order: fetch detail (if in scope), account for
@@ -3077,6 +3139,7 @@ export const hebConnector: BrowserConnectorConfig = {
 	},
 	async collect(ctx: BrowserCollectContext): Promise<void> {
 		const {
+			collectionMode,
 			scope,
 			state,
 			emitRecord,
@@ -3115,7 +3178,12 @@ export const hebConnector: BrowserConnectorConfig = {
 		const collectNutritionTargets = wantsNutrition;
 
 		const ordersState = (state.orders ?? {}) as OrdersStateShape;
-		const boundary = resumeBoundary(ordersState.checkpoint);
+		// An explicit full refresh ignores the resume checkpoint and walks the
+		// whole order history.
+		const boundary =
+			collectionMode === "full_refresh"
+				? null
+				: resumeBoundary(ordersState.checkpoint);
 		// A committed `orders` checkpoint is this connection's own record that
 		// H-E-B has listed orders for this account before. It is what makes a
 		// later "no order history" page a contradiction to escalate rather than

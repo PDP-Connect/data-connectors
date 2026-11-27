@@ -2732,6 +2732,74 @@ test("collectAnthropic: split-export manifest returned by POST export_data impor
 	assert.deepEqual(skipsOf(protocolMessages), []);
 });
 
+
+
+/** The split-export fixture without its projects part, as Claude delivers it
+ * for an account with no projects (verified on a test account 2026-11-04). */
+async function splitExportWithoutProjects() {
+	const downloads = await splitExportDownloads();
+	const manifest = JSON.parse(downloads.manifestBytes.toString("utf8")) as {
+		total_files: number;
+		data_files: { category: string; batch_index: number }[];
+	};
+	manifest.data_files = manifest.data_files
+		.filter((part) => part.category !== "projects")
+		.map((part, index) => ({ ...part, batch_index: index }));
+	manifest.total_files = manifest.data_files.length;
+	return {
+		manifest,
+		downloads: {
+			...downloads,
+			manifestBytes: Buffer.from(JSON.stringify(manifest)),
+		},
+	};
+}
+
+for (const [label, countResponse, expectEmpty] of [
+	["live count 0", jsonResponse(200, { count: 0 }), true],
+	["live count 1", jsonResponse(200, { count: 1 }), false],
+	["unreadable live count", jsonResponse(500, {}), false],
+] as const) {
+	test(`collectAnthropic: a complete split export with no projects part and ${label}`, async () => {
+		const { manifest, downloads } = await splitExportWithoutProjects();
+		const { ctx, emitted, page, protocolMessages } = makeContext({
+			streams: ["account_profile", ...CONTENT_STREAMS],
+			fetchStub: (url) => {
+				if (url.endsWith("/projects/count"))
+					return Promise.resolve(countResponse);
+				if (url.includes("/api/organizations") && !url.includes("export_data"))
+					return Promise.resolve(jsonResponse(200, ORG_RESPONSE));
+				if (url.includes("/export_data"))
+					return Promise.resolve(jsonResponse(200, manifest));
+				return Promise.reject(new Error(`unexpected fetch: ${url}`));
+			},
+		});
+		serveSplitExport(page, "no-nonce", downloads);
+
+		await collectAnthropic(ctx);
+
+		assert.deepEqual(recordCounts(emitted), {
+			account_profile: 1,
+			conversations: 2,
+			messages: 3,
+		});
+		const skippedStreams = skipsOf(protocolMessages).map(
+			(m) => (m as { stream: string }).stream,
+		);
+		const checkpointed = new Set(
+			statesOf(protocolMessages).map((m) => m.stream),
+		);
+		if (expectEmpty) {
+			assert.deepEqual(skippedStreams, []);
+			assert.ok(checkpointed.has("projects"));
+			assert.ok(checkpointed.has("project_documents"));
+		} else {
+			assert.deepEqual(skippedStreams, ["projects", "project_documents"]);
+			assert.ok(!checkpointed.has("projects"));
+		}
+	});
+}
+
 test("collectAnthropic: a failed part of a nonce manifest keeps the pending nonce", async () => {
 	const downloads = await splitExportDownloads();
 	const counter = { exportRequests: 0 };

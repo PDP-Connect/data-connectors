@@ -1,18 +1,23 @@
-# First-Party Aggregation Declarations
+# Aggregation declarations
 
-This note documents the conservative `query.aggregations` declarations added for the first single-stream aggregate surface.
+A stream declares the aggregates a client can request in `query.aggregations` of its entry in `connectors/<key>/manifest.json`. This page lists the keys and the rules that the checks enforce. The guidance for choosing fields is in [Search and filter declarations](connector-authoring-guide.md#4b-search-and-filter-declarations).
 
-## Included
+## Manifest keys
 
-- `ynab.transactions`: count, amount sum/min/max, date min/max, and grouped counts by low-cardinality status/type fields.
-- `chase.transactions`: count, amount sum/min/max, date min/max, and grouped counts by currency/type.
-- `usaa.transactions`: count, amount and balance sum/min/max, date min/max, and grouped counts by currency/category.
-- `gmail.messages`: count, size sum/min/max, received/date min/max, and grouped counts by boolean message-state fields.
-- `slack.messages`: count, engagement count sum/min/max, sent_at min/max, and grouped counts by boolean message-shape fields.
+| Key | Meaning |
+|---|---|
+| `count` | Count of records. |
+| `sum`, `min`, `max` | Numeric or date fields to aggregate. |
+| `count_distinct` | Fields to count distinct values of. |
+| `group_by` | Scalar fields to group counts by. |
+| `group_by_time` | Date or date-time string fields to bucket counts by time. |
 
-## Excluded
+## Declaration rules
 
-- Free-text fields such as memo, name, description, subject, snippet, and Slack text are not groupable or aggregatable.
-- Stable identifiers such as message ids, user ids, channel ids, account ids, payee ids, transaction ids, and thread ids are not groupable because they are high-cardinality and can disclose sensitive relationships.
-- Arrays, objects, blob references, attachment filenames, email participant lists, and relationship-expanded child data are excluded from v1 aggregation declarations.
-- Cross-stream summaries, joins, entity resolution, percentiles, arbitrary expressions, and dashboard-specific rollups remain out of scope.
+1. A stream that declares `group_by` or `group_by_time` also declares `count: true`.
+2. Each `group_by_time` field exists in `schema.properties` and is a date or date-time string. The aggregate engine rejects an integer epoch field.
+3. A field that looks useful for search, range filters, time buckets or grouped counts, but that the stream does not declare for that use, is listed with a reason in `packages/polyfill-connectors/src/query-affordance-allowlist.ts`. The test fails when an entry is stale, which means the manifest now declares it or the stream or field is gone.
+
+`packages/polyfill-connectors/src/query-affordance-manifest-honesty.test.ts` checks these rules.
+
+A stream declares a single-stream aggregate only. Cross-stream summaries, joins, percentiles and arbitrary expressions have no declaration key.

@@ -36,6 +36,10 @@ export function makePagingApi({
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("auth not used in fake")),
 		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			// Primary is a healthy empty source in this search-list fixture.
+			if (path.startsWith("/conversations?")) {
+				return Promise.resolve({ status: 200, json: { items: [], total: 0 } });
+			}
 			if (path.startsWith("/conversations/search?")) {
 				const cursor = Number(
 					new URLSearchParams(path.split("?")[1]).get("cursor"),

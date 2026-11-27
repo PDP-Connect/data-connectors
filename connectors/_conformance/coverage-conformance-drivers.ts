@@ -1241,6 +1241,11 @@ export interface ConnectorDriver {
 }
 
 export const CONNECTOR_DRIVERS: Record<string, ConnectorDriver> = {
+	readwise: {
+		coveredStreams: ["books", "highlights"],
+		run: async () =>
+			(await import("../readwise/coverage-driver.ts")).runCoverageDriver(),
+	},
 	amazon: { coveredStreams: ["orders"], run: driveAmazon },
 	apple_contacts: {
 		coveredStreams: ["address_books", "contacts", "contact_groups"],
@@ -1370,7 +1375,6 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"github.starred",
 	"github.issues",
 	"github.pull_requests",
-	"github.gists",
 	"github.user",
 	"github.user_stats",
 	"github.contributions",
@@ -1449,6 +1453,9 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	// driver exists for it yet.
 	"character_ai.chats",
 	"character_ai.messages",
+	// Mountain Project: auth-walled mountainproject.com session (the exports
+	// are read as the signed-in owner); no credential-free coverage driver yet.
+	"mountain_project.ticks",
 	// Oura browser profile: auth-walled cloud.ouraring.com browser-session
 	// collection with no credential-free coverage driver yet. The PAT/API Oura
 	// connector remains the supported setup profile; this profile is listed as
@@ -1469,6 +1476,12 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"slack.messages",
 	"slack.files",
 	"slack.canvases",
+	// Slack browser profile: auth-walled app.slack.com session whose Web API
+	// token lives only in the signed-in page; no credential-free coverage
+	// driver exists for it yet.
+	"slack_browser.channels",
+	"slack_browser.users",
+	"slack_browser.workspace",
 	"spotify.playlists",
 	"spotify.saved_tracks",
 	// Twitter archive (REAL_UNLISTED_CONNECTORS): zip-import snapshot receipts,
@@ -1515,6 +1528,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"whatsapp.chats",
 	"whatsapp.messages",
 	"whatsapp.attachments",
+	// Whole Foods is real-unlisted Development, but this aggregate gate has
+	// no registered real-collection driver for its required order streams.
+	// Dedicated integration fixtures do not establish coverage in this gate.
+	"wholefoods.order_items",
+	"wholefoods.orders",
 	// YNAB: module-level paced HTTP governor (createConnectorHttpGovernor,
 	// 20s floor interval) for every stream except account_stats, which this
 	// gate drives through ynabCollect's own DI seam (see driveYnabAccountStats

@@ -14,6 +14,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
@@ -392,6 +393,8 @@ test("runSlackdump: detects progress from mtime even when a WAL checkpoint keeps
 		fakeSlackdump,
 		`#!/usr/bin/env node
 import { DatabaseSync } from "node:sqlite";
+import { connect } from "node:net";
+import { createInterface } from "node:readline";
 
 const db = new DatabaseSync(process.env.TEST_SQLITE_PATH);
 db.exec("PRAGMA journal_mode=WAL");
@@ -402,28 +405,56 @@ db.exec(\`
 \`);
 db.prepare("INSERT INTO CHANNEL (ID, NAME, DATA, CHUNK_ID) VALUES (?, ?, ?, ?)").run("C1", "general", "{}", 1);
 
-let n = 0;
-const insert = setInterval(() => {
-  n += 1;
+let n = 1;
+const insert = () => {
   db.prepare("INSERT INTO MESSAGE (CHANNEL_ID, TS, THREAD_TS, IS_PARENT, TXT, NUM_FILES, DATA, CHUNK_ID) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
     .run("C1", String(n), null, null, "msg " + n, null, Buffer.from("{}"), 1);
+};
+insert();
+// Each commit remains observable until the parent acknowledges its progress.
+const acknowledgement = connect(Number(process.env.TEST_ACK_PORT), "127.0.0.1");
+createInterface({ input: acknowledgement }).on("line", line => {
+  if (Number(line) < n) return;
   if (n >= 3) {
-    clearInterval(insert);
+    acknowledgement.end();
     db.close();
     process.exit(0);
   }
-}, 15);
+  n += 1;
+  insert();
+});
 `,
 		"utf8",
 	);
 	await chmod(fakeSlackdump, 0o755);
 	process.env.SLACKDUMP_BIN = fakeSlackdump;
+	let acknowledgement: Socket | undefined;
+	const queuedAcknowledgements: string[] = [];
+	const server = createServer((socket) => {
+		acknowledgement = socket;
+		for (const message of queuedAcknowledgements) socket.write(message);
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	const address = server.address();
+	assert.ok(address && typeof address !== "string");
 
 	try {
 		await runSlackdump(["resume"], {
-			env: { ...process.env, TEST_SQLITE_PATH: sqlitePath },
+			env: {
+				...process.env,
+				TEST_ACK_PORT: String(address.port),
+				TEST_SQLITE_PATH: sqlitePath,
+			},
 			progress: (message, extra = {}) => {
 				progressEvents.push({ extra, message });
+				const messageAcknowledgement = `${progressEvents.length}\n`;
+				if (progressEvents.length <= 3) {
+					if (acknowledgement) acknowledgement.write(messageAcknowledgement);
+					else queuedAcknowledgements.push(messageAcknowledgement);
+				}
 				return Promise.resolve();
 			},
 			progressIntervalMs: 10,
@@ -432,6 +463,8 @@ const insert = setInterval(() => {
 			timeoutMs: 1000,
 		});
 	} finally {
+		acknowledgement?.destroy();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
 		if (priorBin === undefined) {
 			delete process.env.SLACKDUMP_BIN;
 		} else {

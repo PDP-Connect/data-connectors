@@ -1,0 +1,13 @@
+{
+	"result": "0000",
+	"message": "OK",
+	"data": {
+		"summaryInfo": {
+			"rhr": 51,
+			"lthr": 168,
+			"fitnessMaxHr": 189,
+			"staminaScore": 63,
+			"recomendTlInDays": 0
+		}
+	}
+}

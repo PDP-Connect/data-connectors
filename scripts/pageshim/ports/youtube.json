@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "youtube",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}

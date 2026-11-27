@@ -55,6 +55,8 @@ export function createLinkedInFixtures(transform = (_url, body) => body) {
    } else if (url.pathname === "/voyager/api/identity/dash/profiles" && url.searchParams.has("ids")) {
     body = { results: { "urn:li:fsd_profile:conn-1": { firstName: "Fixture", lastName: "Connection", headline: "Tester", publicIdentifier: "fixture-connection" } } };
    } else if (url.pathname === "/voyager/api/identity/dash/profiles") body = { elements: [profile] };
+   // The owner's skills collection: absent unless a case serves it.
+   else if (url.pathname === "/voyager/api/identity/dash/profileSkills") body = { fixtureStatus: 404 };
    else return json({ message: "Unmatched fixture" }, 404);
    const transformed = transform(url, structuredClone(body), requests);
    if (transformed?.fixtureStatus) return json({}, transformed.fixtureStatus);

@@ -48,6 +48,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import {
 	connectorsDir,
 	fixturesDir,
@@ -68,6 +69,57 @@ import {
 const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
 const TEMP_NAME_BROWSER = `zz_init_browser_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";
+
+test("API scaffold reports transient HTTP failures as retryable and client errors as terminal", () => {
+	withPrivateConnectorTree(() => {
+		const args = parseArgs([TEMP_NAME]);
+		const plan = writeScaffold(args);
+		const fixture = join(plan.connectorDir, "http-fixture.mjs");
+		writeFileSync(
+			fixture,
+			'globalThis.fetch = async () => new Response("synthetic failure", { status: Number(process.env.SYNTHETIC_STATUS) });\n',
+		);
+		for (const status of [408, 429, 503, 400, 401]) {
+			const result = spawnSync(
+				process.execPath,
+				[
+					"--import",
+					"tsx",
+					"--import",
+					pathToFileURL(fixture).href,
+					plan.files.indexTs,
+				],
+				{
+					cwd: PACKAGE_ROOT,
+					env: {
+						...childTestEnv(),
+						[`${TEMP_NAME.toUpperCase()}_API_TOKEN`]: "synthetic-token",
+						SYNTHETIC_STATUS: String(status),
+					},
+					input: `${JSON.stringify({ type: "START", scope: { streams: [{ name: TEMP_STREAM }] } })}\n`,
+					encoding: "utf8",
+					timeout: 15_000,
+				},
+			);
+			assert.equal(result.error, undefined);
+			const frames = result.stdout
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const failure = frames.find((frame) => frame.type === "DONE")?.error;
+			assert.ok(failure, `${status}: ${result.stdout}\n${result.stderr}`);
+			assert.equal(
+				failure.retryable,
+				status === 408 || status === 429 || status >= 500,
+				`${status}: ${JSON.stringify(failure)}`,
+			);
+			assert.equal(
+				frames.some((frame) => frame.type === "STATE"),
+				false,
+			);
+		}
+	});
+});
 
 function withPrivateConnectorTree(
 	run: () => void,
@@ -509,5 +561,218 @@ test("connector-init: mutation of an existing tracked input is still rejected", 
 				}, root),
 			/tracked connector/,
 		);
+	});
+});
+
+test("connector-init: next steps keep synthetic pilots separate from reviewed real captures", () => {
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_instructions_${String(process.pid)}`;
+		const plan = planTargets(name, "items");
+		assert.deepEqual(findCollisions(plan), []);
+		try {
+			const result = spawnSync(
+				process.execPath,
+				["--import", "tsx", "bin/connector-init.ts", name],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+					timeout: 60_000,
+				},
+			);
+			assert.equal(result.status, 0, result.stderr);
+			assert.ok(
+				result.stdout.includes(`connectors/${name}/fixtures/scrubbed/<runId>/`),
+			);
+			assert.match(result.stdout, /Keep the synthetic pilot-real-shape rows/);
+			assert.match(
+				result.stdout,
+				/Never put real owner rows under pilot-real-shape/,
+			);
+			assert.doesNotMatch(result.stdout, /replace this\s+scaffold's synthetic/);
+		} finally {
+			cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+		}
+	});
+});
+
+test("CLI browser scaffold parses unusual display names and orders setup before running", () => {
+	withPrivateConnectorTree(() => {
+		for (const [suffix, display] of [
+			["quote", 'Acme "Plus"'],
+			["newline", "Acme\nPlus"],
+		] as const) {
+			const name = `zz_init_${suffix}_${process.pid}`;
+			const plan = planTargets(name, "items");
+			assert.deepEqual(findCollisions(plan), []);
+			try {
+				const result = spawnSync(
+					process.execPath,
+					[
+						"--import",
+						"tsx",
+						"bin/connector-init.ts",
+						name,
+						"--browser",
+						"--display-name",
+						display,
+					],
+					{ cwd: PACKAGE_ROOT, env: childTestEnv(), encoding: "utf8" },
+				);
+				assert.equal(result.status, 0, result.stderr);
+				for (const file of [plan.files.indexTs, plan.files.typesTs]) {
+					const checked = spawnSync(process.execPath, ["--check", file], {
+						encoding: "utf8",
+					});
+					assert.equal(checked.status, 0, checked.stderr);
+				}
+				const setup = result.stdout.indexOf("LOGIN_CHECK_URL");
+				const run = result.stdout.indexOf("bin/connector-dev.ts");
+				assert.ok(setup >= 0 && setup < run, result.stdout);
+			} finally {
+				cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+			}
+		}
+	});
+});
+
+test("CLI browser scaffold rejects an untouched row selector but accepts configured empty rows", () => {
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_rows_${process.pid}`;
+		const plan = planTargets(name, "items");
+		assert.deepEqual(findCollisions(plan), []);
+		try {
+			const result = spawnSync(
+				process.execPath,
+				["--import", "tsx", "bin/connector-init.ts", name, "--browser"],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+				},
+			);
+			assert.equal(result.status, 0, result.stderr);
+			writeFileSync(
+				plan.files.indexTs,
+				readFileSync(plan.files.indexTs, "utf8").replace(
+					'"TODO-rows-container-selector"',
+					'"#rows"',
+				),
+			);
+			writeFileSync(
+				plan.files.indexTs,
+				readFileSync(plan.files.indexTs, "utf8").replace(
+					JSON.stringify(`https://example.invalid/TODO-${name}-items`),
+					JSON.stringify("https://example.invalid/items"),
+				),
+			);
+			const script = `
+      import assert from "node:assert/strict";
+      import {readFileSync, writeFileSync} from "node:fs";
+      import {pathToFileURL} from "node:url";
+      const path = ${JSON.stringify(plan.files.indexTs)};
+      const url = pathToFileURL(path).href;
+      const {collect} = await import(url + "?first");
+      let rows = [{getAttribute: () => "value", textContent: "row"}];
+      const rowLocator = {evaluateAll: async (extract) => extract(rows)};
+      const container = {isVisible: async () => true, locator: () => rowLocator};
+      const page = {goto: async (url) => assert.equal(url, "https://example.invalid/items"), locator: () => ({count: async () => 1, nth: () => container}), waitForTimeout: async () => undefined};
+      const context = {page, requested: new Set(["items"]), progress: async () => undefined, emitRecord: async () => undefined};
+      await assert.rejects(() => collect(context), /ROW_SELECTOR.*placeholder/);
+      rows = [];
+      writeFileSync(path, readFileSync(path, "utf8").replace('"TODO-row-selector"', '".row"'));
+      const configured = await import(url + "?configured");
+      await assert.doesNotReject(() => configured.collect(context));
+    `;
+			const checked = spawnSync(
+				process.execPath,
+				["--import", "tsx", "--input-type=module", "-e", script],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+				},
+			);
+			assert.equal(checked.status, 0, checked.stderr);
+		} finally {
+			cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+		}
+	});
+});
+
+test("CLI browser instructions configure login before first invocation", () => {
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_order_${process.pid}`;
+		const plan = planTargets(name, "items");
+		assert.deepEqual(findCollisions(plan), []);
+		try {
+			const result = spawnSync(
+				process.execPath,
+				["--import", "tsx", "bin/connector-init.ts", name, "--browser"],
+				{
+					cwd: PACKAGE_ROOT,
+					env: childTestEnv(),
+					encoding: "utf8",
+				},
+			);
+			assert.equal(result.status, 0, result.stderr);
+			assert.ok(
+				result.stdout.indexOf("LOGIN_CHECK_URL") >= 0 &&
+					result.stdout.indexOf("LOGIN_CHECK_URL") <
+						result.stdout.indexOf("bin/connector-dev.ts"),
+				result.stdout,
+			);
+		} finally {
+			cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+		}
+	});
+});
+
+test("cleanup leaves unrelated changes in a private fixture alone", () => {
+	const root = mkdtempSync(join(tmpdir(), "init-owned-"));
+	const connector = join(root, "connector");
+	const fixture = join(root, "fixture");
+	const manifest = join(root, "manifest.json");
+	const unrelated = join(root, "unrelated.txt");
+	try {
+		writeFileSync(unrelated, "before");
+		writeFileSync(manifest, "owned");
+		writeFileSync(unrelated, "changed during generation");
+		cleanUp(connector, fixture, manifest);
+		assert.equal(readFileSync(unrelated, "utf8"), "changed during generation");
+		assert.equal(existsSync(manifest), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("CLI collision refuses pre-existing targets without changing their bytes", () => {
+	withPrivateConnectorTree(() => {
+		const name = `zz_init_collision_${process.pid}`;
+		const plan = planTargets(name, "items");
+		mkdirSync(plan.connectorDir, { recursive: true });
+		writeFileSync(plan.files.indexTs, "// sentinel source\n");
+		writeFileSync(plan.files.manifestJson, '{"sentinel":true}\n');
+		const files = [plan.files.indexTs, plan.files.manifestJson];
+		const before = files.map((path) => readFileSync(path));
+		const names = readdirSync(plan.connectorDir).sort();
+		const result = spawnSync(
+			process.execPath,
+			["--import", "tsx", "bin/connector-init.ts", name],
+			{
+				cwd: PACKAGE_ROOT,
+				env: childTestEnv(),
+				encoding: "utf8",
+			},
+		);
+		assert.notEqual(result.status, 0);
+		for (const path of [plan.connectorDir, ...files]) {
+			assert.ok((result.stderr + result.stdout).includes(path));
+		}
+		assert.deepEqual(
+			files.map((path) => readFileSync(path)),
+			before,
+		);
+		assert.deepEqual(readdirSync(plan.connectorDir).sort(), names);
 	});
 });

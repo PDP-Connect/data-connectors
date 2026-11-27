@@ -76,7 +76,11 @@ export function buildTweetRecord(t: TweetShape): TweetOut | null {
 		in_reply_to_status_id: t.in_reply_to_status_id_str ?? null,
 		in_reply_to_screen_name: t.in_reply_to_screen_name ?? null,
 		lang: t.lang ?? null,
-		media_count: (t.entities?.media || []).length,
+		media_count: Array.isArray(t.extended_entities?.media)
+			? t.extended_entities.media.length
+			: Array.isArray(t.entities?.media)
+				? t.entities.media.length
+				: 0,
 		url_count: (t.entities?.urls || []).length,
 	};
 }

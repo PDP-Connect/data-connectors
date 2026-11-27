@@ -535,7 +535,7 @@ test("a malformed account envelope fails without replacing profile state", async
 	);
 });
 
-test("a non-empty page without a final story id fails instead of claiming exhaustion", async () => {
+test("a malformed tail reports ambiguity and retains the last safe checkpoint", async () => {
 	const fetchPath = makeScriptedFetch({
 		[`/stories/target-or-actor/${OWNER_ID}`]: [
 			{
@@ -546,19 +546,23 @@ test("a non-empty page without a final story id fails instead of claiming exhaus
 		],
 	});
 	const { ctx, messages } = makeCtx({}, ["transactions"]);
-	await assert.rejects(
-		collectAllStreams(
-			ctx,
-			fetchPath.fetchPath,
-			OWNER_ID,
-			accountUser(),
-			NO_DELAY,
-		),
-		/venmo_pagination_stalled/,
+	const failures: string[] = [];
+	ctx.reportStreamFailure = async (_stream, message) => {
+		failures.push(message);
+	};
+	await collectAllStreams(
+		ctx,
+		fetchPath.fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
 	);
+	assert.ok(failures.some((message) => message.includes("missing_payment=1")));
+	const state = messages.find((message) => message.type === "STATE");
+	assert.ok(state?.type === "STATE");
 	assert.equal(
-		messages.filter((message) => message.type === "STATE").length,
-		0,
+		(state.cursor as Record<string, unknown>).backfill_before_id,
+		"4901",
 	);
 });
 
@@ -1901,7 +1905,7 @@ test("semantics: completed-run metadata does not claim date cursor incrementalit
 	);
 	assert.equal(transactions.incremental, false);
 	assert.equal(transactions.cursor_field, undefined);
-	assert.equal(manifest.version, "0.2.28");
+	// Patch releases preserve this stream contract without freezing its version.
 });
 
 test("partial mutable payments never replace a complete record and are retried", async () => {
@@ -2049,4 +2053,108 @@ test("unselected incomplete user snapshots do not fail requested coverage", asyn
 		);
 		assert.equal(run.emitted.length, 0);
 	}
+});
+
+for (const reason of ["missing_payment", "unknown_action"]) {
+	test(
+		"ambiguous " + reason + " stories report counts and remain retryable",
+		async () => {
+			const rows = [
+				story("8802", "2026-07-02T00:00:00Z"),
+				story("8801", "2026-07-01T00:00:00Z"),
+			];
+			const partial = rows.map((row) =>
+				reason === "missing_payment"
+					? { ...row, payment: null }
+					: {
+							...row,
+							payment: {
+								...row.payment,
+								action: "future_action",
+								note: "PRIVATE_CANARY",
+							},
+						},
+			);
+			const first = makeCtx({}, ["transactions"]);
+			const failures: string[] = [];
+			first.ctx.reportStreamFailure = async (_stream, message) => {
+				failures.push(message);
+			};
+			await collectAllStreams(
+				first.ctx,
+				makeScriptedFetch({
+					[`/stories/target-or-actor/${OWNER_ID}`]: [
+						{ body: { data: partial } },
+						{ body: { data: [] } },
+					],
+				}).fetchPath,
+				OWNER_ID,
+				accountUser(),
+				NO_DELAY,
+			);
+			assert.equal(first.emitted.length, 0);
+			assert.ok(failures.some((message) => message.includes(reason + "=2")));
+			assert.ok(
+				failures.every((message) => !message.includes("PRIVATE_CANARY")),
+			);
+			const coverage = first.messages.find(
+				(message) => message.type === "DETAIL_COVERAGE",
+			);
+			assert.ok(coverage?.type === "DETAIL_COVERAGE");
+			assert.equal(coverage.considered, 2);
+			assert.equal(coverage.covered, 0);
+			const state = first.messages.find((message) => message.type === "STATE");
+			assert.ok(state?.type === "STATE");
+			assert.equal(
+				(state.cursor as Record<string, unknown>).backfill_before_id,
+				undefined,
+			);
+			const next = makeCtx({ transactions: state.cursor }, ["transactions"]);
+			await collectAllStreams(
+				next.ctx,
+				makeScriptedFetch({
+					[`/stories/target-or-actor/${OWNER_ID}`]: [
+						{ body: { data: rows } },
+						{ body: { data: [] } },
+					],
+				}).fetchPath,
+				OWNER_ID,
+				accountUser(),
+				NO_DELAY,
+			);
+			assert.equal(
+				next.emitted.length,
+				2,
+				"fixed parser can reread previously ambiguous stories",
+			);
+		},
+	);
+}
+
+test("genuinely empty feed completes but error plus empty data does not", async () => {
+	const empty = makeCtx({}, ["transactions"]);
+	const outcome = await collectTransactions(
+		empty.ctx,
+		makeScriptedFetch({
+			[`/stories/target-or-actor/${OWNER_ID}`]: [{ body: { data: [] } }],
+		}).fetchPath,
+		OWNER_ID,
+		NO_DELAY,
+	);
+	assert.equal(outcome.considered, 0);
+	assert.equal(outcome.covered, 0);
+	assert.equal(outcome.blockedByRejected, false);
+	await assert.rejects(
+		collectTransactions(
+			makeCtx({}, ["transactions"]).ctx,
+			makeScriptedFetch({
+				[`/stories/target-or-actor/${OWNER_ID}`]: [
+					{ body: { error: { message: "synthetic failure" }, data: [] } },
+				],
+			}).fetchPath,
+			OWNER_ID,
+			NO_DELAY,
+		),
+		/venmo_invalid_response/,
+	);
 });

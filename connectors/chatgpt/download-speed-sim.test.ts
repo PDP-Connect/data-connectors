@@ -193,6 +193,13 @@ async function simulate(
 				body?: { conversation_ids?: string[] };
 			};
 			const now = Date.now();
+			// Healthy empty primary source isolates the existing search speed model.
+			if (path.startsWith("/conversations?")) {
+				return respondAfter(SEARCH_MS, () => ({
+					status: 200,
+					json: { items: [], total: 0 },
+				}));
+			}
 			if (path === "/conversations/batch") {
 				const key = (body?.conversation_ids ?? []).join(",");
 				batchPosts.push({ atMs: now, ids: key, retry: batchIdsSent.has(key) });

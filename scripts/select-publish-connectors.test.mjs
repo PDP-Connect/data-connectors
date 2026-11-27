@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { parse as parseYaml } from "yaml";
 import {
   filterAbsentVersions,
   PublishSelectionError,
@@ -27,6 +28,23 @@ const SOURCES = {
   github: "https://registry.pdpp.dev/sources/github",
 };
 const VERSIONS = { oura: "0.1.0", oura_browser: "0.1.0", github: "0.5.1" };
+
+test("the publish selector's dependencies are installed before every main-push selection", () => {
+  const workflow = parseYaml(readFileSync(new URL("../.github/workflows/publish-polyfill-connectors.yml", import.meta.url), "utf8"));
+  const steps = workflow.jobs.prepare.steps;
+  const selectorIndex = steps.findIndex((step) => step.id === "main-selection");
+  const installIndex = steps.findIndex((step) => /\bnpm ci\b.*--ignore-scripts/.test(step.run ?? ""));
+  const nodeIndex = steps.findIndex((step) => step.uses?.startsWith("actions/setup-node@"));
+
+  assert.ok(selectorIndex >= 0, "the main-push selector must exist");
+  assert.ok(nodeIndex >= 0 && nodeIndex < installIndex && installIndex < selectorIndex,
+    "set up Node and install the root lockfile before selecting connector releases");
+  const install = steps[installIndex];
+  assert.equal(install.if, steps[selectorIndex].if, "install must run for the same events as selection");
+  assert.equal(install["working-directory"], undefined, "install must use the root lockfile");
+  assert.match(install.run, /(?:^|\s)--include=dev(?:\s|$)/, "selector build dependencies must be present even with production npm settings");
+  assert.notEqual(install["continue-on-error"], true, "a failed install must stop selection");
+});
 
 function makeRepo() {
   const dir = mkdtempSync(join(tmpdir(), "select-publish-connectors-"));
@@ -627,18 +645,13 @@ test("a changed version already present in GHCR is skipped", async () => {
   assert.match(notices.join("\n"), /already present in GHCR/);
 });
 
-test("an unknown GHCR lookup is skipped with a notice and never selected", async () => {
-  const notices = [];
+test("an unknown GHCR lookup fails selection instead of reporting a successful no-op", async () => {
   const candidate = { connector: "oura", manifest: "oura", version: "0.2.0" };
-  const selected = await filterAbsentVersions([candidate], {
+  await assert.rejects(filterAbsentVersions([candidate], {
     owner: "pdp-connect",
     lookup: async () => ({ outcome: "unknown", reason: "registry timed out" }),
-    notice: (message) => notices.push(message),
-  });
-
-  assert.deepEqual(selected, []);
-  assert.match(notices.join("\n"), /GHCR lookup is unknown/);
-  assert.match(notices.join("\n"), /will not be published blindly/);
+    notice: () => {},
+  }), /GHCR lookup is unknown.*registry timed out/);
 });
 
 test("only a definite absent lookup reaches the publish matrix", async () => {

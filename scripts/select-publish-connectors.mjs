@@ -256,9 +256,9 @@ export async function filterAbsentVersions(
       continue;
     }
 
-    notice(
-      `Skipping ${candidate.connector}@${candidate.version}: GHCR lookup is unknown` +
-        `${result?.reason ? ` (${result.reason})` : ""}; it will not be published blindly.`,
+    throw new PublishSelectionError(
+      `${candidate.connector}@${candidate.version}: GHCR lookup is unknown` +
+        `${result?.reason ? ` (${result.reason})` : ""}; retry after the registry is available.`,
     );
   }
   return selected;
@@ -322,7 +322,7 @@ async function main() {
   if (firstLayoutTransition) {
     notice("First root-layout move: automatic connector publication is skipped. Release individual versioned connectors explicitly after consumer activation review.");
   } else if (selected.length === 0) {
-    notice(`Every connector version on main is already in GHCR, or its lookup is unknown, between ${before} and ${after}; nothing to publish.`);
+    notice(`Every connector version on main is already in GHCR between ${before} and ${after}; nothing to publish.`);
   } else {
     notice(`Selected ${selected.length} connector version${selected.length === 1 ? "" : "s"} missing from GHCR for publication.`);
   }

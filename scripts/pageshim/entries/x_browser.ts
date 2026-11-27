@@ -36,6 +36,7 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
 // Defined by build.mjs from connectors/x_browser/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 // Set only by harness tests, to shorten the pauses between actions.
 declare const PAGESHIM_X_ACTION_DELAY_MS: number | undefined;
 
@@ -43,7 +44,7 @@ type ScopeEntriesPage = ShimPage & {
 	requestedScopeEntries?: () => unknown;
 };
 
-const STREAMS = ["profile", "posts", "likes", "bookmarks"];
+const STREAMS = PAGESHIM_CONNECTOR_STREAMS;
 
 const summarizeCounts = (counts: Record<string, number>) => {
 	const details = Object.fromEntries(
@@ -105,7 +106,7 @@ const summarizeCounts = (counts: Record<string, number>) => {
 			},
 			toScope: (_stream, records) => ({ records }),
 			streamScopeRecords: {
-				order: ["posts", "likes", "bookmarks", "profile"],
+				order: ["posts", "likes", "bookmarks"],
 				summarizeCounts,
 			},
 			summarize: (scopes) =>
