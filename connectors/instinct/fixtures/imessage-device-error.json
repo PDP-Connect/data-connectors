@@ -1,0 +1,11 @@
+{
+	"errors": [
+		{
+			"message": "internal server error",
+			"path": ["imessageLocalConnection"]
+		}
+	],
+	"data": {
+		"imessageLocalConnection": null
+	}
+}

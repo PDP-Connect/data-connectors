@@ -1118,9 +1118,20 @@ async function collectOrders(
 			deliveryError instanceof OrderEnumerationUnprovenError
 				? `${error.message}; ${deliveryError.message}`
 				: error.message;
+		// A navigation or readiness failure, or a delivery that failed outright,
+		// is a failed read, not an unproven enumeration (Collection Profile 5.5):
+		// it is reported only as a stream failure.
+		const readFailed =
+			/navigation_failed|readiness_timeout/.test(message) ||
+			(deliveryError !== null &&
+				!(deliveryError instanceof OrderEnumerationUnprovenError));
 		const failedStreams = ORDER_DERIVED_STREAMS;
 		for (const stream of failedStreams) {
 			if (requested.has(stream)) {
+				if (readFailed && reportStreamFailure) {
+					await reportStreamFailure(stream, message, { retryable: true });
+					continue;
+				}
 				await ctx.emit({
 					type: "SKIP_RESULT",
 					stream,
@@ -1128,14 +1139,6 @@ async function collectOrders(
 					message,
 					recovery_hint: { action: "retry_by_runtime", retryable: true },
 				});
-				if (
-					reportStreamFailure &&
-					(/navigation_failed|readiness_timeout/.test(message) ||
-						(deliveryError !== null &&
-							!(deliveryError instanceof OrderEnumerationUnprovenError)))
-				) {
-					await reportStreamFailure(stream, message, { retryable: true });
-				}
 			}
 		}
 		// A signed-out or blocked page is not an enumeration verdict: after the

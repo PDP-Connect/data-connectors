@@ -24,7 +24,7 @@
  */
 
 import assert, { deepStrictEqual, strictEqual } from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import {
 	attachmentContentType,
 	attachmentRecordId,

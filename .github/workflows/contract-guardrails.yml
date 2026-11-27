@@ -24,14 +24,17 @@ jobs:
       - name: Check packed library manifest projection
         run: npm run polyfill-library-metadata:check
 
+      - name: Test PageShim port profiles
+        run: node --test scripts/pageshim/port-profile.test.mjs
+
+      - name: Check stream schemas for run-clock fields
+        run: node scripts/check-run-clock-schema-fields.mjs
+
+      - name: Test run-clock schema guard
+        run: node --test scripts/check-run-clock-schema-fields.test.mjs
+
       - name: Check permanent frozen scope IDs, schemas and generated docs
         run: npm run legacy-shapes:check && npm run legacy-shapes:test
-
-      - name: Test temporary release metadata and fixture proofs (remove with F10)
-        run: npm run legacy-retention:test
-
-      - name: Test the retained Oura artifact (until F2) and connector brand icons
-        run: npm run oura-retention:test
 
       - name: Test installer artifact contracts
         run: npm run installer:test
@@ -45,7 +48,7 @@ jobs:
       - name: Test publish ref gate
         run: node --test scripts/publish-ref-gate.test.mjs
 
-      - name: Test publish tag guard, manifest lookup, registry rate limit and additive schemas
+      - name: Test publish tag guard, manifest lookup, registry rate limit, additive schemas and connector brand icons
         run: npm run scripts:test
 
       - name: Check scope schemas additive (HC-COMPAT-ADDITIVE-SCHEMA-001)

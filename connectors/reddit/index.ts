@@ -106,7 +106,6 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import { createRepairBudget } from "../../packages/polyfill-connectors/src/repair-budget.ts";
-import { OUTPUT_FIELDS, validateRecord } from "./schemas.ts";
 import {
 	appendNewChildren,
 	classifyListingStatus,
@@ -123,6 +122,7 @@ import {
 	voteRecord,
 	voteStatsRecord,
 } from "./parsers.ts";
+import { OUTPUT_FIELDS, validateRecord } from "./schemas.ts";
 import type { RedditChild, RedditFetchResult, RedditListing } from "./types.ts";
 
 const USER_AGENT = "pdpp-reddit-connector/0.2 (polyfill; +https://pdpp.dev)";
@@ -138,9 +138,11 @@ const PAGE_DELAY_MS = 500;
  * this matches. The non-collision tests over this pattern remain as
  * defense-in-depth for the literals Reddit throws, and the pattern still
  * fully owns PRE-submit and collect-phase retry classification.
+ * Collect transport status 0 and HTTP 5xx failures are retryable; auth,
+ * other HTTP 4xx (except the existing 429 path), and parse errors are not.
  */
 export const REDDIT_RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|fetch failed|reddit_rate_limited/i;
+	/ECONN|ETIMEDOUT|fetch failed|reddit_rate_limited|reddit_http_(?:0|5\d\d)\b/i;
 
 const REDDIT_TERMINAL_DIAGNOSTIC_MAX = 240;
 const REDDIT_AUTH_FAILURE_RE =
@@ -916,6 +918,81 @@ export async function collectAllStreams(
 			...(options.delay ? { delay: options.delay } : {}),
 		});
 	}
+}
+
+// ─── PageShim host ──────────────────────────────────────────────────────
+
+/**
+ * The PageShim page answers navigation and evaluation but has no synchronous
+ * `url()`. The origin guard ({@link ensureRedditJsonOrigin}) needs one, so this
+ * page reads the document's address after each navigation instead.
+ */
+function documentUrlPage(page: Page): Page {
+	let url = "about:blank";
+	const readUrl = async (): Promise<void> => {
+		url = String(await page.evaluate(() => location.href));
+	};
+	return {
+		url: () => url,
+		goto: async (target: string, options?: Parameters<Page["goto"]>[1]) => {
+			const response = await page.goto(target, options);
+			await readUrl();
+			return response;
+		},
+		evaluate: page.evaluate.bind(page),
+	} as unknown as Page;
+}
+
+/**
+ * The signed-in account name, from `/api/me.json` on the Reddit origin the
+ * page is on. Null when the page is not on Reddit or the session is signed
+ * out (Reddit answers `{}` or redirects to its login page). Never navigates.
+ */
+async function sessionAccountName(page: Page): Promise<string | null> {
+	const name = await page.evaluate(async () => {
+		try {
+			if (!/(^|\.)reddit\.com$/.test(location.hostname)) return null;
+			const res = await fetch("/api/me.json", {
+				credentials: "include",
+				headers: { accept: "application/json" },
+			});
+			if (!res.ok) return null;
+			const body = (await res.json()) as { data?: { name?: unknown } };
+			return typeof body?.data?.name === "string" ? body.data.name : null;
+		} catch {
+			return null;
+		}
+	});
+	return typeof name === "string" && name ? name : null;
+}
+
+/** PageShim session probe: the page's Reddit session names an account. */
+export async function probeRedditSession(page: Page): Promise<boolean> {
+	return (await sessionAccountName(page)) !== null;
+}
+
+/**
+ * PageShim collect. The host signs the owner in and passes no credentials, so
+ * the listings' account name comes from the session itself.
+ */
+export async function collectRedditPageShim(
+	ctx: BrowserCollectContext,
+): Promise<void> {
+	const page = documentUrlPage(ctx.page);
+	if (!(await ensureRedditJsonOrigin(page))) {
+		throw new Error(`reddit_http_0: ${REDDIT_JSON_ORIGIN} could not be opened`);
+	}
+	const user = await sessionAccountName(page);
+	if (!user) {
+		throw new Error(
+			"reddit_auth_failed: the session names no signed-in account",
+		);
+	}
+	await collectAllStreams({
+		...ctx,
+		page,
+		credentials: { ...ctx.credentials, REDDIT_USERNAME: user },
+	});
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────

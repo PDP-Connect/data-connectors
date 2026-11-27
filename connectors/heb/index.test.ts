@@ -4,7 +4,8 @@
 /**
  * Integration tests for the H-E-B connector's collect()-layer helpers.
  *
- * These tests don't spin up a browser. They stub `Page`'s minimal surface
+ * The synthetic `collect:` cases and existing detail-surface tests launch
+ * Chromium against local fixtures. Other tests stub `Page`'s minimal surface
  * (goto/waitForSelector/content/url) and drive the real exported functions
  * from index.ts, using `makeRecordingEmit(validateRecord)` so every emitted
  * record runs through the connector's real zod schema.
@@ -34,6 +35,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
+	type EmittedRecord,
 	makeRecordingEmit,
 	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
@@ -42,6 +44,7 @@ import {
 	classifyEmptyListPage,
 	classifyHebDetailFailure,
 	collectNutrition,
+	HebEnumerationUnprovenError,
 	collectProfile,
 	type DetailFailureKind,
 	type EmitDeps,
@@ -55,6 +58,7 @@ import {
 	HEB_REPAIR_RETRY_DELAY_MAX_MS,
 	HEB_REPAIR_RETRY_DELAY_MIN_MS,
 	hebAllowsInteractiveAuthRepair,
+	hebConnector,
 	type NutritionTarget,
 	newOrderItemsCoverage,
 	newOrdersCoverage,
@@ -75,9 +79,14 @@ import {
 	resolveOrderDetail,
 	runForwardScan,
 } from "./index.ts";
+import type { OrderItemTally } from "./item-count-anchor.ts";
+import { parseOrderDate, parseOrdersListDom } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
 
+// DOM fixtures contain date-only English labels; pin this test process so
+// absolute fixture dates do not depend on the host's local timezone.
+process.env.TZ = "UTC";
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
 // they fire on the next tick instead of sleeping.
 after(skipPoliteDelays());
@@ -223,6 +232,420 @@ const NO_DETAIL_HTML = "<html><body><main>no items here</main></body></html>";
 const PASSWORD_FORM_HTML = `<html><body><main>
   <form><input type="password" name="password" /></form>
 </main></body></html>`;
+
+interface SyntheticProviderBody {
+	orderDate: string;
+	quantity: number;
+	lineTotal: string;
+}
+
+interface SyntheticListSummary {
+	itemCount: number;
+	total: string;
+}
+
+function syntheticOrderList(
+	body: SyntheticProviderBody,
+	summary: Partial<SyntheticListSummary> = {},
+): string {
+	const [year, month, day] = body.orderDate.split("-").map(Number);
+	const date = new Date(Date.UTC(year ?? 2026, (month ?? 1) - 1, day ?? 1));
+	const dateLabel = new Intl.DateTimeFormat("en-US", {
+		day: "numeric",
+		month: "short",
+		timeZone: "UTC",
+		year: "numeric",
+	}).format(date);
+	return `<html><body><main><div data-qe-id="orderResults"><div><div><div data-qe-id="orderDetailsCard"><div><p data-qe-id="orderDetailsHeader">Curbside at H-E-B Synthetic Store</p><p data-qe-id="orderDetailsDate">${dateLabel}, 11:00am–12:00pm</p><p data-qe-id="orderDetailsTotal">Total: <span>${summary.total ?? body.lineTotal}, ${summary.itemCount ?? body.quantity} items</span><br>Status: <span data-qe-id="orderDetailsStatus">Delivered</span></p></div><div><a data-qe-id="viewDetailsButton" href="/my-account/order-history/HEB1000000001">View details</a></div></div></div></div></div><nav aria-label="Pagination Navigation"><a href="/my-account/your-orders?page=1">1</a></nav></main></body></html>`;
+}
+
+function syntheticOrderDetail(body: SyntheticProviderBody): string {
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic groceries</h2><ul><li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic-widget/9001">Synthetic Widget</a><span data-qe-id="checkoutItemPrice">${body.lineTotal}</span><span data-qe-id="orderItemQty">Qty: ${body.quantity}</span></li></ul></section></main></body></html>`;
+}
+
+const SYNTHETIC_ORDER: SyntheticProviderBody = {
+	lineTotal: "$10.00",
+	orderDate: "2026-07-14",
+	quantity: 1,
+};
+
+test("collect: synthetic fixture dates use a deterministic UTC test environment", () => {
+	assert.equal(process.env.TZ, "UTC");
+	const raw = parseOrdersListDom(syntheticOrderList(SYNTHETIC_ORDER))[0]
+		?.orderDateRaw;
+	assert.ok(raw);
+	assert.equal(parseOrderDate(raw), SYNTHETIC_ORDER.orderDate);
+});
+
+test("collect: synthetic list summary controls stay independent of detail fields", () => {
+	const summary = { itemCount: 1, total: "$10.00" };
+	const base = syntheticOrderList(SYNTHETIC_ORDER, summary);
+	assert.equal(
+		syntheticOrderList({ ...SYNTHETIC_ORDER, quantity: 2 }, summary),
+		base,
+		"detail quantity must not change the controlled list count",
+	);
+	assert.equal(
+		syntheticOrderList({ ...SYNTHETIC_ORDER, lineTotal: "$12.00" }, summary),
+		base,
+		"detail line total must not change the controlled list total",
+	);
+	assert.match(base, /\$10\.00, 1 items/);
+});
+
+interface SyntheticStreamFailure {
+	stream: string;
+	message: string;
+	options: { retryable?: boolean } | undefined;
+}
+
+async function collectSyntheticHeb(input: {
+	body: SyntheticProviderBody;
+	listSummary?: Partial<SyntheticListSummary>;
+	emittedAt: string;
+	state: Record<string, unknown>;
+	streams: string[];
+}): Promise<{
+	emitted: EmittedRecord[];
+	protocolMessages: EmittedMessage[];
+	streamFailures: SyntheticStreamFailure[];
+	progressMessages: string[];
+}> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const listBody = syntheticOrderList(input.body, input.listSummary);
+		const detailBody = syntheticOrderDetail(input.body);
+		// Keep every request local to these synthetic provider responses.
+		await page.route("**/*", (route) => route.abort());
+		await page.route(
+			"https://www.heb.com/my-account/your-orders?page=1",
+			(route) => route.fulfill({ body: listBody, contentType: "text/html" }),
+		);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB1000000001",
+			(route) => route.fulfill({ body: detailBody, contentType: "text/html" }),
+		);
+		const harness = makeRecordingEmit(validateRecord);
+		const streams = input.streams.map((name) => ({ name }));
+		const streamFailures: SyntheticStreamFailure[] = [];
+		const progressMessages: string[] = [];
+		const context: BrowserCollectContext = {
+			assist: async () => {
+				throw new Error("synthetic collect must not request assistance");
+			},
+			capture: null,
+			collectionMode: "incremental",
+			completeAssistance: async () => {},
+			context: page.context(),
+			credentials: {},
+			detailGaps: [],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			// All fixture records are selected; this run exercises mapping only.
+			isRecordSelected: (_stream, _data) => true,
+			emittedAt: input.emittedAt,
+			page,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+			recoveryOnly: false,
+			reportStreamFailure: async (stream, message, options) => {
+				streamFailures.push({ stream, message, options });
+			},
+			requestDetailGapPage: async () => [],
+			requested: new Map(streams.map((stream) => [stream.name, stream])),
+			scope: { streams },
+			sendInteraction: async () => {
+				throw new Error("synthetic collect must not request interaction");
+			},
+			state: input.state,
+		};
+		await hebConnector.collect(context);
+		return {
+			emitted: harness.emitted,
+			protocolMessages: harness.protocolMessages,
+			streamFailures,
+			progressMessages,
+		};
+	} finally {
+		await browser.close();
+	}
+}
+
+const ORDER_STREAMS = ["orders", "order_items"];
+const SYNTHETIC_CLOCK = "2026-08-20T12:00:00.000Z";
+const SYNTHETIC_LATER_CLOCK = "2026-09-21T12:00:00.000Z";
+
+type SyntheticRun = Awaited<ReturnType<typeof collectSyntheticHeb>>;
+type SkipResult = Extract<EmittedMessage, { type: "SKIP_RESULT" }>;
+
+function onlyRecord(
+	run: SyntheticRun,
+	stream: string,
+): Record<string, unknown> {
+	const records = run.emitted.filter((record) => record.stream === stream);
+	assert.equal(records.length, 1, `expected exactly one ${stream} record`);
+	const [record] = records;
+	assert.ok(record);
+	return record.data;
+}
+
+function withoutFields(
+	data: Record<string, unknown>,
+	fields: string[],
+): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(data).filter(([key]) => !fields.includes(key)),
+	);
+}
+
+/** Current contract: the list scan has no owner-bound proof, so valid records
+ * are still emitted but no STATE cursor is written and every requested stream
+ * reports `inventory_not_proven_complete` (index.ts emitInventoryIncomplete). */
+function assertWithheldWithoutState(
+	run: SyntheticRun,
+	streams: string[],
+): void {
+	assert.deepEqual(
+		run.protocolMessages.filter((message) => message.type === "STATE"),
+		[],
+		"unproven list inventory must not emit a STATE cursor",
+	);
+	// H-E-B never calls reportStreamFailure; the withheld signal travels as SKIP_RESULT.
+	assert.deepEqual(
+		run.streamFailures,
+		[],
+		"the withheld signal is a SKIP_RESULT, not a reportStreamFailure call",
+	);
+	const skips = run.protocolMessages.filter(
+		(message): message is SkipResult => message.type === "SKIP_RESULT",
+	);
+	// A stream may be reported at more than one call site, so compare distinct
+	// values rather than the exact skip count.
+	assert.deepEqual(
+		[...new Set(skips.map((skip) => skip.reason))],
+		["inventory_not_proven_complete"],
+		"every incomplete signal carries the same reason",
+	);
+	assert.deepEqual(
+		[...new Set(skips.map((skip) => skip.stream))].sort(),
+		[...streams].sort(),
+		"the incomplete signal covers exactly the requested streams",
+	);
+}
+
+test("collect: identical synthetic provider bodies map to identical RECORD data across collection clocks", async () => {
+	// Each stream set launches its own browser and shares no state, so the sets run concurrently.
+	await Promise.all(
+		[["order_items"], ORDER_STREAMS].map(async (streams) => {
+			const first = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: SYNTHETIC_CLOCK,
+				state: {},
+				streams,
+			});
+			const second = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: SYNTHETIC_LATER_CLOCK,
+				state: {},
+				streams,
+			});
+			const firstRecords = first.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const secondRecords = second.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const expectedStreams = streams.includes("orders")
+				? ["orders", "order_items"]
+				: ["order_items"];
+			assert.deepEqual(
+				firstRecords.map((record) => record.stream),
+				expectedStreams,
+				"the first mapping run emits every selected stream record",
+			);
+			assert.deepEqual(
+				secondRecords.map((record) => record.stream),
+				expectedStreams,
+				"the second mapping run emits every selected stream record",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data),
+				secondRecords.map((record) => record.data),
+				"raw RECORD data must not depend on the collection clock",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data.id),
+				secondRecords.map((record) => record.data.id),
+				"matching cardinality and keys prove no record was suppressed",
+			);
+			assertWithheldWithoutState(first, streams);
+			assertWithheldWithoutState(second, streams);
+		}),
+	);
+});
+
+test("collect: an isolated provider orderDate change reaches orders and order_items only", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, orderDate: "2026-07-15" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(base, ORDER_STREAMS);
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseOrder = onlyRecord(base, "orders");
+	const order = onlyRecord(changed, "orders");
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(
+		order.id,
+		baseOrder.id,
+		"orderDate does not change the order identity",
+	);
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"orderDate does not change the item identity",
+	);
+	assert.deepEqual(
+		withoutFields(order, ["order_date"]),
+		withoutFields(baseOrder, ["order_date"]),
+		"unrelated order fields hold steady",
+	);
+	assert.deepEqual(
+		withoutFields(item, ["order_date"]),
+		withoutFields(baseItem, ["order_date"]),
+		"unrelated item fields hold steady",
+	);
+	assert.equal(
+		order.order_date,
+		"2026-07-15",
+		"provider orderDate maps to orders.order_date",
+	);
+	assert.equal(
+		item.order_date,
+		"2026-07-15",
+		"provider orderDate maps to order_items.order_date",
+	);
+});
+
+test("collect: an isolated provider quantity change reaches order_items.quantity", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, quantity: 2 },
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(base, ORDER_STREAMS);
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseOrder = onlyRecord(base, "orders");
+	const order = onlyRecord(changed, "orders");
+	assert.equal(baseOrder.item_count, 1);
+	assert.equal(baseOrder.total, "$10.00");
+	assert.equal(baseOrder.total_cents, 1000);
+	assert.deepEqual(order, baseOrder, "independent list summary is unchanged");
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(baseItem.quantity, 1);
+	assert.equal(baseItem.line_total, "$10.00");
+	assert.equal(baseItem.line_total_cents, 1000);
+	assert.equal(baseItem.order_date, "2026-07-14");
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"quantity does not change the item identity",
+	);
+	assert.equal(
+		item.line_total,
+		baseItem.line_total,
+		"line total is an independent provider field",
+	);
+	assert.equal(item.line_total_cents, baseItem.line_total_cents);
+	assert.equal(item.order_date, baseItem.order_date);
+	assert.deepEqual(
+		withoutFields(item, ["quantity"]),
+		withoutFields(baseItem, ["quantity"]),
+		"unrelated item fields hold steady",
+	);
+	// A greater fulfilled-unit total is not evidence of a shortfall.
+	const mismatch = "An order's item count did not match its details";
+	assert.equal(base.progressMessages.includes(mismatch), false);
+	assert.equal(changed.progressMessages.includes(mismatch), false);
+	assert.equal(
+		item.quantity,
+		2,
+		"provider quantity maps to order_items.quantity",
+	);
+});
+
+test("collect: an isolated provider lineTotal change reaches line_total and line_total_cents", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, lineTotal: "$12.00" },
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(base, ORDER_STREAMS);
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseOrder = onlyRecord(base, "orders");
+	const order = onlyRecord(changed, "orders");
+	assert.equal(baseOrder.item_count, 1);
+	assert.equal(baseOrder.total, "$10.00");
+	assert.equal(baseOrder.total_cents, 1000);
+	assert.deepEqual(order, baseOrder, "independent list summary is unchanged");
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(baseItem.quantity, 1);
+	assert.equal(baseItem.line_total, "$10.00");
+	assert.equal(baseItem.line_total_cents, 1000);
+	assert.equal(baseItem.order_date, "2026-07-14");
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"lineTotal does not change the item identity",
+	);
+	assert.equal(item.quantity, baseItem.quantity);
+	assert.equal(item.order_date, baseItem.order_date);
+	assert.deepEqual(
+		withoutFields(item, ["line_total", "line_total_cents"]),
+		withoutFields(baseItem, ["line_total", "line_total_cents"]),
+		"unrelated item fields hold steady",
+	);
+	assert.equal(
+		item.line_total,
+		"$12.00",
+		"provider lineTotal maps to line_total",
+	);
+	assert.equal(
+		item.line_total_cents,
+		1200,
+		"provider lineTotal maps to line_total_cents",
+	);
+});
 
 /** A minimal Page stub backing fetchOrderDetail/processListOrder: goto always
  *  resolves (or throws once per `throwsNTimes` to exercise the retry path),
@@ -965,6 +1388,120 @@ test("classifyHebDetailFailure: a non-retryable navigation failure classifies as
 	);
 });
 
+// ─── HTTP status of the detail navigation ─────────────────────────────────
+// `page.goto` resolves with a response for a 403 or a 503; it throws only for
+// transport failures. The status has to be weighed against what the page
+// says: a challenge or sign-in page behind a 403 is a dead session, and a 5xx
+// is transient, so neither is a connector defect.
+
+const ORDER_DETAIL_URL =
+	"https://www.heb.com/my-account/order-history/HEB1000000001";
+
+function readFixture(name: string): string {
+	return readFileSync(join(FIXTURES_DIR, name), "utf8");
+}
+
+/** A detail page whose `goto` answers with the next status in `statuses`
+ *  (the last one repeats) and then serves `content` at `landedUrl`. */
+function makeStatusPageStub(opts: {
+	content: string;
+	landedUrl?: string;
+	statuses: number[];
+}): { gotoCalls: () => number; page: Page } {
+	let gotoCalls = 0;
+	const base = makePageStub({
+		content: opts.content,
+		...(opts.landedUrl ? { url: opts.landedUrl } : {}),
+	});
+	const page = new Proxy(base, {
+		get(target, prop): unknown {
+			if (prop === "goto") {
+				return (): Promise<unknown> => {
+					const status =
+						opts.statuses[Math.min(gotoCalls, opts.statuses.length - 1)] ?? 200;
+					gotoCalls += 1;
+					return Promise.resolve({
+						ok: () => status >= 200 && status < 300,
+						status: () => status,
+					});
+				};
+			}
+			return Reflect.get(target, prop);
+		},
+	});
+	return { gotoCalls: () => gotoCalls, page };
+}
+
+const fetchWithoutWaiting = (page: Page) =>
+	fetchOrderDetail(page, "HEB1000000001", {
+		navigationRetryMinTimeoutMs: 1,
+		waitForHydration: immediateWait,
+	});
+
+for (const [label, content] of [
+	["Incapsula block page", readFixture("incapsula-block.html")],
+	["Imperva incident report", readFixture("incapsula-json-block.html")],
+] as const) {
+	test(`fetchOrderDetail: an HTTP 403 carrying the ${label} asks for session repair`, async () => {
+		const { page } = makeStatusPageStub({
+			content,
+			landedUrl: ORDER_DETAIL_URL,
+			statuses: [403],
+		});
+		const result = await fetchWithoutWaiting(page);
+		assert.equal(result.status, "failed");
+		assert.equal(result.failureKind, "session_repair_required");
+	});
+}
+
+test("fetchOrderDetail: an HTTP 403 that lands on the sign-in page asks for session repair", async () => {
+	const { page } = makeStatusPageStub({
+		content: PASSWORD_FORM_HTML,
+		landedUrl: "https://www.heb.com/login",
+		statuses: [403],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "session_repair_required");
+});
+
+test("fetchOrderDetail: an HTTP 404 on an ordinary page stays a non-retryable failure and is tried once", async () => {
+	const { gotoCalls, page } = makeStatusPageStub({
+		content: NO_DETAIL_HTML,
+		landedUrl: ORDER_DETAIL_URL,
+		statuses: [404],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "navigation_failed_non_retryable");
+	assert.equal(gotoCalls(), 1);
+});
+
+for (const status of [500, 502, 503, 504]) {
+	test(`fetchOrderDetail: an HTTP ${String(status)} is retried and the order is read when the retry succeeds`, async () => {
+		const { gotoCalls, page } = makeStatusPageStub({
+			content: DETAIL_HTML,
+			landedUrl: ORDER_DETAIL_URL,
+			statuses: [status, 200],
+		});
+		const result = await fetchWithoutWaiting(page);
+		assert.equal(result.status, "hydrated");
+		assert.equal(gotoCalls(), 2);
+	});
+}
+
+test("fetchOrderDetail: an HTTP 503 on every attempt is retry-exhausted, a retryable gap, not a connector defect", async () => {
+	const { gotoCalls, page } = makeStatusPageStub({
+		content: NO_DETAIL_HTML,
+		landedUrl: ORDER_DETAIL_URL,
+		statuses: [503],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "navigation_retry_exhausted");
+	assert.equal(gotoCalls(), 3, "one attempt and two retries");
+});
+
 // ─── design.md Decision 4: owner-started manual repair vs unattended latch ─
 
 test("hebAllowsInteractiveAuthRepair: true when PDPP_RUN_TRIGGER_KIND is 'manual'", () => {
@@ -1591,7 +2128,14 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_navigation_failed/,
+		(error: unknown) => {
+			// A failed navigation is a failed read: `collect` reports it for
+			// every order stream from the error, so the scan emits no SKIP.
+			assert.ok(error instanceof HebEnumerationUnprovenError);
+			assert.match(error.message, /heb_empty_list_page_navigation_failed/);
+			assert.equal(error.readFailed, true);
+			return true;
+		},
 	);
 
 	assert.deepEqual(
@@ -1601,11 +2145,10 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 		["HEB1000000001"],
 		"stale page cards must not enter the current run",
 	);
-	const skip = protocolMessages.find(
-		(message) => message.type === "SKIP_RESULT",
+	assert.equal(
+		protocolMessages.some((message) => message.type === "SKIP_RESULT"),
+		false,
 	);
-	assert.ok(skip);
-	assert.equal(skip?.reason, "stream_collection_failed");
 	assert.equal(
 		protocolMessages.some(
 			(message) =>
@@ -1639,9 +2182,15 @@ test("runForwardScan: a falsy goto rejection cannot parse stale page content", a
 			`https://www.heb.com/my-account/your-orders?page=${navigations}`,
 	});
 
+	let failure: HebEnumerationUnprovenError | undefined;
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_navigation_failed/,
+		(error: unknown) => {
+			assert.ok(error instanceof HebEnumerationUnprovenError);
+			assert.match(error.message, /heb_empty_list_page_navigation_failed/);
+			failure = error;
+			return true;
+		},
 	);
 	assert.deepEqual(
 		emitted
@@ -1655,8 +2204,7 @@ test("runForwardScan: a falsy goto rejection cannot parse stale page content", a
 		false,
 	);
 	assert.deepEqual(
-		protocolMessages.find((message) => message.type === "SKIP_RESULT")
-			?.diagnostics,
+		failure?.diagnostics,
 		{
 			error_class: "unknown",
 		},
@@ -1936,7 +2484,7 @@ test("runForwardScan: an Imperva block is never laundered into a proven-empty re
 
 	await assert.rejects(
 		() => runForwardScan(page, deps, makeRunFlags(), null),
-		/heb_empty_list_page_source_auth_or_challenge/,
+		{ message: "heb_session_required" },
 		"bot protection must outrank the empty-state marker",
 	);
 });
@@ -2736,6 +3284,98 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget
 		emitted.filter((record) => record.stream === "nutrition").length,
 		0,
 		"budget exhaustion must not fabricate nutrition rows",
+	);
+});
+
+// A hydrated H-E-B order stays a pending gap (its detail page carries no
+// completeness signal), so a backlog of gaps that can never clear builds up.
+
+function makeBacklog(
+	count: number,
+): BrowserCollectContext["detailGaps"][number][] {
+	return Array.from({ length: count }, (_, index) =>
+		makeGap(`HEB${String(4_000_000_000 + index)}`),
+	);
+}
+
+async function recoverBacklog(
+	count: number,
+	options: { emittedAt?: string; recoveryOnly?: boolean } = {},
+) {
+	const { deps, protocolMessages } = makeRecordingDeps();
+	const flags = makeRunFlags();
+	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+		makePageStub({ content: DETAIL_HTML }),
+		{
+			detailGaps: makeBacklog(count),
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: options.emittedAt ?? deps.emittedAt,
+			sendInteraction: deps.sendInteraction,
+			waitForHydration: deps.waitForHydration,
+		},
+		flags,
+		{
+			recoveryOnly: options.recoveryOnly ?? false,
+			wantsItems: true,
+			wantsNutrition: false,
+		},
+	);
+	const attempted = findDetailGaps(protocolMessages).map((gap) =>
+		String(gap.record_key),
+	);
+	return { attempted, flags, protocolMessages, result };
+}
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a backlog of unprovable gaps leaves half the detail budget to the forward scan", async () => {
+	const { attempted, flags, protocolMessages, result } =
+		await recoverBacklog(100);
+
+	assert.equal(flags.detailAttempts, 50);
+	assert.equal(attempted.length, 50, "only the gaps it retried are re-emitted");
+	assert.equal(
+		result.suppressForward,
+		false,
+		"the scan for new orders still runs",
+	);
+	assert.equal(result.stoppedWithPending, true);
+	assert.equal(result.recovered, 0);
+	assert.equal(findDetailGapRecovered(protocolMessages).length, 0);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a backlog within the recovery share is retried in full, in order", async () => {
+	const { attempted, flags, result } = await recoverBacklog(50);
+
+	assert.deepEqual(
+		attempted,
+		makeBacklog(50).map((gap) => String(gap.record_key)),
+	);
+	assert.equal(flags.detailAttempts, 50);
+	assert.equal(result.suppressForward, false);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a recovery-only run may spend the whole detail budget", async () => {
+	const { flags, result } = await recoverBacklog(100, { recoveryOnly: true });
+
+	assert.equal(flags.detailAttempts, 100);
+	assert.equal(
+		result.suppressForward,
+		true,
+		"recovery-only still skips the forward scan",
+	);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: an over-share backlog retries the first gaps the host served", async () => {
+	// The host serves gaps fewest-attempts first and takes back a lease the
+	// run did not settle without counting an attempt, so the leftovers lead
+	// the next run. The pass must keep the order it was given.
+	const { attempted } = await recoverBacklog(100);
+
+	assert.deepEqual(
+		attempted,
+		makeBacklog(100)
+			.slice(0, 50)
+			.map((gap) => String(gap.record_key)),
 	);
 });
 
@@ -3724,6 +4364,293 @@ test("processListOrder retains 58 rows at 85-vs-84 and emits a retryable invento
 	}
 });
 
+/** Three rows: 2 units, a weighed row with a fractional first number, 1 unit.
+ *  The weighed row has no whole quantity, so the order's units are unknown. */
+function syntheticWeighedRowFixture(): string {
+	const quantities = ["Qty: 2", "Qty: 1.2 of 1.2 lbs", "Qty: 1"];
+	const rows = quantities
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
+}
+
+test("processListOrder says nothing about a shortfall when the order's units cannot be summed", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticWeighedRowFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000002",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps, emitted } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000002", itemCount: 6 }),
+		);
+
+		assert.equal(
+			emitted.filter((record) => record.stream === "order_items").length,
+			3,
+			"the rows are delivered whole",
+		);
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+			"three rows against a card of six units is not evidence of missing items",
+		);
+		assert.deepEqual(
+			itemCountTallies,
+			[],
+			"an order whose units are unknown joins no run-level shortfall tally",
+		);
+		assert.ok(
+			diagnosticLines.includes(
+				'[heb-diagnostic] item_count_reconciliation {"card_units":6,"product_rows":3,"fulfilled_units":"unknown","fractional_qty_rows":1,"unparsed_qty_rows":0,"whole_qty_rows":2,"reason":"unit_and_row_counts_differ"}',
+			),
+			"the diagnostic line still says why the units are unknown",
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+/** A static detail page whose rows carry the given quantity texts. */
+function quantityRowsFixture(quantities: readonly string[]): string {
+	const rows = quantities
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
+}
+
+test("processListOrder retains unreadable quantities without inventing a shortfall", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = quantityRowsFixture(["Qty: 2", "Qty: unavailable", "Qty: 1"]);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000005",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps, emitted } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000005", itemCount: 6 }),
+		);
+
+		const items = emitted.filter((record) => record.stream === "order_items");
+		assert.deepEqual(
+			items.map((record) => record.data.quantity),
+			[2, null, 1],
+			"all three real parser-to-emitter rows survive, including the unreadable quantity",
+		);
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+			"the known subtotal of three is not a proven shortfall against six",
+		);
+		assert.deepEqual(
+			itemCountTallies,
+			[],
+			"an unreadable quantity excludes the order from the run-level unit tally",
+		);
+		assert.ok(
+			diagnosticLines.includes(
+				'[heb-diagnostic] item_count_reconciliation {"card_units":6,"product_rows":3,"fulfilled_units":"unknown","fractional_qty_rows":0,"unparsed_qty_rows":1,"whole_qty_rows":2,"reason":"unit_and_row_counts_differ"}',
+			),
+			"unreadable quantities are reported positively and not mistaken for fractions",
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+const repeat = (text: string, times: number): string[] =>
+	Array.from({ length: times }, () => text);
+
+// Shapes of real orders, as counts only: the card's unit count, how many rows
+// the page lists, and what the quantities add up to. A real account showed no
+// rule that turns rows into the card's count, so only a whole-number total
+// strictly below the card is called a shortfall.
+const UNIT_SHAPES: readonly {
+	card: number;
+	collected: number | null;
+	name: string;
+	quantities: string[];
+	shortfall: boolean;
+}[] = [
+	{
+		name: "a card equal to the whole-number units",
+		card: 13,
+		quantities: ["Qty: 3", "Qty: 2", "Qty: 2", ...repeat("Qty: 1", 6)],
+		collected: 13,
+		shortfall: false,
+	},
+	{
+		name: "a card one unit above the whole-number units",
+		card: 66,
+		quantities: [...repeat("Qty: 2", 29), ...repeat("Qty: 1", 7)],
+		collected: 65,
+		shortfall: true,
+	},
+	{
+		name: "a card with one weighed row among whole quantities",
+		card: 40,
+		quantities: [
+			...repeat("Qty: 1", 11),
+			...repeat("Qty: 2", 14),
+			"Qty: 2.01 of 2.01 lbs",
+		],
+		collected: null,
+		shortfall: false,
+	},
+];
+
+for (const shape of UNIT_SHAPES) {
+	test(`processListOrder unit anchor: ${shape.name}`, async () => {
+		const browser = await chromium.launch({ headless: true });
+		try {
+			const page = await browser.newPage();
+			const fixtureHtml = quantityRowsFixture(shape.quantities);
+			await page.route(
+				"https://www.heb.com/my-account/order-history/HEB000000000004",
+				async (route) => {
+					await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+				},
+			);
+			const progressMessages: string[] = [];
+			const itemCountTallies: OrderItemTally[] = [];
+			const { deps, emitted } = makeRecordingDeps({
+				itemCountTallies,
+				orderItemsCoverage: newOrderItemsCoverage(),
+				progress: async (message) => {
+					progressMessages.push(message);
+				},
+			});
+
+			await processListOrder(
+				page,
+				deps,
+				makeRunFlags(),
+				makeListOrder({ orderId: "HEB000000000004", itemCount: shape.card }),
+			);
+
+			assert.equal(
+				emitted.filter((record) => record.stream === "order_items").length,
+				shape.quantities.length,
+				"every row is delivered whatever the card says",
+			);
+			assert.equal(
+				progressMessages.includes(
+					"An order's item count did not match its details",
+				),
+				shape.shortfall,
+			);
+			assert.deepEqual(
+				itemCountTallies,
+				shape.collected === null
+					? []
+					: [
+							{
+								orderId: "HEB000000000004",
+								declaredItemCount: shape.card,
+								collectedItemCount: shape.collected,
+							},
+						],
+			);
+		} finally {
+			await browser.close();
+		}
+	});
+}
+
+test("processListOrder tallies a known surplus without telling the owner anything is missing", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticStaticQuantityFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000003",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+
+		// The page holds 84 units. H-E-B restates a card downward after a refund,
+		// so holding more than the card says is preserved, not reported.
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000003", itemCount: 80 }),
+		);
+
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+		);
+		assert.deepEqual(itemCountTallies, [
+			{
+				orderId: "HEB000000000003",
+				declaredItemCount: 80,
+				collectedItemCount: 84,
+			},
+		]);
+	} finally {
+		await browser.close();
+	}
+});
+
 test("fetchOrderDetail: a large unattributed virtualized order accumulates all declared items across scroll snapshots", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
@@ -3849,7 +4776,7 @@ test("collectProfile withholds an aggregate without complete owner-bound section
 		protocolMessages.some(
 			(m) =>
 				m.type === "SKIP_RESULT" &&
-				m.reason === "inventory_not_proven_complete",
+				m.reason === "stream_collection_failed",
 		),
 	);
 });
@@ -4062,50 +4989,53 @@ test("collectNutrition covers products past the former 50-lookup limit and recor
 
 	const outcomes = emitted.filter((record) => record.stream === "nutrition");
 	assert.equal(outcomes.length, targets.length - 2);
-	assert.equal(
-		protocolMessages.filter(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "inventory_not_proven_complete",
-		).length,
-		2,
+	// The target without a URL is an unproven lookup; the page that failed to
+	// load is a failed read.
+	assert.deepEqual(
+		protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && message.reason),
+		["inventory_not_proven_complete", "stream_collection_failed"],
 	);
 });
 
-test("collectNutrition retains blocked outcomes with the observed product URL", async () => {
+test("collectNutrition ends the run as a session failure on a blocked product page", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const blockedPage = makePageStub({
 		content:
 			"<html><body><iframe src='/_Incapsula_Resource'></iframe></body></html>",
 	});
 
-	await collectNutrition(
-		blockedPage,
-		[
-			{
-				name: "H-E-B Organic 2% Reduced Fat Milk",
-				productId: "123456789",
-				productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
-			},
-		],
-		{
-			emit: deps.emit,
-			emitRecord: deps.emitRecord,
-			emittedAt: deps.emittedAt,
-			waitForHydration: immediateWait,
-		},
+	await assert.rejects(
+		() =>
+			collectNutrition(
+				blockedPage,
+				[
+					{
+						name: "H-E-B Organic 2% Reduced Fat Milk",
+						productId: "123456789",
+						productUrl: "https://www.heb.com/product-detail/heb-milk/123456789",
+					},
+				],
+				{
+					emit: deps.emit,
+					emitRecord: deps.emitRecord,
+					emittedAt: deps.emittedAt,
+					waitForHydration: immediateWait,
+				},
+			),
+		{ message: "heb_session_required" },
 	);
 
 	assert.equal(
 		emitted.filter((record) => record.stream === "nutrition").length,
 		0,
 	);
-	assert.ok(
-		protocolMessages.some(
-			(message) =>
-				message.type === "SKIP_RESULT" &&
-				message.reason === "inventory_not_proven_complete",
-		),
+	assert.deepEqual(
+		protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => message.type === "SKIP_RESULT" && message.reason),
+		["session_repair_required"],
 	);
 });
 
@@ -4187,4 +5117,102 @@ test("nutritionCoverageRecoveryHint retries only the causes a rerun can clear", 
 		nutritionCoverageRecoveryHint("order_scan_suppressed"),
 		retry,
 	);
+});
+
+test("resolveOrderDetail: latched manual repair respects the 99/100 detail boundary", async () => {
+	await Promise.all(
+		[99, 100].map(async (initialAttempts) => {
+			const flags: RunFlags = {
+				detailAttempts: initialAttempts,
+				isManualRun: true,
+				manualRepairAttempted: false,
+				sessionRepairRequired: true,
+			};
+			const base = makeSessionRepairPageStub({
+				htmlSequence: [LIVE_ORDERS_HTML],
+				detailHtmlAfterRepair: DETAIL_HTML,
+			});
+			const navigations: string[] = [];
+			let interactions = 0;
+			const page = new Proxy(base, {
+				get(target, prop): unknown {
+					if (prop === "goto") {
+						return (url: string, options?: Parameters<Page["goto"]>[1]) => {
+							navigations.push(url);
+							return target.goto(url, options);
+						};
+					}
+					return Reflect.get(target, prop);
+				},
+			});
+			const send = fakeSendInteraction();
+			const deps = immediateRepairDeps((request) => {
+				interactions += 1;
+				return send(request);
+			});
+			const result = await resolveOrderDetail(
+				page,
+				flags,
+				"HEB1000000001",
+				deps,
+			);
+			assert.equal(
+				flags.detailAttempts,
+				100,
+				"repair must never fetch detail 101",
+			);
+			if (initialAttempts === 100) {
+				assert.equal(result.status, "deferred");
+				assert.equal(result.failureKind, "deferred_budget");
+				assert.equal(interactions, 0);
+				assert.deepEqual(navigations, []);
+				assert.equal(flags.manualRepairAttempted, false);
+				assert.equal(flags.sessionRepairRequired, true);
+			} else {
+				assert.equal(result.status, "hydrated");
+				assert.equal(interactions, 1);
+				assert.equal(
+					navigations.filter((url) => url.includes("/order-history/")).length,
+					1,
+				);
+				assert.equal(flags.manualRepairAttempted, true);
+				assert.equal(flags.sessionRepairRequired, false);
+			}
+		}),
+	);
+});
+
+test("resolveOrderDetail: failed repair at 99 does not spend a detail or retry repair", async () => {
+	const flags: RunFlags = {
+		detailAttempts: 99,
+		isManualRun: true,
+		manualRepairAttempted: false,
+		sessionRepairRequired: true,
+	};
+	let interactions = 0;
+	const deps = immediateRepairDeps(() => {
+		interactions += 1;
+		return Promise.reject(new Error("synthetic repair declined"));
+	});
+	const first = await resolveOrderDetail(
+		NEVER_CALLED_PAGE,
+		flags,
+		"HEB1000000001",
+		deps,
+	);
+	assert.equal(first.status, "deferred");
+	assert.equal(first.failureKind, "session_repair_required");
+	assert.equal(flags.detailAttempts, 99);
+	assert.equal(flags.manualRepairAttempted, true);
+	assert.equal(flags.sessionRepairRequired, true);
+	const second = await resolveOrderDetail(
+		NEVER_CALLED_PAGE,
+		flags,
+		"HEB1000000002",
+		deps,
+	);
+	assert.equal(second.status, "deferred");
+	assert.equal(second.failureKind, "session_repair_required");
+	assert.equal(flags.detailAttempts, 99);
+	assert.equal(interactions, 1);
 });

@@ -344,17 +344,26 @@ test("copyMirroredRemoteDownload: never sleeps past the timeout", async () => {
 	);
 });
 
-test("copyMirroredRemoteDownload: a file that lands during the last sleep is still taken at the deadline", async () => {
+test("copyMirroredRemoteDownload: a file that lands during the last sleep is still taken at the deadline", async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-download-mirror-final-"));
 	try {
-		const { writeFile } = await import("node:fs/promises");
+		const { writeFileSync } = await import("node:fs");
 		const mirrored = join(dir, "artifact");
 		const target = join(dir, "out.zip");
-		// Timeout 300ms: polls at 0 and 250, last sleep 250..300. The file
-		// lands at ~270ms, after the last in-loop stat.
-		setTimeout(() => {
-			writeFile(mirrored, "late").catch(() => undefined);
-		}, 270);
+		// Advance polling sleeps without wall time. Complete the fixture write
+		// during the sleep spanning 270ms, before the deadline check can resume.
+		let elapsed = 0;
+		t.mock.method(
+			globalThis,
+			"setTimeout",
+			(callback: () => void, delay: number) => {
+				elapsed += delay;
+				if (elapsed >= 270) {
+					writeFileSync(mirrored, "late");
+				}
+				callback();
+			},
+		);
 		const copied = await copyMirroredRemoteDownload(
 			{
 				failure: async () => null,

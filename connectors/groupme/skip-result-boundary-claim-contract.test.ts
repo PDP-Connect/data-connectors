@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import type { EmittedMessage } from "@pdpp/connector-protocol/connector-runtime-protocol";
+import { test } from "vitest";
 
 /**
  * `SKIP_RESULT.boundary_claim` type contract.

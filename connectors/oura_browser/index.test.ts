@@ -24,7 +24,7 @@ function harness(options: {
   streams?: string[];
   since?: string;
   until?: string;
-  answers?: (endpoint: string, token: string | null) => Answer;
+  answers?: (endpoint: string, token: string | null, window: { start: string | null; end: string | null }) => Answer;
   state?: Record<string, unknown>;
   /** Omit the requested time range, so a stored cursor decides the start. */
   openRange?: boolean;
@@ -38,7 +38,8 @@ function harness(options: {
       const endpoint = url.pathname.split("/").at(-1) ?? "";
       const token = url.searchParams.get("next_token");
       calls.push({ endpoint, start: url.searchParams.get("start_date"), end: url.searchParams.get("end_date"), token });
-      const answer = options.answers?.(endpoint, token) ?? { data: replay[endpoint as keyof typeof replay] ?? [], next_token: null };
+      const window = { start: url.searchParams.get("start_date"), end: url.searchParams.get("end_date") };
+      const answer = options.answers?.(endpoint, token, window) ?? { data: replay[endpoint as keyof typeof replay] ?? [], next_token: null };
       const status = answer.status ?? 200;
       return { ok: () => status >= 200 && status < 300, status: () => status, json: async () => answer, dispose: async () => {} };
     } } }),
@@ -158,6 +159,64 @@ for (const [label, stored, start] of [
   });
 }
 
+// Oura's end_date is inclusive: a chunk asking for [from, to] also returns the day after `to`.
+function inclusiveWindow(rows: Array<Record<string, unknown>>) {
+  return (_endpoint: string, _token: string | null, window: { start: string | null; end: string | null }): Answer => ({
+    data: rows.filter((row) => String(row.day) >= String(window.start) && String(row.day) <= String(window.end)),
+    next_token: null,
+  });
+}
+// A 31-day window splits into a 30-day chunk (08-01..08-30) and a 1-day chunk (08-31).
+const WINDOW = { since: "2026-08-01T00:00:00Z", until: "2026-09-01T00:00:00Z" };
+const BOUNDARY = "2026-08-31";
+
+test("a boundary day returned by two chunks is emitted once per id", async () => {
+  const rows = [
+    { ...replay.daily_readiness[0], id: id(501), day: "2026-08-10", timestamp: "2026-08-10T08:15:00+00:00" },
+    { ...replay.daily_readiness[0], id: id(502), day: BOUNDARY, timestamp: `${BOUNDARY}T08:15:00+00:00` },
+  ];
+  const h = harness({ streams: ["readiness"], ...WINDOW, answers: inclusiveWindow(rows) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.calls.map((call) => [call.start, call.end]), [["2026-08-01", "2026-08-31"], ["2026-08-31", "2026-09-01"]]);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(501), id(502)]);
+  noSkip(h);
+});
+
+test("a boundary day shared by sleep sessions and daily scores is emitted once per id", async () => {
+  const sessions = [{ ...replay.sleep[0], id: id(601), day: BOUNDARY }];
+  const scores = [{ ...replay.daily_sleep[0], id: id(602), day: BOUNDARY }];
+  const h = harness({ streams: ["sleep"], ...WINDOW, answers: (endpoint, token, window) =>
+    inclusiveWindow(endpoint === "sleep" ? sessions : scores)(endpoint, token, window) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 4);
+  assert.deepEqual(h.records.map(({ data }) => [data.record_type, data.id]),
+    [["sleep_session", id(601)], ["daily_score", id(602)]]);
+  noSkip(h);
+});
+
+test("of two copies of one id, the copy with more filled fields is kept", async () => {
+  const sparse = { ...replay.daily_readiness[0], id: id(502), day: BOUNDARY, timestamp: `${BOUNDARY}T08:15:00+00:00`, score: null };
+  const full = { ...sparse, score: 77 };
+  // The first chunk returns the sparse copy; the second chunk returns the full copy.
+  const h = harness({ streams: ["readiness"], ...WINDOW, answers: (_endpoint, _token, window) =>
+    ({ data: [window.start === "2026-08-01" ? sparse : full], next_token: null }) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.deepEqual(h.records.map(({ data }) => [data.id, data.score]), [[id(502), 77]]);
+});
+
+test("a window inside one chunk emits each row once, as before", async () => {
+  const rows = [
+    { ...replay.daily_readiness[0], id: id(501), day: "2026-08-10", timestamp: "2026-08-10T08:15:00+00:00" },
+    { ...replay.daily_readiness[0], id: id(502), day: "2026-08-11", timestamp: "2026-08-11T08:15:00+00:00" },
+  ];
+  const h = harness({ streams: ["readiness"], since: "2026-08-10T00:00:00Z", until: "2026-08-12T00:00:00Z",
+    answers: inclusiveWindow(rows) });
+  await collectOuraBrowser(h.ctx, ACCESS);
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.records.map(({ data }) => data.id), [id(501), id(502)]);
+  noSkip(h);
+});
+
 test("a session takes a daily score only when that score is the only one for its day", async () => {
   const session = (n: number) => ({ ...replay.sleep[0], id: id(n) });
   const score = (n: number, value: number) => ({ ...replay.daily_sleep[0], id: id(n), score: value });
@@ -167,7 +226,8 @@ test("a session takes a daily score only when that score is the only one for its
     await collectOuraBrowser(h.ctx, ACCESS);
     noSkip(h);
     // Score documents always stand alone, whatever the sessions link to.
-    assert.equal(h.records.filter(({ data }) => data.record_type === "daily_score").length, dailySleep.length);
+    assert.equal(h.records.filter(({ data }) => data.record_type === "daily_score").length,
+      new Set(dailySleep.map((score) => score.id)).size);
     return h.records.filter(({ data }) => data.record_type === "sleep_session")
       .map(({ data }) => [data.id, data.daily_sleep_id, data.sleep_score, data.daily_sleep_timestamp, data.contributors]);
   };

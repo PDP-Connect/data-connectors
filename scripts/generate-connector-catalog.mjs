@@ -8,6 +8,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  assertPublishableRow,
+  assertDevelopmentTier,
+} from "./assert-publishable-readiness.mjs";
+import {
   PUBLISHABLE_CONNECTORS,
 } from "./connector-publish-allowlist.mjs";
 import {
@@ -149,8 +153,14 @@ async function requestTagsPage(url, context) {
   if (challenge.service) tokenUrl.searchParams.set("service", challenge.service);
   tokenUrl.searchParams.set("scope", challenge.scope ?? `repository:${context.name}:pull`);
 
+  // The realm passed checkTokenRealm, so the registry credential may go to it.
+  // With a credential, GHCR answers a repository that does not exist with
+  // NAME_UNKNOWN; anonymously it answers 403, which reads as denial, not absence.
   const token = tokenFrom(await context.requestImpl(tokenUrl.toString(), {
     timeoutMs: context.timeoutMs,
+    ...(context.credential === undefined
+      ? {}
+      : { headers: { authorization: `Basic ${context.credential}` } }),
   }));
   response = await context.requestImpl(url, {
     headers: { authorization: `Bearer ${token}` },
@@ -193,6 +203,7 @@ export async function listRepositoryTags({
   timeoutMs,
   allowInsecureLoopback = false,
   requestImpl = requestText,
+  credential = undefined,
 }) {
   const path = `/v2/${name}/tags/list`;
   let url = `${scheme}://${registry}${path}?n=${PAGE_SIZE}`;
@@ -208,6 +219,7 @@ export async function listRepositoryTags({
       timeoutMs,
       allowInsecureLoopback,
       requestImpl,
+      credential,
     });
     if (response.status === 404 && seenPages.size === 1) {
       const codes = parseDistributionErrorCodes(response.body);
@@ -409,7 +421,9 @@ export async function generateConnectorCatalog({
   sourceCommit,
   generatedAt,
   previousCatalog = null,
+  refreshMetadata = false,
   connectors = PUBLISHABLE_CONNECTORS,
+  credential = undefined,
   scheme = "https",
   timeoutMs,
   allowInsecureLoopback = false,
@@ -417,12 +431,19 @@ export async function generateConnectorCatalog({
   lookupImpl = lookupManifest,
   fetchImpl = fetch,
 }) {
+  // Check identities and exclusions before any request. Development-tier
+  // readiness is checked against published metadata after it is read.
+  for (const connector of connectors) assertPublishableRow(connector);
   if (!/^[0-9a-f]{40}$/.test(sourceCommit ?? "")) {
     throw new Error("source commit must be a 40-character lowercase hexadecimal Git object ID");
   }
   if (!isCatalogTimestamp(generatedAt)) {
     throw new Error("generated at must be an RFC 3339 timestamp");
   }
+  // The caller verifies the previous catalog's signature before passing it.
+  // Validate its shape before relying on its immutable version mappings.
+  if (previousCatalog !== null) assertCatalog(previousCatalog);
+  const previousByKey = new Map((previousCatalog?.connectors ?? []).map((entry) => [entry.connector_key, entry]));
 
   const inputs = [...connectors].sort((a, b) =>
     a.connectorKey < b.connectorKey ? -1 : a.connectorKey > b.connectorKey ? 1 : 0,
@@ -437,14 +458,23 @@ export async function generateConnectorCatalog({
       timeoutMs,
       allowInsecureLoopback,
       requestImpl,
+      credential,
     }))
       .map(parseSemver)
       .filter(Boolean)
       .sort(compareSemver);
-    if (tags.length === 0) continue;
-
-    const versions = [];
+    const known = previousByKey.get(connector.connectorKey);
+    const versionsByName = new Map();
+    for (const release of known?.versions ?? []) {
+      if (!parseSemver(release.version) || versionsByName.has(release.version)) {
+        throw new Error(`${connector.connectorKey} has an invalid or duplicate previous catalog version`);
+      }
+      versionsByName.set(release.version, release.digest);
+    }
     for (const tag of tags) {
+      // Once a signed catalog has assigned a version to a digest, its mapping
+      // is authoritative. A mutable tag cannot redefine that version.
+      if (versionsByName.has(tag.version)) continue;
       const result = await lookupImpl({
         registry,
         name,
@@ -459,19 +489,26 @@ export async function generateConnectorCatalog({
             (result.reason ? `: ${result.reason}` : ""),
         );
       }
-      versions.push({ version: tag.version, digest: result.digest });
+      versionsByName.set(tag.version, result.digest);
     }
+    const versions = [...versionsByName].map(([version, digest]) => ({ version, digest }))
+      .sort((left, right) => compareSemver(parseSemver(left.version), parseSemver(right.version)));
+    if (versions.length === 0) continue;
     const latest = versions.at(-1);
-    const metadata = await readPublishedMetadata({
-      registry,
-      repository: name,
-      connectorKey: connector.connectorKey,
-      version: latest.version,
-      digest: latest.digest,
-      scheme,
-      timeoutMs,
-      fetchImpl,
-    });
+    const metadata = !refreshMetadata && known?.latest.version === latest.version && known.latest.digest === latest.digest
+      ? { connector_key: known.connector_key, connector_id: known.connector_id, display_name: known.display_name,
+        tier: known.tier, runtime_requirements: known.runtime_requirements, setup: known.setup, version: latest.version }
+      : await readPublishedMetadata({
+        registry,
+        repository: name,
+        connectorKey: connector.connectorKey,
+        version: latest.version,
+        digest: latest.digest,
+        scheme,
+        timeoutMs,
+        fetchImpl,
+      });
+    assertDevelopmentTier(connector, metadata);
     catalogConnectors.push({
       ...metadata,
       latest: { version: metadata.version, digest: latest.digest },
@@ -485,21 +522,11 @@ export async function generateConnectorCatalog({
     connectors: catalogConnectors.map(({ version, ...connector }) => connector),
   };
   if (previousCatalog !== null) {
-    if (
-      typeof previousCatalog !== "object" ||
-      typeof previousCatalog.source_commit !== "string" ||
-      !Array.isArray(previousCatalog.connectors) ||
-      typeof previousCatalog.generated_at !== "string" ||
-      !Number.isFinite(Date.parse(previousCatalog.generated_at))
-    ) {
-      throw new Error("previous connector catalog has an invalid comparison shape");
-    }
-    const comparable = (value) => JSON.stringify(sortObjectKeys({
-      source_commit: value.source_commit,
-      connectors: value.connectors,
-    }));
-    if (comparable(catalog) === comparable(previousCatalog)) {
+    const comparable = (value) => JSON.stringify(sortObjectKeys(value.connectors));
+    if (comparable(catalog) === comparable(previousCatalog) &&
+        (!refreshMetadata || sourceCommit === previousCatalog.source_commit)) {
       catalog.generated_at = previousCatalog.generated_at;
+      catalog.source_commit = previousCatalog.source_commit;
     } else {
       const nextTimestamp = Math.max(
         Date.parse(catalog.generated_at),
@@ -557,12 +584,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const previousCatalog = args["previous-catalog"]
       ? JSON.parse(readFileSync(args["previous-catalog"], "utf8"))
       : null;
+    if (args["refresh-metadata"] !== undefined && !["true", "false"].includes(args["refresh-metadata"])) {
+      throw new Error("--refresh-metadata must be true or false");
+    }
+    const username = process.env.CONNECTOR_CATALOG_USERNAME ?? "";
+    const password = process.env.CONNECTOR_CATALOG_PASSWORD ?? "";
     const catalog = await generateConnectorCatalog({
+      credential: password ? Buffer.from(`${username}:${password}`).toString("base64") : undefined,
       registry: args.registry ?? DEFAULT_REGISTRY,
       namespace: args.namespace ?? DEFAULT_NAMESPACE,
       sourceCommit,
       generatedAt,
       previousCatalog,
+      refreshMetadata: args["refresh-metadata"] === "true",
       scheme: process.env.CONNECTOR_CATALOG_SCHEME === "http" ? "http" : "https",
       timeoutMs: Number(process.env.CONNECTOR_CATALOG_TIMEOUT_MS) || undefined,
       allowInsecureLoopback:

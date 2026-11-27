@@ -109,8 +109,6 @@ interface ChatGptAuthProbeDiagnostic extends ChatGptDomSessionProbe {
 
 const APPROVE_SIGN_IN_TEXT = /approve sign-in/i;
 const CHATGPT_DEVICE_TEXT = /chatgpt app|your devices/i;
-const CONTINUE_WITH_PASSWORD_NAME = /^continue with password$/i;
-const LOG_IN_NAME = /^log in$/i;
 const RESEND_PROMPT_TEXT = /resend prompt/i;
 const SENT_NOTIFICATION_TEXT = /sent a notification/i;
 const TRY_WITH_EMAIL_TEXT = /try with email/i;
@@ -446,10 +444,6 @@ async function checkLoggedInViaDOMDetails(
 	};
 }
 
-async function checkLoggedInViaDOM(page: Page): Promise<boolean> {
-	return (await checkLoggedInViaDOMDetails(page)).dom_logged_in;
-}
-
 export function isLikelyChatGptPushApprovalText(text: string): boolean {
 	const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
 	if (!normalized) {
@@ -525,7 +519,7 @@ async function isLikelyChatGptPushApprovalPage(page: Page): Promise<boolean> {
 }
 
 async function isChatGptSessionActiveOnPage(page: Page): Promise<boolean> {
-	return (await checkSession(page)) || (await checkLoggedInViaDOM(page));
+	return await checkSession(page);
 }
 
 async function isChatGptSessionActiveFromContext(page: Page): Promise<boolean> {
@@ -664,8 +658,7 @@ async function openChatGptLogin(page: Page): Promise<void> {
 
 async function clickIntermediateLogin(page: Page): Promise<void> {
 	await clickFirstVisible([
-		page.getByRole("button", { name: LOG_IN_NAME }),
-		page.getByRole("link", { name: LOG_IN_NAME }),
+		page.locator('[data-testid="login-button"], a[href="/auth/login"]'),
 	]);
 	await page.waitForTimeout(3000);
 }
@@ -892,7 +885,7 @@ async function findAndFillEmail({
 
 	await emailWait.match.fill(email);
 	await page
-		.locator('button[type="submit"], :text-is("Continue")')
+		.locator('button[type="submit"]:visible, input[type="submit"]:visible')
 		.first()
 		.click()
 		.catch((): undefined => undefined);
@@ -902,8 +895,9 @@ async function findAndFillEmail({
 
 async function continueWithPasswordIfPresent(page: Page): Promise<void> {
 	const clicked = await clickFirstVisible([
-		page.getByRole("button", { name: CONTINUE_WITH_PASSWORD_NAME }),
-		page.getByRole("link", { name: CONTINUE_WITH_PASSWORD_NAME }),
+		page.locator(
+			'button[name="intent"][value="password"], a[href*="/log-in/password"]',
+		),
 	]);
 	if (clicked) {
 		await page.waitForTimeout(3000);
@@ -1059,7 +1053,7 @@ async function submitPasswordAndHandleSecondFactor({
 
 	await passwordIn.fill(password);
 	await page
-		.locator('button[type="submit"], :text-is("Continue")')
+		.locator('button[type="submit"]:visible, input[type="submit"]:visible')
 		.first()
 		.click()
 		.catch((): undefined => undefined);

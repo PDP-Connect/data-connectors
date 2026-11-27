@@ -174,6 +174,11 @@ test("steam: friends stream hydrates persona fields via a single batched GetPlay
 								relationship: "friend",
 								friend_since: 1_700_000_001,
 							},
+							{
+								steamid: "76561198000000003",
+								relationship: "friend",
+								friend_since: 1_700_000_002,
+							},
 						],
 					},
 				}),
@@ -191,7 +196,14 @@ test("steam: friends stream hydrates persona fields via a single batched GetPlay
 								profileurl:
 									"https://steamcommunity.com/profiles/76561198000000001/",
 							},
-							// 76561198000000002 omitted: simulates a private/unresolvable profile.
+							{
+								steamid: "76561198000000002",
+								personaname: "Friend Two",
+								avatar: "https://example.com/two.jpg",
+								profileurl:
+									"https://steamcommunity.com/profiles/76561198000000002/",
+							},
+							// 76561198000000003 omitted: simulates a private/unresolvable profile.
 						],
 					},
 				}),
@@ -213,13 +225,13 @@ test("steam: friends stream hydrates persona fields via a single batched GetPlay
 	);
 	assert.equal(
 		summariesRequests[0]?.searchParams.get("steamids"),
-		"76561198000000001,76561198000000002",
+		"76561198000000001,76561198000000002,76561198000000003",
 	);
 
 	const records = emittedRecords.filter(
 		(record) => record.stream === "friends",
 	);
-	assert.equal(records.length, 2);
+	assert.equal(records.length, 3);
 	const hydrated = records.find(
 		(record) => record.data.steamid === "76561198000000001",
 	);
@@ -229,8 +241,12 @@ test("steam: friends stream hydrates persona fields via a single batched GetPlay
 		hydrated?.data.profile_url,
 		"https://steamcommunity.com/profiles/76561198000000001/",
 	);
-	const unresolved = records.find(
+	const fallbackAvatar = records.find(
 		(record) => record.data.steamid === "76561198000000002",
+	);
+	assert.equal(fallbackAvatar?.data.avatar_url, "https://example.com/two.jpg");
+	const unresolved = records.find(
+		(record) => record.data.steamid === "76561198000000003",
 	);
 	assert.equal(
 		unresolved?.data.persona_name,

@@ -9,8 +9,12 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.41",
+  "version": "0.1.53",
   "display_name": "Oura (Browser Sign-In)",
+  "brand": {
+    "icon": "icon.svg",
+    "background_color": "#2F4A73"
+  },
   "runtime_requirements": {
     "bindings": {
       "network": {
@@ -37,7 +41,7 @@
       "rationale": "Collection uses an owner-created Oura Developer Portal app and scoped API v2 OAuth token. A cached refresh token supports unattended reads; first authorization or a revoked grant requires browser sign-in."
     },
     "public_listing": {
-      "tier": "development"
+      "tier": "preview"
     }
   },
   "streams": [
@@ -306,7 +310,7 @@
   ],
   "reason_display_messages": {
     "oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
-    "inventory_not_proven_complete": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
+    "stream_collection_failed": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
   },
   "mobile": {
     "pageshim": {

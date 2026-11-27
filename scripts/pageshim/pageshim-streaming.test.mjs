@@ -37,6 +37,220 @@ const assertCleanRun = (run) =>
 		"runtime used no missing shim members or Node stubs",
 	);
 
+async function runCoverageOutcome(messages, { resultStreaming = true, streamRecords = true, ...hostOptions } = {}) {
+	await mkdir(root, { recursive: true });
+	const bundle = join(root, "outcome.js");
+	await buildPageshim({
+		connector: "strava_browser",
+		entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+		outfile: bundle,
+		extraDefines: {
+			PAGESHIM_COVERAGE_MESSAGES: JSON.stringify(messages),
+			PAGESHIM_COVERAGE_THROW: "false",
+			PAGESHIM_COVERAGE_RECORD: "true",
+			PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+		},
+	});
+	return runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"],
+		initialState: { "chatgpt.conversations": { checkpoint: "previous" } },
+		resultStreaming, resultSpoolDirectory: join(root, `outcome-${resultStreaming}-${streamRecords}`), ...hostOptions });
+}
+
+for (const bounded of [false, true]) {
+	for (const resultStreaming of [false, true]) {
+		for (const streamRecords of [false, true]) {
+			test(`late real time-range filtering vetoes an earlier checkpoint: bounded=${bounded}, records=${streamRecords}, host=${resultStreaming}`, { timeout: 60_000 }, async () => {
+				await mkdir(root, { recursive: true });
+				const bundle = join(root, `late-bound-${bounded}-${resultStreaming}-${streamRecords}.js`);
+				await buildPageshim({
+					connector: "chatgpt",
+					entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+					outfile: bundle,
+					extraDefines: {
+						PAGESHIM_COVERAGE_MESSAGES: "[]",
+						PAGESHIM_COVERAGE_THROW: "false",
+						PAGESHIM_COVERAGE_RECORD: "false",
+						PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+						PAGESHIM_COVERAGE_RANGE_MODE: JSON.stringify(bounded ? "bounded" : "unbounded"),
+					},
+				});
+				const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"],
+					initialState: { "chatgpt.conversations": { checkpoint: "previous" } },
+					resultStreaming, resultSpoolDirectory: join(root, `late-bound-spool-${bounded}-${resultStreaming}-${streamRecords}`) });
+				assertCleanRun(run);
+				assert.deepEqual(run.ret, { ok: true });
+				assert.equal(run.data.error, undefined);
+				const payload = resultStreaming
+					? JSON.parse(await readFile(run.streamScopeFiles["chatgpt.conversations"], "utf8"))
+					: run.result["chatgpt.conversations"];
+				assert.deepEqual(payload.records.map(record => record.id), bounded ? ["retained"] : ["retained", "filtered"]);
+				assert.deepEqual((resultStreaming ? run.streamDone : run.result).errors, []);
+				assert.match(run.data.status, /^Complete!/);
+				assert.deepEqual(run.stateMessages, bounded ? [] : [
+					{ type: "STATE", stream: "chatgpt.conversations", cursor: { checkpoint: "candidate" } },
+				]);
+				assert.deepEqual(run.states, { "chatgpt.conversations": { checkpoint: bounded ? "previous" : "candidate" } });
+			});
+		}
+	}
+}
+
+for (const streamRecords of [false, true]) {
+	for (const resultStreaming of [false, true]) {
+		for (const deferred of [false, true]) {
+			test(`finalized healthy or deferred coverage keeps the latest eligible checkpoint: deferred=${deferred}, records=${streamRecords}, host=${resultStreaming}`, { timeout: 60_000 }, async () => {
+				const run = await runCoverageOutcome([
+					{ type: "STATE", stream: "conversations", cursor: { checkpoint: "first" } },
+					...(deferred ? [{ type: "SKIP_RESULT", stream: "conversations", reason: "window_deferred",
+						recovery_hint: { action: "retry_by_runtime", retryable: true } }] : []),
+					{ type: "STATE", stream: "conversations", cursor: { checkpoint: "latest" } },
+				], { streamRecords, resultStreaming });
+				assert.equal(run.data.error, undefined);
+				assert.match(run.data.status, deferred ? /^Partial:/ : /^Complete!/);
+				assert.deepEqual(run.states, { "chatgpt.conversations": { checkpoint: "latest" } });
+				assert.deepEqual(run.stateMessages, [{ type: "STATE", stream: "chatgpt.conversations", cursor: { checkpoint: "latest" } }]);
+				if (resultStreaming) assert.ok(run.stateAckOrder < run.resultDoneAttemptOrder);
+			});
+		}
+		for (const diagnostics of [{ considered: 2, covered: 1 }, { required_keys: ["a", "b"], hydrated_keys: ["a"] }]) {
+			for (const stateFirst of [false, true]) {
+				test(`deferred uncovered inventory vetoes STATE: counts=${"considered" in diagnostics}, stateFirst=${stateFirst}, records=${streamRecords}, host=${resultStreaming}`, { timeout: 60_000 }, async () => {
+					const state = { type: "STATE", stream: "conversations", cursor: { checkpoint: "beyond-gap" } };
+					const skip = { type: "SKIP_RESULT", stream: "conversations", reason: "window_deferred",
+						recovery_hint: { action: "retry_by_runtime", retryable: true }, diagnostics };
+					const run = await runCoverageOutcome(stateFirst ? [state, skip] : [skip, state], { resultStreaming, streamRecords });
+					assert.equal(run.data.error, undefined);
+					assert.match(run.data.status, /^Partial:/);
+					assert.deepEqual(run.states, { "chatgpt.conversations": { checkpoint: "previous" } });
+					assert.deepEqual(run.stateMessages, [], "uncovered evidence vetoes staging in either order");
+					const done = resultStreaming ? run.streamDone : run.result;
+					assert.equal(done.errors[0].code, "window_deferred");
+					assert.deepEqual(done.errors[0].recovery_hint, { action: "retry_by_runtime", retryable: true });
+				});
+			}
+		}
+		for (const receipt of [
+			{ type: "DETAIL_COVERAGE", considered: 2, covered: 1 },
+			{ type: "SKIP_RESULT", reason: "page_unreadable", message: "Requested content could not be read." },
+		]) {
+			test(`late coverage veto preserves the committed cursor: ${receipt.type}, records=${streamRecords}, host=${resultStreaming}`, { timeout: 60_000 }, async () => {
+				const run = await runCoverageOutcome([
+					{ type: "STATE", stream: "conversations", cursor: { checkpoint: "invalid" } },
+					{ ...receipt, stream: "conversations" },
+				], { resultStreaming, streamRecords });
+				assertCleanRun(run);
+				assert.deepEqual(run.ret, { ok: true });
+				assert.equal(run.data.error, undefined);
+				assert.match(run.data.status, /^Partial:/);
+				assert.deepEqual(run.states, { "chatgpt.conversations": { checkpoint: "previous" } });
+				assert.deepEqual(run.stateMessages, [], "an ineligible cursor never reaches staging");
+				if (resultStreaming) assert.equal(run.streamResult.completed, true);
+			});
+		}
+	}
+	test(`terminal receipt aggregation stays bounded and preserves incomplete counts: records=${streamRecords}`, { timeout: 60_000 }, async () => {
+		const run = await runCoverageOutcome(Array.from({ length: 70 }, (_, i) => ({
+			type: "SKIP_RESULT", stream: "conversations", reason: "page_unreadable",
+			message: `${i}:` + "x".repeat(4096), recovery_hint: { action: "retry_by_runtime", retryable: true },
+		})), { streamRecords });
+		assertCleanRun(run);
+		assert.deepEqual(run.ret, { ok: true });
+		assert.equal(run.data.error, undefined);
+		assert.equal(run.streamResult.completed, true);
+		assert.match(run.data.status, /^Partial:/);
+		assert.ok(JSON.stringify(["setData", ["result:done", run.streamDone]]).length < 262144);
+		assert.equal(run.streamDone.errors.reduce((sum, error) => sum + (error.count ?? 1), 0), 70);
+		assert.ok(run.streamDone.errors.some(error => error.reason.includes("0:")), "keep a bounded explanation sample");
+		assert.equal(run.streamDone.errors[0].code, "page_unreadable");
+		assert.deepEqual(run.streamDone.errors[0].recovery_hint, { action: "retry_by_runtime", retryable: true });
+	});
+	test(`distinct escape-heavy receipt overflow retains scope, counts, and a sample: records=${streamRecords}`, { timeout: 60_000 }, async () => {
+		const run = await runCoverageOutcome(Array.from({ length: 70 }, (_, i) => ({
+			type: "SKIP_RESULT", stream: "conversations", reason: `read_failed_${i}`, message: `${i}:` + '\\"\u0000'.repeat(4096),
+		})), { streamRecords });
+		assert.equal(run.data.error, undefined);
+		assert.equal(run.streamResult.completed, true);
+		assert.match(run.data.status, /^Partial:/);
+		assert.equal(run.streamDone.errors.reduce((sum, error) => sum + (error.count ?? 1), 0), 70);
+		assert.ok(JSON.stringify(["setData", ["result:done", run.streamDone]]).length < 262144);
+		const overflow = run.streamDone.errors.find(error => error.code === "additional_collection_errors");
+		assert.ok(overflow.count > 0);
+		assert.equal(overflow.scope, "chatgpt.conversations");
+		assert.equal(overflow.samples.length, 1);
+		assert.ok(overflow.samples[0].length > 0);
+	});
+}
+
+// Match the legacy host boundary: accepted data remains durable even if a
+// subsequent STATE or final status bridge call fails. A sibling can commit first.
+for (const failure of [{ failStateWriteAt: 1 }, { failStateWriteAt: 2 }, { failFinalStatusWrite: true }]) {
+	test(`legacy accepted records survive later host failure: ${JSON.stringify(failure)}`, { timeout: 60_000 }, async () => {
+		const acceptedResults = [];
+		const scopes = ["chatgpt.conversations", "chatgpt.memories"];
+		const initialState = Object.fromEntries(scopes.map(scope => [scope, { checkpoint: "previous" }]));
+		const run = await runCoverageOutcome([
+			{ type: "STATE", stream: "conversations", cursor: { checkpoint: "next" } },
+			{ type: "RECORD", stream: "memories", data: { id: "sibling" } },
+			{ type: "STATE", stream: "memories", cursor: { checkpoint: "sibling-next" } },
+		], { resultStreaming: false, streamRecords: false, scopes, initialState, ...failure,
+			observeBridge: (method, args, reply) => {
+				if (method === "setData" && args[0] === "result" && !reply?.__shimError)
+					acceptedResults.push(JSON.parse(args[1]));
+			} });
+		assertCleanRun(run);
+		assert.equal(acceptedResults.length, 1, "never replace accepted data with an empty fatal payload");
+		assert.deepEqual(run.result, acceptedResults[0]);
+		assert.deepEqual(run.result["chatgpt.conversations"], { records: [{ id: "one" }] });
+		assert.deepEqual(run.result["chatgpt.memories"], { records: [{ id: "sibling" }] });
+		assert.deepEqual(run.result.errors, []);
+		assert.equal(run.data.error, failure.failFinalStatusWrite ? "synthetic final status write failed" : "synthetic STATE write failed");
+		const acknowledged = failure.failStateWriteAt ? failure.failStateWriteAt - 1 : 2;
+		assert.equal(run.stateMessages.length, acknowledged);
+		assert.deepEqual(run.states[scopes[0]], { checkpoint: acknowledged ? "next" : "previous" });
+		assert.deepEqual(run.states[scopes[1]], { checkpoint: acknowledged === 2 ? "sibling-next" : "previous" });
+	});
+}
+
+for (const optionRetryable of [false, true]) {
+	for (const hintRetryable of [undefined, false, true]) {
+		test(`reported recovery normalizes retryability independently: option=${optionRetryable}, hint=${hintRetryable}`, { timeout: 60_000 }, async () => {
+			await mkdir(root, { recursive: true });
+			const bundle = join(root, "report-recovery.js");
+			await buildPageshim({ connector: "strava_browser",
+				entryPoint: new URL("./test-fixtures/stream-failure-runtime.ts", import.meta.url).pathname,
+				outfile: bundle, extraDefines: { PAGESHIM_STREAM_FAILURE_MODE: JSON.stringify("report"),
+					PAGESHIM_STREAM_FAILURE_OPTIONS: JSON.stringify({ retryable: optionRetryable,
+						recoveryHint: { action: "retry_by_runtime", ...(hintRetryable === undefined ? {} : { retryable: hintRetryable }) } }) } });
+			for (const resultStreaming of [false, true]) {
+				const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], resultStreaming,
+					resultSpoolDirectory: join(root, `recovery-${optionRetryable}-${hintRetryable}-${resultStreaming}`) });
+				assert.equal(run.data.error, undefined);
+				assert.match(run.data.status, /^Partial:/);
+				const done = resultStreaming ? run.streamDone : run.result;
+				assert.equal(done.errors[0].code, "stream_collection_failed");
+				assert.deepEqual(done.errors[0].recovery_hint, { action: "retry_by_runtime", retryable: hintRetryable ?? optionRetryable });
+				assert.deepEqual(run.stateMessages, []);
+			}
+		});
+	}
+}
+
+for (const code of ["linkedin_session_dead", "meta_session_required"]) {
+	test(`typed fatal metadata survives the legacy result boundary: ${code}`, { timeout: 60_000 }, async () => {
+		await mkdir(root, { recursive: true });
+		const bundle = join(root, "typed-fatal.js");
+		await buildPageshim({ connector: "strava_browser", entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+			outfile: bundle, extraDefines: { PAGESHIM_COVERAGE_MESSAGES: JSON.stringify([{ type: "STATE", stream: "conversations", cursor: { invalid: true } }]),
+				PAGESHIM_COVERAGE_RECORD: "false", PAGESHIM_COVERAGE_STREAM: "false", PAGESHIM_COVERAGE_THROW: "false", PAGESHIM_TERMINAL_CODE: JSON.stringify(code) } });
+		const run = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"] });
+		assert.equal(run.data.error, "Authentication rejected.");
+		assert.deepEqual(run.result.errors, [{ errorClass: "auth_failed", reason: "Authentication rejected.", disposition: "fatal", phase: "collect",
+			code, recovery_hint: { action: "manual_action_required", retryable: false } }]);
+		assert.deepEqual(run.stateMessages, []);
+		assert.doesNotMatch(run.data.status, /^(Complete!|Partial:)/);
+	});
+}
+
 async function buildSyntheticBundle(
 	recordCount,
 	swallowEmitErrors = false,
@@ -663,6 +877,9 @@ test("coverage receipts distinguish incomplete inventory, complete runs, and rea
 		{ name: "complete", type: "DETAIL_COVERAGE", considered: 1, covered: 1, required_keys: ["a"], hydrated_keys: ["a"], complete: true },
 		{ name: "failure", type: "DETAIL_COVERAGE", considered: 2, covered: 1, failure: true },
 		{ name: "zero-inventory", type: "SKIP_RESULT", reason: "inventory_not_proven_complete", empty: true },
+		// The desktop runtime's other unproven-enumeration cause: one readable
+		// record and no coverage diagnostics is still partial, never Complete!.
+		{ name: "linkedin-cause", type: "SKIP_RESULT", reason: "linkedin_enumeration_unproven" },
 	];
 	await mkdir(root, { recursive: true });
 	for (const resultStreaming of [false, true]) {
@@ -699,6 +916,64 @@ test("coverage receipts distinguish incomplete inventory, complete runs, and rea
 					assert.equal(errors.length, complete ? 0 : 1, name);
 					if (!complete) assert.equal(errors[0].errorClass, "partial", name);
 				}
+			}
+		}
+	}
+});
+
+// A stream failure reported with the portable reason, as a raw SKIP_RESULT or
+// through ctx.reportStreamFailure, is the same partial outcome as an unproven
+// enumeration: with no records the thin host still gets a result with the
+// failed scope omitted and its error, never a run error or an empty success.
+test("a zero-record portable stream failure completes as a scoped partial result", {
+	timeout: 180_000,
+}, async () => {
+	await mkdir(root, { recursive: true });
+	for (const mode of ["skip", "report"]) {
+		const bundle = join(root, `stream-failure-${mode}.js`);
+		await buildPageshim({
+			connector: "strava_browser",
+			entryPoint: new URL("./test-fixtures/stream-failure-runtime.ts", import.meta.url).pathname,
+			outfile: bundle,
+			extraDefines: { PAGESHIM_STREAM_FAILURE_MODE: JSON.stringify(mode) },
+		});
+		for (const sibling of [false, true]) {
+			for (const resultStreaming of [false, true]) {
+				const label = `${mode}, sibling=${sibling}, streaming=${resultStreaming}`;
+				const run = await runHarness({
+					bundle, fixtures,
+					scopes: sibling ? ["chatgpt.conversations", "chatgpt.memories"] : ["chatgpt.conversations"],
+					resultStreaming,
+					resultSpoolDirectory: join(root, `stream-failure-${mode}-${sibling}-${resultStreaming}`),
+				});
+				assertCleanRun(run);
+				assert.deepEqual(run.ret, { ok: true }, label);
+				assert.equal(run.data.error, undefined, label);
+				assert.match(run.data.status, /^Partial:/, label);
+				const done = resultStreaming ? run.streamDone : run.result;
+				assert.deepEqual(done.errors, [{
+					errorClass: "partial",
+					reason: "The conversations list failed to load.",
+					disposition: "omitted",
+					scope: "chatgpt.conversations",
+					phase: "collect",
+					code: "stream_collection_failed",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+				}], label);
+				const scope = async (name) => resultStreaming
+					? (run.streamScopeFiles[name] === undefined ? undefined
+						: JSON.parse(await readFile(run.streamScopeFiles[name], "utf8")))
+					: run.result[name];
+				if (sibling) {
+					assert.deepEqual(await scope("chatgpt.memories"), { records: [{ id: "m1" }] }, label);
+					assert.deepEqual(run.states["chatgpt.memories"], { done: true }, label);
+				}
+				// The failed stream never becomes a checkpointed (proven-empty) scope.
+				assert.equal(run.states["chatgpt.conversations"], undefined, label);
+				const failed = await scope("chatgpt.conversations");
+				if (failed !== undefined) assert.deepEqual(failed, { records: [] }, label);
+				if (resultStreaming && !sibling)
+					assert.deepEqual(failed, { records: [] }, `${label}: the thin host gets the omitted scope`);
 			}
 		}
 	}
@@ -779,4 +1054,37 @@ test("audited crypto parity and every admitted bundle byte comparison", async ()
     report.push({connector,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash});
   }
   console.log("PAGESHIM_CRYPTO_IMPACT_SUMMARY "+JSON.stringify(report));
+});
+
+test("SKIP_RESULT forwards only bounded machine codes and recovery actions", { timeout: 60_000 }, async () => {
+	await mkdir(root, { recursive: true });
+	const bundle = join(root, "skip-machine-fields.js");
+	await buildPageshim({
+		connector: "strava_browser",
+		entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+		outfile: bundle,
+		extraDefines: {
+			PAGESHIM_COVERAGE_MESSAGES: JSON.stringify([
+				{ type: "SKIP_RESULT", stream: "conversations", reason: "inventory_not_proven_complete", recovery_hint: { action: "retry_by_runtime", retryable: true } },
+				{ type: "SKIP_RESULT", stream: "conversations", reason: "UPPERCASE", recovery_hint: { action: "x".repeat(65), retryable: true } },
+				{ type: "SKIP_RESULT", stream: "conversations", reason: "x".repeat(65), recovery_hint: { action: "a URL https://example.invalid", retryable: false } },
+				{ type: "SKIP_RESULT", stream: "conversations", recovery_hint: { action: "retry_by_runtime", retryable: "true" } },
+			]),
+			PAGESHIM_COVERAGE_THROW: "false", PAGESHIM_COVERAGE_RECORD: "false", PAGESHIM_COVERAGE_STREAM: "false",
+		},
+	});
+	for (const resultStreaming of [false, true]) {
+		const r = await runHarness({ bundle, fixtures, scopes: ["chatgpt.conversations"], resultStreaming,
+			resultSpoolDirectory: join(root, `skip-machine-${resultStreaming}`) });
+		assertCleanRun(r);
+		assert.deepEqual(r.ret, { ok: true });
+		const errors = resultStreaming ? r.streamDone.errors : r.result.errors;
+		assert.equal(errors.length, 4);
+		assert.equal(errors[0].code, "stream_collection_failed");
+		assert.deepEqual(errors[0].recovery_hint, { action: "retry_by_runtime", retryable: true });
+		for (const error of errors.slice(1)) {
+			assert.equal(error.code, undefined);
+			assert.equal(error.recovery_hint, undefined);
+		}
+	}
 });

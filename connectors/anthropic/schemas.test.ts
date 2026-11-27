@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+	accountPlanSchema,
 	accountProfileSchema,
 	conversationsSchema,
 	messagesSchema,
@@ -416,5 +417,88 @@ test("the manifest declares pdpp-safe-escape-v1 on exactly the fields the parser
 		const blob = (byName.get(name) as Record<string, Record<string, unknown>>)
 			.blob_ref;
 		assert.equal(blob?.x_pdpp_blob_projects_field, undefined, name);
+	}
+});
+
+const ACCOUNT_PLAN_RECORD = {
+	id: "account_plan",
+	account_id: "synthetic-org-id",
+	account_structure: null,
+	account_created_at: "2025-03-01T12:00:00.123456Z",
+	plan_type: "pro",
+	plan_display_name: null,
+	subscription_plan: null,
+	has_active_subscription: null,
+	billing_period: null,
+	will_renew: null,
+	renews_at: null,
+	expires_at: null,
+	cancels_at: null,
+	scheduled_plan_change: null,
+};
+
+test("account_plan schema accepts the export's partial record and routes through validateRecord", () => {
+	assert.equal(accountPlanSchema.safeParse(ACCOUNT_PLAN_RECORD).success, true);
+	assert.equal(validateRecord("account_plan", ACCOUNT_PLAN_RECORD).ok, true);
+	assert.equal(
+		accountPlanSchema.safeParse({
+			...ACCOUNT_PLAN_RECORD,
+			plan_type: null,
+			account_created_at: null,
+		}).success,
+		true,
+	);
+});
+
+test("account_plan schema rejects a missing id, and a malformed creation time", () => {
+	const { id: _omit, ...withoutId } = ACCOUNT_PLAN_RECORD;
+	assert.equal(accountPlanSchema.safeParse(withoutId).success, false);
+	assert.equal(
+		accountPlanSchema.safeParse({
+			...ACCOUNT_PLAN_RECORD,
+			account_created_at: "yesterday",
+		}).success,
+		false,
+	);
+});
+
+test("timestamp schema rejects invalid complete datetimes and keeps valid forms", () => {
+	for (const value of [
+		"2026-99-99T99:99:99garbage",
+		"2026-02-29T00:00:00Z",
+		"1900-02-29T00:00:00Z",
+		"2026-04-31T00:00:00Z",
+		"2026-00-01T00:00:00Z",
+		"2026-01-00T00:00:00Z",
+		"2026-01-01T24:00:00Z",
+		"2026-01-01T00:60:00Z",
+		"2026-01-01T00:00:60Z",
+		"2026-01-01T00:00:00+24:00",
+		"2026-01-01T00:00:00+05:60",
+		"2026-01-01T00:00:00",
+		"2026-01-01T00:00:00Zgarbage",
+		"2026-01-01T00:00:00Z\n",
+	]) {
+		assert.equal(
+			conversationsSchema.safeParse({
+				...CONVERSATION_RECORD,
+				create_time: value,
+			}).success,
+			false,
+			value,
+		);
+	}
+	for (const value of [
+		"2026-01-02T03:04:05.123456Z",
+		"2026-01-02T03:04:05+05:30",
+		"2026-01-02T03:04:05.123-04:00",
+		"2000-02-29T23:59:59Z",
+	]) {
+		const result = conversationsSchema.safeParse({
+			...CONVERSATION_RECORD,
+			create_time: value,
+		});
+		assert.ok(result.success, value);
+		assert.equal(result.data.create_time, value);
 	}
 });

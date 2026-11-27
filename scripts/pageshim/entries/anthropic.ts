@@ -22,15 +22,10 @@ import { applyRequestedTimeRanges } from "../requested-time-range.ts";
 
 // Defined by build.mjs from connectors/anthropic/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 const CLAUDE_ORIGIN = "https://claude.ai";
-const STREAMS = [
-	"account_profile",
-	"conversations",
-	"messages",
-	"projects",
-	"project_documents",
-];
+const STREAMS = PAGESHIM_CONNECTOR_STREAMS;
 
 // index.ts spools each source object here. The shim discards the bytes.
 process.env.PDPP_BLOB_SPOOL_DIR = "/pageshim-blobs";
@@ -98,13 +93,7 @@ const count = (scope: unknown): number => {
 			records: records.map(({ blob_ref: _blobRef, ...record }) => record),
 		}),
 		streamScopeRecords: {
-			order: [
-				"messages",
-				"conversations",
-				"account_profile",
-				"projects",
-				"project_documents",
-			],
+			order: ["messages", "conversations"],
 			toRecord: (_stream, record) => {
 				const { blob_ref: _blobRef, ...output } = record;
 				return output;

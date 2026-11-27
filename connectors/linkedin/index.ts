@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.30)
+ * PDPP LinkedIn Connector
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -16,6 +16,8 @@
  * `page.evaluate(fetch)`, exactly as the legacy connector did — Voyager
  * requires the session cookie + CSRF token pair that only exists in that
  * context, and has no public CORS allowance.
+ * An unauthenticated reachability probe cannot exercise this collection path:
+ * Voyager requires an owner-authenticated browser session.
  *
  * Streams (D7 — capability-map.json `linkedin`):
  *   profile      /voyager/api/me + dash/profiles (FullProfileWithEntities)
@@ -74,6 +76,7 @@ import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/brows
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
+	createConnectorFailure,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	type ProbeSessionArgs,
@@ -102,6 +105,7 @@ import {
 	connectionEnrichmentHasMalformedFields,
 	connectionEnrichmentIsReadable,
 	type DashProfileSource,
+	pageElementsAt,
 } from "./parsers.ts";
 import { connectionEvidence, profileEvidence, sectionEvidence, summaryEvidence } from "./evidence.ts";
 import { validateRecord } from "./schemas.ts";
@@ -134,7 +138,31 @@ const PROFILE_DECORATION_IDS = [
 	"com.linkedin.voyager.dash.deco.identity.profile.FullProfileWithEntities-109",
 ];
 
-type VoyagerJsonResult<T> = { _error: string } | (T & { _error?: undefined });
+/** Why a Voyager read failed, as a closed set. A thrown message or a response
+ *  body can quote private text, so only these classes leave the page. */
+type VoyagerReadCause = `http_${number}` | "malformed_json_body" | "transport_failed";
+
+type PageVoyagerResult =
+	| { _error: VoyagerReadCause }
+	| { _body: unknown; _status: number };
+
+// JSON can contain any string key, including _error and recognized cause names.
+// Only envelopes created here carry this process-local, non-JSON brand.
+const VOYAGER_FAILURE = Symbol("voyager_failure");
+type VoyagerFailure = { [VOYAGER_FAILURE]: true; _error: VoyagerReadCause };
+type VoyagerJsonResult<T> = VoyagerFailure | (T & { [VOYAGER_FAILURE]?: never });
+
+function isVoyagerReadCause(value: unknown): value is VoyagerReadCause {
+	return value === "malformed_json_body" || value === "transport_failed" ||
+		(typeof value === "string" && /^http_[0-9]{1,3}$/u.test(value));
+}
+
+function voyagerFailure(cause: unknown): VoyagerFailure {
+	return {
+		[VOYAGER_FAILURE]: true,
+		_error: isVoyagerReadCause(cause) ? cause : "transport_failed",
+	};
+}
 
 /** Fetch a Voyager endpoint from inside the logged-in page context. Voyager
  *  has no public CORS allowance, so this must run via `page.evaluate` on a
@@ -153,7 +181,7 @@ async function voyagerFetch<T>(
 	label?: string,
 ): Promise<VoyagerJsonResult<T>> {
 	const result = await page.evaluate(
-		async ({ path }) => {
+		async ({ path }): Promise<PageVoyagerResult> => {
 			try {
 				const csrfMatch = document.cookie.match(/JSESSIONID="?([^";]+)/);
 				const csrfToken = csrfMatch ? csrfMatch[1] : "";
@@ -166,13 +194,17 @@ async function voyagerFetch<T>(
 				}
 				return { _body: await resp.json(), _status: resp.status };
 			} catch (err) {
-				return { _error: err instanceof Error ? err.message : String(err) };
+				// Classes only: a parse or transport error's message can quote the
+				// response body or the host.
+				return {
+					_error: err instanceof SyntaxError ? "malformed_json_body" : "transport_failed",
+				};
 			}
 		},
 		{ path: endpoint },
 	);
 	if ("_error" in result) {
-		return result as VoyagerJsonResult<T>;
+		return voyagerFailure(result._error);
 	}
 	capture?.captureHttp(label ?? endpoint, result._body, {
 		endpoint,
@@ -183,25 +215,26 @@ async function voyagerFetch<T>(
 		result._body === null ||
 		Array.isArray(result._body)
 	) {
-		return { _error: "malformed_json_body" };
+		return voyagerFailure("malformed_json_body");
 	}
-	return result._body as VoyagerJsonResult<T>;
+	return result._body as T & { [VOYAGER_FAILURE]?: never };
 }
 
 function isFetchError<T>(
 	result: VoyagerJsonResult<T>,
-): result is { _error: string } {
+): result is VoyagerFailure {
 	return (
 		typeof result === "object" &&
 		result !== null &&
-		"_error" in result &&
-		typeof result._error === "string"
+		result[VOYAGER_FAILURE] === true &&
+		isVoyagerReadCause(result._error)
 	);
 }
 
 interface DashProfileResult {
 	profile: VoyagerProfileElement | null;
 	source: DashProfileSource;
+	failure?: VoyagerReadCause;
 }
 
 function hasRecognizedProfileField(profile: Record<string, unknown>): boolean {
@@ -239,14 +272,15 @@ async function checkApiAuth(
 }
 
 /** Fetch the full dash profile, trying each known decoration id in turn.
- *  Returns the first successful element, or null if every attempt failed
- *  (the caller still has the basic `/me` fields to fall back to). */
+ *  A successful full decoration recovers earlier failures. A weaker basic
+ *  fallback retains the failed decoration cause for unavailable sections. */
 async function fetchDashProfile(
 	page: Page,
 	publicIdentifier: string,
 	capture?: CaptureSession | null,
 ): Promise<DashProfileResult> {
 	const publicIdStr = encodeURIComponent(publicIdentifier);
+	let decorationFailure: VoyagerReadCause | undefined;
 	for (const decorationId of PROFILE_DECORATION_IDS) {
 		const result = await voyagerFetch<VoyagerDashProfilesResponse>(
 			page,
@@ -254,6 +288,10 @@ async function fetchDashProfile(
 			capture,
 			`dash-profile-${decorationId.split("-").pop()}`,
 		);
+		if (isFetchError(result) && isRejectedSession(result._error)) {
+			return { profile: null, source: "unavailable", failure: result._error };
+		}
+		if (isFetchError(result)) decorationFailure = result._error;
 		if (!isFetchError(result) && Array.isArray(result.elements)) {
 			for (const candidate of result.elements) {
 				if (isRecord(candidate) && hasRecognizedProfileField(candidate)) {
@@ -275,10 +313,83 @@ async function fetchDashProfile(
 	if (!isFetchError(basic) && Array.isArray(basic.elements)) {
 		const profile = basic.elements.find(isRecord);
 		if (profile) {
-			return { profile: profile as VoyagerProfileElement, source: "basic" };
+			return { profile: profile as VoyagerProfileElement, source: "basic",
+				...(decorationFailure ? { failure: decorationFailure } : {}),
+			};
 		}
 	}
-	return { profile: null, source: "unavailable" };
+	return { profile: null, source: "unavailable",
+		...(isFetchError(basic) ? { failure: basic._error } : decorationFailure ? { failure: decorationFailure } : {}),
+	};
+}
+
+const SKILLS_PAGE_SIZE = 20;
+const SKILLS_MAX_PAGES = 10;
+
+interface SkillsWalk {
+	/** Every skill, when the walk proved the whole list; otherwise absent. */
+	elements?: unknown[];
+	/** How the walk ended, as a closed set (never response text). */
+	outcome: string;
+}
+
+/** Walk the owner's skills collection from offset 0 to its stated total.
+ *  The decoration embeds only the first page of a long list (seen live: 20 of
+ *  32). The walk is proof only if every page reports the same total, every
+ *  skill URN is unique and bound to the owner's profile id, and the union is
+ *  exactly that total; anything else leaves the first page as the result. */
+async function walkProfileSkills(
+	page: Page,
+	profile: unknown,
+	firstPage: readonly unknown[],
+	capture?: CaptureSession | null,
+): Promise<SkillsWalk> {
+	if (!isRecord(profile) || typeof profile.entityUrn !== "string") return { outcome: "owner_urn_missing" };
+	const profileId = /^urn:li:fsd_profile:([^:(),]+)$/u.exec(profile.entityUrn)?.[1];
+	if (!profileId) return { outcome: "owner_urn_missing" };
+	const ownedPrefix = `urn:li:fsd_skill:(${profileId},`;
+	const owned = (value: string): boolean => value.startsWith(ownedPrefix) && value.endsWith(")") && value.length > ownedPrefix.length + 1;
+	const urn = encodeURIComponent(profile.entityUrn);
+	const seen = new Map<string, unknown>();
+	let total: number | null = null;
+	// Each page starts where the last one's rows ended: a server may return
+	// fewer than asked for.
+	let start = 0;
+	for (let index = 0; index < SKILLS_MAX_PAGES; index += 1) {
+		const result = await voyagerFetch<Record<string, unknown>>(page,
+			`/voyager/api/identity/dash/profileSkills?q=viewee&profileUrn=${urn}&start=${start}&count=${SKILLS_PAGE_SIZE}`,
+			capture, `skills-page-${String(start).padStart(4, "0")}`);
+		if (isFetchError(result)) return { outcome: `page_${result._error}` };
+		const paging = isRecord(result.paging) ? result.paging : null;
+		if (!Array.isArray(result.elements) || !paging || paging.start !== start) return { outcome: "page_malformed" };
+		if (typeof paging.total !== "number" || !Number.isSafeInteger(paging.total) || paging.total < 0) return { outcome: "page_total_invalid" };
+		if (total !== null && paging.total !== total) return { outcome: "total_changed" };
+		total = paging.total;
+		for (const element of result.elements) {
+			if (!isRecord(element) || typeof element.entityUrn !== "string" || !owned(element.entityUrn)) return { outcome: "skill_not_owned" };
+			// A walked skill must carry its own name: a projection without one
+			// would withhold rows the first page already reads.
+			if (typeof element.name !== "string" || element.name.trim() === "") return { outcome: "skill_name_missing" };
+			if (seen.has(element.entityUrn)) return { outcome: "skill_duplicate" };
+			seen.set(element.entityUrn, element);
+		}
+		start += result.elements.length;
+		if (seen.size >= total || result.elements.length === 0) break;
+		await politeDelay(PAGE_DELAY_MS);
+	}
+	if (total === null || seen.size !== total) return { outcome: "union_total_mismatch" };
+	// The decoration's own entries win for the skills it already carried.
+	for (const element of firstPage) {
+		if (!isRecord(element) || typeof element.entityUrn !== "string" || !seen.has(element.entityUrn)) {
+			return { outcome: "first_page_not_in_walk" };
+		}
+		seen.set(element.entityUrn, element);
+	}
+	return { elements: [...seen.values()], outcome: "proven" };
+}
+
+function isRejectedSession(error: string): boolean {
+	return /^http_40[13]$/u.test(error);
 }
 
 interface ConnectionsResult {
@@ -712,8 +823,9 @@ export async function collectLinkedIn(
 
 	const isAuthenticated = await checkApiAuth(page, capture);
 	if (!isAuthenticated) {
-		throw new Error(
+		throw createConnectorFailure("linkedin_session_dead",
 			"linkedin_session_dead: no live Voyager session (li_at/JSESSIONID cookie missing or expired); manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
 		);
 	}
 
@@ -758,6 +870,10 @@ export async function collectLinkedIn(
 		);
 	}
 	const dashProfile = dashProfileResult.profile;
+	if (dashProfileResult.failure && isRejectedSession(dashProfileResult.failure)) {
+		throw createConnectorFailure("linkedin_session_dead", "linkedin_session_dead: LinkedIn rejected the profile read; manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } });
+	}
 
 	// The profile count is the owner-bound source summary, independent of
 	// connection enumeration or enrichment proof. Reuse the summary reads
@@ -790,7 +906,13 @@ export async function collectLinkedIn(
 	}
 	const ownerEvidence = profileEvidence(meResult, dashProfile);
 
-	const sink: StreamSink = { emit, emitRecord, progress, isRecordSelected: ctx.isRecordSelected };
+	const sink: StreamSink = {
+		emit,
+		emitRecord,
+		progress,
+		isRecordSelected: ctx.isRecordSelected,
+		reportStreamFailure: ctx.reportStreamFailure,
+	};
 
 	if (wantsProfileFields) {
 		await emitRows(
@@ -810,6 +932,7 @@ export async function collectLinkedIn(
 					dashProfileResult.source === "unavailable"
 						? "dashProfileUnavailable"
 						: "profileFieldsUnavailable",
+				...(dashProfileResult.failure ? { readFailure: "read_failed" as const } : {}),
 			},
 		);
 	}
@@ -817,17 +940,36 @@ export async function collectLinkedIn(
 	for (const section of wantedSections) {
 		// Only a full decoration carries the profile sections; an empty list
 		// from the basic fallback is not evidence of an empty section.
-		const items =
+		let items =
 			dashProfileResult.source === "decoration"
 				? collectionAt(dashProfile, section.key)
 				: unavailable("source_unavailable");
+		// The profile decoration carries only the first page of a long or
+		// categorized skills list. Its rows are readable: they are upserted and
+		// the stream reports the unproven enumeration, rather than dropping
+		// every skill (0.3.4x returned none for such accounts).
+		let walked: SkillsWalk | null = null;
+		if (section.stream === "skills" && items.kind === "unavailable" && items.reason === "walk_unverified") {
+			items = pageElementsAt(dashProfile, section.key);
+			// The rest of the list, from LinkedIn's own skills collection. Proven
+			// only when every page is owner-bound and the union matches its total.
+			if (items.kind === "read" && !ownerEvidence) {
+				walked = await walkProfileSkills(page, dashProfile, items.value, capture);
+				if (walked.elements) items = read(walked.elements);
+			}
+		}
 		if (items.kind !== "read") {
-			await emitUnavailableSection(section.stream, emit);
+			await emitUnavailableSection(section.stream, sink, dashProfileResult.failure,
+				items.kind === "unavailable" ? items.reason : undefined);
 			continue;
 		}
+		const evidence = walked?.elements ? undefined : sectionEvidence(dashProfile, section.key);
 		await emitRows(sink, section.stream, section.build(items.value), {
-			enumerated: !ownerEvidence && !sectionEvidence(dashProfile, section.key),
-			diagnostics: { evidence_reason: ownerEvidence ?? sectionEvidence(dashProfile, section.key) },
+			enumerated: !ownerEvidence && !evidence,
+			diagnostics: {
+				evidence_reason: ownerEvidence ?? evidence,
+				...(walked ? { skills_walk: walked.outcome } : {}),
+			},
 			gapReason: "profileSectionFieldsUnreadable",
 		});
 	}
@@ -884,7 +1026,8 @@ export async function collectLinkedIn(
 			(urn) => resolvedProfiles.get(urn)?.profile,
 			(urn) => resolution.permanentlyMissingUrns.has(urn),
 		);
-		const emittedUrns = new Set(rows.records.filter((row) => ctx.isRecordSelected?.("connections", row) ?? true).map((row) => row.id));
+		// Provider inventory proof includes readable rows the owner excluded.
+		const emittedUrns = new Set(rows.records.map((row) => row.id));
 		const withheldCount = elements.length - emittedUrns.size;
 		const evidenceReason = withheldCount > 0 ? "linkedin_connection_enrichment_incomplete" :
 			connectionEvidence({
@@ -893,12 +1036,21 @@ export async function collectLinkedIn(
 				pageTotal: connectionsResult.total, confirmation,
 			});
 		const connectionsComplete = !evidenceReason;
+		// A failed connections page is a failed read: HTTP 401/403 means
+		// LinkedIn rejected the session, anything else (429, 5xx, a thrown
+		// fetch) means the read did not complete.
+		const readFailure = connectionsComplete || terminationReason !== "page_error"
+			? undefined
+			: isRejectedSession(connectionsResult.error ?? "")
+				? "session_rejected" as const
+				: "read_failed" as const;
 		await emitRows(
 			sink,
 			"connections",
 			rows,
 			{
 				enumerated: connectionsComplete,
+				...(readFailure === undefined ? {} : { readFailure }),
 				gapReason: "connectionFieldsUnreadable",
 				diagnostics: {
 					evidence_reason: evidenceReason,
@@ -951,6 +1103,7 @@ interface StreamSink {
 	emit: BrowserCollectContext["emit"];
 	emitRecord: BrowserCollectContext["emitRecord"];
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 }
 
 type RowGapReason =
@@ -976,6 +1129,10 @@ async function emitRows(
 		diagnostics?: Record<string, unknown>;
 		enumerated: boolean;
 		gapReason: RowGapReason;
+		/** The walk stopped because a request failed, not because the end was
+		 *  unproven: a rejected session ends the run, any other failure is a
+		 *  failed read of this stream. */
+		readFailure?: "read_failed" | "session_rejected";
 	},
 ): Promise<void> {
 	const { gapReason } = options;
@@ -983,8 +1140,16 @@ async function emitRows(
 	for (const record of rows.records) {
 		await sink.emitRecord(stream, record);
 	}
+	if (options.readFailure === "session_rejected") {
+		throw createConnectorFailure("linkedin_session_dead",
+			`linkedin_session_dead: LinkedIn rejected the session while reading ${stream}; manual login required in the connector's browser profile`,
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
+		);
+	}
 	const selectedCount = rows.records.filter((record) => sink.isRecordSelected?.(stream, record) ?? true).length;
-	if (options.enumerated && rows.covered === rows.considered && selectedCount === rows.records.length) {
+	if (options.enumerated && rows.covered === rows.considered) {
+		// The requested subset is complete, but cannot certify a global cursor.
+		if (selectedCount !== rows.records.length) return;
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 		await sink.emit({ type: "STATE", stream, cursor: { full_scan_at: new Date().toISOString() } });
 		return;
@@ -993,23 +1158,34 @@ async function emitRows(
 		(stream !== "connections" || options.diagnostics?.missing_urn_count === 0)) {
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 	}
+	const diagnostics = {
+		...(rows.covered < rows.considered
+			? { source_reason: ROW_GAP_REASON[gapReason] }
+			: {}),
+		selected_count: selectedCount,
+		considered: rows.considered,
+		covered: rows.covered,
+		omitted_rows: rows.omittedRows,
+		unavailable_fields: rows.unavailableFields,
+		...options.diagnostics,
+	};
+	const recoveryHint = { action: "retry_by_runtime", retryable: true };
+	if (options.readFailure === "read_failed") {
+		const message = `LinkedIn stopped returning ${stream} pages before the list ended; covered entries are upserted only`;
+		if (sink.reportStreamFailure)
+			await sink.reportStreamFailure(stream, message, { recoveryHint, diagnostics });
+		else
+			await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed",
+				recovery_hint: { action: "retry_by_runtime", retryable: true }, message, diagnostics });
+		return;
+	}
 	await sink.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "linkedin_enumeration_unproven",
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		recovery_hint: recoveryHint,
 		message: `LinkedIn ${stream} enumeration is unproven; covered entries are upserted only`,
-		diagnostics: {
-			...(rows.covered < rows.considered
-				? { source_reason: ROW_GAP_REASON[gapReason] }
-				: {}),
-			selected_count: selectedCount,
-			considered: rows.considered,
-			covered: rows.covered,
-			omitted_rows: rows.omittedRows,
-			unavailable_fields: rows.unavailableFields,
-			...options.diagnostics,
-		},
+		diagnostics,
 	});
 }
 
@@ -1030,15 +1206,29 @@ function coverageMessage(
 
 async function emitUnavailableSection(
 	stream: string,
-	emit: (message: EmittedMessage) => Promise<void>,
+	sink: StreamSink,
+	failure?: VoyagerReadCause,
+	/** Why the section could not be read (a closed set, never response text). */
+	sectionRead?: string,
 ): Promise<void> {
-	await emit({
+	const diagnostics = {
+		source_reason: "linkedin_profile_section_unavailable",
+		...(sectionRead ? { section_read: sectionRead } : {}),
+	};
+	if (failure) {
+		const message = `LinkedIn ${stream} read failed: ${failure}`;
+		const recoveryHint = { action: "retry_by_runtime", retryable: true };
+		if (sink.reportStreamFailure) await sink.reportStreamFailure(stream, message, { recoveryHint, retryable: true, diagnostics });
+		else await sink.emit({ type: "SKIP_RESULT", stream, reason: "stream_collection_failed", message, recovery_hint: { action: "retry_by_runtime", retryable: true }, diagnostics });
+		return;
+	}
+	await sink.emit({
 		type: "SKIP_RESULT",
 		stream,
 		reason: "linkedin_enumeration_unproven",
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		message: "LinkedIn enumeration is unproven; the profile section was unreadable",
-		diagnostics: { source_reason: "linkedin_profile_section_unavailable" },
+		diagnostics,
 	});
 }
 

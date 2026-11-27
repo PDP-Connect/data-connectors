@@ -89,6 +89,7 @@ import {
 	SESSION_DIR_PREFIX_RE,
 	TOOL_RESULT_PREVIEW_CHARS,
 	textPreview,
+	toolBlockBody,
 	widenSessionTimeRange,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -98,6 +99,7 @@ import type {
 	ClaudeJsonlGap,
 	ClaudeSessionFileCursorV1,
 	ClaudeSourceGap,
+	ContentPart,
 	JsonlObject,
 	JsonlObservations,
 	SessionAccumulator,
@@ -409,6 +411,51 @@ export async function buildAttachmentRecord(
 	};
 }
 
+/**
+ * One attachment record per `tool_use` / `tool_result` block in a message.
+ * The message record keeps only a `[tool_use: Name]` placeholder; this record
+ * holds the tool name, a preview, and the complete body in the artifact
+ * spool. The id is stable per block, so a re-derivation upserts.
+ */
+async function buildToolBlockRecords(
+	obj: JsonlObject,
+	sessionId: string,
+	uuid: string,
+	captureContext: ArtifactCaptureContext | null,
+): Promise<RecordData[]> {
+	const content = (obj.message as { content?: unknown } | undefined)?.content;
+	if (!Array.isArray(content)) {
+		return [];
+	}
+	const records: RecordData[] = [];
+	for (const [index, part] of content.entries()) {
+		const block = part as ContentPart | null;
+		if (block?.type !== "tool_use" && block?.type !== "tool_result") {
+			continue;
+		}
+		const id = `${uuid}:${block.type}:${index}`;
+		const body = toolBlockBody(block);
+		const preview = safeTextPreview(body, ATTACHMENT_PREVIEW_CHARS);
+		records.push({
+			id,
+			session_id: sessionId,
+			parent_uuid: uuid,
+			event_type: block.type,
+			hook_name: null,
+			tool_use_id:
+				(block.type === "tool_use" ? block.id : block.tool_use_id) ?? null,
+			tool_name: block.type === "tool_use" ? (block.name ?? null) : null,
+			content_preview: preview.preview,
+			content_binary_reason: preview.kind === "binary" ? preview.reason : null,
+			content_bytes: Buffer.byteLength(body, "utf8"),
+			timestamp: obj.timestamp || null,
+			// One capture at a time: a block body can be many MB of tool output.
+			...(await captureAttachmentBody(body, id, captureContext)),
+		});
+	}
+	return records;
+}
+
 // ─── Per-line dispatcher ────────────────────────────────────────────────
 
 /** Injected deps threaded through every per-line emit helper. Mirrors the
@@ -419,11 +466,18 @@ export interface LineEmitDeps {
 	 *  Null/omitted disables it — records still emit, with `artifact_capture:
 	 *  "unavailable"` (see captureInlineArtifact). */
 	captureContext?: ArtifactCaptureContext | null;
+	/** Records which inline bodies remain owed. Null/omitted: none tracked. */
+	captureLedger?: ArtifactCaptureLedger | null;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	requested: Map<string, StreamScope>;
 }
 
 export interface ProcessJsonlLineArgs {
+	/**
+	 * When `true`, emit only `attachments` records. Used to retry attachment
+	 * bodies on lines whose messages an earlier run already emitted.
+	 */
+	attachmentsOnly?: boolean;
 	/**
 	 * When `true`, update `obs` (including `obs.messageCount`) but do not
 	 * emit message/attachment records. Used by the parent-first two-pass
@@ -450,47 +504,57 @@ export interface ProcessJsonlLineArgs {
  *     stream is requested.
  *   - Any other type → silent no-op (metadata-only lines like the
  *     `summary` header).
+ *   - message lines also emit one attachment record per tool_use /
+ *     tool_result block when the `attachments` stream is requested.
  *   - No uuid → no record (uuid is the emitted record id).
+ *
+ * Returns true when an attachment body from this line was not captured
+ * although capture is enabled, so the caller must not settle the line.
  */
 export async function processJsonlLine({
+	attachmentsOnly,
 	buildOnly,
 	deps,
 	obj,
 	obs,
-}: ProcessJsonlLineArgs): Promise<void> {
+}: ProcessJsonlLineArgs): Promise<boolean> {
 	const { sessionId } = obs;
 	if (!sessionId) {
-		return;
+		return false;
 	}
 	const { uuid, type } = obj;
-
-	if (isMessageType(type)) {
+	const isMessage = isMessageType(type);
+	if (isMessage) {
 		obs.messageCount += 1;
-		if (!buildOnly && deps.requested.has("messages") && uuid) {
-			await deps.emitRecord(
-				"messages",
-				buildMessageRecord(obj, sessionId, uuid, obs.subagentSessionId),
-			);
-		}
-		return;
 	}
-
-	if (
-		!buildOnly &&
-		isAttachmentType(type) &&
-		deps.requested.has("attachments") &&
-		uuid
-	) {
+	if (buildOnly || !uuid) {
+		return false;
+	}
+	if (isMessage && !attachmentsOnly && deps.requested.has("messages")) {
 		await deps.emitRecord(
-			"attachments",
-			await buildAttachmentRecord(
-				obj,
-				sessionId,
-				uuid,
-				deps.captureContext ?? null,
-			),
+			"messages",
+			buildMessageRecord(obj, sessionId, uuid, obs.subagentSessionId),
 		);
 	}
+	if (!deps.requested.has("attachments")) {
+		return false;
+	}
+	const captureContext = deps.captureContext ?? null;
+	const attachments = isMessage
+		? await buildToolBlockRecords(obj, sessionId, uuid, captureContext)
+		: isAttachmentType(type)
+			? [await buildAttachmentRecord(obj, sessionId, uuid, captureContext)]
+			: [];
+	let bodyOwed = false;
+	for (const record of attachments) {
+		await deps.emitRecord("attachments", record);
+		const status = record.artifact_capture as ArtifactCaptureStatus | null;
+		if (status && deps.captureLedger) {
+			deps.captureLedger.record(record.id as string, status);
+			bodyOwed ||= deps.captureLedger.isOutstanding(record.id as string);
+		}
+	}
+	return bodyOwed;
 }
 
 // ─── Sessions pass (I/O-free) ───────────────────────────────────────────
@@ -1718,6 +1782,19 @@ function hasValidJsonlGaps(cursor: Record<string, unknown>): boolean {
 	);
 }
 
+/** An owed offset past its cursor's committed prefix is not trusted. */
+function isOwedOffset(
+	value: unknown,
+	committedOffsetBytes: number,
+): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isSafeInteger(value) &&
+		value >= 0 &&
+		value < committedOffsetBytes
+	);
+}
+
 function readChildFileCursors(
 	value: unknown,
 ): Record<string, ClaudeChildFileCursorV1> {
@@ -1732,9 +1809,13 @@ function readChildFileCursors(
 			hasValidJsonlGaps(cursor) &&
 			readStringOrNull(cursor.current_session_id) !== undefined
 		) {
+			const { attachments_owed_from_bytes: owedFrom, ...physical } = cursor;
 			out[path] = {
-				...cursor,
+				...physical,
 				current_session_id: cursor.current_session_id as string | null,
+				...(isOwedOffset(owedFrom, cursor.committed_offset_bytes)
+					? { attachments_owed_from_bytes: owedFrom }
+					: {}),
 			};
 		}
 	}
@@ -1805,7 +1886,7 @@ async function scanClaudeJsonl(input: {
 	prior:
 		| (LocalJsonlScanResult["cursor"] & { jsonl_gaps?: ClaudeJsonlGap[] })
 		| undefined;
-	onObject: (obj: JsonlObject) => Promise<void>;
+	onObject: (obj: JsonlObject, byteOffset: number) => Promise<void>;
 }): Promise<
 	LocalJsonlScanResult & {
 		cursor: LocalJsonlScanResult["cursor"] & { jsonl_gaps: ClaudeJsonlGap[] };
@@ -1839,7 +1920,7 @@ async function scanClaudeJsonl(input: {
 				});
 				return;
 			}
-			await input.onObject(obj);
+			await input.onObject(obj, byteOffset);
 		},
 		onIncompleteLine: async (_line, byteOffset, lineNumber) => {
 			gaps.push({
@@ -2206,8 +2287,53 @@ async function scanSessionSource(input: {
 	};
 }
 
+/**
+ * Retry attachment records from lines `[from, to)` that an earlier run
+ * committed although a body was not captured, without re-emitting messages.
+ * Lines before `from` are parsed only to carry the session id forward.
+ * Returns the offset of the first line whose attachment body is still owed.
+ */
+async function replayCommittedAttachments(input: {
+	deps: LineEmitDeps;
+	from: number;
+	source: ClaudeJsonlSource;
+	subagentSessionId: string | null;
+	to: number;
+}): Promise<number | undefined> {
+	const observation = makeJsonlObservations(
+		input.source.forcedSessionId,
+		input.subagentSessionId,
+	);
+	let owedFrom: number | undefined;
+	await scanLocalJsonl({
+		path: input.source.path,
+		prior: undefined,
+		onLine: async (line, byteOffset) => {
+			if (byteOffset >= input.to) return;
+			let obj: unknown;
+			try {
+				obj = JSON.parse(line.toString("utf8"));
+			} catch {
+				return;
+			}
+			if (!isRecord(obj)) return;
+			observeJsonlFields(obj, observation, input.source.forcedSessionId);
+			if (byteOffset < input.from) return;
+			const owed = await processJsonlLine({
+				attachmentsOnly: true,
+				deps: input.deps,
+				obj,
+				obs: observation,
+			});
+			if (owed) owedFrom ??= byteOffset;
+		},
+	});
+	return owedFrom;
+}
+
 async function scanChildSource(input: {
 	captureContext?: ArtifactCaptureContext | null;
+	captureLedger?: ArtifactCaptureLedger | null;
 	cursor: ClaudeChildFileCursorV1 | undefined;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	emitRecords: boolean;
@@ -2229,29 +2355,65 @@ async function scanChildSource(input: {
 	);
 	observation.sessionId =
 		input.cursor?.current_session_id ?? observation.sessionId;
+	const deps: LineEmitDeps = {
+		captureContext: input.captureContext ?? null,
+		captureLedger: input.captureLedger ?? null,
+		emitRecord: async (stream, data) => {
+			input.telemetry.transcriptRecordsEmitted += 1;
+			await input.emitRecord(stream, data);
+		},
+		requested: input.requested,
+	};
+	const emitAttachments = input.requested.has("attachments");
+	// A prior run committed these lines while an attachment body was owed.
+	// Retry the attachments first; the scan below handles new lines.
+	const priorOwedFrom = input.cursor?.attachments_owed_from_bytes;
+	let replayOwedFrom: number | undefined;
+	if (emitAttachments && input.cursor && priorOwedFrom !== undefined) {
+		replayOwedFrom = await replayCommittedAttachments({
+			deps,
+			from: priorOwedFrom,
+			source: input.source,
+			subagentSessionId,
+			to: input.cursor.committed_offset_bytes,
+		});
+	}
+	let scanOwedFrom: number | undefined;
 	const result = await scanClaudeJsonl({
 		path: input.source.path,
 		prior: input.cursor,
-		onObject: async (obj) => {
+		onObject: async (obj, byteOffset) => {
 			observeJsonlFields(obj, observation, input.source.forcedSessionId);
-			await processJsonlLine({
+			const owed = await processJsonlLine({
 				buildOnly: !input.emitRecords,
-				deps: {
-					captureContext: input.captureContext ?? null,
-					emitRecord: async (stream, data) => {
-						input.telemetry.transcriptRecordsEmitted += 1;
-						await input.emitRecord(stream, data);
-					},
-					requested: input.requested,
-				},
+				deps,
 				obj,
 				obs: observation,
 			});
+			if (owed) scanOwedFrom ??= byteOffset;
 		},
 	});
 	observeLocalJsonlScan(input.telemetry, result);
+	const rebuilt = result.decision.kind === "rebuild";
+	// A rebuild re-derived every line, so earlier offsets no longer apply. A
+	// run without the attachments stream leaves a prior obligation in place.
+	const owedFrom = emitAttachments
+		? rebuilt
+			? scanOwedFrom
+			: (replayOwedFrom ?? scanOwedFrom)
+		: rebuilt
+			? undefined
+			: priorOwedFrom;
+	const { attachments_owed_from_bytes: _settled, ...physical } =
+		result.cursor as ClaudeChildFileCursorV1;
 	return {
-		cursor: { ...result.cursor, current_session_id: observation.sessionId },
+		cursor: {
+			...physical,
+			current_session_id: observation.sessionId,
+			...(owedFrom === undefined
+				? {}
+				: { attachments_owed_from_bytes: owedFrom }),
+		},
 	};
 }
 
@@ -3146,6 +3308,7 @@ if (isMainModule(import.meta.url)) {
 								() =>
 									scanChildSource({
 										captureContext,
+										captureLedger,
 										cursor: priorChildCursors[source.path],
 										emitRecord,
 										emitRecords: !candidateLegacyBaseline,
@@ -3178,6 +3341,7 @@ if (isMainModule(import.meta.url)) {
 									() =>
 										scanChildSource({
 											captureContext,
+											captureLedger,
 											cursor: undefined,
 											emitRecord,
 											emitRecords: true,

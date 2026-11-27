@@ -14,11 +14,9 @@
  * `/open-user-tab` makes the test open a tab in the same browser through its
  * own client while this run is in flight, the way the browser's owner would.
  *
- * `PDPP_OWNERSHIP_FIXTURE_PRESERVE_PAGE=1` makes it a connector that declares
- * page preservation (like ChatGPT): its run page stays open between runs and
- * the next run picks it up. In that mode a run counts how many runs the page
- * has served and emits the count as the record id.
- * `PDPP_OWNERSHIP_FIXTURE_DOWNLOAD=1` (with preserve) also downloads
+ * `PDPP_OWNERSHIP_FIXTURE_COUNT_RUNS=1` counts runs in page-local state.
+ * Each run uses a fresh page, so this counter must stay 1.
+ * `PDPP_OWNERSHIP_FIXTURE_DOWNLOAD=1` in that mode also downloads
  * `/export.zip` on the run page.
  */
 
@@ -36,16 +34,15 @@ const validateRecord: ValidateRecord = (stream: string, data: RecordData) => {
 	return { ok: false, issues: [{ path: "id", message: "expected string id" }] };
 };
 
-const preservePage = process.env.PDPP_OWNERSHIP_FIXTURE_PRESERVE_PAGE === "1";
+const countFreshPageRuns =
+	process.env.PDPP_OWNERSHIP_FIXTURE_COUNT_RUNS === "1";
 
-async function collectOnPreservedPage(
+async function collectOnFreshPage(
 	{ page, emitRecord }: BrowserCollectContext,
 	baseUrl: string,
 ): Promise<void> {
 	const runUrl = new URL("/run", baseUrl).toString();
-	if (page.url() !== runUrl) {
-		await page.goto(runUrl, { waitUntil: "load" });
-	}
+	await page.goto(runUrl, { waitUntil: "load" });
 	const runsServed = await page.evaluate(() => {
 		const served = Number(document.body.dataset.runsServed ?? "0") + 1;
 		document.body.dataset.runsServed = String(served);
@@ -60,9 +57,7 @@ async function collectOnPreservedPage(
 		waitUntil: "load",
 	});
 	if (process.env.PDPP_OWNERSHIP_FIXTURE_DOWNLOAD === "1") {
-		// A download on the reused run page: the launcher must count it as the
-		// run's (it goes into a recording's HAR) although it did not create
-		// the page.
+		// A download on the fresh run page belongs to this run's recording.
 		const download = page.waitForEvent("download");
 		await page.evaluate((href) => {
 			window.location.href = href;
@@ -77,9 +72,6 @@ runConnector({
 	validateRecord,
 	browser: {
 		profileName: "remote_ownership_fixture",
-		...(preservePage
-			? { preservePageOnFailure: true, preservePageOnSuccess: true }
-			: {}),
 	},
 	async collect(ctx: BrowserCollectContext) {
 		const { page, emitRecord } = ctx;
@@ -87,8 +79,8 @@ runConnector({
 		if (!baseUrl) {
 			throw new Error("PDPP_OWNERSHIP_FIXTURE_BASE_URL is not set");
 		}
-		if (preservePage) {
-			await collectOnPreservedPage(ctx, baseUrl);
+		if (countFreshPageRuns) {
+			await collectOnFreshPage(ctx, baseUrl);
 			return;
 		}
 		await page.goto(new URL("/run", baseUrl).toString(), { waitUntil: "load" });

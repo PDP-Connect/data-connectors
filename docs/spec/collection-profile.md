@@ -2,7 +2,7 @@
 
 Status: Normative draft. This is the canonical PDPP Collection Profile.
 
-Date: 2026-10-05
+Date: 2026-10-22
 
 ## 1. Scope
 
@@ -16,7 +16,8 @@ This document is the canonical Collection Profile. It is normative for
 connectors and connector runtimes in the PDPP ecosystem, in this repository and
 elsewhere. Its machine-readable half is
 [`schemas/connector-manifest.schema.json`](../../schemas/connector-manifest.schema.json),
-which validates `runtime_requirements.bindings`, together with
+which validates `runtime_requirements.bindings` and the `coverage_stores`
+declaration rule of Section 7.1.1, together with
 [`schemas/connector-binding-grammar.mjs`](../../schemas/connector-binding-grammar.mjs),
 which canonicalizes and validates the constraint grammars of Section 3.3.2
 beyond what JSON Schema alone can express.
@@ -36,9 +37,7 @@ differs from this document, for example in binding names, `DONE.status`, or
 `coverage_strategy` values, this document governs.
 
 This profile does not standardize a source platform API, process sandbox,
-package format, artifact registry, or resource-server ingest transport. The
-retired legacy `*-playwright` artifacts used a different manifest, page API,
-and runner. They do not implement this profile.
+package format, artifact registry, or resource-server ingest transport.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY**, and
@@ -154,6 +153,7 @@ Each stream declaration has these connector-facing fields:
 | `parent_streams` | OPTIONAL non-empty list of checkpoint-parent streams. See Section 3.6. |
 | `coverage_strategy` | REQUIRED coverage strategy from Section 3.5. |
 | `freshness_strategy` | REQUIRED freshness strategy from Section 3.5. |
+| `coverage_stores` | OPTIONAL. Valid only with the `RUN_COVERAGE_V1` declaration of Section 7.1.1. |
 
 An `append_only` stream contains immutable events. A connector adds records and
 MUST NOT update or delete an existing record. Repeating the same key is an
@@ -932,11 +932,14 @@ requires. A runtime MUST advertise its supported protocol version and
 capabilities before placement. It MUST reject a connector with an unsupported
 required capability before spawn.
 
-The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7)
-and `OBSERVATION` (since 0.2.0, Section 5.10). A connector that can emit one
-of these messages MUST declare that value. A runtime that does not advertise a
-declared capability MUST NOT start that connector. A runtime that implements
-profile version 0.2.0 MUST advertise and support `OBSERVATION`.
+The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7),
+`OBSERVATION` (since 0.2.0, Section 5.10), and `RUN_COVERAGE_V1` (Section 7.1,
+which defines it as elective). A connector that can emit one of these messages
+MUST declare that value. A runtime that does not advertise a declared
+capability MUST NOT start that connector, unless the section that defines the
+capability makes it elective and the runtime implements that elective exception.
+This exception does not waive any other placement requirement. A runtime that
+implements profile version 0.2.0 MUST advertise and support `OBSERVATION`.
 
 A connector that does not declare `OBSERVATION` is diagnosed from runtime
 records alone (Section 5.11). A runtime MUST NOT record that connector as
@@ -1815,7 +1818,225 @@ Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either
 claim.
 
-## 7. Runtime-specific extensions
+## 7. Extensions
+
+### 7.1 Store collection evidence (RUN_COVERAGE_V1)
+
+This extension adds optional terminal store collection evidence, carried as
+`DONE.coverage`. It has its own payload version, `coverage.version` 1, and its
+own capability, `RUN_COVERAGE_V1`. Neither changes with the profile version.
+
+This extension applies to manifests whose protocol_version is 0.1.0, 0.2.0 or
+0.3.0. Using this extension never makes a runtime conformant to a base profile
+version it does not fully implement; conformance to the base profile is a
+separate claim.
+
+`RUN_COVERAGE_V1` is an elective capability for runtimes that implement the
+elective exception in Section 3.4. Such a runtime that does not support
+`RUN_COVERAGE_V1` MAY start the connector only if all other placement
+requirements pass. It MUST omit `START.run_coverage_version`, and the connector
+MUST omit `DONE.coverage`. The extension is negotiated per run, so an exchange
+without the request is an ordinary base-profile exchange.
+
+Applicability to base profiles 0.1.0 and 0.2.0 does not imply interoperability
+with unchanged readers. Old required-only readers that do not support a declared
+`RUN_COVERAGE_V1` reject the connector before `START`. Rollout MUST be
+runtime-first: upgrade readers to implement the elective exception before
+deploying manifests that declare `RUN_COVERAGE_V1`, as required by Section 8.
+
+#### 7.1.1 Declaration and negotiation
+
+A connector that uses this extension MUST declare `RUN_COVERAGE_V1` in
+`protocol_capabilities`. Declaring `coverage_stores` on a stream, or emitting
+`DONE.coverage`, is a use of this extension. `coverage_stores` is valid only
+with that declaration, and a validator MUST reject `coverage_stores` without it.
+
+A stream MAY declare `coverage_stores`, a non-empty array of unique, opaque,
+non-empty string identifiers. An identifier MUST NOT contain a credential or a
+device-specific path. Identifiers are scoped to their stream and manifest
+revision. The manifest MUST state each store's collection obligation, including
+whether the store covers content or metadata inventory only. A runtime MUST NOT
+derive positive store coverage for a stream that declares no `coverage_stores`.
+A change to a store's obligation MUST change the manifest revision. A manifest
+revision is the manifest content that its manifest fingerprint identifies
+(Section 7.1.2).
+
+A runtime requests version 1 evidence with `START.run_coverage_version` and
+`START.collection_scope`. When `START` omits `run_coverage_version`, a connector
+MUST omit `DONE.coverage`. Omission, including by producers that predate the
+field, follows Section 7.1.2.
+
+| Field | Requirement |
+| --- | --- |
+| `run_coverage_version` | OPTIONAL value `1`, requesting terminal store collection evidence (Section 7.1.2). |
+| `collection_scope` | REQUIRED non-empty string when version 1 store collection evidence is requested. |
+
+When the runtime requests version 1 evidence, it MUST supply a non-empty
+`collection_scope` string. If it emits `DONE.coverage`, the connector MUST echo
+that string without modification in `collection_scope`. The runtime MUST bind
+the string to the run's normalized effective targets, collection mode, prior
+checkpoint boundary, and source-root restrictions (the filesystem inputs
+declared under Section 3.3.5). A runtime MUST NOT request evidence for a run
+whose effective scope it cannot fully bind into collection_scope. The echoed
+string is correlation data and MUST NOT confer authorization. The `scoped` flag
+in Section 7.1.2 does not change `START.scope` or the run's authority bindings.
+
+#### 7.1.2 Optional terminal store collection evidence
+
+A failed `DONE` MUST NOT contain `coverage`.
+
+The coverage object MUST contain `version: 1`, `collection_scope`, and a
+non-empty `streams` array. Each stream MUST contain a non-empty `stream` name, a
+boolean `scoped`, and a non-empty `stores` array. Each store MUST contain a
+non-empty `store` identifier and one status. The stream entries MUST equal the
+requested stream set, and each stream's stores MUST equal its manifest
+inventory, without duplicates or extras. A connector MUST omit the whole object
+when a requested stream has no declared inventory.
+
+For each store's declared obligation within the authorized source account and
+scope, the connector MUST report the first applicable result below:
+
+| Condition, in precedence order | Status |
+| --- | --- |
+| Store inaccessible before enumeration begins | `unavailable` |
+| Enumeration or candidate classification not closed | `failed` |
+| Closed, but an in-scope candidate, required field, supported item or required payload was skipped, deferred, unsupported or left pending | `partial` |
+| Otherwise: every candidate has an emitted upsert/delete, unchanged state backed by a valid same-obligation baseline, or a proven scope exclusion | `collected` |
+
+Accepted `collected` means the connector asserted closure and the runtime found
+no contradictory accounting; it does not independently verify source
+enumeration or source snapshot consistency. Proven empty enumeration can be
+`collected`; absence of records or a file-read failure is not proof of
+emptiness. Pagination exhaustion alone does not establish initial/backfill
+completion. A delta establishes full-obligation collection only with a valid
+same-obligation baseline and the complete required change interval. `unknown`
+means insufficient usable evidence: it is a projection state, not a wire status
+or a severity below `failed`. `scoped: true` asserts that enumeration honored
+the requested boundary; `scoped: false` supplies no such assertion and MUST NOT
+support positive coverage for that stream. Neither value asserts binding
+enforcement under Section 3.3.9.
+
+A positive covers only the obligation within its bound collection_scope.
+It MUST NOT be presented as coverage of a wider view.
+
+In this extension, durable admission means that the durable write path accepted
+the effect, and outstanding debt means unrecovered durable detail gaps (Section
+5.6).
+
+The runtime MUST reconcile assertions with DETAIL_COVERAGE, durable admission,
+outstanding debt and applicable checkpoint outcomes for the same obligations,
+and with STREAM_EVIDENCE when negotiated and emitted; lawful absence of that
+optional message is not missing accounting. The connector's assertion MUST NOT
+override runtime evidence or substitute for required accounting. Known
+inaccessibility, incomplete closure or missing required work takes the
+corresponding negative result above; insufficient usable evidence yields
+`unknown`, without erasing a known negative. Negative runtime accounting that
+cannot be attributed to a specific store MUST downgrade every store of that
+stream. A rejected in-scope effect, unresolved debt, missing required accounting
+or withheld affected checkpoint MUST prevent positive coverage for its
+obligation. This downgrade does not change checkpoint eligibility.
+`DONE.coverage` MUST NOT authorize STATE advancement, materialization receipts,
+debt settlement or absence-derived deletion.
+
+Before accepting positive coverage, the runtime MUST validate version, boundary
+echo, stream/store sets, statuses and run bindings. Missing, unsupported or
+malformed coverage yields unknown unless a known negative applies; the runtime
+MAY fail the exchange instead. Omission of `DONE.coverage` is a new terminal
+result, including when evidence was not negotiated or the producer predates it;
+it MUST retire earlier positive evidence under Section 7.1.3, whether or not the
+run includes `STATE`. A transport acknowledgment is not durable admission. A
+later fully validated run for the same obligation may replace a negative; debt
+settlement still follows the detail-gap accounting of Section 5.6. A
+connection-wide verdict MUST NOT imply coverage for omitted or uninstrumented
+streams.
+
+A positive is bound to one release. Its artifact digest is `sha256:` followed by
+64 lowercase hexadecimal digits: SHA-256 of the exact distributed release-artifact
+bytes from which the executed connector was obtained, not an unpacked or
+reserialized representation. Its manifest fingerprint is 64 lowercase
+hexadecimal digits: SHA-256 of the UTF-8 RFC 8785 JSON Canonicalization Scheme
+(JCS) serialization of the entire manifest. The artifact digest and manifest
+fingerprint MUST match a release pair verified by the runtime or server for
+that connector. An unregistered digest, or a digest paired with a different
+manifest fingerprint, MUST NOT establish positive coverage. A different release
+MUST invalidate the positive, with no exception.
+
+#### 7.1.3 Terminal run records and coverage currency
+
+A runtime that implements store collection evidence MUST commit an orderable
+terminal run record for every run's final outcome, including failure and omitted
+evidence, whether or not evidence was negotiated or the run changed `STATE`.
+The record MUST name the run, its sequence and final outcome under Sections 4
+and 5.8; successful `DONE` followed by process failure is not a successful run.
+
+Run sequence decides eligibility; commit revision orders observations. The
+persisting component MUST apply this state/event table, ordering per connection
+and projecting per affected obligation, never using wall-clock timestamps to
+decide currency:
+
+| State or event | Required transition |
+| --- | --- |
+| Run starts | Assign a strictly increasing run sequence before admitting any effect. |
+| Coverage-affecting observation, including a relevant run attempt, admitted effect or terminal outcome | Assign a strictly increasing commit revision; unrelated observations do not change coverage or take a coverage revision. |
+| Positive terminal result | Publish only after successful `DONE`, exit 0, durable admission of relevant effects and completion of applicable commits. It is current only while no later-committed coverage-affecting observation of a newer-or-equal run exists; earlier-run records remain history. Do not improve coverage while later relevant work is unresolved. |
+| Later coverage-affecting observation of a newer-or-equal run | Retire the positive to unknown unless the observation establishes a validated replacement result. Run registration (a run start that admits no effect) does not retire a positive. |
+| Exact replay of the same terminal record | Return the stored receipt without changing revision or coverage; reject a conflicting duplicate and write nothing. |
+| Missing, unreadable or ambiguous sequence/revision | Project unknown, not positive coverage. |
+| Restore that can regress ordering | Reset positives to unknown until a run assigned after the restore commits an eligible current terminal record. |
+
+An in-flight run does not make the earlier run's fact false. That run stays
+shown with its as-of: the commit revision and time of its terminal record
+(Section 7.1.4).
+
+Disclosed limit: a run that is registered and then crashes before any terminal
+record or ingested record leaves the earlier positive standing.
+
+A run whose start registration failed, so it has no run sequence, still counts
+as an observed later attempt. Its terminal record or ingested records retire
+earlier positives, and it can never itself be eligible.
+
+#### 7.1.4 Coverage facts
+
+Coverage is a fact about one run. It is never a present-tense claim about the
+source. A terminal store coverage projection MUST carry the run identifier and
+sequence, release artifact digest (explicitly absent if unrecorded), and terminal
+record commit revision and time. Owner-facing text MUST identify that run and
+commit time, not imply a source snapshot at commit time; a source snapshot time
+may be shown only when supported by source evidence and distinguished from
+commit time. The runtime MUST retain connection, source-account,
+placement-generation, manifest-revision and executable-release bindings and
+revalidate them before reusing a positive for a requested view. Metadata-only
+inventory coverage MUST NOT be displayed as completeness of underlying content.
+
+A coverage projection derived from DETAIL_COVERAGE or STREAM_EVIDENCE SHOULD
+carry the same facts. This profile leaves those projections runtime-specific.
+
+Informative presentation and deployment guidance (non-normative): for example,
+"collection of <store> completed in run R; committed at T". Deployment-specific
+event exclusions, stricter local verdicts, restore-path disclosure and catalog
+migration policy are implementer guidance, not additional protocol requirements.
+See the non-normative implementer note and its requirement/test mapping:
+https://github.com/PDP-Connect/data-connect/blob/feat/local-run-coverage-verdict/docs/261021-local-device-coverage-evidence.md
+
+#### 7.1.5 Accounting under the base profile
+
+This requirement applies under every base profile version that this extension
+lists. A positive (`collected`) also requires that the base profile's own
+accounting for that run show no contradiction. Any obligation whose accounting
+the runtime cannot evaluate under its base profile yields no positive. A 0.1.0
+or 0.2.0 run with legacy detail accounting gets no positive for a stream whose
+detail accounting is incomplete or unevaluated. Under 0.1.0 and 0.2.0, a
+stream's detail
+accounting is incomplete when a required key is unaccounted, and unevaluated
+when a checkpoint-parent boundary has no `DETAIL_COVERAGE` report (Section 5.6).
+
+Base profiles 0.1.0 and 0.2.0 define no same-obligation baseline and no change
+interval. A rule in this extension that depends on either applies only where
+the base profile defines it. Under 0.1.0 and 0.2.0, a delta run therefore
+establishes no
+full-obligation collection, and unchanged state supports no positive.
+
+### 7.2 Runtime-specific extensions
 
 This profile does not define `ASSISTANCE`, `ASSISTANCE_STATUS`,
 `DETAIL_GAPS_PAGE_REQUEST`, `DETAIL_GAPS_PAGE_RESPONSE`,

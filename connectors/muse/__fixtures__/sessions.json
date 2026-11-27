@@ -1,0 +1,34 @@
+{
+  "sessions": [
+    {
+      "archived": false,
+      "can_send_actions": true,
+      "can_send_messages": true,
+      "created_at_ms": 1792607934000,
+      "is_primary": true,
+      "is_thread": false,
+      "pinned": false,
+      "session_id": "40e530d9-99e2-40b7-8755-e82048f45fa6",
+      "snippet": "Synthetic snippet 1 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "status": "completed",
+      "title": "Synthetic title 2 lorem lorem lorem",
+      "unread_count": 0,
+      "updated_at_ms": 1792612428000
+    },
+    {
+      "archived": false,
+      "can_send_actions": true,
+      "can_send_messages": true,
+      "created_at_ms": 1792608473000,
+      "is_primary": false,
+      "is_thread": true,
+      "pinned": false,
+      "session_id": "1fd67356-2afc-459e-8a67-648b9fca887e",
+      "snippet": "Synthetic snippet 3 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "status": "completed",
+      "title": "Synthetic title 4 lorem lorem lorem",
+      "unread_count": 0,
+      "updated_at_ms": 1792610689000
+    }
+  ]
+}

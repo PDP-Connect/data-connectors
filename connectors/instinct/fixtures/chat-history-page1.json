@@ -1,0 +1,167 @@
+{
+	"data": {
+		"chatHistory": {
+			"cursor": "chat-cursor-page-2",
+			"events": [
+				{
+					"id": "00000000-0000-4000-8000-000000000101",
+					"type": "message",
+					"createdAt": 1789070000,
+					"message": {
+						"id": "msg-0101TEST",
+						"role": "user",
+						"content": "Can you book a table for two on Friday?",
+						"readAt": 1789070003,
+						"origin": null,
+						"attachments": []
+					},
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000102",
+					"type": "tool_invocation",
+					"createdAt": 1789070010,
+					"message": null,
+					"error": null,
+					"toolInvocation": {
+						"toolName": "send_whatsapp_message",
+						"toolId": "call-01TEST",
+						"arguments": "{\"text\":\"Looking for a table for two on Friday now.\"}"
+					},
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000103",
+					"type": "tool_response",
+					"createdAt": 1789070012,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": {
+						"toolName": "send_whatsapp_message",
+						"toolId": "call-01TEST",
+						"response": "{\"status\":\"sent\"}",
+						"isError": false
+					},
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000104",
+					"type": "tool_result_block",
+					"createdAt": 1789070012,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000105",
+					"type": "thinking",
+					"createdAt": 1789070020,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": {
+						"thinking": "Two options near the office; ask which one."
+					},
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000106",
+					"type": "interaction",
+					"createdAt": 1789070030,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": {
+						"interactionId": "int-01TEST",
+						"interactionType": "choice",
+						"title": "Pick a restaurant",
+						"body": null,
+						"question": "Which one should I book?",
+						"options": ["Cafe Example", "Example Bistro"],
+						"actionSummary": null,
+						"targetMode": null,
+						"deviceName": null,
+						"plan": null
+					},
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000107",
+					"type": "interaction_response",
+					"createdAt": 1789070050,
+					"message": null,
+					"error": null,
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": {
+						"interactionId": "int-01TEST",
+						"approved": true,
+						"selected": ["Example Bistro"],
+						"text": null,
+						"summary": "Picked Example Bistro",
+						"dismissed": false
+					},
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				},
+				{
+					"id": "00000000-0000-4000-8000-000000000108",
+					"type": "error",
+					"createdAt": 1789070050,
+					"message": null,
+					"error": {
+						"message": "Booking site timed out; retrying."
+					},
+					"toolInvocation": null,
+					"toolResponse": null,
+					"interaction": null,
+					"interactionResponse": null,
+					"screenshot": null,
+					"thinking": null,
+					"action": null,
+					"draftField": null
+				}
+			]
+		}
+	}
+}

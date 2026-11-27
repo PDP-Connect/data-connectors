@@ -214,7 +214,7 @@ test("profile: navigation during record delivery prevents a profile checkpoint",
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "profile" &&
-				message.reason === "inventory_not_proven_complete" &&
+				message.reason === "stream_collection_failed" &&
 				typeof message.recovery_hint === "object" &&
 				message.recovery_hint?.action === "retry_by_runtime" &&
 				message.recovery_hint?.retryable === true &&

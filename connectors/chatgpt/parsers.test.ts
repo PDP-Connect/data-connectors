@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import {
 	assertSynthesizedCall,
 	buildAccountPlanRecord,
@@ -15,6 +16,7 @@ import {
 	buildMemoryRecord,
 	buildSharedConversationRecord,
 	countBranchMessages,
+	countBranchModels,
 	decodeEscapedText,
 	encodePdppSafeText,
 	encodeToolCallStrings,
@@ -38,11 +40,84 @@ import {
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
+	ChatGptContent,
+	ChatGptMessage,
 	ChatGptNode,
 	ConversationListItem,
 	RawAccountsCheckBody,
 	RawGizmo,
 } from "./types.ts";
+
+for (const contentType of ["text", "multimodal_text"]) {
+	for (const [name, parts, expected] of [
+		["explicit empty", [""], ""],
+		["absent parts", undefined, null],
+		["empty array", [], null],
+		["object only", [{}], null],
+		["mixed empty and object", ["", {}], null],
+		["mixed separated empty strings and object", ["", {}, ""], null],
+		["object before multiple empty strings", [{}, "", ""], null],
+		["mixed empty strings and multiple objects", ["", {}, "", {}], null],
+		["all-string newline", ["", ""], "\n"],
+		["mixed actual text and object", ["text", {}, ""], "text\n"],
+		["mixed whitespace text and object", [" ", {}, ""], " \n"],
+	] as const) {
+		test(`empty text fidelity: ${contentType} ${name} through wire schema`, () => {
+			const content: ChatGptContent = {
+				content_type: contentType,
+				...(parts === undefined ? {} : { parts: [...parts] }),
+			};
+			assert.equal(extractContentParts(content).raw, expected);
+			assert.equal(extractContent(content), expected);
+			const node: ChatGptNode = {
+				parent: null,
+				children: [],
+				message: { id: "synthetic", author: { role: "user" }, content },
+			};
+			const extracted = extractMessage(
+				"synthetic",
+				node,
+				"synthetic-conversation",
+				true,
+			);
+			assert.ok(extracted);
+			assert.equal(extracted.content, expected);
+			const wire = toMessageRecord(extracted, "synthetic-conversation");
+			assert.equal(wire.content, expected);
+			assert.equal(validateRecord("messages", wire).ok, true);
+		});
+	}
+}
+
+test("missing and unsupported content do not assert empty text", () => {
+	for (const content of [
+		undefined,
+		{ content_type: "unsupported", parts: [""] },
+	]) {
+		if (content === undefined) {
+			assert.equal(extractContentParts(content).raw, null);
+			assert.equal(extractContent(content), null);
+		}
+		assert.notEqual(extractContent(content), "");
+		const node: ChatGptNode = {
+			parent: null,
+			children: [],
+			message: {
+				id: "synthetic",
+				author: { role: "user" },
+				...(content ? { content } : {}),
+			},
+		};
+		const extracted = extractMessage(
+			"synthetic", node, "synthetic-conversation", true,
+		);
+		assert.ok(extracted);
+		const wire = toMessageRecord(extracted, "synthetic-conversation");
+		assert.notEqual(wire.content, "");
+		if (content === undefined) assert.equal(wire.content, null);
+		assert.equal(validateRecord("messages", wire).ok, true);
+	}
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
@@ -142,7 +217,7 @@ const LEGACY_JOIN_CASES: Array<[string, unknown[], string | null]> = [
 	["a leading empty string adds a newline", ["", " a "], "\n a "],
 	["empty strings between strings", ["a", "", "b"], "a\n\nb"],
 	["two empty strings give a lone newline", ["", ""], "\n"],
-	["one empty string is empty", [""], null],
+	["one explicit empty string is text", [""], ""],
 	["no parts", [], null],
 	["whitespace-only strings are kept", ["", "   "], "\n   "],
 	["only object parts are empty", [{}, {}], null],
@@ -342,6 +417,30 @@ test("messages manifest: primary key is [id], and every field a wire record carr
 	}
 });
 
+test("messages declaration accepts the explicit empty string emitted on the wire", () => {
+	const manifest = JSON.parse(
+		readFileSync(join(__dirname, "manifest.json"), "utf8"),
+	) as {
+		streams: Array<{ name: string; schema: Record<string, unknown> }>;
+	};
+	const messages = manifest.streams.find((stream) => stream.name === "messages");
+	assert.ok(messages);
+	// The runtime schema above also checks formats; here check the real public
+	// declaration, including nullable content, without custom annotation keywords.
+	const validate = new Ajv2020({
+		strict: false, validateFormats: false,
+	}).compile(messages.schema);
+	for (const contentType of ["text", "multimodal_text"]) {
+		const node = textNode("");
+		if (node.message?.content) node.message.content.content_type = contentType;
+		const extracted = extractMessage("n1", node, "c1", true);
+		assert.ok(extracted);
+		const wire = toMessageRecord(extracted, "c1");
+		assert.equal(wire.content, "");
+		assert.equal(validate(wire), true, JSON.stringify(validate.errors));
+	}
+});
+
 test("extractContent: a body without a parts array is empty", () => {
 	assert.equal(extractContent({ content_type: "text" }), null);
 	assert.equal(extractContent({ content_type: "multimodal_text" }), null);
@@ -349,7 +448,7 @@ test("extractContent: a body without a parts array is empty", () => {
 
 test("extractContent: no text parts → null; whitespace-only text is kept as written", () => {
 	assert.equal(extractContent({ content_type: "text", parts: [] }), null);
-	assert.equal(extractContent({ content_type: "text", parts: [""] }), null);
+	assert.equal(extractContent({ content_type: "text", parts: [""] }), "");
 	assert.equal(
 		extractContent({ content_type: "text", parts: ["", "   "] }),
 		"\n   ",
@@ -1076,6 +1175,7 @@ test("buildAccountPlanRecord: normalizes the default account from the fixture", 
 	const rec = buildAccountPlanRecord(raw);
 	assert.deepEqual(rec, {
 		id: "account_plan",
+		is_default: true,
 		account_id: "00000000-0000-4000-8000-000000000001",
 		account_structure: "personal",
 		account_created_at: "2023-01-15T10:00:00.000Z",
@@ -1383,6 +1483,179 @@ test("buildConversationRecord: detail fields overlay list; branchCount uses mapp
 	assert.equal(rec.gizmo_id, "g-1");
 	assert.equal(rec.current_node, currentNode);
 	assert.equal(rec.message_count_on_current_branch, 2);
+});
+
+test("countBranchModels: a conversation that switches models counts assistant replies per model on the current branch only", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	// gpt-4o twice, then o3 twice. Not counted: the tool message that names
+	// gpt-4o, the abandoned-branch reply that names gpt-5, and the last
+	// assistant reply, which reports no model.
+	assert.deepEqual(countBranchModels(mapping, currentNode), {
+		"gpt-4o": 2,
+		o3: 2,
+	});
+	// The same tree read from the abandoned branch sees only its own replies.
+	assert.deepEqual(countBranchModels(mapping, "a3-alt"), {
+		"gpt-4o": 2,
+		"gpt-5": 1,
+	});
+});
+
+test("countBranchModels: null without a mapping or tip, empty when no assistant names a model", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	assert.equal(countBranchModels(null, currentNode), null);
+	assert.equal(countBranchModels(mapping, null), null);
+	assert.deepEqual(countBranchModels(mapping, "u2"), { "gpt-4o": 1 });
+	assert.deepEqual(countBranchModels(mapping, "u1"), {});
+});
+
+test("countBranchModels: drops slugs that are not safe model names", () => {
+	const reply = (
+		id: string,
+		parent: string,
+		slug: unknown,
+	): [string, ChatGptNode] => [
+		id,
+		{
+			parent,
+			children: [],
+			message: {
+				author: { role: "assistant" },
+				metadata: { model_slug: slug as string },
+			},
+		},
+	];
+	const mapping: Record<string, ChatGptNode> = Object.fromEntries([
+		["root", { parent: null, children: ["r1"] }],
+		reply("r1", "root", "x".repeat(80)),
+		reply("r2", "r1", "x".repeat(81)),
+		reply("r3", "r2", ""),
+		reply("r4", "r3", "bad\u0000slug"),
+		reply("r5", "r4", 4),
+		reply("r6", "r5", null),
+		reply("r7", "r6", "__proto__"),
+		reply("r8", "r7", "__proto__"),
+	]);
+	const counts = countBranchModels(mapping, "r8");
+	assert.deepEqual(Object.entries(counts ?? {}), [
+		["x".repeat(80), 1],
+		["__proto__", 2],
+	]);
+	assert.equal(
+		validateRecord("conversations", conversationWith(counts)).ok,
+		true,
+	);
+});
+
+test("countBranchModels: counts only replies, not the tool calls and intermediate steps the messages stream reports as such", () => {
+	const assistant = (
+		id: string,
+		parent: string,
+		message: Partial<ChatGptMessage>,
+	): [string, ChatGptNode] => [
+		id,
+		{
+			parent,
+			children: [],
+			message: {
+				author: { role: "assistant" },
+				metadata: { model_slug: "gpt-4o" },
+				...message,
+			},
+		},
+	];
+	const mapping: Record<string, ChatGptNode> = Object.fromEntries([
+		["root", { parent: null, children: ["a1"] }],
+		// A reply to the user, with and without an explicit "all" recipient.
+		assistant("a1", "root", {}),
+		assistant("a2", "a1", { recipient: "all", end_turn: true }),
+		// Not replies: a call to a tool, a call listed in metadata, a plugin call,
+		// and a step that does not end the turn.
+		assistant("t1", "a2", { recipient: "python" }),
+		assistant("t2", "t1", {
+			metadata: { model_slug: "gpt-4o", tool_calls: [{ name: "search" }] },
+		}),
+		assistant("t3", "t2", {
+			metadata: { model_slug: "gpt-4o", invoked_plugin: { name: "x" } },
+		}),
+		assistant("t4", "t3", { end_turn: false }),
+		assistant("a3", "t4", { metadata: { model_slug: "o3" } }),
+	]);
+
+	assert.deepEqual(countBranchModels(mapping, "a3"), { "gpt-4o": 2, o3: 1 });
+});
+
+function conversationWith(modelCounts: unknown): Record<string, unknown> {
+	return {
+		id: "c1",
+		title: null,
+		create_time: null,
+		update_time: null,
+		is_archived: null,
+		is_starred: null,
+		workspace_id: null,
+		current_node: null,
+		message_count_on_current_branch: null,
+		model_counts: modelCounts,
+		gizmo_id: null,
+	};
+}
+
+test("conversations schema: model_counts accepts null and name-to-count objects, refuses unsafe keys and counts", () => {
+	for (const ok of [null, {}, { "gpt-4o": 3 }]) {
+		assert.equal(
+			validateRecord("conversations", conversationWith(ok)).ok,
+			true,
+		);
+	}
+	for (const bad of [
+		{ ["x".repeat(81)]: 1 },
+		{ "": 1 },
+		{ "a\u0000b": 1 },
+		{ "gpt-4o": 0 },
+		{ "gpt-4o": 1.5 },
+		{ "gpt-4o": "3" },
+		["gpt-4o"],
+		"gpt-4o",
+	]) {
+		assert.equal(
+			validateRecord("conversations", conversationWith(bad)).ok,
+			false,
+			JSON.stringify(bad),
+		);
+	}
+	// A record without the field is not a valid conversation record any more.
+	const { model_counts: _omitted, ...without } = conversationWith(null);
+	assert.equal(validateRecord("conversations", without).ok, false);
+});
+
+test("buildConversationRecord: model_counts follows the detail mapping, like the branch count", () => {
+	const { mapping, current_node: currentNode } =
+		readFixtureJson<ConversationFixture>("conversation-model-switch.json");
+	const list: ConversationListItem = {
+		id: "conv1",
+		update_time: 1_700_000_000,
+	};
+	const withDetail = buildConversationRecord(list, {
+		current_node: currentNode,
+		mapping,
+	});
+	assert.deepEqual(withDetail.model_counts, { "gpt-4o": 2, o3: 2 });
+	assert.equal(validateRecord("conversations", withDetail).ok, true);
+	// A detail with a mapping but no tip: nothing is on the branch.
+	const noTip = buildConversationRecord(list, { current_node: null, mapping });
+	assert.equal(noTip.message_count_on_current_branch, 0);
+	assert.deepEqual(noTip.model_counts, {});
+	// No detail: unknown, not empty.
+	const listOnly = buildConversationRecord(list, null);
+	assert.equal(listOnly.message_count_on_current_branch, null);
+	assert.equal(listOnly.model_counts, null);
+	assert.equal(validateRecord("conversations", listOnly).ok, true);
+	// Nothing but model names and counts reaches the record: no message text.
+	assert.equal(JSON.stringify(withDetail).includes("question"), false);
+	assert.equal(JSON.stringify(withDetail).includes("answer"), false);
 });
 
 test("buildConversationRecord: null detail falls back to list fields", () => {

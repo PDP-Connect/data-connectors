@@ -255,6 +255,9 @@ async function fetchJellyfin(
 	const res = await fetch(url.toString(), {
 		headers: {
 			Accept: "application/json",
+			// Jellyfin 12 accepts the token only in the Authorization header and
+			// answers 401 to X-Emby-Token; older servers accept both forms.
+			Authorization: `MediaBrowser Token="${apiKey}"`,
 			"X-Emby-Token": apiKey,
 		},
 		redirect: "error", // Reject redirects

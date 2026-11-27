@@ -1,0 +1,46 @@
+{
+  "user": {
+    "user": {
+      "username": "Synthetic username 1 lorem",
+      "id": 990522193,
+      "first_name": "",
+      "account": {
+        "name": "Synthetic name 2 lorem",
+        "avatar_type": "DEFAULT",
+        "onboarding_complete": true,
+        "avatar_file_name": "",
+        "mobile_onboarding_complete": 0
+      },
+      "is_staff": false,
+      "subscription": null,
+      "entitlements": [],
+      "ppid": "Synthetic ppid 3 lorem lorem",
+      "phone_settings": {
+        "phone_number": "",
+        "verified_at": "2026-01-05T10:04:28Z"
+      },
+      "age_data": {
+        "age_category": "AGE_CATEGORY_O18",
+        "verification_status": "Synthetic verification_status 5 lorem lorem lorem lorem"
+      }
+    },
+    "derived_attributes": {
+      "eligible_for": []
+    },
+    "is_human": true,
+    "name": "Synthetic name 6 lorem",
+    "email": "user7@example.com",
+    "date_joined": "2026-01-09T10:08:56.123Z",
+    "date_of_birth": "2026-01-10T10:09:03Z",
+    "needs_to_acknowledge_policy": false,
+    "accepted_policy_acknowledgements": [
+      "Oct2023",
+      "Jul2025"
+    ],
+    "suspended_until": null,
+    "hidden_characters": [],
+    "blocked_users": [],
+    "bio": null,
+    "interests": null
+  }
+}

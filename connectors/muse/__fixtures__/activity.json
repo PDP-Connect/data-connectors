@@ -1,0 +1,66 @@
+{
+  "days": [
+    {
+      "date": "2026-01-02",
+      "count": 4,
+      "activities": [
+        {
+          "timestamp": "2026-01-03T10:02:14Z",
+          "type": "task_running",
+          "message_id": "71c73ea2-964a-409c-8e61-a8ad879103bb",
+          "title": "Synthetic title 3 lorem lorem lorem lorem lorem lorem lorem lorem",
+          "status_title": "Synthetic status_title 4 lorem lorem lorem lorem",
+          "subtitle": null,
+          "details": {
+            "tasks": [
+              {
+                "agent_id": "e39d7650-f35b-403f-88c9-cb91ad90179f",
+                "label": "Synthetic label 5 lorem lorem lorem lorem lorem lorem lorem lorem",
+                "response_preview": "Synthetic response_preview 6 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+                "status": "completed"
+              }
+            ]
+          },
+          "status": "success",
+          "task_label": "Synthetic task_label 7 lorem lorem lorem lorem lorem lorem lorem lorem"
+        },
+        {
+          "timestamp": "2026-01-09T10:08:56Z",
+          "type": "web_search",
+          "message_id": "fe8d9364-0b64-48fe-8f06-163fd830109e",
+          "title": "Synthetic title 9 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+          "status_title": "Synthetic status_title 10 lorem lorem",
+          "subtitle": null,
+          "details": {
+            "items": [
+              {
+                "query": "Synthetic query 11 lorem lorem lorem lorem lorem",
+                "tool": "browser_search"
+              },
+              {
+                "query": "Synthetic query 12 lorem lorem lorem lorem lorem lorem",
+                "tool": "browser_search"
+              }
+            ]
+          },
+          "status": "success",
+          "task_label": "Synthetic task_label 13 lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+        },
+        {
+          "timestamp": "2026-01-15T10:14:38Z",
+          "type": "reminder_set",
+          "message_id": "fe8d9364-0b64-48fe-8f06-163fd830109e",
+          "title": "Synthetic title 15 lorem lorem lorem lorem",
+          "status_title": "Synthetic status_title 16 lorem lorem",
+          "subtitle": null,
+          "details": {
+            "action": "add",
+            "tool": "cron"
+          },
+          "status": "success",
+          "task_label": "Synthetic task_label 17 lorem lorem"
+        }
+      ]
+    }
+  ]
+}

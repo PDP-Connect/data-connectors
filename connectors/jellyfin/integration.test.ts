@@ -383,6 +383,16 @@ test("e2e: header auth (X-Emby-Token) and no query param credentials", async () 
 			"test-secret-key-12345",
 			"Header should contain correct secret",
 		);
+
+		// Jellyfin 12 rejects X-Emby-Token (401) and reads the token only from
+		// the Authorization header, so every data request carries both forms.
+		for (const req of requests) {
+			assert.equal(
+				req.headers.authorization,
+				'MediaBrowser Token="test-secret-key-12345"',
+				`Request should carry the MediaBrowser Authorization token: ${req.path}`,
+			);
+		}
 	} finally {
 		await server.stop();
 	}

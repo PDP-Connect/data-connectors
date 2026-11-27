@@ -45,13 +45,21 @@ const NODE_ONLY = new Set([
 	"patchright",
 	"readline",
 ]);
-const manifestVersion = (name) =>
+const manifestOf = (name) =>
 	JSON.parse(
 		readFileSync(
 			new URL(`../../connectors/${name}/manifest.json`, import.meta.url),
 			"utf8",
 		),
-	).version;
+	);
+const manifestVersion = (name) => manifestOf(name).version;
+/** Every manifest stream, as the scopes a PageShim bundle must accept. */
+const manifestScopes = (name) => {
+	const manifest = manifestOf(name);
+	return manifest.streams.map(
+		(stream) => `${manifest.mobile.pageshim.scope_prefix}.${stream.name}`,
+	);
+};
 
 function assertCleanRun(run) {
 	assert.deepEqual(
@@ -190,8 +198,20 @@ for (const name of pageShimConnectors(
 			assert.equal(r.result, null, "a thin host never gets a one-message result");
 			assert.equal(r.streamResult.completed, true);
 			assert.equal(r.streamResult.scopeCount, c.scopes.length);
-			// fetchedAt is wall-clock time, so it differs between the two runs.
-			const withoutFetchedAt = ({ fetchedAt, ...value }) => value;
+			// fetchedAt is wall-clock time, so it differs between the two runs,
+			// as does any record field the case names as a per-run clock.
+			const volatile = c.volatileRecordFields ?? [];
+			const withoutFetchedAt = ({ fetchedAt, ...value }) =>
+				volatile.length === 0 || !Array.isArray(value.records)
+					? value
+					: {
+							...value,
+							records: value.records.map((record) =>
+								Object.fromEntries(
+									Object.entries(record).filter(([key]) => !volatile.includes(key)),
+								),
+							),
+						};
 			for (const scope of c.scopes)
 				assert.deepEqual(
 					withoutFetchedAt(
@@ -228,15 +248,23 @@ for (const name of pageShimConnectors(
 			assert.equal(r.calls.goHeadless, 1);
 		});
 
+		await t.test("accepts and runs every manifest stream", async () => {
+			const r = await run({ scopes: manifestScopes(name) });
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.deepEqual(
+				r.result?.errors.filter((error) => error.phase === "init") ?? [],
+				[],
+				"the bundle refused a manifest stream",
+			);
+		});
+
 		await t.test("empty requestedScopes: protocol_violation", async () => {
 			const r = await run({ scopes: [] });
 			assertFatal(r, c, name, {
 				errorClass: "protocol_violation",
 				phase: "init",
-				requestedScopes:
-					name === "chatgpt"
-						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.allScopes ?? c.scopes,
+				requestedScopes: manifestScopes(name),
 			});
 		});
 
@@ -245,10 +273,7 @@ for (const name of pageShimConnectors(
 			assertFatal(r, c, name, {
 				errorClass: "protocol_violation",
 				phase: "init",
-				requestedScopes:
-					name === "chatgpt"
-						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.allScopes ?? c.scopes,
+				requestedScopes: manifestScopes(name),
 			});
 		});
 
@@ -315,7 +340,7 @@ test("chatgpt: complete bounded walk is not marked partial just because STATE wa
 		assert.deepEqual(r.result.exportSummary, {
 			count: 1,
 			label: "conversation",
-			details: { conversations: 1, messages: 1, memories: 0, account_plan: 0 },
+			details: fx.chatgptDetails({ conversations: 1, messages: 1 }),
 		});
 	} finally {
 		fx.useConversationCount(2);
@@ -358,12 +383,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 		);
 		assert.equal(legacy.result["chatgpt.conversations"].records.length, 2);
 		assert.equal(legacy.result["chatgpt.messages"].records.length, 2);
-		assert.deepEqual(legacy.result.exportSummary.details, {
-			conversations: 2,
-			messages: 2,
-			memories: 1,
-			account_plan: 0,
-		});
+		assert.deepEqual(legacy.result.exportSummary.details, fx.chatgptDetails({ conversations: 2, messages: 2, memories: 1 }));
 
 		const streamed = await runHarness({
 			bundle: built.outfile,
@@ -387,12 +407,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 			readFileSync(streamed.streamScopeFiles["chatgpt.memories"], "utf8"),
 		).records;
 		assert.deepEqual(memoryRecords, legacy.result["chatgpt.memories"].records);
-		assert.deepEqual(streamed.streamDone.exportSummary.details, {
-			conversations: 2,
-			messages: 2,
-			memories: 1,
-			account_plan: 0,
-		});
+		assert.deepEqual(streamed.streamDone.exportSummary.details, fx.chatgptDetails({ conversations: 2, messages: 2, memories: 1 }));
 
 		const unsupported = await runHarness({
 			bundle: built.outfile,
@@ -424,12 +439,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 		assert.equal(memoriesOnly.result["chatgpt.conversations"], undefined);
 		assert.equal(memoriesOnly.result["chatgpt.messages"], undefined);
 		assert.equal(memoriesOnly.result["chatgpt.memories"].records.length, 1);
-		assert.deepEqual(memoriesOnly.result.exportSummary.details, {
-			conversations: 0,
-			messages: 0,
-			memories: 1,
-			account_plan: 0,
-		});
+		assert.deepEqual(memoriesOnly.result.exportSummary.details, fx.chatgptDetails({ memories: 1 }));
 	} finally {
 		rmSync(spool, { recursive: true, force: true });
 	}
@@ -474,12 +484,7 @@ test("chatgpt: account_plan is served as its own timeless scope", {
 		assert.deepEqual(planFields(plans[0]), expectedPlan);
 		assert.equal(legacy.result["chatgpt.conversations"].records.length, 2);
 		assert.equal(legacy.result["chatgpt.memories"], undefined);
-		assert.deepEqual(legacy.result.exportSummary.details, {
-			conversations: 2,
-			messages: 2,
-			memories: 0,
-			account_plan: 1,
-		});
+		assert.deepEqual(legacy.result.exportSummary.details, fx.chatgptDetails({ conversations: 2, messages: 2, account_plan: 1 }));
 
 		const streamed = await runHarness({
 			bundle: built.outfile,
@@ -581,6 +586,53 @@ test("chatgpt: account_plan is served as its own timeless scope", {
 		);
 	} finally {
 		fx.setAccountsCheckStatus(200);
+		rmSync(spool, { recursive: true, force: true });
+	}
+});
+
+test("chatgpt: every manifest stream yields schema-valid records on both hosts", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const { validateRecord } = await import("../../connectors/chatgpt/schemas.ts");
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-every-stream.js"),
+	});
+	const scopes = manifestScopes("chatgpt");
+	const spool = mkdtempSync(join(out, "chatgpt-every-stream-"));
+	try {
+		const legacy = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes,
+		});
+		assert.deepEqual(legacy.ret, { ok: true }, legacy.log.slice(-20).join("\n"));
+		assertCleanRun(legacy);
+		assert.deepEqual(legacy.result.errors, []);
+		assert.match(legacy.data.status, /^Complete!/);
+		for (const scope of scopes) {
+			const records = legacy.result[scope]?.records ?? [];
+			assert.ok(records.length > 0, `${scope} has no records`);
+			const stream = scope.slice("chatgpt.".length);
+			for (const record of records) {
+				const checked = validateRecord(stream, record);
+				assert.equal(checked.ok, true, `${scope} record fails its schema`);
+				assert.equal(checked.anomalies, undefined, `${scope} record has shape anomalies`);
+			}
+		}
+		const streamed = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: spool,
+		});
+		assert.deepEqual(streamed.ret, { ok: true }, streamed.log.slice(-20).join("\n"));
+		assert.equal(streamed.streamResult?.completed, true);
+		assert.equal(streamed.streamResult.scopeCount, scopes.length);
+		assert.deepEqual(streamed.streamDone.errors, []);
+	} finally {
 		rmSync(spool, { recursive: true, force: true });
 	}
 });
@@ -874,6 +926,10 @@ test("chatgpt: a windowed conversations-only run keeps list items that carry onl
 				update_time: now - (index < 2 ? index + 1 : 40 + index) * 86400,
 			}));
 			response.body = JSON.stringify(body);
+		} else if (/^\/backend-api\/conversation\//.test(path)) {
+			// A conversations-only run reads each detail for its model counts, and
+			// the record takes its times from that detail. Keep it inside the window.
+			stampChatGptDetail(response, now - 86400);
 		}
 		return response;
 	};
@@ -894,10 +950,11 @@ test("chatgpt: a windowed conversations-only run keeps list items that carry onl
 	const conversations = JSON.parse(
 		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
 	);
-	assert.deepEqual(
-		conversations.records.map((record) => record.id),
-		["conv-1", "conv-2"],
-	);
+	// Record order is not part of the contract: the detail pass reads oldest first.
+	assert.deepEqual(conversations.records.map((record) => record.id).sort(), [
+		"conv-1",
+		"conv-2",
+	]);
 });
 
 test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed pages", {
@@ -1345,7 +1402,7 @@ test("chatgpt: capped PageShim walk reports partial with omitted detail evidence
 	assert.deepEqual(r.result.exportSummary, {
 		count: 1,
 		label: "conversation",
-		details: { conversations: 1, messages: 1, memories: 0, account_plan: 0 },
+		details: fx.chatgptDetails({ conversations: 1, messages: 1 }),
 	});
 	assert.deepEqual(r.result.errors, [
 		{
@@ -1433,6 +1490,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 			disposition: "omitted",
 			scope: "github.starred",
 			phase: "collect",
+			code: "stream_collection_failed",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		},
 	);
 });
@@ -1634,6 +1693,7 @@ test("anthropic: export paths on the PageShim host", {
 			);
 			assert.deepEqual(streamed, {
 				"claude.account_profile": 1,
+				"claude.account_plan": 1,
 				"claude.conversations": 1,
 				"claude.messages": 0,
 				"claude.projects": 0,
@@ -1661,8 +1721,14 @@ test("anthropic: export paths on the PageShim host", {
 				resultSpoolDirectory: spool,
 			});
 			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
-			for (const scope of ["claude.conversations", "claude.messages"])
-				assert.equal(r.streamScopeFiles?.[scope], undefined, scope);
+			// A thin host gets the skipped scope as a placeholder that carries its
+			// error; it is never a checkpointed empty scope.
+			assert.ok(r.streamScopeFiles?.["claude.conversations"], "claude.conversations");
+			for (const scope of ["claude.conversations", "claude.messages"]) {
+				const file = r.streamScopeFiles?.[scope];
+				if (file !== undefined) assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { records: [] }, scope);
+				assert.equal(r.states?.[scope], undefined, scope);
+			}
 		} finally {
 			rmSync(spool, { recursive: true, force: true });
 		}
@@ -2452,7 +2518,7 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 	});
 
 	await t.test(
-		"an unrecognised list fails closed: no activities, one omitted error",
+		"an unrecognised list fails the run: no activities, one fatal error",
 		async () => {
 			const r = await run((raw) =>
 				new URL(raw).pathname === "/athlete/training_activities"
@@ -2467,9 +2533,121 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 			assertCleanRun(r);
 			assert.equal(r.result["strava.activities"], undefined);
 			assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
-			assert.equal(r.result.errors[0].scope, "strava.activities");
-			assert.equal(r.result.errors[0].disposition, "omitted");
-			assert.deepEqual(r.result.exportSummary, c.emptyExportSummary);
+			assert.equal(r.result.errors[0].disposition, "fatal");
+			assert.equal(r.result.errors[0].code, "source_unreadable");
+			assert.match(r.result.errors[0].reason, /no models array/);
+			assert.equal(r.data.error, r.result.errors[0].reason);
+		},
+	);
+
+	// Page 1 is the only read an account with few activities makes. On the
+	// thin host an unreadable first page used to stream an empty
+	// { activities } scope, and the device showed "no data" exactly as for an
+	// account with no activities.
+	const firstPage = (reply) => (raw) => {
+		const url = new URL(raw);
+		return url.pathname === "/athlete/training_activities" &&
+			url.searchParams.get("per_page") !== "1"
+			? reply
+			: resolveFixture(raw);
+	};
+	const thinHost = (resolve, name) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve },
+			scopes: c.scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: join(out, name),
+		});
+	for (const [label, reply, code] of [
+		[
+			"a signed-out list",
+			{ status: 403, contentType: "text/html", body: "<html>sign in</html>" },
+			"sign_in_required",
+		],
+		[
+			"an HTML list",
+			{ status: 200, contentType: "text/html", body: "<html>app</html>" },
+			"source_unreadable",
+		],
+		[
+			"a list in a new shape",
+			{ status: 200, contentType: "application/json", body: '{"activities":[]}' },
+			"source_unreadable",
+		],
+		[
+			"a list Strava cannot serve",
+			{ status: 503, contentType: "text/html", body: "<html>busy</html>" },
+			"collection_interrupted",
+		],
+	]) {
+		await t.test(
+			`${label} on page 1 fails the run on the thin host, with no empty scope`,
+			async () => {
+				const r = await thinHost(
+					firstPage(reply),
+					`strava-page1-${code}-${reply.status}`,
+				);
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.notEqual(r.streamResult?.completed, true);
+				assert.deepEqual(r.streamScopeFiles, {});
+				assert.ok(r.data.error, "the run reports an error");
+				assert.equal(r.data.scopeCounts, undefined);
+			},
+		);
+	}
+
+	await t.test(
+		"an account with no activities completes with an empty list on the thin host",
+		async () => {
+			const r = await thinHost(
+				firstPage({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ models: [], page: 1, perPage: 20, total: 0 }),
+				}),
+				"strava-page1-empty-account",
+			);
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.equal(r.streamResult?.completed, true);
+			assert.deepEqual(r.streamResult.donePayload.errors, []);
+			assert.equal(r.data.error, undefined);
+			assert.deepEqual(
+				JSON.parse(
+					await readFile(r.streamScopeFiles["strava.activities"], "utf8"),
+				),
+				{ activities: [] },
+			);
+			// The mobile host reads this to tell an empty account from a list
+			// it could not read: both arrive as an empty scope.
+			assert.deepEqual(r.data.scopeCounts, {
+				"strava.activities": { found: 0, ok: true },
+			});
+		},
+	);
+
+	await t.test(
+		"a list whose activities are all unreadable reports the scope as not answered",
+		async () => {
+			const r = await thinHost(
+				firstPage({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						models: [{ id: 1 }, { id: 2, start_time: "yesterday" }],
+						page: 1,
+						perPage: 20,
+						total: 2,
+					}),
+				}),
+				"strava-page1-unreadable",
+			);
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assert.deepEqual(r.data.scopeCounts, {
+				"strava.activities": { found: 0, ok: false },
+			});
 		},
 	);
 
@@ -2521,7 +2699,7 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 	);
 });
 
-test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
+test("strava_browser: every PageShim run delivers the whole activity list, even with a saved cursor", {
 	timeout: 180_000,
 }, async () => {
 	const { pageshimCase: c, resolveFixture } = await import(
@@ -2585,23 +2763,24 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 			stateAckDelayMs: 5,
 			...overrides,
 		});
-	let initialState = {};
-
-	const first = await run(initialState);
+	// The mobile host stores each { activities } payload as the newest whole
+	// version and does not merge it with the last one. A run that resumed the
+	// saved cursor emitted only a detail batch or new activities, which then
+	// replaced the stored list, or emitted nothing and failed as no data.
+	const first = await run({});
 	assert.deepEqual(first.ret, { ok: true }, first.log.slice(-20).join("\n"));
 	assertCleanRun(first);
 	assert.deepEqual(first.result.errors, []);
 	assert.equal(first.result["strava.activities"].activities.length, 205);
+	assert.deepEqual(first.data.scopeCounts, {
+		"strava.activities": { found: 205, ok: true },
+	});
 	assert.deepEqual(
 		detailRequests,
 		[],
 		"initial inventory must not backfill details",
 	);
 	assert.equal(first.states?.["strava.activities"]?.list_complete, true);
-	assert.equal(
-		first.states?.["strava.activities"]?.pending_detail_ids.length,
-		205,
-	);
 	assert.deepEqual(first.stateMessages, [
 		{
 			type: "STATE",
@@ -2609,6 +2788,19 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 			cursor: first.states["strava.activities"],
 		},
 	]);
+	// No PageShim run reads the collector's id lists, and with about 9k
+	// activities they would exceed the host bridge's 256Ki message cap. The
+	// checkpoint keeps only the scalar fields, so its size does not grow with
+	// the activity list.
+	assert.deepEqual(
+		Object.keys(first.states["strava.activities"]).sort(),
+		["list_complete", "requested_since"],
+		"the PageShim checkpoint must not carry known_ids or pending_detail_ids",
+	);
+	assert.ok(
+		JSON.stringify(first.states["strava.activities"]).length < 256,
+		"the PageShim checkpoint must not grow with the activity list",
+	);
 	assert.ok(
 		first.resultWriteOrder < first.stateAckOrder,
 		"the runtime must publish buffered records before writing their checkpoint",
@@ -2617,53 +2809,51 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		!first.log.some((line) => line.includes("91000000000")),
 		"cursor contents must not appear in logs",
 	);
-	initialState = first.states;
+
+	// A device that ran 0.1.40 or earlier stored the collector's full cursor
+	// with every id listed; a current device stores the compact one. Neither
+	// may change what a run delivers.
+	const allIds = activities.map((a) => a.id_str);
+	const legacyStates = {
+		"strava.activities": {
+			known_ids: allIds,
+			pending_detail_ids: allIds,
+			list_complete: true,
+			requested_since: null,
+		},
+	};
+	for (const [label, states] of [
+		["second", legacyStates],
+		["third", first.states],
+	]) {
+		detailRequests.length = 0;
+		const next = await run(states);
+		assert.deepEqual(next.ret, { ok: true }, next.log.slice(-20).join("\n"));
+		assertCleanRun(next);
+		assert.deepEqual(next.result.errors, []);
+		const ids = next.result["strava.activities"].activities.map((a) => a.id);
+		assert.equal(ids.length, 205, `the ${label} run must deliver every activity`);
+		assert.equal(new Set(ids).size, 205, `the ${label} run must not repeat an id`);
+		assert.deepEqual(
+			detailRequests,
+			[],
+			`the ${label} run must not resume a detail batch from the saved cursor`,
+		);
+		assert.deepEqual(
+			next.states,
+			first.states,
+			`the ${label} run must write the compact checkpoint, whatever it was given`,
+		);
+	}
 
 	detailRequests.length = 0;
-	const second = await run(initialState);
-	assert.deepEqual(second.ret, { ok: true }, second.log.slice(-20).join("\n"));
-	assertCleanRun(second);
-	assert.equal(
-		detailRequests.length,
-		100,
-		"run two must fetch the first detail batch",
-	);
-	const secondBatch = new Set(detailRequests);
-	assert.equal(second.result["strava.activities"].activities.length, 100);
-	assert.equal(
-		second.states?.["strava.activities"]?.pending_detail_ids.length,
-		105,
-	);
-	assert.notDeepEqual(second.states, initialState);
-	initialState = second.states;
-
-	detailRequests.length = 0;
-	const third = await run(initialState);
-	assert.deepEqual(third.ret, { ok: true }, third.log.slice(-20).join("\n"));
-	assertCleanRun(third);
-	assert.equal(
-		detailRequests.length,
-		100,
-		"run three must fetch the next detail batch",
-	);
-	assert.ok(
-		detailRequests.every((id) => !secondBatch.has(id)),
-		"run three must continue with activities left by run two",
-	);
-	assert.equal(third.result["strava.activities"].activities.length, 100);
-	assert.equal(
-		third.states?.["strava.activities"]?.pending_detail_ids.length,
-		5,
-	);
-
-	detailRequests.length = 0;
-	const failed = await run(third.states, { failResultWrite: true });
+	const failed = await run(first.states, { failResultWrite: true });
 	assert.deepEqual(failed.ret, { ok: true }, failed.log.slice(-20).join("\n"));
 	assert.equal(failed.data.error, "synthetic result write failed");
 	assert.deepEqual(failed.stateMessages, []);
 	assert.deepEqual(
 		failed.states,
-		third.states,
+		first.states,
 		"a failed result write must not send a checkpoint",
 	);
 });
@@ -2764,10 +2954,12 @@ test("strava_browser: a large activity list streams only when the host offers pa
 	);
 	assert.ok(scope.length > 125 * 1024, `${scope.length}`);
 	assert.equal(JSON.parse(scope).activities.length, 2000);
-	assert.equal(
-		large.states["strava.activities"].pending_detail_ids.length,
-		2000,
-	);
+	// The checkpoint stays small however long the list is: the id lists the
+	// collector keeps for desktop detail work are not sent to the host.
+	assert.deepEqual(large.states["strava.activities"], {
+		list_complete: true,
+		requested_since: null,
+	});
 	assert.match(large.data.status, /^Complete! 2000 activities/);
 
 	const largeLegacy = await run("strava-large-older-shell", 2000, false);
@@ -3390,6 +3582,46 @@ page = new Proxy(locationHost, {
 		}
 	}
 });
+test("icloud_notes: overlap outcomes and recovery survive the built collector host boundary", { timeout: 120_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud-overlap.js") });
+	for (const mode of ["identical", "conflicting", "duplicate-only"]) {
+		for (const resultStreaming of [false, true]) {
+			let noteCalls = 0;
+			const fixtures = { ...c.fixtures, resolve(url, request) {
+				const response = c.fixtures.resolve(url, request);
+				if (!url.includes("/records/query") || JSON.parse(request.postData).query.filterBy[0].fieldValue.value !== "recents") return response;
+				const rows = JSON.parse(response.body).records;
+				const overlap = structuredClone(rows[0]);
+				if (mode === "conflicting") overlap.fields.TitleEncrypted.value = Buffer.from("New revision").toString("base64");
+				noteCalls++;
+				const records = noteCalls === 1 ? [rows[0]] : noteCalls === 2 ? mode === "duplicate-only" ? [overlap] : [overlap, rows[1]] : [rows[2]];
+				return { ...response, body: JSON.stringify({ records, ...(noteCalls < 3 ? { continuationMarker: `page-${noteCalls + 1}` } : {}) }) };
+			} };
+			const run = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes, resultStreaming,
+				gotoDelayMs: 0, loginWaitMs: 1000, resultSpoolDirectory: join(out, `icloud-overlap-${mode}-${resultStreaming}`) });
+			assertCleanRun(run);
+			assert.equal(run.data.error, undefined);
+			assert.equal(noteCalls, mode === "identical" ? 3 : 2);
+			const done = resultStreaming ? run.streamDone : run.result;
+			const notes = resultStreaming ? JSON.parse(readFileSync(run.streamScopeFiles["icloud_notes.notes"], "utf8")) : run.result["icloud_notes.notes"];
+			assert.equal(notes.records.length, mode === "identical" ? 3 : mode === "conflicting" ? 2 : 1);
+			assert.match(run.data.status, mode === "identical" ? /^Complete!/ : /^Partial:/);
+			if (mode === "identical") {
+				assert.deepEqual(done.errors, []);
+				assert.ok(run.states["icloud_notes.notes"]);
+			} else {
+				const error = done.errors.find(error => error.scope === "icloud_notes.notes");
+				assert.equal(error.code, "stream_collection_failed");
+				assert.deepEqual(error.recovery_hint, { action: "retry_by_runtime", retryable: true });
+				assert.equal(run.states["icloud_notes.notes"], undefined);
+			}
+			assert.ok(run.states["icloud_notes.folders"]);
+			assert.ok(run.states["icloud_notes.profile"]);
+		}
+	}
+});
+
 test("icloud_notes: failed continuation preserves readable rows and never checkpoints notes", { timeout: 120_000 }, async () => {
 	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
 	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-partial.js") });
@@ -3412,6 +3644,53 @@ test("icloud_notes: failed continuation preserves readable rows and never checkp
 	assert.equal(r.states["icloud_notes.notes"], undefined);
 	assert.ok(r.states["icloud_notes.profile"]);
 	assert.ok(r.states["icloud_notes.folders"]);
+});
+
+test("icloud_notes: incomplete inventories retain recovery hints without checkpointing", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-recovery.js") });
+	for (const [status, action, retryable] of [
+		[429, "retry_by_runtime", true], [503, "retry_by_runtime", true],
+		[401, "manual_action_required", false], [403, "manual_action_required", false],
+		[200, "not_retriable", false],
+	]) {
+		for (const resultStreaming of [false, true]) {
+			const fixtures = { ...c.fixtures, resolve(url, request) {
+				const response = c.fixtures.resolve(url, request);
+				if (!url.includes("/records/query")) return response;
+				const query = JSON.parse(request.postData);
+				if (query.query.filterBy[0].fieldValue.value !== "parentless") return response;
+				return { ...response, status, body: JSON.stringify(status === 200 ? { records: [{ recordType: "Folder" }] } : { error: "synthetic failure" }) };
+			} };
+			const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes,
+				gotoDelayMs: 0, loginWaitMs: 1000, resultStreaming,
+				resultSpoolDirectory: join(out, `icloud-recovery-${status}-${resultStreaming}`) });
+			assertCleanRun(r);
+			assert.deepEqual(r.ret, { ok: true });
+			// The stacked portable-failure change makes rejected authentication a
+			// run-level failure. It must not turn back into a scoped retry.
+			if (status === 401 || status === 403) {
+				assert.match(r.data.error, /^icloud_auth_failed:/);
+				assert.doesNotMatch(r.data.status, /^(Complete!|Partial:)/);
+				assert.deepEqual(r.states, {});
+				assert.deepEqual(r.stateMessages, []);
+				if (resultStreaming) assert.equal(r.streamDone, null);
+				else {
+					assert.deepEqual(r.result.errors.map(error => [error.errorClass, error.disposition]), [["auth_failed", "fatal"]]);
+					assert.equal(r.result.errors[0].code, "icloud_auth_failed");
+					assert.deepEqual(r.result.errors[0].recovery_hint, { action, retryable });
+				}
+				continue;
+			}
+			const errors = resultStreaming ? r.streamDone.errors : r.result.errors;
+			for (const scope of ["icloud_notes.folders", "icloud_notes.notes"]) {
+				const error = errors.find(error => error.scope === scope);
+				assert.equal(error?.code, "stream_collection_failed", `${status}: ${scope}`);
+				assert.deepEqual(error?.recovery_hint, { action, retryable }, `${status}: ${scope}`);
+				assert.equal(r.states[scope], undefined, `${status}: no checkpoint for ${scope}`);
+			}
+		}
+	}
 });
 
 test("icloud_notes: thin host commits all streams only after accepted completion", { timeout: 120_000 }, async () => {
@@ -3661,7 +3940,6 @@ test("meta: following empty, contradictory, owner and partial-page evidence neve
    {owner, users: [row], has_more: true, next_max_id: "next"},
    {owner, users: [{pk: "bad"}], has_more: false},
   ]}, count: 1, complete: false},
-  {name: "late logout", options: {logoutAtEnd: true}, count: 1, complete: false},
  ];
  for (const c of cases) {
   const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(c.options),
@@ -3673,6 +3951,39 @@ test("meta: following empty, contradictory, owner and partial-page evidence neve
   assert.equal(r.result.errors.length, c.complete ? 0 : 1, c.name);
   assert.match(r.data.status, c.complete ? /^Complete!/ : /^Partial:/, c.name);
   if (!c.complete) assert.match(r.result.errors[0].reason, /not proven complete/, c.name);
+ }
+});
+
+
+test("meta: late logout remains a terminal session failure on both hosts", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-late-logout.js")});
+ for (const resultStreaming of [false, true]) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures({logoutAtEnd: true}),
+   scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}},
+   resultStreaming, resultSpoolDirectory: join(out, "meta-late-logout-" + resultStreaming)});
+  assertCleanRun(r);
+  assert.equal(r.data.error, "meta_session_required: Instagram authentication was rejected or challenged during this run");
+  assert.deepEqual(r.stateMessages, []);
+  assert.deepEqual(r.states, {"instagram.following": {old: true}});
+  assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+  assert.deepEqual(r.ret, {ok: true});
+  assert.equal(r.streamDone, null);
+  assert.equal(r.streamResult, null);
+  if (resultStreaming) {
+   assert.equal(r.result, null);
+  } else {
+   assert.deepEqual(r.result.errors, [{
+    errorClass: "auth_failed",
+    reason: "meta_session_required: Instagram authentication was rejected or challenged during this run",
+    disposition: "fatal",
+    phase: "collect",
+    code: "meta_session_required",
+    recovery_hint: { action: "manual_action_required", retryable: false },
+   }]);
+   assert.equal(r.result["instagram.following"], undefined);
+   assert.equal(r.result.exportSummary.count, 0);
+  }
  }
 });
 
@@ -3711,7 +4022,7 @@ test("meta: rejected streamed completion never commits following STATE", {timeou
  assert.notEqual(r.streamResult.completed, true);
 });
 
-test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {
+test("spotify: seven mobile streams read to their end export clean and checkpointed on both hosts", { timeout: 180_000 }, async () => {
 	const { pageshimCase: c } = await import("./fixtures/spotify.mjs");
 	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-seven-streams.js") });
 	for (const resultStreaming of [false, true]) {
@@ -3721,13 +4032,15 @@ test("spotify: seven mobile streams retain capped inventory semantics on both ho
 		assert.deepEqual(r.ret, { ok: true });
 		assertCleanRun(r);
 		assert.equal(r.data.error, undefined);
-		assert.match(r.data.status, /^Partial:/);
+		assert.doesNotMatch(r.data.status, /^Partial:/);
 		const result = resultStreaming ? r.streamDone : r.result;
 		assert.deepEqual(result.exportSummary, c.exportSummary);
-		assert.deepEqual(result.errors, c.partialErrors);
-		assert.equal(result.errors.length, 3, "no failure companion for an incomplete inventory");
-		for (const stream of ["recently_played_contexts", "top_artists", "top_tracks"]) {
-			assert.equal(r.states["spotify." + stream], undefined);
+		assert.deepEqual(result.errors, []);
+		// Rankings read to Spotify's total and a recent list Spotify ended are
+		// complete; a total above the 100-row bound would still be capped.
+		assert.equal(r.states["spotify.recently_played_contexts"].completion.terminal, "short_page");
+		for (const stream of ["top_artists", "top_tracks"]) {
+			assert.equal(r.states["spotify." + stream].completion.rows, r.states["spotify." + stream].completion.total);
 		}
 		assert.equal(r.states["spotify.saved_tracks"].completion.rows, 1);
 		if (resultStreaming) {
@@ -3735,6 +4048,112 @@ test("spotify: seven mobile streams retain capped inventory semantics on both ho
 			assert.equal(r.streamResult.scopeCount, 7);
 		}
 	}
+});
+
+// RSS's result classifier rejects a run that is silent about a requested
+// scope ("requested scope 'spotify.playlists' must be produced or marked
+// omitted", 0.1.55). Each requested scope must be in the result or carry an
+// omitted error; a degraded one must also be in the result.
+function assertEveryScopeAccounted(result, scopes) {
+	const omitted = new Set(result.errors.filter((e) => e.disposition === "omitted").map((e) => e.scope));
+	const degraded = new Set(result.errors.filter((e) => e.disposition === "degraded").map((e) => e.scope));
+	for (const scope of scopes) {
+		const produced = Object.hasOwn(result, scope);
+		assert.ok(produced || omitted.has(scope), `${scope} neither produced nor omitted`);
+		assert.ok(!(produced && omitted.has(scope)), `${scope} both produced and omitted`);
+		if (degraded.has(scope)) assert.ok(produced, `${scope} degraded but absent`);
+	}
+	assert.equal(result.errors.some((e) => e.disposition === "fatal"), false);
+}
+
+test("spotify: every requested scope is produced or omitted when the library, a playlist row or a stream fails", { timeout: 300_000 }, async (t) => {
+	const fx = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-scope-outcomes.js") });
+	const scopes = fx.pageshimCase.scopes;
+	const gqlOverride = (override) => ({ ...fx.spotifyFixtures, resolve(raw, request) {
+		const base = fx.resolveFixture(raw, request);
+		const url = new URL(raw);
+		if (url.hostname === "api-partner.spotify.com") {
+			const body = JSON.parse(request.postData ?? "{}");
+			const replaced = override(body.operationName, body.variables ?? {}, base);
+			if (replaced) return replaced;
+		}
+		if (url.pathname.includes("/recently-played/")) return override("recently-played", {}, base) ?? base;
+		return base;
+	} });
+	const json = (body, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
+	await t.test("an account with no playlists, no history and no rankings exports every scope empty and clean", async () => {
+		const fixtures = gqlOverride((operation, variables) => {
+			if (operation === "libraryV3") return json({ data: { me: { libraryV3: { offset: variables.offset, totalCount: 1, items: [
+				{ item: { data: { __typename: "LikedSongs", uri: "spotify:collection:tracks" } } },
+			] } } } });
+			if (operation === "fetchLibraryTracks") return json({ data: { me: { library: { tracks: { offset: variables.offset, totalCount: 0, items: [] } } } } });
+			if (operation === "userTopContent") return json({ data: { me: { profile: { topArtists: { totalCount: 0, items: [] }, topTracks: { totalCount: 0, items: [] } } } } });
+			// A fresh account: Spotify answers an empty 404 at offset 0.
+			if (operation === "recently-played") return { status: 404, contentType: "application/json", body: "" };
+			return null;
+		});
+		for (const resultStreaming of [false, true]) {
+			const r = await runHarness({ bundle: built.outfile, fixtures, scopes, resultStreaming, gotoDelayMs: 0,
+				resultSpoolDirectory: join(out, "spotify-empty-" + resultStreaming) });
+			assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+			assertCleanRun(r);
+			const result = resultStreaming ? { ...r.streamDone } : r.result;
+			if (!resultStreaming) {
+				assertEveryScopeAccounted(result, scopes);
+				assert.deepEqual(result["spotify.playlists"], { records: [] });
+				assert.deepEqual(result["spotify.playlist_items"], { records: [] });
+				assert.deepEqual(result["spotify.saved_tracks"], { records: [] });
+				// Total 0 in every window is a complete, empty ranking (0.1.57).
+				assert.deepEqual(result["spotify.top_artists"], { records: [] });
+				assert.deepEqual(result["spotify.top_tracks"], { records: [] });
+				// Spotify's empty 404 at offset 0 is the end of an empty history
+				// (0.1.58): steady per user on RSS prod, and seen on accounts with
+				// nothing else in them.
+				assert.deepEqual(result["spotify.recently_played_contexts"], { records: [] });
+				assert.deepEqual(result.errors, []);
+			} else {
+				assert.equal(r.streamResult.completed, true);
+				assert.equal(r.streamResult.scopeCount, 7);
+			}
+			assert.equal(r.states["spotify.recently_played_contexts"].completion.terminal, "not_found_at_start");
+			assert.equal(r.states["spotify.playlists"].completion.operation, "libraryV3");
+			assert.equal(r.states["spotify.playlist_items"].completion.rows, 1);
+		}
+	});
+	await t.test("a library that fails omits only the two playlist scopes", async () => {
+		const fixtures = gqlOverride((operation) =>
+			operation === "libraryV3" ? json({ errors: [{ message: "synthetic library failure" }] }) : null);
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes, gotoDelayMs: 0 });
+		assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+		assertCleanRun(r);
+		assertEveryScopeAccounted(r.result, scopes);
+		for (const scope of ["spotify.playlists", "spotify.playlist_items"]) {
+			assert.equal(Object.hasOwn(r.result, scope), false);
+			assert.ok(r.result.errors.some((e) => e.scope === scope && e.disposition === "omitted" && e.code === "stream_collection_failed"));
+		}
+		assert.equal(r.result["spotify.saved_tracks"].records.length, 1);
+		assert.equal(r.result["spotify.profile"].records.length, 1);
+	});
+	await t.test("a playlist row of an unknown type degrades playlist_items instead of failing the run", async () => {
+		const fixtures = gqlOverride((operation, variables, base) => {
+			if (operation !== "fetchPlaylist") return null;
+			const payload = JSON.parse(base.body);
+			const content = payload.data.playlistV2.content;
+			content.items.unshift({ itemV2: { data: { __typename: "SyntheticFutureRow", uri: "spotify:future:x" } } });
+			content.totalCount = content.items.length;
+			return json(payload);
+		});
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes, gotoDelayMs: 0 });
+		assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+		assertCleanRun(r);
+		assertEveryScopeAccounted(r.result, scopes);
+		assert.equal(r.result["spotify.playlist_items"].records.length, 1);
+		assert.equal(r.result["spotify.playlist_items"].records[0].position, 1);
+		assert.ok(r.result.errors.some((e) => e.scope === "spotify.playlist_items" && e.disposition === "degraded"));
+		assert.equal(r.result["spotify.playlists"].records.length, 1);
+		assert.equal(r.states["spotify.playlist_items"], undefined);
+	});
 });
 
 test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeout: 180_000 }, async (t) => {
@@ -3905,8 +4324,14 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
    return body;
   }, 1],
   ["source-404 connection enrichment", "connections", (url, body) => url.searchParams.has("ids") ? { fixtureStatus: 404 } : body, 0],
+  // A skills first page short of its total keeps its rows (0.3.43); the rest
+  // of the list cannot be walked here, so nothing proves it complete.
   ["section total mismatch", "skills", (url, body) => {
    if (url.searchParams.has("memberIdentity")) body.elements[0].profileSkills.paging.total = 2;
+   return body;
+  }, 1],
+  ["section total mismatch", "languages", (url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].profileLanguages.paging.total = 2;
    return body;
   }, 0],
   ["profile owner mismatch", "skills", (url, body) => {
@@ -3927,6 +4352,24 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
    assert.ok(r.result.errors.some((e) => e.scope === scope && e.errorClass === "partial"));
   });
  }
+ await t.test("a skills first page is completed by walking the owner's skills collection", async () => {
+  // Seen live (2026-11-05): the decoration embedded 20 of 32 skills.
+  const skills = [1, 2, 3].map((n) => ({ entityUrn: `urn:li:fsd_skill:(12,${n})`, name: `Skill ${n}` }));
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].profileSkills = { elements: skills.slice(0, 2), paging: { start: 0, count: 2, total: 3 } };
+   if (url.pathname === "/voyager/api/identity/dash/profileSkills") {
+    const start = Number(url.searchParams.get("start"));
+    return { elements: skills.slice(start, start + 2), paging: { start, count: 2, total: 3 } };
+   }
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.skills"] });
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result["linkedin.skills"].records.map((record) => record.id), skills.map((skill) => skill.entityUrn));
+  assert.ok(r.states["linkedin.skills"].full_scan_at);
+  assert.equal(fixtures.requests.filter((request) => request.path === "/voyager/api/identity/dash/profileSkills").length, 2);
+ });
  await t.test("successful JSON without owner identity cannot pass the probe", async () => {
   const fixtures = createLinkedInFixtures((url, body) => url.pathname === "/voyager/api/me" ? {} : body);
   const r = await run(fixtures, { loginWaitMs: 50 });
@@ -3935,5 +4378,60 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
   assert.equal(r.calls.showBrowser, 1);
   assert.ok(fixtures.requests.every((request) => request.path === "/voyager/api/me"));
   assert.deepEqual(r.stateMessages, []);
+ });
+ // A successful HTTP 200 JSON body with an `_error` key is profile data. These
+ // cases send the sentinel through the real harness and the fixture transform.
+ const SENTINEL = "SECRET_NOTE";
+ const exportedText = (r) => JSON.stringify([r.result, r.data, r.states, r.stateMessages]);
+ await t.test("successful JSON _error=SECRET_NOTE on a usable profile keeps the complete inventory", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) body._error = SENTINEL;
+   return body;
+  });
+  const r = await run(fixtures);
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result.exportSummary, c.exportSummary);
+  assert.match(r.data.status, /^Complete!/);
+  assert.equal(r.result["linkedin.experience"].records.length, 1);
+  assert.equal(exportedText(r).includes(SENTINEL), false);
+ });
+ await t.test("successful JSON _error=SECRET_NOTE on an unreadable profile is a portable partial, not its text", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) {
+    delete body.elements[0].profilePositionGroups;
+    body._error = SENTINEL;
+   }
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.experience", "linkedin.skills"] });
+  assertCleanRun(r);
+  assert.match(r.data.status, /^Partial:/);
+  assert.equal(r.result["linkedin.experience"]?.records.length ?? 0, 0);
+  assert.equal(r.result["linkedin.skills"].records.length, 1);
+  assert.equal(r.result.errors.length, 1);
+  const [error] = r.result.errors;
+  assert.equal(error.scope, "linkedin.experience");
+  assert.equal(error.errorClass, "partial");
+  assert.equal(error.code, "stream_collection_failed");
+  assert.equal(error.reason, "LinkedIn enumeration is unproven; the profile section was unreadable");
+  assert.equal(exportedText(r).includes(SENTINEL), false);
+ });
+ await t.test("genuine HTTP 503 beside a successful basic JSON _error=SECRET_NOTE keeps its own cause", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.searchParams.has("decorationId")) return { fixtureStatus: 503 };
+   if (url.searchParams.has("memberIdentity")) return { _error: SENTINEL, elements: [{ firstName: "Anon", lastName: "Member" }] };
+   return body;
+  });
+  const r = await run(fixtures, { scopes: ["linkedin.experience"] });
+  assertCleanRun(r);
+  assert.match(r.data.status, /^Partial:/);
+  assert.equal(r.result.errors.length, 1);
+  const [error] = r.result.errors;
+  assert.equal(error.scope, "linkedin.experience");
+  assert.equal(error.errorClass, "partial");
+  assert.equal(error.code, "stream_collection_failed");
+  assert.equal(error.reason, "LinkedIn experience read failed: http_503");
+  assert.equal(exportedText(r).includes(SENTINEL), false);
  });
 });

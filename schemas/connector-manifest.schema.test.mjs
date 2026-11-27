@@ -74,6 +74,230 @@ test("the profile feature table matches the schema feature enum exactly", () => 
   );
 });
 
+test("store evidence states its base profiles in one sentence, and conformance stays a separate claim", () => {
+  const section = profile
+    .split(/^### 7\.1 Store collection evidence \(RUN_COVERAGE_V1\)$/m)[1]
+    ?.split(/^### 7\.2 /m)[0];
+  assert.ok(section, "profile must define the store collection evidence extension");
+  assert.equal(
+    profile.split("This extension applies to manifests whose protocol_version is").length - 1,
+    1,
+    "the base-profile sentence appears exactly once",
+  );
+  assert.match(
+    section.replace(/\s+/g, " "),
+    /This extension applies to manifests whose protocol_version is 0\.1\.0, 0\.2\.0 or 0\.3\.0\. Using this extension never makes a runtime conformant to a base profile version it does not fully implement; conformance to the base profile is a separate claim\./,
+  );
+});
+
+// These are document regressions, not runtime interoperability tests.
+function profileSection(heading, nextHeading) {
+  const section = profile.split(heading)[1]?.split(nextHeading)[0];
+  assert.ok(section, `profile must contain ${heading}`);
+  return section.replace(/\s+/g, " ");
+}
+
+test("Section 3.4 preserves pre-spawn refusal of unsupported required capabilities", () => {
+  const text = profileSection("### 3.4 Human interaction and protocol capabilities", "### 3.5 ");
+  assert.match(text, /It MUST reject a connector with an unsupported required capability before spawn\./);
+  assert.match(text, /A runtime that implements profile version 0\.2\.0 MUST advertise and support `OBSERVATION`\./);
+});
+
+test("Section 3.4 limits the elective exception to readers implementing it", () => {
+  const text = profileSection("### 3.4 Human interaction and protocol capabilities", "### 3.5 ");
+  assert.match(text, /A runtime that does not advertise a declared capability MUST NOT start that connector, unless the section that defines the capability makes it elective and the runtime implements that elective exception\./);
+  assert.match(text, /This exception does not waive any other placement requirement\./);
+  assert.match(text, /`RUN_COVERAGE_V1` \(Section 7\.1, which defines it as elective\)/);
+  assert.doesNotMatch(text, /an elective capability never blocks spawn/i);
+});
+
+test("an elective-aware runtime lacking coverage support may start only after other placement checks", () => {
+  const text = profileSection("### 7.1 Store collection evidence (RUN_COVERAGE_V1)", "#### 7.1.1 ");
+  assert.match(text, /`RUN_COVERAGE_V1` is an elective capability for runtimes that implement the elective exception in Section 3\.4\./);
+  assert.match(text, /Such a runtime that does not support `RUN_COVERAGE_V1` MAY start the connector only if all other placement requirements pass\./);
+  assert.match(text, /It MUST omit `START.run_coverage_version`, and the connector MUST omit `DONE.coverage`\./);
+  assert.match(text, /The extension is negotiated per run, so an exchange without the request is an ordinary base-profile exchange\./);
+  assert.doesNotMatch(text, /An elective capability never blocks spawn|A runtime that does not support `RUN_COVERAGE_V1` starts the connector/);
+});
+
+test("base-profile applicability does not promise unchanged-reader compatibility: roll out runtimes first", () => {
+  const text = profileSection("### 7.1 Store collection evidence (RUN_COVERAGE_V1)", "#### 7.1.1 ");
+  assert.match(text, /Applicability to base profiles 0\.1\.0 and 0\.2\.0 does not imply interoperability with unchanged readers\./);
+  assert.match(text, /Old required-only readers that do not support a declared `RUN_COVERAGE_V1` reject the connector before `START`\./);
+  assert.match(text, /Rollout MUST be runtime-first: upgrade readers to implement the elective exception before deploying manifests that declare `RUN_COVERAGE_V1`, as required by Section 8\./);
+  const versioning = profileSection("## 8. Profile versioning", "## 9. ");
+  assert.match(versioning, /A new optional message that an older fail-closed runtime would reject requires capability negotiation and a runtime-first rollout\./);
+});
+
+test("coverage inventory requires unique opaque non-empty strings and exact terminal inventory", () => {
+  const declaration = profileSection("#### 7.1.1 Declaration and negotiation", "#### 7.1.2 ");
+  assert.match(declaration, /A stream MAY declare `coverage_stores`, a non-empty array of unique, opaque, non-empty string identifiers\./);
+  const terminal = profileSection("#### 7.1.2 Optional terminal store collection evidence", "#### 7.1.3 ");
+  assert.match(terminal, /Each store MUST contain a non-empty `store` identifier and one status\./);
+  assert.match(terminal, /each stream's stores MUST equal its manifest inventory, without duplicates or extras\./);
+});
+
+test("a connector that uses the extension declares RUN_COVERAGE_V1, and coverage_stores needs that declaration", () => {
+  const section = profile
+    .split(/^#### 7\.1\.1 Declaration and negotiation$/m)[1]
+    ?.split(/^#### 7\.1\.2 /m)[0];
+  assert.ok(section, "profile must define declaration and negotiation");
+  const text = section.replace(/\s+/g, " ");
+  assert.match(text, /A connector that uses this extension MUST declare `RUN_COVERAGE_V1` in `protocol_capabilities`\./);
+  assert.match(text, /Declaring `coverage_stores` on a stream, or emitting `DONE\.coverage`, is a use of this extension\./);
+  assert.match(
+    text,
+    /`coverage_stores` is valid only with that declaration, and a validator MUST reject `coverage_stores` without it\./,
+  );
+  assert.equal(profile.split("A stream MAY declare `coverage_stores`").length - 1, 1, "the stream rule is stated once");
+  const streamFields = profile
+    .split(/^### 3\.2 Stream declarations$/m)[1]
+    ?.split(/^### 3\.3 /m)[0];
+  assert.ok(streamFields, "profile must define stream declarations");
+  assert.match(
+    streamFields.replace(/\s+/g, " "),
+    /`coverage_stores` \| OPTIONAL\. Valid only with the `RUN_COVERAGE_V1` declaration of Section 7\.1\.1\./,
+  );
+});
+
+test("terminal store evidence defines omission, runtime authority, release binding, and retirement", () => {
+  const section = profile
+    .split(/^#### 7\.1\.2 Optional terminal store collection evidence$/m)[1]
+    ?.split(/^#### 7\.1\.3 /m)[0];
+  assert.ok(section, "profile must define terminal store evidence");
+  const text = section.replace(/\s+/g, " ");
+  assert.match(text, /A failed `DONE` MUST NOT contain `coverage`\./);
+  assert.match(
+    text,
+    /In this extension, durable admission means that the durable write path accepted the effect, and outstanding debt means unrecovered durable detail gaps \(Section 5\.6\)\./,
+  );
+  assert.match(text, /The connector's assertion MUST NOT override runtime evidence/);
+  assert.match(text, /debt settlement still follows the detail-gap accounting of Section 5\.6\./);
+  assert.match(text, /`scoped: false` supplies no such assertion and MUST NOT support positive coverage for that stream\./);
+  assert.match(text, /The artifact digest and manifest fingerprint MUST match a release pair/);
+  assert.match(
+    text,
+    /An unregistered digest, or a digest paired with a different manifest fingerprint, MUST NOT establish positive coverage/,
+  );
+  assert.match(text, /Omission of `DONE\.coverage` is a new terminal result/);
+  assert.match(text, /MUST retire earlier positive evidence under Section 7\.1\.3, whether or not the run includes `STATE`/);
+  // A positive covers only its bound collection_scope, and a different release invalidates it.
+  assert.match(
+    text,
+    /A positive covers only the obligation within its bound collection_scope\. It MUST NOT be presented as coverage of a wider view\./,
+  );
+  assert.match(text, /A different release MUST invalidate the positive, with no exception\./);
+});
+
+test("terminal run records order final outcomes by run sequence and commit revision", () => {
+  const section = profile
+    .split(/^#### 7\.1\.3 Terminal run records and coverage currency$/m)[1]
+    ?.split(/^### 7\.2 /m)[0];
+  assert.ok(section, "profile must define terminal run records and coverage currency");
+  const text = section.replace(/\s+/g, " ");
+  assert.match(text, /Coverage is a fact about one run/);
+  assert.match(text, /A runtime that implements store collection evidence MUST commit an orderable terminal run record for every run's final outcome, including failure and omitted evidence/);
+  assert.match(text, /whether or not evidence was negotiated or the run changed `STATE`/);
+  assert.match(text, /successful `DONE` followed by process failure is not a successful run/);
+  // Run sequence decides eligibility; commit revision orders coverage-affecting observations.
+  assert.match(text, /Run sequence decides eligibility; commit revision orders observations/);
+  assert.match(text, /Run starts \| Assign a strictly increasing run sequence before admitting any effect/);
+  assert.match(text, /Assign a strictly increasing commit revision/);
+  assert.match(text, /never using wall-clock timestamps to decide currency/);
+  assert.match(text, /Missing, unreadable or ambiguous sequence\/revision \| Project unknown, not positive coverage/);
+  assert.match(text, /no later-committed coverage-affecting observation of a newer-or-equal run exists; earlier-run records remain history/);
+  assert.match(text, /Later coverage-affecting observation of a newer-or-equal run \| Retire the positive to unknown/);
+  // Run registration retires nothing; an in-flight run leaves the earlier run's fact standing.
+  assert.match(text, /Run registration \(a run start that admits no effect\) does not retire a positive\./);
+  assert.match(
+    text,
+    /An in-flight run does not make the earlier run's fact false\. That run stays shown with its as-of: the commit revision and time of its terminal record \(Section 7\.1\.4\)\./,
+  );
+  assert.match(text, /Disclosed limit: a run that is registered and then crashes before any terminal record or ingested record leaves the earlier positive standing\./);
+  assert.match(text, /A run whose start registration failed, so it has no run sequence, still counts as an observed later attempt\. Its terminal record or ingested records retire earlier positives, and it can never itself be eligible\./);
+  // Exact replay is idempotent; a conflicting duplicate writes nothing.
+  assert.match(text, /Exact replay of the same terminal record \| Return the stored receipt without changing revision or coverage; reject a conflicting duplicate and write nothing/);
+  assert.match(text, /Restore that can regress ordering \| Reset positives to unknown/);
+  assert.match(text, /Do not improve coverage while later relevant work is unresolved/);
+  // Terminal store projections identify the run and commit, not a source snapshot.
+  assert.match(text, /A terminal store coverage projection MUST carry the run identifier and sequence, release artifact digest .* and terminal record commit revision and time/);
+  assert.match(text, /Owner-facing text MUST identify that run and commit time, not imply a source snapshot at commit time/);
+});
+
+test("the coverage-fact rule is stated once, and the implementer note is linked once", () => {
+  assert.equal(profile.split("Coverage is a fact about one run").length - 1, 1);
+  const coverageFacts = profile
+    .split(/^#### 7\.1\.4 Coverage facts$/m)[1]
+    ?.split(/^#### 7\.1\.5 /m)[0];
+  assert.ok(coverageFacts, "profile must define the shared coverage facts");
+  assert.match(
+    coverageFacts.replace(/\s+/g, " "),
+    /A coverage projection derived from DETAIL_COVERAGE or STREAM_EVIDENCE SHOULD carry the same facts/,
+  );
+  const noteUrl =
+    "https://github.com/PDP-Connect/data-connect/blob/feat/local-run-coverage-verdict/docs/261021-local-device-coverage-evidence.md";
+  assert.equal(profile.split(noteUrl).length - 1, 1, "the implementer note is linked exactly once");
+});
+
+test("a runtime requests store evidence only for a scope it can bind into collection_scope", () => {
+  const section = profile
+    .split(/^#### 7\.1\.1 Declaration and negotiation$/m)[1]
+    ?.split(/^#### 7\.1\.2 /m)[0];
+  assert.ok(section, "profile must define the START request for store evidence");
+  const text = section.replace(/\s+/g, " ");
+  assert.match(
+    text,
+    /A runtime MUST NOT request evidence for a run whose effective scope it cannot fully bind into collection_scope\./,
+  );
+  // The scope-echo rule stays normative: the connector echoes the string without modification.
+  assert.match(
+    text,
+    /If it emits `DONE\.coverage`, the connector MUST echo that string without modification in `collection_scope`\./,
+  );
+  assert.match(text, /When `START` omits `run_coverage_version`, a connector MUST omit `DONE\.coverage`/);
+});
+
+test("a positive also needs the base profile's own accounting, so a 0.2.0 run gets none where detail accounting is open", () => {
+  const section = profile
+    .split(/^#### 7\.1\.5 Accounting under the base profile$/m)[1]
+    ?.split(/^### 7\.2 /m)[0];
+  assert.ok(section, "profile must define accounting under the base profile");
+  const text = section.replace(/\s+/g, " ");
+  assert.match(text, /This requirement applies under every base profile version that this extension lists\./);
+  assert.match(text, /A positive \(`collected`\) also requires that the base profile's own accounting for that run show no contradiction\./);
+  assert.match(text, /Any obligation whose accounting the runtime cannot evaluate under its base profile yields no positive\./);
+  assert.match(
+    text,
+    /A 0\.1\.0 or 0\.2\.0 run with legacy detail accounting gets no positive for a stream whose detail accounting is incomplete or unevaluated\./,
+  );
+  assert.match(text, /Base profiles 0\.1\.0 and 0\.2\.0 define no same-obligation baseline and no change interval\./);
+  assert.match(text, /Under 0\.1\.0 and 0\.2\.0, a delta run therefore establishes no full-obligation collection, and unchanged state supports no positive\./);
+});
+
+test("a stream that declares coverage_stores is rejected without RUN_COVERAGE_V1 in protocol_capabilities", () => {
+  const streams = [{ name: "items", coverage_stores: ["store-a"] }];
+  assert.equal(validate({ streams }), false, "a missing protocol_capabilities fails the rule");
+  assert.equal(validate({ streams, protocol_capabilities: ["OBSERVATION"] }), false);
+  assert.equal(validate({ streams, protocol_capabilities: "RUN_COVERAGE_V1" }), false, "the capability list must be an array");
+});
+
+test("a stream that declares coverage_stores is accepted with RUN_COVERAGE_V1, and other streams need no declaration", () => {
+  const streams = [{ name: "items", coverage_stores: ["store-a"] }];
+  assert.equal(validate({ streams, protocol_capabilities: ["RUN_COVERAGE_V1"] }), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ streams: [{ name: "items" }] }), true, JSON.stringify(validate.errors));
+});
+
+// The schema owns only the capability-declaration implication here.
+// Full inventory validation is outside this schema's responsibility;
+// schema acceptance below does not make these inventories protocol-valid.
+test("outside-schema responsibility: malformed coverage inventories pass the declaration-only schema boundary", () => {
+  for (const coverage_stores of [[], [""], ["store-a", "store-a"], [42]]) {
+    const streams = [{ name: "items", coverage_stores }];
+    assert.equal(validate({ streams, protocol_capabilities: ["RUN_COVERAGE_V1"] }), true, JSON.stringify(validate.errors));
+    assert.equal(validate({ streams }), false, "even malformed inventories still require the capability declaration");
+  }
+});
+
 // Section 3.3.8's one-providing-kind rule is the target shape, not an
 // absolute today: `host_http_request` is a named legacy exception, valid on
 // both `browser` and `network`, because github_browser and strava_browser

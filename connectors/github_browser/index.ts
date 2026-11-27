@@ -129,11 +129,18 @@ export async function collect({
 	emitRecord,
 	page,
 	progress,
+	reportStreamFailure,
 	requested,
 	state,
 }: Pick<
 	BrowserCollectContext,
-	"emit" | "emitRecord" | "page" | "progress" | "requested" | "state"
+	| "emit"
+	| "emitRecord"
+	| "page"
+	| "progress"
+	| "reportStreamFailure"
+	| "requested"
+	| "state"
 >): Promise<void> {
 	const services = {
 		fetchPublicJson: async (url: string) =>
@@ -163,7 +170,14 @@ export async function collect({
 	};
 	await progress("Collecting the selected GitHub browser streams");
 	await collectGitHubBrowser(
-		{ emit, emitRecord, progress, requested: new Set(requested.keys()), state },
+		{
+			emit,
+			emitRecord,
+			progress,
+			...(reportStreamFailure === undefined ? {} : { reportStreamFailure }),
+			requested: new Set(requested.keys()),
+			state,
+		},
 		services,
 	);
 }

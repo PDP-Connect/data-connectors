@@ -1,0 +1,7 @@
+{
+	"format": "pdpp.fixture-provenance/1",
+	"class": "synthetic",
+	"labeled_by": "human:connector-author",
+	"labeled_at": "2026-09-22",
+	"note": "Shape-real, value-synthetic. Field shapes, nullability, and the mixed epoch-seconds/ISO timestamp encodings were taken from live api.instinct.com responses on a real owner account; every identifier, phone number, email, and name is invented. Records were produced by running collectInstinct over fixtures/instinct/*.json, so they cannot drift from the parsers. The live account had no connected services, devices, trusted people, or vault entries, so those four streams' rows are shape-derived from the resolver selection sets rather than copied from a populated account. The chats and chat_events rows follow the shapes of a live chats/chatHistory pull (epoch-second createdAt, newest-window-first paging, message/tool_invocation/tool_response/tool_result_block events); the rarer event kinds (interaction, thinking, action, screenshot, draft_field, error) are shape-derived from the chatHistory selection set, and every message, argument, and response text is invented."
+}

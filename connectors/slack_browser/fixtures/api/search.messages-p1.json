@@ -1,0 +1,82 @@
+{
+	"ok": true,
+	"query": "after:2026-09-20",
+	"messages": {
+		"total": 3,
+		"pagination": {
+			"total_count": 3,
+			"page": 1,
+			"per_page": 100,
+			"page_count": 1,
+			"first": 1,
+			"last": 3
+		},
+		"paging": {
+			"count": 100,
+			"total": 3,
+			"page": 1,
+			"pages": 1
+		},
+		"matches": [
+			{
+				"iid": "iid-1",
+				"team": "T0123456789",
+				"channel": {
+					"id": "C0123456789",
+					"is_channel": true,
+					"is_group": false,
+					"is_im": false,
+					"is_mpim": false,
+					"is_private": false,
+					"name": "general"
+				},
+				"type": "message",
+				"user": "U0555555555",
+				"username": "pat",
+				"ts": "1790000000.000700",
+				"text": "Late reply to the old thread",
+				"permalink": "https://acme.slack.com/archives/C0123456789/p1790000000000700?thread_ts=1788000000.000600&cid=C0123456789",
+				"no_reactions": true
+			},
+			{
+				"iid": "iid-2",
+				"team": "T0123456789",
+				"channel": {
+					"id": "D0123456789",
+					"is_channel": false,
+					"is_im": true,
+					"is_mpim": false,
+					"is_private": true,
+					"name": "pat"
+				},
+				"type": "message",
+				"user": "U0555555555",
+				"username": "pat",
+				"ts": "1790470000.001300",
+				"text": "Can you review my PR when you have a minute?",
+				"permalink": "https://acme.slack.com/archives/D0123456789/p1790470000001300",
+				"no_reactions": true
+			},
+			{
+				"iid": "iid-3",
+				"team": "T0123456789",
+				"channel": {
+					"id": "C0999999999",
+					"is_channel": true,
+					"is_group": false,
+					"is_im": false,
+					"is_mpim": false,
+					"is_private": false,
+					"name": "not-a-member"
+				},
+				"type": "message",
+				"user": "U0555555555",
+				"username": "pat",
+				"ts": "1790480000.001400",
+				"text": "A public channel the owner is not in",
+				"permalink": "https://acme.slack.com/archives/C0999999999/p1790480000001400",
+				"no_reactions": true
+			}
+		]
+	}
+}

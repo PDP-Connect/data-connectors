@@ -16,6 +16,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 	anthropic: {
+		account_plan: null,
 		account_profile: null,
 		conversations: { field: "create_time", format: "date-time" },
 		messages: { field: "create_time", format: "date-time" },

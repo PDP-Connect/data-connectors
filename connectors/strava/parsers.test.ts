@@ -489,3 +489,45 @@ test("streamCsvRows preserves quoted newlines and doubled quotes across chunks",
 		["2", "plain"],
 	]);
 });
+
+test("recorded zero heart rates survive the export record builder", () => {
+	const cols = columns();
+	const row = new Array<string>(HEADER.length).fill("");
+	row[0] = "1";
+	row[1] = "2024-05-20T13:05:32Z";
+	row[7] = "0";
+	row[16] = "0";
+	const record = buildActivityRecord(row, cols, null);
+	assert.ok(record);
+	assert.equal(record.average_heartrate, 0);
+	assert.equal(record.max_heartrate, 0);
+});
+
+test("export dates preserve the stated clock and distinguish known local offsets", () => {
+	const cols = columns();
+	for (const [source, start, localDay, basis] of [
+		["2024-05-20T00:30:00+05:00", "2024-05-20T00:30:00+05:00", "2024-05-20", "utc"],
+		["2024-05-20T23:30:00-05:00", "2024-05-20T23:30:00-05:00", "2024-05-20", "utc"],
+		["2024-05-20T00:30:00+00:00", "2024-05-20T00:30:00+00:00", "2024-05-20", "utc"],
+		["2024-05-20T00:30:00+0000", "2024-05-20T00:30:00+0000", "2024-05-20", "utc"],
+		["2024-05-20T00:30:00Z", "2024-05-20T00:30:00Z", null, "utc"],
+		["2024-05-20T00:30:00-00:00", "2024-05-20T00:30:00-00:00", null, "utc"],
+		["2024-05-20T00:30:00-0000", "2024-05-20T00:30:00-0000", null, "utc"],
+		["2024-05-20 00:30:00", "2024-05-20T00:30:00", null, "unknown"],
+		["May 20, 2024, 12:30:00 AM", "2024-05-20T00:30:00", null, "unknown"],
+	] as const) {
+		const row = new Array<string>(HEADER.length).fill("");
+		row[0] = "1";
+		row[1] = source;
+		const record = buildActivityRecord(row, cols, null);
+		assert.ok(record, source);
+		assert.equal(record.start_time, start, source);
+		assert.equal(record.start_date, "2024-05-20", source);
+		assert.equal(record.start_date, record.start_time.slice(0, 10), source);
+		assert.equal(record.start_date_local, localDay, source);
+		assert.equal(record.start_time_basis, basis, source);
+		if (record.start_date_local !== null) {
+			assert.equal(record.start_date_local, record.start_date, source);
+		}
+	}
+});

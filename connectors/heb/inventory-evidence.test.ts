@@ -76,7 +76,7 @@ test("mounted rows and matching unit counts retain items without claiming invent
 	assert.equal(result.detail.items.length, 1);
 	assert.equal((result as any).inventoryComplete, false);
 });
-test("name-only profile is withheld with a retryable inventory skip", async () => {
+test("name-only profile is withheld as a retryable failed read", async () => {
 	const deps = sink();
 	await collectProfile(
 		pageFor("<main><p>Name</p><p>Example Person</p></main>"),
@@ -86,7 +86,7 @@ test("name-only profile is withheld with a retryable inventory skip", async () =
 	assert.ok(
 		deps.messages.some(
 			(m) =>
-				m.reason === "inventory_not_proven_complete" &&
+				m.reason === "stream_collection_failed" &&
 				m.recovery_hint.retryable,
 		),
 	);
@@ -111,20 +111,37 @@ for (const [label, html, landed] of [
 ] as const) {
 	test(`nutrition ${label} remains unknown and retryable`, async () => {
 		const deps = sink();
+		const target = {
+			name: "Widget",
+			productId: "500",
+			productUrl: "https://www.heb.com/product-detail/widget/500",
+		};
+		if (label === "login response") {
+			// A sign-in page is a session failure, not an unknown lookup.
+			await assert.rejects(
+				() => collectNutrition(pageFor(html, landed), [target], deps),
+				{ message: "heb_session_required" },
+			);
+			assert.deepEqual(
+				deps.messages.map((m) => m.reason),
+				["session_repair_required"],
+			);
+			return;
+		}
 		const result = await collectNutrition(
 			pageFor(html, landed),
-			[
-				{
-					name: "Widget",
-					productId: "500",
-					productUrl: "https://www.heb.com/product-detail/widget/500",
-				},
-			],
+			[target],
 			deps,
 		);
 		assert.equal(result.lookupSkips, 1);
 		assert.ok(
-			deps.messages.some((m) => m.reason === "inventory_not_proven_complete"),
+			deps.messages.some(
+				(m) =>
+					m.reason ===
+					(label === "blank successful shell"
+						? "inventory_not_proven_complete"
+						: "stream_collection_failed"),
+			),
 		);
 		assert.ok(deps.records.every((r) => r.data.source !== "not_found"));
 	});
@@ -441,7 +458,7 @@ for (const html of [
 		await collectProfile(pageFor(html), deps);
 		assert.equal(deps.records.length, 0);
 		assert.ok(
-			deps.messages.some((m) => m.reason === "inventory_not_proven_complete"),
+			deps.messages.some((m) => m.reason === "stream_collection_failed"),
 		);
 	});
 test("literal zero calories stays zero; absent serving values stay null", () => {

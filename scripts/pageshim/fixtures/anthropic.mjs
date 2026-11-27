@@ -17,6 +17,7 @@ export const syntheticExport = readFileSync(
 );
 
 export const ORG = "org-syn-0000-0000-0000-000000000001";
+export const ORG_CREATED_AT = "2025-03-01T12:00:00.123456Z";
 export const NONCE = "nonce-syn-0001";
 const SIGNED = "https://storage.claude-export.test/export.zip?sig=synthetic";
 
@@ -79,7 +80,15 @@ export function resolveFixture(raw) {
 		);
 	if (!loggedIn) return json({ error: "unauthorized" }, 401);
 	if (p === "/api/organizations")
-		return json([{ uuid: ORG, capabilities: ["chat"] }]);
+		return json([
+			{
+				uuid: ORG,
+				// A personal organization is named after its owner.
+				name: "Sample User's Organization",
+				capabilities: ["chat", "claude_pro"],
+				created_at: ORG_CREATED_AT,
+			},
+		]);
 	if (p === `/api/organizations/${ORG}/export_data`) {
 		counts.exportRequests += 1;
 		if (format === "new")
@@ -164,6 +173,7 @@ export const anthropicFixtures = {
 
 const STREAMS = [
 	"account_profile",
+	"account_plan",
 	"conversations",
 	"messages",
 	"projects",
@@ -179,6 +189,7 @@ export const pageshimCase = {
 		label: "conversations",
 		details: {
 			account_profile: 1,
+			account_plan: 1,
 			conversations: 2,
 			messages: 2,
 			projects: 2,
