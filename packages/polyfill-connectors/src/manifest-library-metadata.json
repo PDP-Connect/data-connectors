@@ -241,7 +241,7 @@
 			"connector_key": "doordash",
 			"reason_display_messages": {
 				"doordash_orders_response_not_observed": "We couldn't read your DoorDash order history this time. This can mean your account has no orders yet, or that DoorDash changed something on their end — running it again will not help until the connector is updated.",
-				"doordash_orders_response_unreadable": "DoorDash sent back part of your order history that this run could not read, so older orders were not read this time. Nothing was lost; the next run reads the whole history again.",
+				"doordash_orders_response_unreadable": "DoorDash sent back part of your order history that this run could not read, so some orders, either the newest or older ones, were not read this time. Nothing was lost; the next run reads the whole history again.",
 				"shape_check_failed": "The data didn't look like we expected"
 			}
 		}
