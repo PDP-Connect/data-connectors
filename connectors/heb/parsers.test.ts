@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { DOMParser } from "linkedom";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -1381,6 +1382,16 @@ test("isIncapsulaBlocked returns false for an empty body", () => {
 test("isIncapsulaBlocked returns false for malformed markup", () => {
 	assert.equal(isIncapsulaBlocked("<html"), false);
 });
+test("isIncapsulaBlocked returns false if the HTML parser throws", (t) => {
+	const html = "<html><body><iframe></iframe></body></html>";
+	assert.equal(isIncapsulaBlocked(html), true);
+	const parse = t.mock.method(DOMParser.prototype, "parseFromString", () => {
+		throw new Error("synthetic HTML parser failure");
+	});
+	assert.equal(isIncapsulaBlocked(html), false);
+	assert.equal(parse.mock.callCount(), 1, "the HTML parser was reached");
+});
+
 test("isIncapsulaBlocked still recognizes a small HTML block page", () => {
 	assert.equal(isIncapsulaBlocked("<html><body><iframe></iframe></body></html>"), true);
 });
