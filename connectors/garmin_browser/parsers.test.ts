@@ -27,6 +27,7 @@ import {
 	siteTimeZone,
 	sleepRow,
 	sleepRows,
+	summaryRangeDays,
 	trainingStatus,
 	type Window,
 	windowRows,
@@ -257,6 +258,133 @@ test("dailySummary: a fractional count builds, and the schema refuses it, so it 
 		),
 	);
 	assert.deepEqual(verdicts("daily_summaries", record), NEITHER);
+});
+
+// ── daily_summaries over a range ──────────────────────────────────────────
+const RANGE_WINDOW: Window = { from: "2026-09-16", to: "2026-09-17" };
+const rangeEntries = (): Obj[] =>
+	fixture<{ data: Obj[] }>("daily-summaries-range.json").data;
+const rangeDay = (days: Map<string, unknown> | null, day: string): unknown => {
+	assert.ok(days, "a range answer in Garmin's shape");
+	assert.ok(days.has(day), day);
+	return days.get(day);
+};
+
+test("summaryRangeDays: a day with wellness data builds the record the day's own summary builds; a day without is absent", () => {
+	const days = summaryRangeDays(
+		fixture("daily-summaries-range.json"),
+		RANGE_WINDOW,
+	);
+	assert.deepEqual([...(days?.keys() ?? [])], [SUMMARY_DAY]);
+	assert.deepEqual(
+		dailySummary(SUMMARY_DAY, rangeDay(days, SUMMARY_DAY)),
+		dailySummary(SUMMARY_DAY, fixture("daily-summary.json")),
+	);
+});
+
+test("summaryRangeDays: only includesWellnessData true makes a day count, whatever its metrics say", () => {
+	const [first] = rangeEntries();
+	assert.ok(first);
+	for (const wellness of [false, undefined, null, "true", 1]) {
+		const days = summaryRangeDays(
+			{ data: [{ ...first, includesWellnessData: wellness }] },
+			RANGE_WINDOW,
+		);
+		assert.deepEqual([...(days?.keys() ?? [])], [], String(wellness));
+	}
+});
+
+test("summaryRangeDays: a metric the range leaves out, or its whole group, is null; one of the wrong type stays unreadable", () => {
+	const [first] = rangeEntries();
+	assert.ok(first);
+	const days = summaryRangeDays(
+		{
+			data: [
+				{
+					...first,
+					heartRate: { restingValue: 52 },
+					bodyBattery: undefined,
+					stress: { avgLevel: "31" },
+				},
+			],
+		},
+		RANGE_WINDOW,
+	);
+	const built = dailySummary(SUMMARY_DAY, rangeDay(days, SUMMARY_DAY));
+	assert.equal(kindOf(built), "unreadable");
+	const clean = summaryRangeDays(
+		{ data: [{ ...first, heartRate: { restingValue: 52 } }] },
+		RANGE_WINDOW,
+	);
+	const record = recordOf(
+		dailySummary(SUMMARY_DAY, rangeDay(clean, SUMMARY_DAY)),
+	);
+	assert.equal(record.min_heart_rate_bpm, null);
+	assert.equal(record.resting_heart_rate_bpm, 52);
+	assert.equal(record.body_battery_low, 24);
+});
+
+test("summaryRangeDays: a day the range does not hold is absent, not empty", () => {
+	const [first] = rangeEntries();
+	const days = summaryRangeDays({ data: [first] }, RANGE_WINDOW);
+	assert.deepEqual([...(days?.keys() ?? [])], [SUMMARY_DAY]);
+});
+
+test("summaryRangeDays: an answer that is not Garmin's range shape is null, so no day of it is trusted", () => {
+	const [first, second] = rangeEntries();
+	assert.ok(first && second);
+	for (const json of [
+		null,
+		[],
+		"data",
+		{},
+		{ data: null },
+		{ data: {} },
+		{ data: [first, null] },
+		{ data: [first, "2026-09-17"] },
+		// A day outside the window asked for, a day the calendar does not have, no day, the same day twice.
+		{ data: [first, { ...second, calendarDate: "2026-09-18" }] },
+		{ data: [first, { ...second, calendarDate: "2026-09-31" }] },
+		{ data: [first, { ...second, calendarDate: undefined }] },
+		{ data: [first, { ...first }] },
+		// A metric group that is not an object.
+		{ data: [{ ...first, heartRate: 52 }] },
+		{ data: [{ ...first, movement: { steps: 8432 } }] },
+	]) {
+		assert.equal(
+			summaryRangeDays(json, RANGE_WINDOW),
+			null,
+			JSON.stringify(json),
+		);
+	}
+	assert.deepEqual(
+		[...(summaryRangeDays({ data: [] }, RANGE_WINDOW)?.keys() ?? [])],
+		[],
+	);
+});
+
+test("summaryRangeDays reads no handle or account id: a day carries only the six metrics and its date", () => {
+	const days = summaryRangeDays(
+		{
+			data: [
+				{
+					...rangeEntries()[0],
+					userProfileId: 41001,
+					displayName: "fixture-owner",
+				},
+			],
+		},
+		RANGE_WINDOW,
+	);
+	assert.deepEqual(Object.keys(rangeDay(days, SUMMARY_DAY) as Obj).sort(), [
+		"averageStressLevel",
+		"bodyBatteryHighestValue",
+		"bodyBatteryLowestValue",
+		"calendarDate",
+		"minHeartRate",
+		"restingHeartRate",
+		"totalSteps",
+	]);
 });
 
 // ── training_status ────────────────────────────────────────────────────────

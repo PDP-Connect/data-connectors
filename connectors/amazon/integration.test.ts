@@ -32,6 +32,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
+import { parseHTML } from "linkedom";
 import type { Page } from "playwright";
 import {
 	assertUserFacingProgress,
@@ -48,7 +49,11 @@ import {
 	makeRecordingEmit,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	AMAZON_CHALLENGE_SELECTOR,
+	AMAZON_CHALLENGE_TEXT_PATTERN,
+	AMAZON_MID_WALK_STOP_RE,
 	AMAZON_NO_ORDERS_TEXT_PATTERN,
+	AMAZON_WALK_BUDGET_MS,
 	type AmazonRecoveryClass,
 	applyYearCompletionState,
 	buildOrderDetailGap,
@@ -56,6 +61,7 @@ import {
 	classifyDetailOutcome,
 	classifyEmptyListPageDiagnostics,
 	collectAmazonProfile,
+	detailPaceMs,
 	type EmitDeps,
 	emitOrderAndItems,
 	emitOrderItemsCoverage,
@@ -75,8 +81,10 @@ import {
 	recoverPendingOrderItemDetailGaps,
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	redactAmazonListPageDiagnostics,
+	safeUrlPath,
 	scrapeListPage,
 	shouldEmitTrailingOrdersState,
+	walkTimeSpent,
 	type YearsCursor,
 } from "./index.ts";
 import { buildOrderRecord, parseOrderDate } from "./parsers.ts";
@@ -500,6 +508,19 @@ test("collect path does not advance a year cursor after unparseable order-date d
 	);
 });
 
+test("collect path withholds orders and order_items coverage after an early stop or truncated year", () => {
+	const src = readFileSync(AMAZON_INDEX_PATH, "utf8");
+	assert.match(src, /let yearSweepFinished = true;/);
+	assert.match(
+		src,
+		/yearSweepFinished = false;\s*\/\/ Not frozen and no STATE for this year/,
+		"a recognized mid-walk stop must clear the flag",
+	);
+	assert.match(src, /if \(truncated\) yearSweepFinished = false;/);
+	assert.match(src, /if \(yearSweepFinished && orderItemsCoverage\)/);
+	assert.match(src, /if \(yearSweepFinished && ordersCoverage\)/);
+});
+
 test("amazon manifest: successful runs have a bounded freshness window", () => {
 	// The bounded window is what this test is for: without
 	// `maximum_staleness_seconds`, freshness is `unknown` and a successful run
@@ -631,6 +652,112 @@ test("classifyEmptyListPageDiagnostics: current empty-year copy is terminal desp
 			reason: "no_orders_text",
 		},
 	);
+});
+
+test("empty-year page whose Buy it again carousel names a Robot product is not a challenge", () => {
+	// Live 2026-11-19 (amazon.ca): the run walked ~33 orders back through the
+	// years, reached a year with no orders, and failed as
+	// source_auth_or_challenge because the old detector matched the bare word
+	// "robot" anywhere on the page. Product names must not read as a challenge.
+	const carousel = readFileSync(AMAZON_EMPTY_YEAR_FIXTURE, "utf8").replace(
+		"</body>",
+		'<div class="a-carousel"><a>iRobot Roomba Combo j5+ Robot Vacuum</a><a>CAPTCHA Card Game</a></div></body>',
+	);
+	const { document } = parseHTML(carousel);
+	const text = document.body?.textContent ?? "";
+	assert.match(text, /robot/i);
+	assert.equal(document.querySelector(AMAZON_CHALLENGE_SELECTOR), null);
+	assert.doesNotMatch(text, new RegExp(AMAZON_CHALLENGE_TEXT_PATTERN, "i"));
+	assert.match(text, new RegExp(AMAZON_NO_ORDERS_TEXT_PATTERN, "i"));
+	assert.deepEqual(
+		classifyEmptyListPageDiagnostics(
+			makeEmptyPageDiagnostics({ captcha: "false", no_orders_text: "true" }),
+			0,
+		),
+		{ action: "terminal", reason: "no_orders_text" },
+	);
+});
+
+test("a stop part way through the order walk keeps the orders already read", () => {
+	// Live 2026-11-19 (amazon.ca), twice: 32 orders read, then a list page came
+	// back as sign-in or challenge and the run failed with none of them.
+	for (const code of [
+		"amazon_empty_list_page_source_auth_or_challenge",
+		"amazon_empty_list_page_empty_first_page_without_terminal_signal",
+		"amazon_empty_list_page_selector_drift",
+		"amazon_list_page_navigation_failed",
+		"amazon_list_page_readiness_timeout",
+	]) {
+		assert.match(code, AMAZON_MID_WALK_STOP_RE, code);
+	}
+	// A contradiction with stored history is still a hard failure.
+	assert.doesNotMatch(
+		"amazon_empty_list_page_amazon_empty_history_after_prior_orders",
+		AMAZON_MID_WALK_STOP_RE,
+	);
+	assert.doesNotMatch(
+		"amazon_empty_list_page_renderer_diagnostics_failed",
+		AMAZON_MID_WALK_STOP_RE,
+	);
+});
+
+test("order-detail pages are paced 1.5 to 3 seconds apart", () => {
+	assert.equal(
+		detailPaceMs(() => 0),
+		1500,
+	);
+	assert.equal(
+		detailPaceMs(() => 0.999),
+		2998,
+	);
+});
+
+test("the walk stops at its own time budget, detail pages earlier, and keeps the orders read", () => {
+	const flags = { walkDeadlineAt: 1_000_000 };
+	assert.equal(walkTimeSpent(flags, 0, 999_999), false);
+	assert.equal(walkTimeSpent(flags, 0, 1_000_000), true);
+	assert.equal(walkTimeSpent(flags, 60_000, 940_000), true);
+	assert.equal(walkTimeSpent(flags, 60_000, 939_999), false);
+	assert.equal(walkTimeSpent({}, 0, Number.MAX_SAFE_INTEGER), false);
+	assert.match("amazon_walk_time_budget", AMAZON_MID_WALK_STOP_RE);
+	// Sign-in (several minutes for a code) plus the walk stays under the host's 14 minute ceiling.
+	assert(AMAZON_WALK_BUDGET_MS <= 2 * 60_000);
+});
+
+test("stop diagnostics keep the URL path only, ids masked", () => {
+	assert.equal(
+		safeUrlPath(
+			"https://www.amazon.ca/ap/signin?openid.return_to=x&email=a%40b.c",
+		),
+		"/ap/signin",
+	);
+	assert.equal(
+		safeUrlPath(
+			"https://www.amazon.ca/gp/your-account/order-details/702-1234567-1234567",
+		),
+		"/gp/your-account/order-details/:id",
+	);
+	assert.equal(safeUrlPath("not a url"), "");
+});
+
+test("Amazon's own challenge pages still read as a challenge", () => {
+	const textRe = new RegExp(AMAZON_CHALLENGE_TEXT_PATTERN, "i");
+	const pages = [
+		'<form action="/errors/validateCaptcha"><h4>Enter the characters you see below</h4><p>Sorry, we just need to make sure you\'re not a robot.</p><input id="captchacharacters" name="field-keywords"></form>',
+		'<form class="cvf-widget-form cvf-widget-form-captcha"><input name="cvf_captcha_input"></form>',
+		"<div><awswaf-captcha></awswaf-captcha></div>",
+	];
+	for (const html of pages) {
+		const { document } = parseHTML(`<html><body>${html}</body></html>`);
+		assert.notEqual(
+			document.querySelector(AMAZON_CHALLENGE_SELECTOR),
+			null,
+			html,
+		);
+	}
+	assert.match("Enter the characters you see below", textRe);
+	assert.match("We have detected unusual traffic from your network", textRe);
+	assert.match("Sorry, we just need to make sure you're not a robot.", textRe);
 });
 
 test("Amazon empty-page diagnostics retain structural facts but redact page text, title, and URL", () => {
@@ -2894,7 +3021,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: zero-budget legacy stop
 	});
 });
 
-test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustion suppresses forward walk", async () => {
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a spent detail budget still walks the order list (only recovery-only skips it)", async () => {
 	const { deps } = makeRecordingDeps();
 	const orderId = "111-1234567-8901234";
 	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -2925,7 +3052,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: detail-budget exhaustio
 	assert.deepEqual(result, {
 		recovered: 0,
 		stoppedWithPending: true,
-		suppressForward: true,
+		suppressForward: false,
 	});
 });
 
@@ -3750,7 +3877,16 @@ test("collectAmazonProfile: emits a profile record parsed from the current page 
 	});
 
 	assert.deepEqual(harness.emitted, [
-		{ stream: "profile", data: { id: "me", name: "Jane Doe", is_prime: true } },
+		{
+			stream: "profile",
+			data: {
+				id: "me",
+				name: "Jane Doe",
+				is_prime: true,
+				postal_code: null,
+				store: "amazon.com",
+			},
+		},
 	]);
 	const coverage = harness.protocolMessages.find(
 		(m) => m.type === "DETAIL_COVERAGE",

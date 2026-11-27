@@ -27,7 +27,7 @@
  * Pagination: DoorDash's orders page infinite-scrolls, firing a repeat
  * `getConsumerOrdersWithDetails` request as the owner (or an automated
  * scroll) nears the bottom. Same approach as the legacy scraper: scroll,
- * capture, repeat, stop when a scroll yields no new orders or a page-count
+ * capture, repeat, stop after two consecutive zero-add responses, no response, or a page-count
  * ceiling is hit (`MAX_SCROLL_PAGES`, mirrors Reddit's `MAX_PAGES` safety
  * cap pattern from src/page-ceiling.ts).
  *
@@ -134,14 +134,18 @@ export const DOORDASH_RETRYABLE_PATTERN =
 
 /**
  * Wait for the next `getConsumerOrdersWithDetails` response after triggering
- * `action` (a navigation or scroll). Returns `null` on timeout — the caller
- * treats that as "no more pages" rather than an error, since DoorDash simply
- * stops firing the request once the list is exhausted.
+ * `action` (a navigation or scroll). Absence on timeout can end the list;
+ * an observed response whose JSON is unreadable must not certify exhaustion.
  */
+export type OrdersResponse =
+	| { kind: "none" }
+	| { kind: "unreadable" }
+	| { kind: "body"; body: unknown };
+
 export async function waitForOrdersResponse(
 	page: Page,
 	action: () => Promise<void>,
-): Promise<unknown> {
+): Promise<OrdersResponse> {
 	const responsePromise = page
 		.waitForResponse((res: Response) => ORDERS_GRAPHQL_URL_RE.test(res.url()), {
 			timeout: RESPONSE_WAIT_TIMEOUT_MS,
@@ -150,12 +154,12 @@ export async function waitForOrdersResponse(
 	await action();
 	const response = await responsePromise;
 	if (!response) {
-		return null;
+		return { kind: "none" };
 	}
 	try {
-		return await response.json();
+		return { kind: "body", body: await response.json() };
 	} catch {
-		return null;
+		return { kind: "unreadable" };
 	}
 }
 
@@ -224,8 +228,8 @@ export async function collectOrderNodes(args: {
 			.goto(ORDERS_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
 			.catch((): undefined => undefined);
 	});
-	if (initialBody) {
-		addNodes(parseOrdersResponse(initialBody));
+	if (initialBody.kind === "body") {
+		addNodes(parseOrdersResponse(initialBody.body));
 	}
 	await progress?.("Fetched DoorDash orders page", {
 		phase: "page",
@@ -233,31 +237,34 @@ export async function collectOrderNodes(args: {
 		item_count: nodes.length,
 	});
 
+	let unreadable = false;
+	let zeroAddResponses = 0;
 	const walk = await walkPagesWithCeiling({
 		maxPages: MAX_SCROLL_PAGES,
 		fetchPage: async (pageNumber) => {
 			const body = await waitForResponseFn(page, async () => {
 				await scrollFn(page);
 			});
-			if (!body) {
+			if (body.kind === "none") return false;
+			if (body.kind === "unreadable") {
+				unreadable = true;
 				return false;
 			}
-			const added = addNodes(parseOrdersResponse(body));
+			const added = addNodes(parseOrdersResponse(body.body));
 			await progress?.("Fetched DoorDash orders page", {
 				phase: "page",
 				page_index: pageNumber,
 				item_count: nodes.length,
 			});
-			if (added === 0) {
-				// Scroll produced a response with nothing new — end of list.
-				return false;
-			}
+			zeroAddResponses = added === 0 ? zeroAddResponses + 1 : 0;
+			// One refetch may overlap before new rows render; require a repeat.
+			if (zeroAddResponses >= 2) return false;
 			await delay(SCROLL_SETTLE_MS);
 			return true;
 		},
 	});
 
-	return { nodes, truncated: walk.truncated };
+	return { nodes, truncated: unreadable || walk.truncated };
 }
 
 export async function collectAllStreams(
@@ -330,7 +337,7 @@ export async function collectAllStreams(
 	}
 
 	if (truncated) {
-		const message = `DoorDash orders stopped at the ${MAX_SCROLL_PAGES}-scroll limit with more history possibly unread`;
+		const message = `DoorDash orders stopped before all history could be read (an unreadable response or the ${MAX_SCROLL_PAGES}-scroll limit)`;
 		if (wantsOrders) {
 			await emit({
 				type: "SKIP_RESULT",

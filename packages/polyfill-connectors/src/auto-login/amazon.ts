@@ -51,6 +51,8 @@ const ORDER_URL = /\/your-orders|\/order-history/;
 const TFA_PROMPT_TEXT =
 	/verification|two.?step|authenticator|passcode|code we sent|sent a text/i;
 const ORDERS_URL = "https://www.amazon.com/your-orders/orders";
+const SIGN_IN_URL =
+	"https://www.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com%2F&openid.assoc_handle=usflex&openid.mode=checkid_setup&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select";
 export const ORDER_PAGE_READY_SELECTOR =
 	'#orderTypeMenuContainer, #yourOrdersHeader, [data-component="orderCardList"], .your-orders-content-container, #searchOrdersInput, .order-card, .js-order-card';
 const ORDER_PAGE_READY_TIMEOUT_MS = 15_000;
@@ -109,6 +111,15 @@ interface EnsureAmazonSessionArgs {
 	// Test hook for synthetic pages that intentionally never render a field.
 	fieldTimeoutMs?: number | undefined;
 	onCredentialSubmit?: () => void;
+	/**
+	 * The Amazon store's orders page (`https://www.amazon.ca/your-orders/orders`).
+	 * Amazon keeps order history per store, so the session is probed, and a
+	 * manual sign-in is waited for, on the store the connector reads. Default:
+	 * amazon.com (Whole Foods, and Amazon before stores).
+	 */
+	ordersUrl?: string | undefined;
+	/** The same store's own sign-in page. Default: amazon.com's. */
+	signInUrl?: string | undefined;
 	page: Page;
 	sendInteraction: (req: InteractionRequest) => Promise<InteractionResponse>;
 }
@@ -150,9 +161,12 @@ function isMissingVisibleFieldError(error: unknown): boolean {
  * sign-in/challenge URL or render the sign-in form. Used both for the initial
  * fast path and to re-check ground truth after a manual/browser action.
  */
-async function probeAmazonSession(page: Page): Promise<boolean> {
+async function probeAmazonSession(
+	page: Page,
+	ordersUrl: string = ORDERS_URL,
+): Promise<boolean> {
 	await page
-		.goto(ORDERS_URL, {
+		.goto(ordersUrl, {
 			waitUntil: "domcontentloaded",
 			timeout: 30_000,
 		})
@@ -219,16 +233,23 @@ async function requestManualLoginForChallenge({
 	assist,
 	capture,
 	completeAssistance,
+	ordersUrl,
 	page,
 	reason,
 	sendInteraction,
 }: Pick<
 	EnsureAmazonSessionArgs,
-	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+	| "assist"
+	| "capture"
+	| "completeAssistance"
+	| "ordersUrl"
+	| "page"
+	| "sendInteraction"
 > & {
 	readonly reason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
+		ordersUrl,
 		...getManualHandoffOptions({ assist, capture, completeAssistance }),
 		handoffReason: "captcha",
 		message:
@@ -247,16 +268,23 @@ async function requestManualLoginWithoutCredentials({
 	assist,
 	capture,
 	completeAssistance,
+	ordersUrl,
 	credentialReason,
 	page,
 	sendInteraction,
 }: Pick<
 	EnsureAmazonSessionArgs,
-	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+	| "assist"
+	| "capture"
+	| "completeAssistance"
+	| "ordersUrl"
+	| "page"
+	| "sendInteraction"
 > & {
 	readonly credentialReason: string;
 }): Promise<boolean> {
 	return await waitForManualLogin({
+		ordersUrl,
 		...getManualHandoffOptions({ assist, capture, completeAssistance }),
 		handoffReason: "login",
 		message:
@@ -273,13 +301,19 @@ async function waitForManualLogin({
 	assist,
 	capture,
 	completeAssistance,
+	ordersUrl,
 	handoffReason,
 	message,
 	page,
 	sendInteraction,
 }: Pick<
 	EnsureAmazonSessionArgs,
-	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+	| "assist"
+	| "capture"
+	| "completeAssistance"
+	| "ordersUrl"
+	| "page"
+	| "sendInteraction"
 > & {
 	readonly handoffReason: "captcha" | "login";
 	readonly message: string;
@@ -293,7 +327,7 @@ async function waitForManualLogin({
 			// Preserve the click-first fallback's former settle window. The streamed
 			// assistance path checks readiness on the owner's current page instead.
 			await page.waitForTimeout(3000);
-			return await probeAmazonSession(page);
+			return await probeAmazonSession(page, ordersUrl);
 		},
 		readinessProbe: probeAmazonOrdersPageInPlace,
 		readinessProbeOnHandoffPage: true,
@@ -308,6 +342,7 @@ async function ensureManualSessionWithoutCredentials({
 	capture,
 	checkpoint,
 	completeAssistance,
+	ordersUrl,
 	credentialReason,
 	page,
 	sendInteraction,
@@ -316,6 +351,7 @@ async function ensureManualSessionWithoutCredentials({
 	capture?: CaptureSession | null;
 	checkpoint: SessionCheckpointFn;
 	completeAssistance?: EnsureAmazonSessionArgs["completeAssistance"];
+	ordersUrl?: string | undefined;
 	/** Member-facing reason explaining that no saved sign-in is available. */
 	readonly credentialReason: string;
 	page: Page;
@@ -324,6 +360,7 @@ async function ensureManualSessionWithoutCredentials({
 	await checkpoint("amazon-signin-manual-required");
 	if (
 		await requestManualLoginWithoutCredentials({
+			ordersUrl,
 			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			credentialReason,
 			page,
@@ -351,6 +388,7 @@ async function fillOrHandleChallenge({
 	assist,
 	capture,
 	completeAssistance,
+	ordersUrl,
 	fieldTimeoutMs = 15_000,
 	locator,
 	page,
@@ -359,7 +397,12 @@ async function fillOrHandleChallenge({
 	value,
 }: Pick<
 	EnsureAmazonSessionArgs,
-	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
+	| "assist"
+	| "capture"
+	| "completeAssistance"
+	| "ordersUrl"
+	| "page"
+	| "sendInteraction"
 > & {
 	readonly locator: Locator;
 	readonly fieldTimeoutMs?: number | undefined;
@@ -379,6 +422,7 @@ async function fillOrHandleChallenge({
 		// declaring failure, rather than crashing with a bare selector timeout.
 		if (
 			await requestManualLoginForChallenge({
+				ordersUrl,
 				...getManualHandoffOptions({ assist, capture, completeAssistance }),
 				page,
 				reason,
@@ -400,13 +444,15 @@ export async function ensureAmazonSession({
 	credentials,
 	fieldTimeoutMs,
 	onCredentialSubmit,
+	ordersUrl = ORDERS_URL,
 	page,
 	sendInteraction,
+	signInUrl = SIGN_IN_URL,
 }: EnsureAmazonSessionArgs): Promise<boolean> {
 	// Phase: initial auth/session probe.
 	await checkpoint("amazon-auth-probe");
 	// Deep probe
-	if (await probeAmazonSession(page)) {
+	if (await probeAmazonSession(page, ordersUrl)) {
 		await checkpoint("amazon-session-already-live");
 		return true;
 	}
@@ -421,6 +467,7 @@ export async function ensureAmazonSession({
 	);
 	if (resolved.kind === "absent") {
 		return await ensureManualSessionWithoutCredentials({
+			ordersUrl,
 			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			checkpoint,
 			credentialReason: resolved.reason,
@@ -432,13 +479,10 @@ export async function ensureAmazonSession({
 
 	// Drive login. Navigate to the signin page explicitly; a prior page may
 	// have redirected from /your-orders and not shown the email field yet.
-	await page.goto(
-		"https://www.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com%2F&openid.assoc_handle=usflex&openid.mode=checkid_setup&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select",
-		{
-			waitUntil: "domcontentloaded",
-			timeout: 30_000,
-		},
-	);
+	await page.goto(signInUrl, {
+		waitUntil: "domcontentloaded",
+		timeout: 30_000,
+	});
 	await page.waitForTimeout(2000);
 	// Phase: sign-in page loaded.
 	await checkpoint("amazon-signin-loaded");
@@ -457,6 +501,7 @@ export async function ensureAmazonSession({
 		.catch((): string => "");
 	if (currentEmail !== email) {
 		const emailStep = await fillOrHandleChallenge({
+			ordersUrl,
 			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			fieldTimeoutMs,
 			locator: emailLoc,
@@ -485,6 +530,7 @@ export async function ensureAmazonSession({
 	// Password step — `#ap_password` remains stable; `input[name="password"]`
 	// also matches a hidden autofill hint, so we prefer the id + require vis.
 	const passwordStep = await fillOrHandleChallenge({
+		ordersUrl,
 		...getManualHandoffOptions({ assist, capture, completeAssistance }),
 		fieldTimeoutMs,
 		locator: page.locator("input#ap_password"),
@@ -551,11 +597,12 @@ export async function ensureAmazonSession({
 	// automated flow (e.g. an approve-on-device prompt or an OTP variant whose
 	// copy did not match TFA_PROMPT_TEXT), give the operator one manual/browser
 	// step and re-probe before declaring the login incomplete.
-	if (await probeAmazonSession(page)) {
+	if (await probeAmazonSession(page, ordersUrl)) {
 		return true;
 	}
 	if (
 		await requestManualLoginForChallenge({
+			ordersUrl,
 			...getManualHandoffOptions({ assist, capture, completeAssistance }),
 			page,
 			reason: "automated sign-in did not complete",

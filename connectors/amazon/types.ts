@@ -17,6 +17,8 @@ export interface ListPageOrder {
 	orderDateRaw: string | null;
 	orderId: string;
 	orderTotal: string | null;
+	/** The store the order was listed on (`amazon.ca`). Absent on rows built before stores. */
+	store?: string | null;
 }
 
 export interface DetailItem {
@@ -38,6 +40,8 @@ export interface OrderDetail {
 	payment_method_summary: string | null;
 	recipient_name: string | null;
 	shipping_address_summary: string | null;
+	/** The shipping address's postal code, in the store country's shape; null when not shown. */
+	shipping_postal_code?: string | null;
 	status_detail: string | null;
 }
 
@@ -67,7 +71,9 @@ export interface OrdersRecord {
 	payment_method_summary: string | null;
 	recipient_name: string | null;
 	shipping_address_summary: string | null;
+	shipping_postal_code: string | null;
 	status_detail: string | null;
+	store: string | null;
 	[field: string]: unknown;
 }
 
@@ -94,6 +100,10 @@ export interface ProfileRecord {
 	id: string;
 	is_prime: boolean | null;
 	name: string | null;
+	/** Postal code of the default delivery address (nav "Deliver to"); null when not shown. */
+	postal_code: string | null;
+	/** The store this profile was read on (`amazon.ca`). */
+	store: string | null;
 	[field: string]: unknown;
 }
 

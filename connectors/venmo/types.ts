@@ -72,3 +72,19 @@ export interface VenmoStoriesResponse {
 		next?: string | null;
 	} | null;
 }
+
+export type VenmoStoryAmbiguity =
+	| "malformed_story"
+	| "missing_payment"
+	| "malformed_payment"
+	| "missing_action"
+	| "unknown_action"
+	| "missing_id"
+	| "missing_date_created";
+export type VenmoStoryResult =
+	| {
+			kind: "record";
+			record: import("../../packages/polyfill-connectors/src/connector-runtime.ts").RecordData;
+	  }
+	| { kind: "unsupported" }
+	| { kind: "ambiguous"; reason: VenmoStoryAmbiguity };
