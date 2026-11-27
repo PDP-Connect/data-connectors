@@ -259,6 +259,13 @@ class FakeWebApp {
 	/** Called as each request is made, before it is answered. */
 	onRequest: ((request: AppRequest) => void) | null = null;
 	readonly requests: AppRequest[] = [];
+	deferResponses = false;
+	readonly delayedResponses: Array<() => void> = [];
+
+	returnHome(): void {
+		(this.window["location"] as { pathname: string }).pathname = "/home";
+		this.timeline = null;
+	}
 	scrolls = 0;
 	signedIn: boolean;
 
@@ -744,7 +751,11 @@ class FakeWebApp {
 				timeline.ended = true;
 			}
 		}
-		xhr.finish(response.status, response.body);
+		if (this.deferResponses)
+			this.delayedResponses.push(() =>
+				xhr.finish(response.status, response.body),
+			);
+		else xhr.finish(response.status, response.body);
 	}
 }
 
@@ -2325,3 +2336,39 @@ test("the run's budget stops the walk before the tab's first scroll", async () =
 	assert.equal(app.scrolls, 0);
 	assert.ok(!requestLog(app).includes("Likes@synthetic-likes-bottom-1"));
 });
+
+for (const stale of ["buffered", "delayed", "overflow"] as const) {
+	test(`a same-page new run cannot use ${stale} prior-run bookmarks`, async () => {
+		const app = new FakeWebApp({ startUrl: HOME_URL });
+		const first = harness(app, ["bookmarks"]);
+		await collectXBrowser(first.ctx, FAST);
+		assert.deepEqual(first.ids("bookmarks"), BOOKMARK_IDS);
+		assert.ok(first.states()["bookmarks"]);
+		app.returnHome();
+		if (stale === "delayed") app.deferResponses = true;
+		// Queue both records and an end-of-list observation under the old run.
+		const count = stale === "overflow" ? 300 : 1;
+		for (let i = 0; i < count; i += 1) app.request("Bookmarks", {});
+		app.request("Bookmarks", { cursor: "synthetic-bookmarks-bottom-1" });
+		app.deferResponses = true;
+		const oldResponses = app.delayedResponses.splice(0);
+		const second = harness(app, ["bookmarks"]);
+		second.ctx.page = hookedPage(app, (script) => {
+			if (script.includes("const VERSION =")) {
+				for (const finish of oldResponses.splice(0)) finish();
+			}
+		});
+		await collectXBrowser(second.ctx, { ...FAST, maxScrollSteps: 1 });
+		assert.deepEqual(second.ids("bookmarks"), []);
+		assert.deepEqual(second.states(), {});
+		assert.ok(second.skips()["bookmarks"]);
+		// Old overflow must not poison a genuine current response on the next run.
+		app.returnHome();
+		app.deferResponses = false;
+		const current = harness(app, ["bookmarks"]);
+		await collectXBrowser(current.ctx, FAST);
+		assert.deepEqual(current.ids("bookmarks"), BOOKMARK_IDS);
+		assert.ok(current.states()["bookmarks"]);
+		assert.deepEqual(current.skips(), {});
+	});
+}

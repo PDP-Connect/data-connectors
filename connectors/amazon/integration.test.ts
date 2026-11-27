@@ -508,6 +508,19 @@ test("collect path does not advance a year cursor after unparseable order-date d
 	);
 });
 
+test("collect path withholds orders and order_items coverage after an early stop or truncated year", () => {
+	const src = readFileSync(AMAZON_INDEX_PATH, "utf8");
+	assert.match(src, /let yearSweepFinished = true;/);
+	assert.match(
+		src,
+		/yearSweepFinished = false;\s*\/\/ Not frozen and no STATE for this year/,
+		"a recognized mid-walk stop must clear the flag",
+	);
+	assert.match(src, /if \(truncated\) yearSweepFinished = false;/);
+	assert.match(src, /if \(yearSweepFinished && orderItemsCoverage\)/);
+	assert.match(src, /if \(yearSweepFinished && ordersCoverage\)/);
+});
+
 test("amazon manifest: successful runs have a bounded freshness window", () => {
 	// The bounded window is what this test is for: without
 	// `maximum_staleness_seconds`, freshness is `unknown` and a successful run

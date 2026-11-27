@@ -92,7 +92,7 @@ export function repoFullFromUrl(url: string | null | undefined): string | null {
 	return url.replace(`${API_BASE}/repos/`, "");
 }
 
-export function normalizeBody(body: string | null | undefined): string | null {
+export function truncateBody(body: string | null | undefined): string | null {
 	return typeof body === "string" ? body : null;
 }
 
@@ -221,7 +221,7 @@ export function issueRecord(it: GitHubIssue): Record<string, unknown> {
 		id: String(it.id),
 		number: it.number ?? null,
 		title: it.title ?? null,
-		body: normalizeBody(it.body),
+		body: truncateBody(it.body),
 		state: it.state ?? null,
 		state_reason: it.state_reason ?? null,
 		user_login: it.user?.login ?? null,
@@ -241,7 +241,11 @@ export function issueRecord(it: GitHubIssue): Record<string, unknown> {
 		closed_at: it.closed_at ?? null,
 		is_pull_request: Boolean(it.pull_request),
 		pull_request_url: it.pull_request?.html_url ?? null,
-		draft: it.pull_request ? Boolean(it.draft) : null,
+		draft: it.pull_request
+			? typeof it.draft === "boolean"
+				? it.draft
+				: null
+			: null,
 	};
 }
 
@@ -250,7 +254,7 @@ function pullRequestCoreFields(it: GitHubIssue): Record<string, unknown> {
 		id: String(it.id),
 		number: it.number ?? null,
 		title: it.title ?? null,
-		body: normalizeBody(it.body),
+		body: truncateBody(it.body),
 		state: it.state ?? null,
 		state_reason: it.state_reason ?? null,
 		user_login: it.user?.login ?? null,
@@ -272,7 +276,10 @@ function pullRequestDetailFields(
 	detail: GitHubPullDetail | null,
 ): Record<string, unknown> {
 	return {
-		draft: Boolean(it.draft ?? detail?.draft),
+		// The list item wins; a draft state neither source reports stays unknown.
+		draft:
+			[it.draft, detail?.draft].find((value) => typeof value === "boolean") ??
+			null,
 		merged_at: detail?.merged_at ?? null,
 		merged_by_login: detail?.merged_by?.login ?? null,
 		commits_count: detail?.commits ?? null,
@@ -308,6 +315,8 @@ export function gistRecord(g: GitHubGist): Record<string, unknown> {
 		language: f.language ?? null,
 		size: typeof f.size === "number" ? f.size : null,
 		raw_url: f.raw_url ?? null,
+		// GitHub may truncate large file content in the gist response.
+		...("truncated" in f ? { truncated: f.truncated === true } : {}),
 	}));
 	return {
 		id: String(g.id),
@@ -315,7 +324,7 @@ export function gistRecord(g: GitHubGist): Record<string, unknown> {
 		public: Boolean(g.public),
 		html_url: g.html_url ?? null,
 		files,
-		files_truncated: false,
+		files_truncated: "truncated" in g && g.truncated === true,
 		files_total_count: fileEntries.length,
 		comments_count: g.comments ?? null,
 		created_at: g.created_at ?? null,
@@ -448,6 +457,11 @@ export function laterIso(
 	}
 	if (!b) {
 		return a;
+	}
+	const aTime = Date.parse(a);
+	const bTime = Date.parse(b);
+	if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
+		return aTime > bTime ? a : b;
 	}
 	return a > b ? a : b;
 }

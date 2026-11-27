@@ -104,6 +104,16 @@ export async function chatGptUsageFetchInBrowser(
 		opaqueId(v: unknown): string | null {
 			return typeof v === "string" && h.OPAQUE_ID.test(v) ? v : null;
 		},
+		// Tells one task from another so the walk can see progress: the task
+		// id, else its creation time. Never its text, schedule or status. A
+		// task with neither has no key and shows no progress.
+		taskKey(t: unknown): string | null {
+			if (!h.isObj(t)) return null;
+			const id = h.opaqueId(t.id) ?? h.opaqueId(t.task_id);
+			if (id) return id;
+			const created = h.epoch(t.created_at) ?? h.epoch(t.create_time);
+			return created === null ? null : `created-${Math.round(created * 1000)}`;
+		},
 		bool(v: unknown): boolean | null {
 			return typeof v === "boolean" ? v : null;
 		},
@@ -537,6 +547,9 @@ export async function chatGptUsageFetchInBrowser(
 					}
 					return {
 						task_count: tasks ? tasks.length : null,
+						task_keys: (tasks ?? [])
+							.map((t) => h.taskKey(t))
+							.filter((k): k is string => k !== null),
 						by_status: Object.fromEntries(byStatus),
 						cursor: h.cursor(j.cursor),
 						// An explicit has_more wins; otherwise a cursor means more.
@@ -728,7 +741,7 @@ const ROLE_KEYS = [
 ] as const;
 
 const SLUG = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
-const OPAQUE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+export const OPAQUE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 export interface ConversationUsageProjection {
 	conversation_id: string | null;

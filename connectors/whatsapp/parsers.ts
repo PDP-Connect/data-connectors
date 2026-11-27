@@ -390,25 +390,27 @@ export function parseWhatsAppDateTime(
 	if (!(dateParts && timeParts)) {
 		return null;
 	}
-	const date = new Date(
+	// Validate the calendar independently of local DST gaps. Time components
+	// are already range-checked by parseWhatsAppTimeParts.
+	const calendar = new Date(
+		Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day),
+	);
+	if (
+		calendar.getUTCFullYear() !== dateParts.year ||
+		calendar.getUTCMonth() !== dateParts.month - 1 ||
+		calendar.getUTCDate() !== dateParts.day
+	) {
+		return null;
+	}
+	// Preserve local-time interpretation, including Date's gap/repeat handling.
+	return new Date(
 		dateParts.year,
 		dateParts.month - 1,
 		dateParts.day,
 		timeParts.hour,
 		timeParts.minute,
 		timeParts.second,
-	);
-	if (
-		date.getFullYear() === dateParts.year &&
-		date.getMonth() === dateParts.month - 1 &&
-		date.getDate() === dateParts.day &&
-		date.getHours() === timeParts.hour &&
-		date.getMinutes() === timeParts.minute &&
-		date.getSeconds() === timeParts.second
-	) {
-		return date.toISOString();
-	}
-	return null;
+	).toISOString();
 }
 
 /** Splits an already-in-memory chat-text string (e.g. a zip's bounded

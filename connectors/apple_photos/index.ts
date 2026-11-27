@@ -69,7 +69,7 @@
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -88,6 +88,12 @@ const MAX_PHOTO_BYTES_ENV = "PDPP_APPLE_PHOTOS_MAX_PHOTO_BYTES";
 // Progress cadence — emit a PROGRESS every N files so operators see motion
 // on large libraries.
 const PROGRESS_INTERVAL_FILES = 500;
+const NON_MEDIA_MACOS_METADATA = new Set([
+	".DS_Store",
+	".Spotlight-V100",
+	".fseventsd",
+	".Trashes",
+]);
 
 /** The configured export directory path, regardless of whether it currently exists. */
 function configuredExportDir(): string {

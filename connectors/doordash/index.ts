@@ -134,10 +134,15 @@ export const DOORDASH_RETRYABLE_PATTERN =
  * `action` (a navigation or scroll). Returns `null` on timeout — the caller
  * distinguishes a missing response from an observed response with no new orders.
  */
+export type OrdersResponse =
+	| { kind: "none" }
+	| { kind: "unreadable" }
+	| { kind: "body"; body: unknown };
+
 export async function waitForOrdersResponse(
 	page: Page,
 	action: () => Promise<void>,
-): Promise<unknown> {
+): Promise<OrdersResponse> {
 	const responsePromise = page
 		.waitForResponse((res: Response) => ORDERS_GRAPHQL_URL_RE.test(res.url()), {
 			timeout: RESPONSE_WAIT_TIMEOUT_MS,
@@ -146,12 +151,12 @@ export async function waitForOrdersResponse(
 	await action();
 	const response = await responsePromise;
 	if (!response) {
-		return null;
+		return { kind: "none" };
 	}
 	try {
-		return await response.json();
+		return { kind: "body", body: await response.json() };
 	} catch {
-		return null;
+		return { kind: "unreadable" };
 	}
 }
 
@@ -218,8 +223,8 @@ export async function collectOrderNodes(args: {
 			.goto(ORDERS_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
 			.catch((): undefined => undefined);
 	});
-	if (initialBody) {
-		addNodes(parseOrdersResponse(initialBody));
+	if (initialBody.kind === "body") {
+		addNodes(parseOrdersResponse(initialBody.body));
 	}
 	await progress?.("Fetched DoorDash orders page", {
 		phase: "page",
@@ -227,23 +232,24 @@ export async function collectOrderNodes(args: {
 		item_count: nodes.length,
 	});
 
+	let zeroAddResponses = 0;
 	for (let pageNumber = 1; ; pageNumber += 1) {
 		const body = await waitForResponseFn(page, async () => {
 			await scrollFn(page);
 		});
-		if (body == null) {
-			return {
-				nodes,
-				incompletePage: initialBody != null || nodes.length > 0 ? pageNumber : null,
-			};
-		}
-		const added = addNodes(parseOrdersResponse(body));
+		if (body.kind === "unreadable") return { nodes, incompletePage: pageNumber };
+		// DoorDash stops firing the request once the list is exhausted, so no
+		// reply to a scroll ends the walk; a reply that cannot be read does not.
+		if (body.kind === "none") return { nodes, incompletePage: null };
+		const added = addNodes(parseOrdersResponse(body.body));
 		await progress?.("Fetched DoorDash orders page", {
 			phase: "page",
 			page_index: pageNumber,
 			item_count: nodes.length,
 		});
-		if (added === 0) return { nodes, incompletePage: null };
+		zeroAddResponses = added === 0 ? zeroAddResponses + 1 : 0;
+		// One refetch may overlap before new rows render; require a repeat.
+		if (zeroAddResponses >= 2) return { nodes, incompletePage: null };
 		await delay(SCROLL_SETTLE_MS);
 	}
 }
@@ -330,8 +336,8 @@ export async function collectAllStreams(
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: "doordash_orders_scroll_response_missing",
-				message: "The next DoorDash orders page did not arrive or could not be read. Older orders may be missing.",
+				reason: "doordash_orders_response_unreadable",
+				message: "The next DoorDash orders page could not be read. Older orders may be missing.",
 				diagnostics: { page_index: incompletePage, total_seen: nodes.length },
 			});
 		};

@@ -194,15 +194,28 @@ export function currencyToCentsFromStatement(
 
 // ─── Date helpers ────────────────────────────────────────────────────────
 
+const STATEMENT_MONTH_RE =
+	/^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2}),\s*(\d{4})$/i;
+const STATEMENT_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** Statement calendar dates must not pass through local midnight and UTC. */
 export function isoDate(raw: string | null | undefined): string | null {
-	if (!raw) {
-		return null;
+	if (!raw) return null;
+	const value = raw.trim();
+	const month = STATEMENT_MONTH_RE.exec(value);
+	if (month?.[1] && month[2] && month[3]) {
+		const monthNumber = STATEMENT_MONTHS.indexOf(month[1].slice(0, 3).toLowerCase()) + 1;
+		return csvDate(`${month[3]}-${monthNumber}-${month[2]}`);
 	}
-	const d = new Date(raw);
-	if (Number.isNaN(d.getTime())) {
-		return null;
-	}
-	return d.toISOString().slice(0, 10);
+	return csvDate(value);
+}
+
+/** Inbox dates contain an abbreviated month and a caller-owned year. */
+function inboxDate(raw: string, year: number): string | null {
+	const parts = /^([a-z]{3})\.?\s+(\d{1,2})$/i.exec(raw.trim());
+	if (!parts?.[1] || !parts[2]) return null;
+	const month = STATEMENT_MONTHS.indexOf(parts[1].toLowerCase()) + 1;
+	return csvDate(`${year}-${month}-${parts[2]}`);
 }
 
 export function mmddyyyy(iso: string): string {
@@ -836,17 +849,18 @@ export function buildAccountStatsRecord(
 export function buildInboxMessageRecord(
 	m: InboxRow,
 	year: number,
-	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
-	// Kept positionally so call sites and siblings stay stable.
-	_fetchedAt: string,
+	// Collection day chooses the year of a yearless date; collection time is not stored.
+	fetchedAt: string,
 ): InboxMessageRecord | null {
 	if (!m.date_short) {
 		return null;
 	}
-	const parsed = new Date(`${m.date_short} ${year}`);
-	const iso = Number.isNaN(parsed.getTime())
-		? null
-		: parsed.toISOString().slice(0, 10);
+	let iso = inboxDate(m.date_short, year);
+	const day = fetchedAt.slice(0, 10);
+	const collectionDay = /^\d{4}-\d{2}-\d{2}$/.test(day) ? csvDate(day) : null;
+	if (iso !== null && collectionDay !== null && iso > collectionDay) {
+		iso = inboxDate(m.date_short, year - 1);
+	}
 	const id = hashId(`${m.date_short}|${m.preview.slice(0, 120)}`);
 	return {
 		id,

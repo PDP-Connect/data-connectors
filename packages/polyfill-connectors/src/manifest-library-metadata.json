@@ -97,7 +97,8 @@
 		"manifest": {
 			"connector_key": "apple-photos",
 			"reason_display_messages": {
-				"export_not_found": "We couldn't find an export to import"
+				"export_not_found": "We couldn't find an export to import",
+				"source_incomplete": "Some files weren't imported because their file type isn't supported"
 			}
 		}
 	},

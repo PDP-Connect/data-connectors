@@ -29,7 +29,11 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams, collectOrderNodes } from "./index.ts";
+import {
+	collectAllStreams,
+	collectOrderNodes,
+	waitForOrdersResponse,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DoorDashOrderNode } from "./types.ts";
 
@@ -118,15 +122,17 @@ test("collectOrderNodes: single page, no scroll continuation when the scroll yie
 		waitForResponseFn: async (_p, action) => {
 			waitCalls += 1;
 			await action();
-			return waitCalls === 1 ? firstBody : graphqlEnvelope([]);
+			return waitCalls === 1
+				? { kind: "body", body: firstBody }
+				: { kind: "body", body: graphqlEnvelope([]) };
 		},
 	});
 	assert.equal(result.nodes.length, 2);
 	assert.equal(result.incompletePage, null);
 	assert.equal(
 		waitCalls,
-		2,
-		"one initial load + one scroll that found nothing",
+		3,
+		"one initial load + two scrolls that found nothing new",
 	);
 });
 
@@ -147,7 +153,7 @@ test("collectOrderNodes: dedupes overlapping orderUuid across pages", async () =
 			await action();
 			const body = pageBodies[call];
 			call += 1;
-			return body ?? null;
+			return body == null ? { kind: "none" } : { kind: "body", body };
 		},
 	});
 	assert.deepEqual(
@@ -167,12 +173,15 @@ test("collectOrderNodes: walks 45 scrolls before an observed empty result", asyn
 		waitForResponseFn: async (_p, action) => {
 			await action();
 			call += 1;
-			return graphqlEnvelope(call <= 46 ? [makeOrderNode(`order-${call}`)] : []);
+			return {
+				kind: "body",
+				body: graphqlEnvelope(call <= 46 ? [makeOrderNode(`order-${call}`)] : []),
+			};
 		},
 	});
 	assert.equal(result.incompletePage, null);
 	assert.equal(result.nodes.length, 46);
-	assert.equal(call, 47);
+	assert.equal(call, 48);
 });
 
 test("collectOrderNodes: no response observed at all returns zero nodes, not truncated", async () => {
@@ -183,11 +192,176 @@ test("collectOrderNodes: no response observed at all returns zero nodes, not tru
 		scrollFn: async () => undefined,
 		waitForResponseFn: async (_p, action) => {
 			await action();
-			return null;
+			return { kind: "none" };
 		},
 	});
 	assert.equal(result.nodes.length, 0);
 	assert.equal(result.incompletePage, null);
+});
+
+type OrdersResponse = Awaited<ReturnType<typeof waitForOrdersResponse>>;
+
+async function walkResponses(responses: OrdersResponse[]) {
+	let calls = 0,
+		scrolls = 0;
+	const result = await collectOrderNodes({
+		page: fakePage(),
+		delay: async () => undefined,
+		scrollFn: async () => {
+			scrolls += 1;
+		},
+		waitForResponseFn: async (_page, action) => {
+			await action();
+			return responses[calls++] ?? { kind: "none" };
+		},
+	});
+	return { result, calls, scrolls };
+}
+const responseWith = (...ids: string[]): OrdersResponse => ({
+	kind: "body",
+	body: graphqlEnvelope(ids.map((id) => makeOrderNode(id))),
+});
+
+test("collectOrderNodes: unreadable scroll truncates instead of certifying history", async () => {
+	const { result, calls } = await walkResponses([
+		responseWith("synthetic-1"),
+		{ kind: "unreadable" },
+		responseWith("unreachable"),
+	]);
+	assert.deepEqual(
+		result.nodes.map((node) => node.orderUuid),
+		["synthetic-1"],
+	);
+	assert.notEqual(result.incompletePage, null);
+	assert.equal(calls, 2);
+});
+
+test("collectOrderNodes: isolated duplicate pages do not stop or accumulate across new orders", async () => {
+	const { result, calls, scrolls } = await walkResponses([
+		responseWith("synthetic-1"),
+		responseWith("synthetic-1"),
+		responseWith("synthetic-2"),
+		responseWith("synthetic-2"),
+		responseWith("synthetic-3"),
+		{ kind: "none" },
+	]);
+	assert.deepEqual(
+		result.nodes.map((node) => node.orderUuid),
+		["synthetic-1", "synthetic-2", "synthetic-3"],
+	);
+	assert.equal(result.incompletePage, null);
+	assert.equal(calls, 6);
+	assert.equal(scrolls, 5);
+});
+
+test("collectOrderNodes: two consecutive zero-add pages end cleanly", async () => {
+	const { result, calls } = await walkResponses([
+		responseWith("synthetic-1"),
+		responseWith("synthetic-1"),
+		responseWith("synthetic-1"),
+		responseWith("unreachable"),
+	]);
+	assert.equal(result.nodes.length, 1);
+	assert.equal(result.incompletePage, null);
+	assert.equal(calls, 3);
+});
+
+test("collectOrderNodes: no response on second scroll still ends cleanly", async () => {
+	const { result, calls, scrolls } = await walkResponses([
+		responseWith("synthetic-1"),
+		responseWith("synthetic-2"),
+		{ kind: "none" },
+	]);
+	assert.equal(result.nodes.length, 2);
+	assert.equal(result.incompletePage, null);
+	assert.equal(calls, 3);
+	assert.equal(scrolls, 2);
+});
+
+function capturePage(
+	bodies: ("none" | "unreadable" | { body: unknown })[],
+): Page {
+	let call = 0;
+	return {
+		...fakePage(),
+		waitForResponse: async () => {
+			const next = bodies[call++] ?? "none";
+			if (next === "none") throw new Error("synthetic timeout");
+			return {
+				json: async () => {
+					if (next === "unreadable")
+						throw new SyntaxError("synthetic non-JSON response");
+					return next.body;
+				},
+			};
+		},
+	} as unknown as Page;
+}
+
+test("waitForOrdersResponse distinguishes absence from unreadable JSON", async () => {
+	assert.deepEqual(
+		await waitForOrdersResponse(capturePage(["none"]), async () => undefined),
+		{ kind: "none" },
+	);
+	assert.deepEqual(
+		await waitForOrdersResponse(
+			capturePage(["unreadable"]),
+			async () => undefined,
+		),
+		{ kind: "unreadable" },
+	);
+	assert.deepEqual(
+		await waitForOrdersResponse(
+			capturePage([{ body: null }]),
+			async () => undefined,
+		),
+		{ kind: "body", body: null },
+	);
+});
+
+test("collectAllStreams: unreadable scroll emits incomplete-history signal for both streams", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = capturePage([
+		{ body: graphqlEnvelope([makeOrderNode("synthetic-1")]) },
+		"unreadable",
+	]);
+	await collectAllStreams(
+		makeCtx(harness, ["orders", "order_items"], page),
+		async () => undefined,
+	);
+	assert.equal(
+		harness.emitted.filter((record) => record.stream === "orders").length,
+		1,
+	);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => [message.stream, message.reason]),
+		[
+			["orders", "doordash_orders_response_unreadable"],
+			["order_items", "doordash_orders_response_unreadable"],
+		],
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: unreadable initial capture with no orders retains not-observed signal", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(harness, ["orders"], capturePage(["unreadable", "none"])),
+		async () => undefined,
+	);
+	assert.equal(harness.emitted.length, 0);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "doordash_orders_response_not_observed",
+		),
+	);
 });
 
 // ─── collectAllStreams: scope filtering + RECORD/split behavior ─────────
@@ -240,17 +414,21 @@ async function runCollectAllStreamsWithNodes(
 	return harness;
 }
 
-test("collectAllStreams: a missing scroll response reports partial coverage on both streams", async () => {
+test("collectAllStreams: no reply to a later scroll ends the walk cleanly with what was read", async () => {
 	const harness = await runCollectAllStreamsWithNodes(
 		[makeOrderNode("fixture-1")],
 		["orders", "order_items"],
 		4,
 		[[makeOrderNode("fixture-2")], [makeOrderNode("fixture-3")]],
 	);
-	assert.deepEqual(harness.protocolMessages.filter((message) => message.type === "SKIP_RESULT").map(({stream, reason}) => [stream, reason]), [
-		["orders", "doordash_orders_scroll_response_missing"],
-		["order_items", "doordash_orders_scroll_response_missing"],
-	]);
+	assert.deepEqual(
+		harness.protocolMessages.filter((message) => message.type === "SKIP_RESULT"),
+		[],
+	);
+	assert.equal(
+		harness.emitted.filter((record) => record.stream === "orders").length,
+		3,
+	);
 });
 
 test("collectAllStreams: counts unnamed items in progress without emitting a nameless record", async () => {
