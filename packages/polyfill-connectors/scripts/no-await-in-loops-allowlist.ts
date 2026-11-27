@@ -2170,24 +2170,24 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/doordash/index.ts",
-			line: 237,
+			line: 238,
 			column: 16,
 			category: "dependent_pagination",
 			note: "collectOrderNodes(): each scroll's response depends on the prior scroll having loaded the next page",
 		},
 		{
 			path: "connectors/doordash/index.ts",
-			line: 296,
+			line: 297,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emit() record-level PROGRESS for an order node missing orderUuid: Collection Profile protocol emission requiring in-order delivery.",
 		},
 		{
 			path: "connectors/doordash/index.ts",
-			line: 329,
+			line: 330,
 			column: 5,
 			category: "ordered_protocol_emission",
-			note: "collectAllStreams(): emit() record-level PROGRESS for an order node missing orderUuid: Collection Profile protocol emission requiring in-order delivery.",
+			note: "emit each order_items record in Collection Profile order",
 		},
 		{
 			path: "connectors/facebook/collect.ts",
@@ -3923,7 +3923,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			line: 350,
 			column: 3,
 			category: "dependent_pagination",
-			note: "progress(): next request depends on the prior page's cursor/offset/response",
+			note: "emit each record before advancing the collection loop",
 		},
 		{
 			path: "connectors/oura/index.ts",

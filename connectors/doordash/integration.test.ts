@@ -136,6 +136,37 @@ test("collectOrderNodes: single page, no scroll continuation when the scroll yie
 	);
 });
 
+async function collectWithReplies(replies: Awaited<ReturnType<typeof waitForOrdersResponse>>[]) {
+	return collectOrderNodes({
+		page: fakePage(),
+		delay: async () => undefined,
+		scrollFn: async () => undefined,
+		waitForResponseFn: async (_page, action) => {
+			await action();
+			return replies.shift() ?? { kind: "none" };
+		},
+	});
+}
+
+test("collectOrderNodes: unreadable first page keeps older orders and marks page zero incomplete", async () => {
+	const result = await collectWithReplies([
+		{ kind: "unreadable" },
+		{ kind: "body", body: graphqlEnvelope([makeOrderNode("older-order")]) },
+		{ kind: "none" },
+	]);
+	assert.deepEqual(result.nodes.map((node) => node.orderUuid), ["older-order"]);
+	assert.equal(result.incompletePage, 0);
+});
+
+test("collectOrderNodes: readable first page followed by no response is complete", async () => {
+	const result = await collectWithReplies([
+		{ kind: "body", body: graphqlEnvelope([makeOrderNode("current-order")]) },
+		{ kind: "none" },
+	]);
+	assert.deepEqual(result.nodes.map((node) => node.orderUuid), ["current-order"]);
+	assert.equal(result.incompletePage, null);
+});
+
 test("collectOrderNodes: dedupes overlapping orderUuid across pages", async () => {
 	const page = fakePage();
 	const pageBodies = [

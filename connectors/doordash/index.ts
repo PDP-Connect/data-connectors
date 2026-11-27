@@ -223,6 +223,7 @@ export async function collectOrderNodes(args: {
 			.goto(ORDERS_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
 			.catch((): undefined => undefined);
 	});
+	const initialUnreadable = initialBody.kind === "unreadable";
 	if (initialBody.kind === "body") {
 		addNodes(parseOrdersResponse(initialBody.body));
 	}
@@ -240,7 +241,7 @@ export async function collectOrderNodes(args: {
 		if (body.kind === "unreadable") return { nodes, incompletePage: pageNumber };
 		// DoorDash stops firing the request once the list is exhausted, so no
 		// reply to a scroll ends the walk; a reply that cannot be read does not.
-		if (body.kind === "none") return { nodes, incompletePage: null };
+		if (body.kind === "none") return { nodes, incompletePage: initialUnreadable && nodes.length > 0 ? 0 : null };
 		const added = addNodes(parseOrdersResponse(body.body));
 		await progress?.("Fetched DoorDash orders page", {
 			phase: "page",
@@ -249,7 +250,7 @@ export async function collectOrderNodes(args: {
 		});
 		zeroAddResponses = added === 0 ? zeroAddResponses + 1 : 0;
 		// One refetch may overlap before new rows render; require a repeat.
-		if (zeroAddResponses >= 2) return { nodes, incompletePage: null };
+		if (zeroAddResponses >= 2) return { nodes, incompletePage: initialUnreadable && nodes.length > 0 ? 0 : null };
 		await delay(SCROLL_SETTLE_MS);
 	}
 }
