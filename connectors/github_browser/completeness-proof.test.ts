@@ -512,7 +512,7 @@ async function replayAll(mutate?: (routes: Awaited<ReturnType<typeof replayFixtu
 	};
 	await collectGitHubBrowser({
 		requested: new Set(requested), state,
-		emit: async message => { messages.push(structuredClone(message)); timeline.push({ kind: message.type, stream: "stream" in message ? message.stream : undefined }); },
+		emit: async message => { messages.push(structuredClone(message)); timeline.push("stream" in message && message.stream !== undefined ? { kind: message.type, stream: message.stream } : { kind: message.type }); },
 		emitRecord: async (stream, data) => { records.push({ stream, data: structuredClone(data) }); timeline.push({ kind: "record", stream }); },
 		reportStreamFailure: async (stream, message, options) => { failures.push({ stream, message, options }); timeline.push({ kind: "failure", stream }); },
 		progress: async message => { progress.push(message); },
@@ -546,7 +546,7 @@ test("full GitHub replay publishes every manifest stream in one offline collecto
 	assert.deepEqual((data("repositories").repositories as Array<{ name: string }>).map(row => row.name), ["alpha", "beta", "gamma", "delta", "epsilon"]);
 	assert.deepEqual((data("starred").starred as Array<{ fullName: string }>).map(row => row.fullName), ids(0, 65).map(id => `sample-user/repo${id}`));
 	assert.deepEqual((data("events").events as Array<{ id: string }>).map(row => row.id), ids(1, 102).map(String));
-	for (const [key, type] of [["issues", "issue"], ["pullRequests", "pr"]])
+	for (const [key, type] of [["issues", "issue"], ["pullRequests", "pr"]] as const)
 		assert.deepEqual((data("history")[key] as Array<{ id: string }>).map(row => row.id), ids(1, 101).map(id => `gh-${type}-${id}`));
 	assert.deepEqual((data("contributions").days as Array<{ date: string }>).map(day => day.date).sort(), replayDates("2023-01-01", "2026-01-01"));
 	assert.equal(data("contributions").totalContributionsLastYear, 365);
@@ -586,7 +586,7 @@ for (const scenario of replayFailures) test(`full GitHub replay isolates ${scena
 	assert.equal(result.messages.filter(message => message.type === "DETAIL_COVERAGE" && message.stream === scenario.stream).length, 0);
 	const outcomes = [...result.messages.filter(message => message.type === "SKIP_RESULT"), ...result.failures];
 	assert.equal(outcomes.length, 1);
-	assert.equal(outcomes[0].stream, scenario.stream);
+	assert.equal(outcomes[0]?.stream, scenario.stream);
 	assert.ok(JSON.stringify(outcomes[0]).includes(`"${scenario.cause}"`));
 	assert.ok(JSON.stringify(outcomes[0]).length < 2000, "failure remains bounded");
 	for (const stream of result.requested.filter(stream => stream !== scenario.stream)) assertReplayPublished(result, stream);
