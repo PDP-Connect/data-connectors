@@ -148,10 +148,15 @@ const PREFIX: Record<Stream, string> = {
 	training_status: TRAINING,
 	activities: ACTIVITIES,
 };
+/** The daily summaries' range read, which daily_summaries asks for before its days. */
+const SUMMARY_RANGE = "/gc-api/usersummary-service/v2/dailysummaries?";
 const streamOf = (path: string): string =>
 	path === PROBE_PATH
 		? "settings"
-		: (STREAMS.find((stream) => path.startsWith(PREFIX[stream])) ?? "unknown");
+		: path.startsWith(SUMMARY_RANGE)
+			? "daily_summaries"
+			: (STREAMS.find((stream) => path.startsWith(PREFIX[stream])) ??
+				"unknown");
 const isStream =
 	(stream: Stream) =>
 	(path: string): boolean =>
@@ -429,7 +434,13 @@ test("collect: reads settings once, then each day of the daily streams and 28-da
 				`${ACTIVITIES}startDate=${from}&endDate=${to}&start=0&limit=100`,
 		),
 	);
-	assert.equal(fake.paths.length, 1 + 90 + 4 + 4 + 90 + 4);
+	// The fixtures' site does not answer the summaries' range: one read of it, the newest
+	// window before today, then every day.
+	assert.deepEqual(
+		fake.paths.filter((path) => path.startsWith(SUMMARY_RANGE)),
+		[`${SUMMARY_RANGE}startDate=2026-09-16&endDate=2026-09-20`],
+	);
+	assert.equal(fake.paths.length, 1 + 1 + 90 + 4 + 4 + 90 + 4);
 	// Streams one after another, in manifest order.
 	const order = fake.paths
 		.map(streamOf)
@@ -4012,4 +4023,639 @@ test("collect: PROGRESS and SKIP messages carry counts and statuses, never an id
 			);
 		}
 	}
+});
+
+// ── Daily summaries read over a range ───────────────────────────────────────
+const RANGE = SUMMARY_RANGE;
+const isRange = (path: string): boolean => path.startsWith(RANGE);
+const rangePath = (from: string, to: string): string =>
+	`${RANGE}startDate=${from}&endDate=${to}`;
+const rangesOf = (fake: Fake): string[] => fake.paths.filter(isRange);
+/** The account answers the range: Garmin's documented shape over the same days. */
+const withRange = (data: SiteData): void => {
+	data.summaryRange = true;
+};
+/** A daily-summaries-only run against `answer`: what it shipped, and what it read. */
+async function summaries(
+	answer: Answer,
+	options: RunOptions = {},
+): Promise<{ fake: Fake; h: RecordingEmit }> {
+	const fake = fakeGarmin(answer);
+	const h = await collect(fake, { streams: ["daily_summaries"], ...options });
+	return { fake, h };
+}
+/** What a run shipped, for comparing two runs: records, PROGRESS, skips and STATE, in order. */
+const shipped = (h: RecordingEmit) => ({
+	records: h.emitted.map(({ stream, data }) => ({ stream, data })),
+	progress: progressLines(h),
+	skips: messagesOf(h, "SKIP_RESULT"),
+	states: statesOf(h),
+});
+const SUMMARY = "2026-09-16";
+
+test("collect: a first run of an owner who wears the watch every day reads daily summaries in four 28-day ranges, newest first, checks five days and reads today on its own, then ships what a day-by-day run ships", async () => {
+	const dayByDay = await summaries(site(everyDay()));
+	assert.equal(idsOf(dayByDay.h, "daily_summaries").length, 90);
+	const ranged = await summaries(site(both(everyDay(), withRange)));
+	assert.deepEqual(shipped(ranged.h), shipped(dayByDay.h));
+	assert.deepEqual(statesOf(ranged.h), { daily_summaries: FULL });
+	assert.deepEqual(
+		rangesOf(ranged.fake),
+		[
+			["2026-09-16", "2026-09-20"],
+			["2026-08-19", "2026-09-15"],
+			["2026-07-22", "2026-08-18"],
+			["2026-06-24", "2026-07-21"],
+		].map(([from = "", to = ""]) => rangePath(from, to)),
+	);
+	// Each window's newest fullest day, then the oldest sparsest; then today, which no range stands in for.
+	assert.deepEqual(pathsOf(ranged.fake, "daily_summaries").map(dayOf), [
+		"2026-09-20",
+		"2026-09-15",
+		"2026-08-18",
+		"2026-07-21",
+		FLOOR,
+		TODAY,
+	]);
+	assert.equal(ranged.fake.paths.length, 1 + 4 + 6);
+	assert.equal(sleepsOf(ranged.fake).length, ranged.fake.paths.length - 1);
+	assert.deepEqual(ranged.fake.visits, []);
+});
+
+test("collect: a web app that does not answer the range costs one read, then every day is read on its own as before", async () => {
+	const dayByDay = await summaries(site(everyDay()));
+	const { fake, h } = await summaries(site(everyDay()));
+	assert.deepEqual(rangesOf(fake), [rangePath("2026-09-16", "2026-09-20")]);
+	assert.deepEqual(
+		pathsOf(fake, "daily_summaries"),
+		daysFrom(FLOOR, TODAY).map((day) => `${DAILY}${day}`),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+test("collect: a check day whose record differs from the day's own drops the range: every day is read on its own, and the day's own summary ships", async () => {
+	const dayByDay = await summaries(site(everyDay()));
+	const { fake, h } = await summaries(
+		site((data) => {
+			everyDay()(data);
+			withRange(data);
+			const own = data.daily["2026-09-20"] as Record<string, unknown>;
+			data.rangeDaily = {
+				"2026-09-20": {
+					calendarDate: "2026-09-20",
+					includesWellnessData: true,
+					movement: { steps: { value: own.totalSteps } },
+					heartRate: { minValue: 40, restingValue: own.restingHeartRate },
+					stress: { avgLevel: own.averageStressLevel },
+					bodyBattery: {
+						minValue: own.bodyBatteryLowestValue,
+						maxValue: own.bodyBatteryHighestValue,
+					},
+				},
+			};
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+	assert.equal(rangesOf(fake).length, 4);
+	const days = pathsOf(fake, "daily_summaries").map(dayOf);
+	assert.deepEqual(days.toSorted(), daysFrom(FLOOR, TODAY));
+	assert.equal(new Set(days).size, 90, "each day read once");
+});
+
+test("collect: a range answer refused or not in Garmin's shape drops the range, with no skip, no reload and no sign-in", async () => {
+	const dayByDay = await summaries(site(everyDay()));
+	for (const answer of [
+		response(400, '{"message":"Invalid range"}', "application/json"),
+		response(403),
+		response(401),
+		response(500),
+		response(429, "", "text/plain", "1"),
+		response(200, "<!doctype html>", "text/html"),
+		json({ data: "none" }),
+		json([{ calendarDate: SUMMARY }]),
+		{ kind: "network_error", message: "TypeError" } as PageFetch,
+	]) {
+		const { fake, h } = await summaries(
+			except(site(both(everyDay(), withRange)), isRange, answer),
+		);
+		const name = JSON.stringify(answer).slice(0, 60);
+		assert.deepEqual(shipped(h), shipped(dayByDay.h), name);
+		assert.deepEqual(fake.visits, [], `${name}: no reload`);
+		assert.equal(rangesOf(fake).length, 1, `${name}: range reads`);
+		assert.equal(new Set(pathsOf(fake, "daily_summaries")).size, 90, name);
+	}
+});
+
+test("collect: a range dropped on a 403 leaves the run's one reload for the days that need it", async () => {
+	const { fake, h } = await summaries(
+		except(
+			except(site(withRange), isRange, response(403)),
+			isPath(`${DAILY}2026-07-01`),
+			response(403),
+			1,
+		),
+	);
+	assert.deepEqual(fake.visits, [APP_URL]);
+	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+	assert.deepEqual(statesOf(h), { daily_summaries: FULL });
+});
+
+test("collect: a day the range leaves out, or holds in a shape that would not read, is read on its own; the rest come from the range", async () => {
+	const dayByDay = await summaries(site(everyDay()));
+	const { fake, h } = await summaries(
+		site((data) => {
+			everyDay()(data);
+			withRange(data);
+			data.rangeDaily = {
+				"2026-08-01": undefined,
+				[SUMMARY]: {
+					calendarDate: SUMMARY,
+					includesWellnessData: true,
+					movement: { steps: { value: "8432" } },
+				},
+			};
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+	assert.equal(rangesOf(fake).length, 4);
+	assert.deepEqual(pathsOf(fake, "daily_summaries").map(dayOf).toSorted(), [
+		FLOOR,
+		"2026-07-21",
+		"2026-08-01",
+		"2026-08-18",
+		"2026-09-15",
+		SUMMARY,
+		"2026-09-20",
+		TODAY,
+	]);
+});
+
+test("collect: a check read that fails drops the range, and the days are read on their own as before", async () => {
+	const dayByDay = await summaries(site(everyDay()));
+	const { fake, h } = await summaries(
+		except(
+			site(both(everyDay(), withRange)),
+			isPath(`${DAILY}2026-09-20`),
+			response(500),
+			1,
+		),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+	assert.equal(new Set(pathsOf(fake, "daily_summaries")).size, 90);
+});
+
+test("collect: a run from the last STATE reads its week again in one range, today on its own", async () => {
+	const account = both(everyDay(), withRange);
+	const first = await summaries(site(account));
+	const dayByDay = await summaries(site(everyDay()), {
+		state: statesOf(first.h),
+	});
+	const { fake, h } = await summaries(site(account), {
+		state: statesOf(first.h),
+	});
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+	assert.deepEqual(rangesOf(fake), [rangePath("2026-09-15", "2026-09-20")]);
+	assert.deepEqual(pathsOf(fake, "daily_summaries").map(dayOf), [
+		"2026-09-20",
+		"2026-09-15",
+		TODAY,
+	]);
+});
+
+test("collect: a run of three days or fewer reads each day on its own and never asks for a range", async () => {
+	for (const until of ["2026-09-02", "2026-09-04"]) {
+		const { fake } = await summaries(site(withRange), {
+			ranges: { daily_summaries: { since: "2026-09-01", until } },
+		});
+		assert.deepEqual(rangesOf(fake), [], until);
+		assert.deepEqual(
+			pathsOf(fake, "daily_summaries").map(dayOf),
+			daysFrom("2026-09-01", addDays(until, -1)),
+			until,
+		);
+	}
+});
+
+test("collect: a range that holds nothing for an older window where the days' own reads hold summaries drops the range: an owner who stopped wearing the watch loses no history", async () => {
+	const lapsed = (data: SiteData): void => {
+		const own = data.daily[SUMMARY] as Record<string, unknown>;
+		data.daily = {
+			"2026-07-20": { ...own, calendarDate: "2026-07-20" },
+			"2026-07-21": { ...own, calendarDate: "2026-07-21" },
+		};
+	};
+	const dayByDay = await summaries(site(lapsed));
+	assert.deepEqual(idsOf(dayByDay.h, "daily_summaries"), [
+		"2026-07-20",
+		"2026-07-21",
+	]);
+	const { h } = await summaries(
+		site((data) => {
+			lapsed(data);
+			withRange(data);
+			// A range that answers every day as empty.
+			data.rangeDaily = Object.fromEntries(
+				daysFrom(FLOOR, TODAY).map((day) => [day, { calendarDate: day }]),
+			);
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+// ── Range reads: what a sampled check cannot vouch for is read on its own ──
+/** An owner who wears the watch every day: a full summary for each day from FLOOR to TODAY. */
+const everyDay =
+	(days: readonly string[] = daysFrom(FLOOR, TODAY)) =>
+	(data: SiteData): void => {
+		const own = data.daily[SUMMARY] as Record<string, unknown>;
+		data.daily = {};
+		days.forEach((day, i) => {
+			data.daily[day] = {
+				...own,
+				calendarDate: day,
+				totalSteps: 4000 + i,
+				restingHeartRate: 48 + (i % 9),
+			};
+		});
+	};
+const both =
+	(...edits: Array<(data: SiteData) => void>) =>
+	(data: SiteData): void => {
+		for (const edit of edits) edit(data);
+	};
+
+test("collect: a range that answers a day as empty never stands in for that day's own read: the summary on an unchecked day still ships", async () => {
+	const onlyJuly10 = (data: SiteData): void => {
+		const own = data.daily[SUMMARY] as Record<string, unknown>;
+		data.daily = { "2026-07-10": { ...own, calendarDate: "2026-07-10" } };
+	};
+	const dayByDay = await summaries(site(onlyJuly10));
+	assert.deepEqual(idsOf(dayByDay.h, "daily_summaries"), ["2026-07-10"]);
+	for (const wellness of [undefined, true]) {
+		const { h } = await summaries(
+			site((data) => {
+				onlyJuly10(data);
+				withRange(data);
+				// Every day answered with nothing, even marked as carrying wellness data.
+				data.rangeDaily = Object.fromEntries(
+					daysFrom(FLOOR, TODAY).map((day) => [
+						day,
+						{ calendarDate: day, includesWellnessData: wellness },
+					]),
+				);
+			}),
+		);
+		assert.deepEqual(shipped(h), shipped(dayByDay.h), `wellness ${wellness}`);
+	}
+});
+
+test("collect: a range that never carries one metric is caught on a completed day, though today holds only steps", async () => {
+	const partialToday = (data: SiteData): void => {
+		data.daily[TODAY] = { calendarDate: TODAY, totalSteps: 120 };
+	};
+	const account = both(everyDay(), partialToday);
+	const dayByDay = await summaries(site(account));
+	const { h } = await summaries(
+		site((data) => {
+			account(data);
+			withRange(data);
+			// The range names resting heart rate otherwise: it reads as absent on every day.
+			data.rangeDaily = Object.fromEntries(
+				daysFrom(FLOOR, TODAY).map((day) => {
+					const own = data.daily[day] as Record<string, unknown>;
+					return [
+						day,
+						{
+							calendarDate: day,
+							includesWellnessData: true,
+							movement: { steps: { value: own.totalSteps } },
+							heartRate: { minValue: own.minHeartRate ?? null },
+							stress: { avgLevel: own.averageStressLevel ?? null },
+							bodyBattery: {
+								minValue: own.bodyBatteryLowestValue ?? null,
+								maxValue: own.bodyBatteryHighestValue ?? null,
+							},
+						},
+					];
+				}),
+			);
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+test("collect: a range that answers 0 steps for days the watch was not worn ships no record for them", async () => {
+	const worn = daysFrom(FLOOR, "2026-08-22");
+	const account = everyDay(worn);
+	const dayByDay = await summaries(site(account));
+	assert.equal(idsOf(dayByDay.h, "daily_summaries").length, worn.length);
+	for (const wellness of [true, false]) {
+		const { h } = await summaries(
+			site((data) => {
+				account(data);
+				withRange(data);
+				data.rangeDaily = Object.fromEntries(
+					daysFrom("2026-08-23", TODAY).map((day) => [
+						day,
+						{
+							calendarDate: day,
+							includesWellnessData: wellness,
+							movement: { steps: { value: 0 } },
+						},
+					]),
+				);
+			}),
+		);
+		assert.deepEqual(shipped(h), shipped(dayByDay.h), `wellness ${wellness}`);
+	}
+});
+
+test("collect: a kept day is read on its own, never from the range: one still unreadable stays kept and counted", async () => {
+	const kept = { ...FULL, retry: [span("2026-05-01", "2026-05-20")] };
+	// Ten kept days still do not read on their own; the ten after them now do.
+	const unreadable = (data: SiteData): void => {
+		const own = data.daily[SUMMARY] as Record<string, unknown>;
+		for (const day of daysFrom("2026-05-01", "2026-05-20")) {
+			data.daily[day] = {
+				...own,
+				calendarDate: day,
+				totalSteps: day <= "2026-05-10" ? "8432" : 8432,
+			};
+		}
+	};
+	// A day with steps alone, the sparsest the range holds, so the sparsest check reads it, not a kept day.
+	const stepsOnly = (data: SiteData): void => {
+		data.daily["2026-09-17"] = { calendarDate: "2026-09-17", totalSteps: 100 };
+	};
+	const account = both(everyDay(), unreadable, stepsOnly);
+	const dayByDay = await summaries(site(account), {
+		state: { daily_summaries: kept },
+	});
+	assert.ok(progressOf(dayByDay.h).length > 0, "the old read counts them");
+	const { h } = await summaries(
+		site((data) => {
+			account(data);
+			withRange(data);
+			// Clean and full in the range, each day as its own summary would read once readable.
+			data.rangeDaily = Object.fromEntries(
+				daysFrom("2026-05-01", "2026-05-20").map((day) => {
+					const own = data.daily[day] as Record<string, unknown>;
+					return [
+						day,
+						{
+							calendarDate: day,
+							includesWellnessData: true,
+							movement: { steps: { value: 8432 } },
+							heartRate: {
+								minValue: own.minHeartRate,
+								restingValue: own.restingHeartRate,
+							},
+							stress: { avgLevel: own.averageStressLevel },
+							bodyBattery: {
+								minValue: own.bodyBatteryLowestValue,
+								maxValue: own.bodyBatteryHighestValue,
+							},
+						},
+					];
+				}),
+			);
+		}),
+		{ state: { daily_summaries: kept } },
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+test("collect: a rate-limited range is dropped at once, without waiting its Retry-After", async () => {
+	const { fake, h } = await summaries(
+		except(
+			site(both(everyDay(), withRange)),
+			isRange,
+			response(429, "", "text/plain", "30"),
+		),
+	);
+	assert.equal(rangesOf(fake).length, 1);
+	assert.ok(!sleepsOf(fake).includes("sleep 30000"), "no Retry-After wait");
+	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+	assert.equal(new Set(pathsOf(fake, "daily_summaries")).size, 90);
+});
+
+test("collect: an account with too few summaries for the range to pay costs at most one range read more than day by day", async () => {
+	const { fake, h } = await summaries(site(withRange));
+	assert.equal(rangesOf(fake).length, 1);
+	assert.equal(pathsOf(fake, "daily_summaries").length, 90);
+	assert.deepEqual(idsOf(h, "daily_summaries"), [SUMMARY]);
+});
+
+test("collect: a metric only some days hold, which the range names otherwise, is caught on a day that holds it, not only on each window's newest day", async () => {
+	// Body Battery on every seventh day only, never on a window's last day.
+	const account = (data: SiteData): void => {
+		everyDay()(data);
+		daysFrom(FLOOR, TODAY).forEach((day, i) => {
+			const own = data.daily[day] as Record<string, unknown>;
+			if (i % 7 !== 3) {
+				own.bodyBatteryHighestValue = null;
+				own.bodyBatteryLowestValue = null;
+			}
+		});
+	};
+	const dayByDay = await summaries(site(account));
+	const { h } = await summaries(
+		site((data) => {
+			account(data);
+			withRange(data);
+			// The range names Body Battery otherwise: absent on every day.
+			data.rangeDaily = Object.fromEntries(
+				daysFrom(FLOOR, TODAY).map((day) => {
+					const own = data.daily[day] as Record<string, unknown>;
+					return [
+						day,
+						{
+							calendarDate: day,
+							includesWellnessData: true,
+							movement: { steps: { value: own.totalSteps } },
+							heartRate: {
+								minValue: own.minHeartRate,
+								restingValue: own.restingHeartRate,
+							},
+							stress: { avgLevel: own.averageStressLevel },
+						},
+					];
+				}),
+			);
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+test("collect: a watch that never measures Body Battery costs one range read, then every day is read on its own", async () => {
+	const noBattery = (data: SiteData): void => {
+		everyDay()(data);
+		for (const own of Object.values(data.daily) as Array<
+			Record<string, unknown>
+		>) {
+			own.bodyBatteryHighestValue = null;
+			own.bodyBatteryLowestValue = null;
+		}
+	};
+	const dayByDay = await summaries(site(noBattery));
+	const { fake, h } = await summaries(site(both(noBattery, withRange)));
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+	assert.deepEqual(rangesOf(fake), [rangePath("2026-09-16", "2026-09-20")]);
+	assert.equal(pathsOf(fake, "daily_summaries").length, 90);
+});
+
+test("collect: a range day answered as empty never stands in, though an older empty day agrees with its own read", async () => {
+	const account = (data: SiteData): void => {
+		everyDay()(data);
+		delete data.daily["2026-07-08"];
+	};
+	const dayByDay = await summaries(site(account));
+	const { h } = await summaries(
+		site((data) => {
+			account(data);
+			withRange(data);
+			data.rangeDaily = {
+				"2026-07-08": {
+					calendarDate: "2026-07-08",
+					includesWellnessData: true,
+				},
+				"2026-07-10": {
+					calendarDate: "2026-07-10",
+					includesWellnessData: true,
+				},
+			};
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+test("collect: a metric the range answers wrongly on the days it holds, none of them a window's last, is caught on the newest day that holds it", async () => {
+	const battery = (data: SiteData): void => {
+		everyDay()(data);
+		daysFrom(FLOOR, TODAY).forEach((day, i) => {
+			const own = data.daily[day] as Record<string, unknown>;
+			if (i % 7 !== 3) {
+				own.bodyBatteryHighestValue = null;
+				own.bodyBatteryLowestValue = null;
+			}
+		});
+	};
+	const dayByDay = await summaries(site(battery));
+	const { h } = await summaries(
+		site((data) => {
+			battery(data);
+			withRange(data);
+			data.rangeDaily = Object.fromEntries(
+				daysFrom(FLOOR, TODAY).map((day) => {
+					const own = data.daily[day] as Record<string, unknown>;
+					const high = own.bodyBatteryHighestValue;
+					return [
+						day,
+						{
+							calendarDate: day,
+							includesWellnessData: true,
+							movement: { steps: { value: own.totalSteps } },
+							heartRate: {
+								minValue: own.minHeartRate,
+								restingValue: own.restingHeartRate,
+							},
+							stress: { avgLevel: own.averageStressLevel },
+							bodyBattery: {
+								minValue: own.bodyBatteryLowestValue,
+								maxValue: typeof high === "number" ? high - 1 : null,
+							},
+						},
+					];
+				}),
+			);
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+test("collect: a metric the range stops carrying before some day, which no window's last day crosses, is caught on the oldest day without it", async () => {
+	const stepsOnlyDay = (data: SiteData): void => {
+		data.daily["2026-07-05"] = { calendarDate: "2026-07-05", totalSteps: 100 };
+	};
+	const account = both(everyDay(), stepsOnlyDay);
+	const dayByDay = await summaries(site(account));
+	const { h } = await summaries(
+		site((data) => {
+			account(data);
+			withRange(data);
+			// Body Battery missing from the range from the third day to the end of the first week.
+			data.rangeDaily = Object.fromEntries(
+				daysFrom("2026-06-26", "2026-06-30").map((day) => {
+					const own = data.daily[day] as Record<string, unknown>;
+					return [
+						day,
+						{
+							calendarDate: day,
+							includesWellnessData: true,
+							movement: { steps: { value: own.totalSteps } },
+							heartRate: {
+								minValue: own.minHeartRate,
+								restingValue: own.restingHeartRate,
+							},
+							stress: { avgLevel: own.averageStressLevel },
+						},
+					];
+				}),
+			);
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
+});
+
+test("collect: a check read that fails keeps the check reads already made", async () => {
+	const { fake, h } = await summaries(
+		except(
+			site(both(everyDay(), withRange)),
+			isPath(`${DAILY}${FLOOR}`),
+			response(500),
+			1,
+		),
+	);
+	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+	// Four ranges, then the walk: every day once, the failed check's day twice.
+	assert.equal(rangesOf(fake).length, 4);
+	assert.equal(pathsOf(fake, "daily_summaries").length, 91);
+});
+
+test("collect: a range whose values drift on its oldest days, every metric present, is caught on its oldest day", async () => {
+	// A genuine steps-only day, the sparsest, so the sparsest check reads it, not the oldest day.
+	const account = (data: SiteData): void => {
+		everyDay()(data);
+		data.daily["2026-07-05"] = { calendarDate: "2026-07-05", totalSteps: 100 };
+	};
+	const dayByDay = await summaries(site(account));
+	const { h } = await summaries(
+		site((data) => {
+			account(data);
+			withRange(data);
+			data.rangeDaily = Object.fromEntries(
+				daysFrom(FLOOR, "2026-06-30").map((day) => {
+					const own = data.daily[day] as Record<string, unknown>;
+					return [
+						day,
+						{
+							calendarDate: day,
+							includesWellnessData: true,
+							movement: { steps: { value: (own.totalSteps as number) + 1 } },
+							heartRate: {
+								minValue: own.minHeartRate,
+								restingValue: own.restingHeartRate,
+							},
+							stress: { avgLevel: own.averageStressLevel },
+							bodyBattery: {
+								minValue: own.bodyBatteryLowestValue,
+								maxValue: own.bodyBatteryHighestValue,
+							},
+						},
+					];
+				}),
+			);
+		}),
+	);
+	assert.deepEqual(shipped(h), shipped(dayByDay.h));
 });
