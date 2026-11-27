@@ -338,17 +338,6 @@ export interface BrowserCollectContext extends BaseCollectContext {
 // ─── Config ─────────────────────────────────────────────────────────────
 
 export interface BrowserConfig {
-	/**
-	 * Preserve the run page after failed runs. Use only for sources where closing
-	 * a failed-but-authenticated page would destroy the best repair surface.
-	 */
-	preservePageOnFailure?: boolean;
-	/**
-	 * Reuse and preserve the run page after successful runs. Use only for
-	 * sources whose auth state is held in the live page instead of durable
-	 * browser storage.
-	 */
-	preservePageOnSuccess?: boolean;
 	profileName?: string;
 }
 
@@ -432,6 +421,16 @@ interface BaseRunConnectorConfig {
 	 * (stderr, outside the protocol channel) to report hook activity instead.
 	 */
 	onDurableCommit?: (log: (message: string) => void) => void | Promise<void>;
+	/**
+	 * The manifest `primary_key` of each stream whose key is not `id` alone.
+	 * Collection Profile: a RECORD's `key` names the same values as the
+	 * primary-key fields of its `data`, as an array for a composite key, and a
+	 * runtime rejects a record whose identities disagree. A stream not listed
+	 * here is keyed by `String(data.id)`, which is only right for
+	 * `primary_key: ["id"]`. Connector tests check each entry against the
+	 * manifest.
+	 */
+	recordKeyFields?: Readonly<Record<string, readonly string[]>>;
 	retryablePattern?: RegExp;
 	/**
 	 * Record field that scope.time_range filters on, for a connector with no
@@ -483,7 +482,6 @@ export type RunConnectorConfig =
 // ─── Primitive helpers (exported for connector convenience) ─────────────
 
 type ClosableBrowserPage = Pick<Page, "close" | "isClosed">;
-type ReusableBrowserPage = Pick<Page, "isClosed" | "url">;
 
 const TRACE_TIMESTAMP_UNSAFE = /[:.]/g;
 
@@ -1002,6 +1000,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			error: TerminalErrorDetails,
 		): TerminalErrorDetails => error,
 		onDurableCommit,
+		recordKeyFields,
 		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
 		timeRangeField,
 		isTombstone,
@@ -1459,6 +1458,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			validateRecord,
 			isTombstone,
 			timeRangeFieldFor,
+			recordKeyFields,
 		});
 		observedCounters = emitRecord.counters;
 		const emittedAt = nowIso();
@@ -1727,6 +1727,7 @@ export function makeEmitRecord(deps: {
 	validateRecord: ValidateRecord | undefined;
 	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
 	timeRangeFieldFor: (stream: string) => ConsentTimeField | null;
+	recordKeyFields?: Readonly<Record<string, readonly string[]>> | undefined;
 }): {
 	emit: (
 		stream: string,
@@ -1752,7 +1753,53 @@ export function makeEmitRecord(deps: {
 		validateRecord,
 		isTombstone,
 		timeRangeFieldFor,
+		recordKeyFields,
 	} = deps;
+	for (const [stream, fields] of Object.entries(recordKeyFields ?? {})) {
+		if (
+			fields.length === 0 ||
+			fields.some((field) => typeof field !== "string" || field === "")
+		) {
+			throw new Error(
+				`runConnector: recordKeyFields.${stream} must be a non-empty list of field names`,
+			);
+		}
+	}
+	const keyFieldsFor = (stream: string): readonly string[] | null =>
+		recordKeyFields && Object.hasOwn(recordKeyFields, stream)
+			? (recordKeyFields[stream] ?? null)
+			: null;
+	/**
+	 * The record's key, or null when a key field is absent. A composite key is
+	 * the array of its string components in primary-key order; its canonical
+	 * form (the `resources` entry) is that array as minified JSON.
+	 */
+	const recordKey = (
+		stream: string,
+		data: RecordData,
+	): { key: string | string[]; canonical: string } | null => {
+		const fields = keyFieldsFor(stream);
+		if (fields === null) {
+			return data.id == null
+				? null
+				: { key: String(data.id), canonical: String(data.id) };
+		}
+		const parts: string[] = [];
+		for (const field of fields) {
+			const value = data[field];
+			if (
+				typeof value !== "string" &&
+				typeof value !== "number" &&
+				typeof value !== "boolean"
+			) {
+				return null;
+			}
+			parts.push(String(value));
+		}
+		return parts.length === 1
+			? { key: parts[0]!, canonical: parts[0]! }
+			: { key: parts, canonical: JSON.stringify(parts) };
+	};
 	// `totalAnomalous` counts records RETAINED despite unmodeled values; it is a
 	// subset of totalEmitted, not a sibling of totalSkipped.
 	const counters = { totalEmitted: 0, totalSkipped: 0, totalAnomalous: 0 };
@@ -1769,9 +1816,10 @@ export function makeEmitRecord(deps: {
 		data: RecordData,
 		options: EmitRecordOptions = {},
 	): "skip" | "tombstone" | "record" => {
-		if (data.id == null) return "skip";
+		const identity = recordKey(stream, data);
+		if (identity === null) return "skip";
 		const rs = resFilters.get(stream);
-		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
+		if (!options.skipResourceFilter && rs && !rs.has(identity.canonical))
 			return "skip";
 		const streamScope = requested.get(stream);
 		const consent = timeRangeFieldFor(stream);
@@ -1809,15 +1857,18 @@ export function makeEmitRecord(deps: {
 		data: RecordData,
 		options: EmitRecordOptions = {},
 	): Promise<void> => {
+		const identity = recordKey(stream, data);
+		if (identity === null) return Promise.resolve();
 		const selection = selectRecord(stream, data, options);
-		if (selection === "skip" || data.id == null) return Promise.resolve();
+		if (selection === "skip") return Promise.resolve();
 		if (selection === "tombstone") {
 			counters.totalEmitted += 1;
+			const fields = keyFieldsFor(stream) ?? ["id"];
 			return emit({
 				type: "RECORD",
 				stream,
-				key: String(data.id),
-				data: { id: data.id },
+				key: identity.key,
+				data: Object.fromEntries(fields.map((field) => [field, data[field]])),
 				emitted_at: emittedAt,
 				op: "delete",
 			});
@@ -1835,7 +1886,7 @@ export function makeEmitRecord(deps: {
 		const record: EmittedMessage = {
 			type: "RECORD",
 			stream,
-			key: String(data.id),
+			key: identity.key,
 			data,
 			emitted_at: emittedAt,
 		};
@@ -2009,23 +2060,13 @@ async function runInBrowser(args: {
 	);
 	let page: Page | null = null;
 	let stopPagePolicy: (() => Promise<void>) | null = null;
-	let runSucceeded = false;
-	let runReusedAttachedPage = false;
 	let browserSurfaceAssistance: ReturnType<
 		typeof createBrowserSurfaceAssistanceLifecycle
 	> | null = null;
 	try {
-		const pagesBeforeRun = new Set(ctx.pages());
-		page = await selectBrowserPageForRun(ctx, browser);
-		// One ownership authority: a page the launcher did not create (a
-		// reused preserve-page tab) is still this run's page, so the launcher
-		// must record it (downloads into the HAR) without closing it.
+		page = await ctx.newPage();
+		// Keep recording/download ownership tied to this newly created run page.
 		adoptRunPage?.(page);
-		// A page the run reused (only a connector that declares page
-		// preservation reuses one, see `selectBrowserPageForRun`) is the run's
-		// page for popup tracking, but in an attached browser it is never
-		// closed: it predates this run and is kept for the next one.
-		runReusedAttachedPage = !ownsBrowserPages && pagesBeforeRun.has(page);
 		stopPagePolicy = await installOwnedRunPagePolicy(ctx, page, {
 			closeUnownedPages: ownsBrowserPages,
 		});
@@ -2134,7 +2175,6 @@ async function runInBrowser(args: {
 		if (!runFailed()) {
 			tracer.markSucceeded();
 			baseCtx.capture?.markSucceeded?.();
-			runSucceeded = true;
 		}
 	} catch (err) {
 		if (page) {
@@ -2145,10 +2185,7 @@ async function runInBrowser(args: {
 		await stopPagePolicy?.();
 		await finalizeDiagnostics();
 		await browserSurfaceAssistance?.close();
-		if (
-			!runReusedAttachedPage &&
-			shouldCloseBrowserPageAfterRun(browser, runSucceeded)
-		) {
+		if (shouldCloseBrowserPageAfterRun()) {
 			await closeBrowserPage(page);
 		}
 		await release().catch((): undefined => undefined);
@@ -2163,42 +2200,6 @@ async function runInBrowser(args: {
 // a wedged run cannot itself re-hang the teardown.
 const CAPTURE_DOM_DEADLINE_MS = 10_000;
 const PAGE_CLOSE_DEADLINE_MS = 10_000;
-
-export function isReusableBrowserRunPage(page: ReusableBrowserPage): boolean {
-	if (page.isClosed()) {
-		return false;
-	}
-	const url = page.url();
-	// An `about:` page (including `about:blank#anything`) or a `data:` page
-	// carries no provider session, so it is never a preserved run page.
-	return Boolean(url) && !url.startsWith("about:") && !url.startsWith("data:");
-}
-
-export async function selectBrowserPageForRun(
-	context: Pick<BrowserContext, "newPage" | "pages">,
-	browser: Pick<
-		BrowserConfig,
-		"preservePageOnFailure" | "preservePageOnSuccess"
-	>,
-): Promise<Page> {
-	// A connector that declares page preservation keeps its run page open
-	// between runs because its authenticated session lives in that live page
-	// (ChatGPT, see `browser-surface-policy.ts`), so the next run must pick it
-	// up instead of opening another one. This applies to an attached browser
-	// (`PDPP_<NAME>_REMOTE_CDP_URL`) too: pointing a preserve-page connector at
-	// a browser hands that browser's session pages to the connector, which is
-	// consent to reuse them. Without reuse every run would open a new page and
-	// the preserved ones would pile up. Connectors without preservation always
-	// start on a page they created, so they never touch an existing tab.
-	if (browser.preservePageOnSuccess || browser.preservePageOnFailure) {
-		for (const page of context.pages()) {
-			if (isReusableBrowserRunPage(page)) {
-				return page;
-			}
-		}
-	}
-	return await context.newPage();
-}
 
 /**
  * Reserve context.newPage for the runtime's next run. Popups opened by the run
@@ -2284,11 +2285,6 @@ function browserRecordingRequested(
 }
 
 export function shouldCloseBrowserPageAfterRun(
-	browser: Pick<
-		BrowserConfig,
-		"preservePageOnFailure" | "preservePageOnSuccess"
-	>,
-	runSucceeded: boolean,
 	env: NodeJS.ProcessEnv = process.env,
 ): boolean {
 	// A `--record-har` run needs the context's last page to stay open until
@@ -2308,12 +2304,6 @@ export function shouldCloseBrowserPageAfterRun(
 		env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim() &&
 		env.PDPP_BROWSER_SURFACE_LEASE_ID?.trim()
 	) {
-		return false;
-	}
-	if (runSucceeded && browser.preservePageOnSuccess) {
-		return false;
-	}
-	if (!runSucceeded && browser.preservePageOnFailure) {
 		return false;
 	}
 	return true;
@@ -2824,20 +2814,12 @@ export function runtimeOwnsBrowserPages(
  * Whether to skip closing the remote browser's existing tabs before attach.
  * A `PDPP_<NAME>_REMOTE_CDP_URL` browser was launched by someone else (an
  * operator's own Chrome, a recording sandbox), so its tabs are not ours to
- * close. A managed n.eko surface keeps the cleanup unless the connector
- * preserves its pages.
+ * close. Managed surfaces retain their normal acquisition cleanup.
  */
 export function shouldPreserveRemotePagesOnAcquire(
-	browser: Pick<
-		BrowserConfig,
-		"preservePageOnFailure" | "preservePageOnSuccess"
-	>,
 	launchSource: BrowserLaunchSource,
 ): boolean {
-	return (
-		!runtimeOwnsBrowserPages(launchSource) ||
-		Boolean(browser.preservePageOnSuccess || browser.preservePageOnFailure)
-	);
+	return !runtimeOwnsBrowserPages(launchSource);
 }
 
 export function decorateBrowserManualAction(
@@ -2910,7 +2892,7 @@ async function acquireBrowser(
 		return await acquireBrowserForConnector({
 			profileName,
 			headless,
-			...(shouldPreserveRemotePagesOnAcquire(browser, launchSource)
+			...(shouldPreserveRemotePagesOnAcquire(launchSource)
 				? { preserveRemotePagesOnAcquire: true }
 				: {}),
 			...(streamingEnabled ? { streamingEnabled: true } : {}),

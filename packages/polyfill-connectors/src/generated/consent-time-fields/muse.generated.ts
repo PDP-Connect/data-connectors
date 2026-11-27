@@ -18,7 +18,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	muse: {
 		activities: { field: "timestamp", format: "date-time" },
 		connected_apps: null,
-		conversations: { field: "created_at", format: "date-time" },
+		conversations: { field: "updated_at", format: "date-time" },
 		files: { field: "modified_at", format: "date-time" },
 		goals: { field: "created_at", format: "date-time" },
 		memory_files: { field: "modified_at", format: "date-time" },

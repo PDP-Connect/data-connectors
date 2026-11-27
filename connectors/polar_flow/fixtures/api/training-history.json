@@ -1,0 +1,42 @@
+[
+	{
+		"id": 8349588454,
+		"duration": 2735000,
+		"distance": 7012.4,
+		"hrAvg": 151,
+		"calories": 498,
+		"note": " ",
+		"sportName": "Running",
+		"sportId": 1,
+		"startDate": "2026-11-03 07:12:09.000",
+		"recoveryTime": 0,
+		"iconUrl": "https://platform.cdn.polar.com/ecosystem/sport/icon/808d0882e97375e68844ec6c5417ea33-2024-04-16_06_01_39",
+		"trainingLoadHtml": "",
+		"hasTrainingTarget": false,
+		"swimmingSport": false,
+		"swimmingPoolUnits": "METERS",
+		"trainingLoadProHtml": "",
+		"periodDataUuid": null,
+		"isTest": false
+	},
+	{
+		"id": 8351200017,
+		"duration": 1800000,
+		"distance": null,
+		"hrAvg": 0,
+		"calories": 210,
+		"note": "Easy mobility session",
+		"sportName": "Yoga",
+		"sportId": 105,
+		"startDate": "2026-11-05 18:30:00.000",
+		"recoveryTime": 0,
+		"iconUrl": "https://platform.cdn.polar.com/ecosystem/sport/icon/00000000000000000000000000000000-2024-04-16_06_01_39",
+		"trainingLoadHtml": "",
+		"hasTrainingTarget": false,
+		"swimmingSport": false,
+		"swimmingPoolUnits": "METERS",
+		"trainingLoadProHtml": "",
+		"periodDataUuid": null,
+		"isTest": false
+	}
+]

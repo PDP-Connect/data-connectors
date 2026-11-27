@@ -38,10 +38,14 @@ jobs:
         shard:
           - name: connector gates a-m
             args: '--test-name-pattern="^[a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
+          # polar_flow alone runs about 5 minutes (one paced first run reads
+          # about 60 windows), so n-s is its own shard to keep each under 15.
+          - name: connector gates n-s
+            args: '--test-name-pattern="^[n-s].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
           - name: connector gates other
-            args: '--test-name-pattern="^[^a-m].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
+            args: '--test-name-pattern="^[^a-s].*: pageshim gate" scripts/pageshim/pageshim.test.mjs'
           - name: regressions
-            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/harness-timing.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs
+            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/harness-timing.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/timing-bounds.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,7 +74,8 @@ jobs:
     needs: harness-shards
     if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    # Allow time for runner cleanup after the shard check.
+    timeout-minutes: 5
     steps:
       - name: Require all shards to pass
         env:

@@ -180,7 +180,30 @@ function bool(v: unknown): boolean | null {
 	return typeof v === "boolean" ? v : null;
 }
 
-const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+const ISO_DT_RE =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+/** Complete ISO datetime with a valid Gregorian calendar date and clock. */
+export function isIsoDateTime(value: string): boolean {
+	const match = ISO_DT_RE.exec(value);
+	if (match === null || match[0] !== value) return false;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+	return (
+		month >= 1 &&
+		month <= 12 &&
+		day >= 1 &&
+		day <= (days[month - 1] ?? 0) &&
+		Number(match[4]) <= 23 &&
+		Number(match[5]) <= 59 &&
+		Number(match[6]) <= 59 &&
+		(match[7] === undefined || Number(match[7]) <= 23) &&
+		(match[8] === undefined || Number(match[8]) <= 59)
+	);
+}
 
 /** Claude export timestamps are already ISO-8601; pass through verbatim if
  * they parse as such, else null (D4: unparseable value is null, never
@@ -191,7 +214,7 @@ export function isoOrNull(v: unknown): string | null {
 	if (s === null) {
 		return null;
 	}
-	return ISO_DT_RE.test(s) ? s : null;
+	return isIsoDateTime(s) ? s : null;
 }
 
 // ─── conversations + messages (claude.conversations split) ─────────────────
@@ -904,10 +927,11 @@ export function parseProject(raw: unknown): {
 	if (id === null) {
 		return null;
 	}
-	const docsRaw = Array.isArray(raw.docs) ? raw.docs : [];
-	const documents = docsRaw
-		.map((d) => parseProjectDocument(d, id))
-		.filter((d): d is ProjectDocumentRecord => d !== null);
+	const docsRaw = Array.isArray(raw.docs) ? raw.docs.filter(isRecord) : [];
+	const parsedDocuments = docsRaw.map((d) => parseProjectDocument(d, id));
+	const documents = parsedDocuments.filter(
+		(d): d is ProjectDocumentRecord => d !== null,
+	);
 	const creator = isRecord(raw.creator) ? raw.creator : null;
 	const creatorUuid = creator === null ? null : str(creator.uuid);
 	const creatorFullName = creator === null ? null : str(creator.full_name);
@@ -927,8 +951,8 @@ export function parseProject(raw: unknown): {
 				update_time: isoOrNull(raw.updated_at),
 				// archived_at's presence/absence IS the archived signal in the export
 				// (matches legacy normalizeProject's `Boolean(p?.archived_at)` exactly)
-				// — a definite false, not an unknown, when the key is absent or null.
-				is_archived: raw.archived_at != null,
+				// — a definite false, not an unknown, when the key is absent, null or empty.
+				is_archived: Boolean(raw.archived_at),
 				prompt_template: encodedField(str(raw.prompt_template), tally),
 				creator:
 					creator !== null
@@ -942,16 +966,17 @@ export function parseProject(raw: unknown): {
 				is_private: bool(raw.is_private),
 				is_starter_project: bool(raw.is_starter_project),
 				archived_at: encodedField(raw.archived_at, tally),
-				raw_docs: docsRaw.filter(isRecord).map((doc) => {
+				raw_docs: docsRaw.map((doc, index) => {
 					// Copies of the document's own fields. Text over the inline cap
 					// lives in the document's record (as a blob) and is left out
-					// here, never cut; the document record reports the omission.
+					// here, never cut. Count the copy only if no document record exists.
 					const copy: OmissionTally = { fields: 0 };
 					const uuid = encodedField(doc.uuid, copy);
 					const filename = encodedField(doc.filename, copy);
 					const content = encodedField(doc.content, copy);
 					const createdAt = encodedField(doc.created_at, copy);
 					const updatedAt = encodedField(doc.updated_at, copy);
+					if (parsedDocuments[index] === null) tally.fields += copy.fields;
 					return {
 						...(typeof uuid === "string" ? { uuid } : {}),
 						...(typeof filename === "string" ? { filename } : {}),
@@ -1129,6 +1154,82 @@ export function resolveExportedProfile(
 		fullName: attributableBrowserName,
 		nameSource: attributableBrowserName ? "browser_menu" : "none",
 		metadataStatus: "valid",
+	};
+}
+
+// ─── account_plan ─────────────────────────────────────────────────────────
+
+/** The fields of one `/api/organizations` entry that account_plan reads. The
+ * entry holds more (an organization name that can be a person's name, for one);
+ * nothing else is read. */
+export interface RawOrganization {
+	uuid?: unknown;
+	capabilities?: unknown;
+	raven_type?: unknown;
+	billing_type?: unknown;
+	created_at?: unknown;
+}
+
+const PLAN_ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+function nonEmptyString(value: unknown): string | null {
+	return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Plan family from an organization entry, as anthropic_live reads it
+ * (connectors/anthropic_live/parsers.ts `planTypeOf`): `claude_max` and
+ * `claude_pro` capabilities, `raven` for Team and Enterprise, and "free" for a
+ * chat organization with no billing. Anything else is null, never a guess.
+ */
+export function planTypeOf(org: RawOrganization): string | null {
+	const caps = Array.isArray(org.capabilities)
+		? org.capabilities.filter((c): c is string => typeof c === "string")
+		: [];
+	if (caps.includes("claude_max")) return "max";
+	if (caps.includes("claude_pro")) return "pro";
+	if (caps.includes("raven")) return nonEmptyString(org.raven_type) ?? "team";
+	const billing = nonEmptyString(org.billing_type);
+	if (caps.includes("chat") && (billing === null || billing === "none")) {
+		return "free";
+	}
+	return null;
+}
+
+/**
+ * The account_plan record for one organization, or null when the entry has no
+ * id. It names the organization (`account_id`), its creation time and its plan
+ * family, and nothing else: every other field of the stream is null.
+ */
+export function buildAccountPlanRecord(
+	org: RawOrganization,
+	isDefault = true,
+): Record<string, unknown> | null {
+	const organizationId = nonEmptyString(org.uuid);
+	if (organizationId === null) return null;
+	const createdAt = nonEmptyString(org.created_at);
+	return {
+		// Keep the exported/default account at the legacy key.
+		id: isDefault ? "account_plan" : `account_plan:${organizationId}`,
+		is_default: isDefault,
+		account_id: organizationId,
+		account_structure: null,
+		account_created_at:
+			createdAt !== null &&
+			PLAN_ISO_DT_RE.test(createdAt) &&
+			!Number.isNaN(Date.parse(createdAt))
+				? createdAt
+				: null,
+		plan_type: planTypeOf(org),
+		plan_display_name: null,
+		subscription_plan: null,
+		has_active_subscription: null,
+		billing_period: null,
+		will_renew: null,
+		renews_at: null,
+		expires_at: null,
+		cancels_at: null,
+		scheduled_plan_change: null,
 	};
 }
 
@@ -1339,4 +1440,35 @@ export function parseClassifiedExport(
 	rawProjects: readonly unknown[],
 ): ParsedExport {
 	return parseExport(rawConversations, rawProjects);
+}
+
+/** Accounts with chat access only; never selects the conversation/export org. */
+export function usablePlanOrganizations(
+	orgs: RawOrganization[],
+): RawOrganization[] {
+	const seen = new Set<string>();
+	return orgs.filter((org) => {
+		if (
+			typeof org.uuid !== "string" ||
+			!org.uuid ||
+			seen.has(org.uuid) ||
+			!Array.isArray(org.capabilities) ||
+			!org.capabilities.some((c) =>
+				["chat", "claude_pro", "claude_max", "raven"].includes(c),
+			)
+		)
+			return false;
+		seen.add(org.uuid);
+		return true;
+	});
+}
+
+/** A full inventory is safe only when every raw entry can be classified. */
+export function hasReadablePlanOrganizationInventory(orgs: unknown[]): boolean {
+	return orgs.every((value) => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+		const org = value as RawOrganization;
+		return typeof org.uuid === "string" && org.uuid.length > 0 &&
+			Array.isArray(org.capabilities) && org.capabilities.every((c) => typeof c === "string");
+	});
 }

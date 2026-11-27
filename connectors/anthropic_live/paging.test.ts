@@ -12,10 +12,10 @@ import test from "node:test";
 import {
 	collectAnthropicLive,
 	ensureAnthropicLiveSession,
-	MAX_CONVERSATIONS_PER_RUN,
 	probeAnthropicLiveSession,
 } from "./index.ts";
 import {
+	CAP_ENV,
 	type Conv,
 	conv,
 	type HarnessOptions,
@@ -24,7 +24,9 @@ import {
 	ORG,
 	type Route,
 	stampMessage,
+	TEST_CAP,
 	uuid,
+	withEnv,
 } from "./test-support.ts";
 
 const CHAT = ["conversations", "messages"];
@@ -254,34 +256,36 @@ test("a list that keeps changing fails without a checkpoint, then recovers once 
 	assertCollected(sync, convs);
 });
 
-test("a backlog over the cap, changed during every run, is collected across runs", async () => {
-	const total = MAX_CONVERSATIONS_PER_RUN + 60;
+test("a backlog over the opt-in count cap, changed during every run, is collected across runs", async () => {
+	const total = TEST_CAP + 60;
 	const convs = backlog(total);
 	const edited = convs[3];
 	const created = conv(9000, 0);
 	created.updated_at = "2026-01-15T11:00:00.000000Z";
 	stampMessage(created, 1, created.updated_at);
-	const sync = await syncUntilSettled(convs, {
-		routeFor: (run) =>
-			onListPage((offset, call) => {
-				if (offset === 0 || call > 2) return;
-				if (run === 0 && call === 1) {
-					// A newer conversation is deleted; an unread old one is
-					// answered, then its first answer is edited.
-					remove(convs, newest(convs)[10]);
-					reply(convs[total - 100], "2026-01-15T10:00:00.000000Z");
-				}
-				if (run === 1 && call === 1) {
-					remove(convs, newest(convs)[3]);
-					convs.push(created);
-					const answer = edited?.chat_messages[1];
-					assert.ok(edited && answer);
-					answer.content = [{ type: "text", text: "edited answer" }];
-					answer.updated_at = "2026-01-15T10:30:00.000000Z";
-					edited.updated_at = "2026-01-15T10:30:00.000000Z";
-				}
-			}),
-	});
+	const sync = await withEnv({ [CAP_ENV]: String(TEST_CAP) }, () =>
+		syncUntilSettled(convs, {
+			routeFor: (run) =>
+				onListPage((offset, call) => {
+					if (offset === 0 || call > 2) return;
+					if (run === 0 && call === 1) {
+						// A newer conversation is deleted; an unread old one is
+						// answered, then its first answer is edited.
+						remove(convs, newest(convs)[10]);
+						reply(convs[total - 100], "2026-01-15T10:00:00.000000Z");
+					}
+					if (run === 1 && call === 1) {
+						remove(convs, newest(convs)[3]);
+						convs.push(created);
+						const answer = edited?.chat_messages[1];
+						assert.ok(edited && answer);
+						answer.content = [{ type: "text", text: "edited answer" }];
+						answer.updated_at = "2026-01-15T10:30:00.000000Z";
+						edited.updated_at = "2026-01-15T10:30:00.000000Z";
+					}
+				}),
+		}),
+	);
 	assert.ok(sync.runs.length >= 2, "the cap spreads the backlog over runs");
 	assertCollected(sync, convs);
 	assert.ok(sync.ids.messages?.has(created.chat_messages[0]?.uuid as string));

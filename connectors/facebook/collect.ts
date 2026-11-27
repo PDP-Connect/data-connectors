@@ -18,6 +18,19 @@
  * A list is complete only on the source's own end signal. A missing end
  * signal, a repeated cursor, a page that adds nothing new, or the page cap
  * fails the stream and writes no STATE.
+ *
+ * A bounded grant narrows the walk at the source:
+ *   - `since`: the timeline and the activity log list newest first, so a walk
+ *     ends once a run of items older than `since` (OLDER_ITEMS_TO_STOP) closes
+ *     a page; nothing after it can be in the window;
+ *   - `until` (posts): the timeline query's own `beforeTime`/`afterTime` date
+ *     variables carry the window, widened by a day on each side, and only when
+ *     the query declares them. A bounded walk that brings no item at all, or
+ *     fails, is not trusted: the plain walk runs instead;
+ *   - `resources`: a walk ends once every requested id was read.
+ * The runtime still drops every record outside the grant; these only stop
+ * reading what it would drop. STATE is never read, so a narrow run never
+ * shortens a later wide one.
  */
 
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -37,6 +50,7 @@ import {
 	type CapturedOperation,
 	type ConnectionMatcher,
 	ERROR_CLASSES,
+	edgeCreationSeconds,
 	erroredItemCount,
 	extractPreloadedPayloads,
 	extractProfileIntro,
@@ -45,7 +59,10 @@ import {
 	type FoundConnection,
 	FRIENDS_OPERATION,
 	facebookError,
+	friendRecordKey,
 	GROUPS_OPERATION,
+	groupRecordKey,
+	isNumericId,
 	isRunEndingError,
 	isValidDocId,
 	type JsonRecord,
@@ -62,9 +79,11 @@ import {
 	parsePostNode,
 	pickConnection,
 	pickPreloadedConnection,
+	postIdKey,
 	type TextCounter,
 	type Viewer,
 } from "./parsers.ts";
+import { validateRecord } from "./schemas.ts";
 
 // ─── Pacing and bounds ──────────────────────────────────────────────────
 
@@ -83,6 +102,20 @@ export const MAX_PAGES: Readonly<Record<string, number>> = {
 	reactions: 400,
 	comments: 400,
 };
+
+/**
+ * A walk under `since` ends when this many items in a row, closing a page,
+ * are older than `since`. More than one page of each list, so a single item
+ * out of order (a pinned or back-dated post) cannot end it early.
+ */
+export const OLDER_ITEMS_TO_STOP: Readonly<Record<string, number>> = {
+	posts: 9,
+	reactions: 30,
+	comments: 30,
+};
+
+/** Slack added on each side of a time bound sent in the source's own date variables. */
+export const PUSHED_BOUND_SLACK_SECONDS = 86_400;
 
 const SOURCE = "facebook";
 
@@ -211,6 +244,7 @@ export type CollectorContext = Pick<
 	| "collectionMode"
 	| "emit"
 	| "emitRecord"
+	| "isRecordSelected"
 	| "progress"
 	| "reportStreamFailure"
 	| "requested"
@@ -324,6 +358,10 @@ async function resolveOperation(
 // ─── The list walk ──────────────────────────────────────────────────────
 
 interface WalkPlan {
+	/** Skip the server-rendered first page and start at the query's own first page. */
+	fromQuery?: boolean;
+	/** Variables set only when the query declares them (the source's date filters). */
+	ifDeclared?: JsonRecord;
 	maxPages: number;
 	/** Variables this stream always sets (for example the activity category). */
 	overrides: JsonRecord;
@@ -333,10 +371,16 @@ interface WalkPlan {
 	viewerId: string;
 	/** Handle one page of edges. The walk itself decides when the list ended. */
 	onEdges: (edges: unknown[]) => Promise<void>;
+	/** Asked after each page: true when the grant's window or resources are fully read. */
+	stopAfterPage?: () => boolean;
+	/** True for an edge the grant's resources leave out: it is not read, so its errors do not count. */
+	skipsEdge?: (edge: unknown) => boolean;
 }
 
 interface WalkState {
 	cursor: string | null;
+	/** Edges the walk was given, on every page. */
+	edges: number;
 	ownerId: string | null;
 	seenCursors: Set<string>;
 	seenKeys: Set<string>;
@@ -408,6 +452,7 @@ function assertItemsReadable(
 		payload.errors,
 		connection,
 		plan.spec.readPaths,
+		(index) => plan.skipsEdge?.(connection.edges[index]) ?? false,
 	);
 	if (errored > 0) {
 		throw facebookError(
@@ -476,6 +521,7 @@ async function walkQueryPages(
 				viewerId: plan.viewerId,
 			}),
 			overrides: plan.overrides,
+			ifDeclared: plan.ifDeclared,
 			provided: operation.provided,
 			template: operation.template,
 		});
@@ -487,27 +533,35 @@ async function walkQueryPages(
 		const restartedFromTop =
 			page === 0 && state.cursor === null && state.seenKeys.size > 0;
 		const added = addKeys(plan.spec, state, connection.edges);
+		state.edges += connection.edges.length;
 		await plan.onEdges(connection.edges);
+		if (plan.stopAfterPage?.()) return;
 		const next = nextCursor(plan, state, connection, added, restartedFromTop);
 		if (next === "end") return;
 		state.cursor = next;
 	}
 }
 
-/** Walk one list to the source's end signal. Throws when that end was not proven. */
+/**
+ * Walk one list to the source's end signal, or until `stopAfterPage` says
+ * the grant is fully read. Throws when neither was proven. Returns how many
+ * edges the walk was given.
+ */
 export async function walkList(
 	services: FacebookServices,
 	plan: WalkPlan,
-): Promise<void> {
-	const payloads = extractPreloadedPayloads(plan.snapshot.scripts);
-	const preloaded = pickPreloadedConnection(
-		payloads,
-		plan.spec.match,
-		plan.spec.prefer,
-	);
+): Promise<{ edges: number }> {
+	const preloaded = plan.fromQuery
+		? null
+		: pickPreloadedConnection(
+				extractPreloadedPayloads(plan.snapshot.scripts),
+				plan.spec.match,
+				plan.spec.prefer,
+			);
 	const first = preloaded?.connection ?? null;
 	const state: WalkState = {
 		cursor: null,
+		edges: 0,
 		ownerId: first?.ownerId ?? null,
 		seenCursors: new Set(),
 		seenKeys: new Set(),
@@ -515,12 +569,15 @@ export async function walkList(
 	if (preloaded && first) {
 		assertItemsReadable(plan, preloaded.payload, first);
 		addKeys(plan.spec, state, first.edges);
+		state.edges += first.edges.length;
 		await plan.onEdges(first.edges);
-		if (first.pageInfo?.hasNextPage === false) return;
+		if (first.pageInfo?.hasNextPage === false || plan.stopAfterPage?.())
+			return { edges: state.edges };
 		state.cursor = first.pageInfo?.endCursor ?? null;
 		if (state.cursor) state.seenCursors.add(state.cursor);
 	}
 	await walkQueryPages(services, plan, state, first);
+	return { edges: state.edges };
 }
 
 // ─── Streams ────────────────────────────────────────────────────────────
@@ -541,16 +598,137 @@ function reportText(stream: string, counter: TextCounter): void {
 	}
 }
 
-function laterIso(current: string | null, candidate: string): string {
-	return current === null || candidate > current ? candidate : current;
-}
-
 /** True the first time an item id is met in this walk; a re-read page or a repeated item is handled once. */
 function firstSeen(handled: Set<string>, key: string | null): boolean {
 	if (key === null) return true;
 	if (handled.has(key)) return false;
 	handled.add(key);
 	return true;
+}
+
+// ─── The grant's window and resources ───────────────────────────────────
+
+interface StreamGrant {
+	/** Requested record ids, or null for every record. */
+	resources: ReadonlySet<string> | null;
+	sinceSeconds: number | null;
+	untilSeconds: number | null;
+}
+
+function boundSeconds(value: string | undefined): number | null {
+	if (value === undefined) return null;
+	const ms = Date.parse(value);
+	return Number.isFinite(ms) ? ms / 1000 : null;
+}
+
+function streamGrant(ctx: CollectorContext, stream: string): StreamGrant {
+	const scope = ctx.requested.get(stream);
+	const resources = scope?.resources;
+	return {
+		resources:
+			Array.isArray(resources) && resources.length > 0
+				? new Set(resources.map(String))
+				: null,
+		sinceSeconds: boundSeconds(scope?.time_range?.since),
+		untilSeconds: boundSeconds(scope?.time_range?.until),
+	};
+}
+
+/**
+ * Decides when a newest-first walk has read all of a grant: every requested
+ * id was met, or a run of OLDER_ITEMS_TO_STOP items older than `since`
+ * closed a page. An item with no readable time breaks the run.
+ */
+class GrantStop {
+	private olderRun = 0;
+	private readonly grant: StreamGrant;
+	private readonly keyOf: (edge: unknown) => string | null;
+	private readonly observed = new Set<string>();
+	private readonly olderToStop: number;
+	private readonly pending: Set<string> | null;
+
+	/** `keyOf` gives an edge's record id when the raw edge proves it, else null. */
+	constructor(
+		grant: StreamGrant,
+		olderToStop: number,
+		keyOf: (edge: unknown) => string | null,
+	) {
+		this.grant = grant;
+		this.keyOf = keyOf;
+		this.olderToStop = olderToStop;
+		this.pending = grant.resources ? new Set(grant.resources) : null;
+	}
+
+	/** Items met again (a re-read page, a restart from the top) do not add to the older run. */
+	observeEdges(edges: readonly unknown[]): void {
+		const since = this.grant.sinceSeconds;
+		if (since === null) return;
+		for (const edge of edges) {
+			const key = this.keyOf(edge);
+			if (key !== null) {
+				if (this.observed.has(key)) continue;
+				this.observed.add(key);
+			}
+			const seconds = edgeCreationSeconds(edge);
+			this.olderRun =
+				seconds !== null && seconds < since ? this.olderRun + 1 : 0;
+		}
+	}
+
+	/**
+	 * True for an edge the grant's resources leave out, by its raw id: it is
+	 * not parsed, so an unrequested item cannot fail the stream.
+	 */
+	skips(edge: unknown): boolean {
+		if (this.pending === null || this.grant.resources === null) return false;
+		const key = this.keyOf(edge);
+		return key !== null && !this.grant.resources.has(key);
+	}
+
+	/** True once every requested id was met; the rest of the page need not be read. */
+	allMet(): boolean {
+		return this.pending !== null && this.pending.size === 0;
+	}
+
+	met(id: string): void {
+		this.pending?.delete(id);
+	}
+
+	done(): boolean {
+		if (this.pending !== null && this.pending.size === 0) return true;
+		return (
+			this.grant.sinceSeconds !== null && this.olderRun >= this.olderToStop
+		);
+	}
+}
+
+/** Counts records the runtime would drop for their shape: such a stream is not complete. */
+async function emitChecked(
+	ctx: CollectorContext,
+	stream: string,
+	record: Record<string, unknown>,
+): Promise<boolean> {
+	const selected = ctx.isRecordSelected?.(stream, record) ?? true;
+	const valid = !selected || validateRecord(stream, record).ok;
+	await ctx.emitRecord(stream, record);
+	return valid;
+}
+
+/** An item key that is a numeric id (the record id of posts, friends and groups), else null. */
+function numericKey(
+	itemKey: (edge: unknown) => string | null,
+): (edge: unknown) => string | null {
+	return (edge) => {
+		const key = itemKey(edge);
+		return isNumericId(key) ? key : null;
+	};
+}
+
+function rejectedError(stream: string, rejected: number): Error {
+	return facebookError(
+		ERROR_CLASSES.shape,
+		`${stream}: ${rejected} record(s) did not match the stream's schema and were not saved`,
+	);
 }
 
 async function collectProfile(run: StreamRun): Promise<void> {
@@ -573,52 +751,105 @@ async function collectProfile(run: StreamRun): Promise<void> {
 		intro,
 		counter,
 	);
-	await run.ctx.emitRecord("profile", { ...record });
+	const valid = await emitChecked(run.ctx, "profile", { ...record });
 	reportText("profile", counter);
+	if (!valid) throw rejectedError("profile", 1);
+}
+
+/** The timeline's own date variables for a grant with `until`, widened by a day each side. */
+function timelineDateVariables(grant: StreamGrant): JsonRecord | null {
+	if (grant.untilSeconds === null) return null;
+	return {
+		beforeTime: Math.ceil(grant.untilSeconds) + PUSHED_BOUND_SLACK_SECONDS,
+		...(grant.sinceSeconds === null
+			? {}
+			: {
+					afterTime:
+						Math.floor(grant.sinceSeconds) - PUSHED_BOUND_SLACK_SECONDS,
+				}),
+	};
 }
 
 /**
  * Posts are mutable (text, audience), and an edit does not change a post's
- * creation time, so every run walks the whole timeline to its end. STATE
- * records only what this run saw; it never shortens the next walk.
+ * creation time, so every run walks the whole timeline, or the whole of the
+ * grant's window, to its end. STATE only marks the walk complete; it never
+ * shortens the next walk.
  */
 async function collectPosts(run: StreamRun): Promise<void> {
 	const counter = newTextCounter();
-	let newest: string | null = null;
-	let unreadable = 0;
+	const grant = streamGrant(run.ctx, "posts");
+	let rejected = 0;
 	const handled = new Set<string>();
-	await walkList(run.services, {
-		stream: "posts",
-		spec: POSTS_OPERATION,
-		snapshot: run.snapshot,
-		viewerId: run.viewer.id,
-		overrides: {},
-		maxPages: MAX_PAGES.posts ?? 600,
-		onEdges: async (edges) => {
-			for (const edge of edges) {
-				const node = nodeOf(edge);
-				const parsed = node
-					? parsePostNode(node, run.viewer.id, counter)
-					: { kind: "unreadable" as const };
-				if (parsed.kind === "unreadable") unreadable += 1;
-				if (parsed.kind !== "post") continue;
-				if (!firstSeen(handled, parsed.record.id)) continue;
-				await run.ctx.emitRecord("posts", { ...parsed.record });
-				newest = laterIso(newest, parsed.record.create_time);
-			}
-		},
-	});
+	/** One attempt; its unreadable count is its own, so a discarded dated walk cannot fail the plain one. */
+	const walk = async (
+		dates: JsonRecord | null,
+	): Promise<{ edges: number; unreadable: number }> => {
+		const stop = new GrantStop(
+			grant,
+			OLDER_ITEMS_TO_STOP.posts ?? 9,
+			numericKey(postIdKey),
+		);
+		let unreadable = 0;
+		const walked = await walkList(run.services, {
+			stream: "posts",
+			spec: POSTS_OPERATION,
+			snapshot: run.snapshot,
+			viewerId: run.viewer.id,
+			overrides: {},
+			// The plain walk clears the date variables: a template captured from
+			// the page may be this run's own dated request.
+			...(dates
+				? { fromQuery: true, ifDeclared: dates }
+				: { ifDeclared: { afterTime: null, beforeTime: null } }),
+			maxPages: MAX_PAGES.posts ?? 600,
+			stopAfterPage: () => stop.done(),
+			skipsEdge: (edge) => stop.skips(edge),
+			onEdges: async (edges) => {
+				stop.observeEdges(edges);
+				for (const edge of edges) {
+					if (stop.allMet()) break;
+					if (stop.skips(edge)) continue;
+					const node = nodeOf(edge);
+					const parsed = node
+						? parsePostNode(node, run.viewer.id, counter)
+						: { kind: "unreadable" as const };
+					if (parsed.kind === "unreadable") unreadable += 1;
+					if (parsed.kind !== "post") continue;
+					stop.met(parsed.record.id);
+					if (!firstSeen(handled, parsed.record.id)) continue;
+					if (!(await emitChecked(run.ctx, "posts", { ...parsed.record })))
+						rejected += 1;
+				}
+			},
+		});
+		return { edges: walked.edges, unreadable };
+	};
+	const dates = timelineDateVariables(grant);
+	let trusted: { edges: number; unreadable: number } | null = null;
+	if (dates) {
+		try {
+			trusted = await walk(dates);
+		} catch (error) {
+			// A dated walk that failed at any page may be the date filter itself;
+			// the plain walk below is the proof instead. Posts it already
+			// delivered are not delivered twice (`handled`).
+			if (isRunEndingError(error)) throw error;
+			connectorDiagnostic(SOURCE, "date_filter_unused", { stream: "posts" });
+		}
+	}
+	// No item under the source's date filter is not proof of an empty window:
+	// the filter may have been read differently. Walk without it.
+	if (trusted === null || trusted.edges === 0) trusted = await walk(null);
+	const { unreadable } = trusted;
 	reportText("posts", counter);
 	if (unreadable > 0)
 		throw facebookError(
 			ERROR_CLASSES.shape,
 			`posts: ${unreadable} timeline item(s) could not be read`,
 		);
-	await run.ctx.emit({
-		type: "STATE",
-		stream: "posts",
-		cursor: newest === null ? {} : { newest_create_time: newest },
-	});
+	if (rejected > 0) throw rejectedError("posts", rejected);
+	await run.ctx.emit({ type: "STATE", stream: "posts", cursor: {} });
 }
 
 async function collectInventory(
@@ -626,10 +857,14 @@ async function collectInventory(
 	stream: "friends" | "groups",
 	spec: OperationSpec,
 	parse: (node: JsonRecord, counter: TextCounter) => { id: string } | null,
+	recordKey: (edge: unknown) => string | null,
 ): Promise<void> {
 	const counter = newTextCounter();
+	const grant = streamGrant(run.ctx, stream);
+	const stop = new GrantStop(grant, Number.POSITIVE_INFINITY, recordKey);
 	const seen = new Set<string>();
 	let unreadable = 0;
+	let rejected = 0;
 	await walkList(run.services, {
 		stream,
 		spec,
@@ -637,16 +872,21 @@ async function collectInventory(
 		viewerId: run.viewer.id,
 		overrides: {},
 		maxPages: MAX_PAGES[stream] ?? 200,
+		stopAfterPage: () => stop.done(),
+		skipsEdge: (edge) => stop.skips(edge),
 		onEdges: async (edges) => {
 			for (const edge of edges) {
+				if (stop.allMet()) break;
+				if (stop.skips(edge)) continue;
 				const node = nodeOf(edge);
 				const record = node ? parse(node, counter) : null;
 				if (!record) {
 					unreadable += 1;
 					continue;
 				}
+				stop.met(record.id);
 				if (!firstSeen(seen, record.id)) continue;
-				await run.ctx.emitRecord(stream, { ...record });
+				if (!(await emitChecked(run.ctx, stream, { ...record }))) rejected += 1;
 			}
 		},
 	});
@@ -656,13 +896,17 @@ async function collectInventory(
 			ERROR_CLASSES.shape,
 			`${stream}: ${unreadable} item(s) could not be read`,
 		);
-	await run.ctx.emit(buildFullScanCoverageMessage(stream, seen.size));
+	if (rejected > 0) throw rejectedError(stream, rejected);
+	// A walk for chosen ids may end early, so it is no full inventory scan.
+	if (grant.resources === null)
+		await run.ctx.emit(buildFullScanCoverageMessage(stream, seen.size));
 	await run.ctx.emit({ type: "STATE", stream, cursor: {} });
 }
 
 /**
- * The activity log is walked to its end every run: a saved time is never
- * taken as proof that older entries were read.
+ * The activity log is walked to its end every run, or to the end of the
+ * grant's window: a saved time is never taken as proof that older entries
+ * were read.
  */
 async function collectActivity(
 	run: StreamRun,
@@ -670,9 +914,15 @@ async function collectActivity(
 	kind: ActivityKind,
 ): Promise<void> {
 	const counter = newTextCounter();
+	const grant = streamGrant(run.ctx, stream);
+	const stop = new GrantStop(
+		grant,
+		OLDER_ITEMS_TO_STOP[stream] ?? 30,
+		ACTIVITY_OPERATION.itemKey,
+	);
 	const seen = new Set<string>();
-	let newest: string | null = null;
 	let unreadable = 0;
+	let rejected = 0;
 	await walkList(run.services, {
 		stream,
 		spec: ACTIVITY_OPERATION,
@@ -680,17 +930,22 @@ async function collectActivity(
 		viewerId: run.viewer.id,
 		overrides: { category_key: ACTIVITY_CATEGORIES[kind] },
 		maxPages: MAX_PAGES[stream] ?? 400,
+		stopAfterPage: () => stop.done(),
+		skipsEdge: (edge) => stop.skips(edge),
 		onEdges: async (edges) => {
+			stop.observeEdges(edges);
 			for (const edge of edges) {
+				if (stop.allMet()) break;
+				if (stop.skips(edge)) continue;
 				const node = nodeOf(edge);
 				const record = node ? parseActivityNode(node, kind, counter) : null;
 				if (!record) {
 					unreadable += 1;
 					continue;
 				}
+				stop.met(record.id);
 				if (!firstSeen(seen, record.id)) continue;
-				newest = laterIso(newest, record.time);
-				await run.ctx.emitRecord(stream, { ...record });
+				if (!(await emitChecked(run.ctx, stream, { ...record }))) rejected += 1;
 			}
 		},
 	});
@@ -700,11 +955,8 @@ async function collectActivity(
 			ERROR_CLASSES.shape,
 			`${stream}: ${unreadable} entry(ies) could not be read`,
 		);
-	await run.ctx.emit({
-		type: "STATE",
-		stream,
-		cursor: newest === null ? {} : { newest_time: newest },
-	});
+	if (rejected > 0) throw rejectedError(stream, rejected);
+	await run.ctx.emit({ type: "STATE", stream, cursor: {} });
 }
 
 // ─── Run ────────────────────────────────────────────────────────────────
@@ -739,10 +991,25 @@ async function failStream(
 ): Promise<void> {
 	const message = error instanceof Error ? error.message : String(error);
 	if (!ctx.reportStreamFailure) throw error;
-	const retryable =
-		!message.startsWith(ERROR_CLASSES.outdated) &&
-		!message.startsWith(ERROR_CLASSES.mutation);
-	await ctx.reportStreamFailure(stream, message.slice(0, 500), { retryable });
+	await ctx.reportStreamFailure(stream, message.slice(0, 500), {
+		recoveryHint: streamFailureHint(message),
+	});
+}
+
+/**
+ * A query the page no longer reveals, or an operation refused as a write,
+ * needs a newer connector; retrying the same one cannot help. Other stream
+ * failures (an unproven end, a timeout, an unreadable item) may pass on a
+ * later run.
+ */
+export function streamFailureHint(message: string): {
+	action: "retry_by_runtime" | "retry_on_connector_upgrade";
+	retryable: boolean;
+} {
+	return message.startsWith(ERROR_CLASSES.outdated) ||
+		message.startsWith(ERROR_CLASSES.mutation)
+		? { action: "retry_on_connector_upgrade", retryable: false }
+		: { action: "retry_by_runtime", retryable: true };
 }
 
 async function runStream(
@@ -773,6 +1040,7 @@ async function runStream(
 				"friends",
 				FRIENDS_OPERATION,
 				parseFriendNode,
+				friendRecordKey,
 			);
 		case "groups":
 			return collectInventory(
@@ -780,6 +1048,7 @@ async function runStream(
 				"groups",
 				GROUPS_OPERATION,
 				parseGroupNode,
+				groupRecordKey,
 			);
 		case "reactions":
 			return collectActivity(

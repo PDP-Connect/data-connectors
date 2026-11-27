@@ -1,0 +1,28 @@
+{
+	"data": {
+		"devices": [
+			{
+				"id": "device-01TEST",
+				"name": "Ada's Laptop",
+				"hostname": "ada-mbp",
+				"osVersion": "15.6",
+				"isConnected": true,
+				"batteryLevel": 87,
+				"isCharging": false,
+				"deviceType": "mac",
+				"createdAt": 1789068259
+			},
+			{
+				"id": "device-02TEST",
+				"name": "Ada's Phone",
+				"hostname": null,
+				"osVersion": "18.2",
+				"isConnected": false,
+				"batteryLevel": null,
+				"isCharging": null,
+				"deviceType": "iphone",
+				"createdAt": "2026-08-01T12:00:00.000Z"
+			}
+		]
+	}
+}

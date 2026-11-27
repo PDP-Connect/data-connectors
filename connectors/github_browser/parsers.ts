@@ -6,7 +6,7 @@ import { z } from "zod";
 import { eventRecord } from "../github/parsers.ts";
 import { type CollectionBoundary, type Continuation, InventoryEvidence, type InventoryTerminalProof } from "./inventory-evidence.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
-import { type InventoryEndResult, inspectInventoryEnd } from "./page-evidence.ts";
+import { type InventoryEndResult, boundCursor, inspectInventoryEnd } from "./page-evidence.ts";
 import type {
 	LegacyContributionDay,
 	LegacyContributions,
@@ -950,14 +950,39 @@ export function inspectInventoryPage(
 		url.searchParams.sort();
 		return url.href;
 	};
-	const nextTargets = new Set(nextControls.map(node => isDisabled(node) ? "disabled" : sameTarget(githubUrl(node.getAttribute("href")))));
 	const next = nextControls[0] ?? null;
 	const disabled = next !== null && isDisabled(next);
-	const nextUrl = next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
+	// The starred tab pages by cursor: its enabled Next link carries `after`, not a page
+	// number. Only this inspector binds such a link, and only when it stays on this page's
+	// path and tab; the walk then follows it by the page counter. Anything else stays unknown.
+	const labelled = (link: Element, name: RegExp) => name.test(text(link));
+	const cursorLinks = stream !== "starred" ? [] : Array.from(pagination?.querySelectorAll("a[href]") ?? []).filter(link => {
+		if (link.closest(OVERLAY_SELECTOR) !== null || isDisabled(link)) return false;
+		const href = githubUrl(link.getAttribute("href"));
+		return href !== null && new URL(href).searchParams.has("after") && (nextControls.includes(link) || labelled(link, /^next$/iu));
+	});
+	// Every recognized Next control, marked or labelled, must name one target.
+	const nextTargets = new Set([...nextControls, ...cursorLinks.filter(link => !nextControls.includes(link))]
+		.map(node => isDisabled(node) ? "disabled" : sameTarget(githubUrl(node.getAttribute("href")))));
+	const cursorHref = cursorLinks.length === 1 ? githubUrl(cursorLinks[0]?.getAttribute("href") ?? null) : null;
+	const cursorNext = cursorHref !== null && boundCursor(cursorHref, page.currentUrl) !== null ? cursorHref : null;
+	// A Previous link is a back link on a cursor page; it is never followed.
+	const backLink = (link: Element, href: string) => {
+		if (stream !== "starred" || !labelled(link, /^previous$/iu)) return false;
+		const url = new URL(href);
+		const current = new URL(page.currentUrl);
+		return url.origin === current.origin && url.pathname === current.pathname &&
+			url.searchParams.get("tab") === current.searchParams.get("tab") &&
+			url.hash === "" && url.searchParams.getAll("before").length === 1 &&
+			(url.searchParams.get("before") ?? "").trim() !== "" &&
+			Array.from(url.searchParams.keys()).every(key => key === "before" || key === "tab");
+	};
+	const nextUrl = cursorNext !== null ? null : next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
 	const foreignPagination = Array.from(pagination?.querySelectorAll("a[href]") ?? []).filter(link =>
 		link.closest(OVERLAY_SELECTOR) === null).some(link => {
 		const href = githubUrl(link.getAttribute("href"));
 		if (href === null) return true;
+		if (link === cursorLinks[0] && cursorNext !== null || backLink(link, href)) return false;
 		const url = new URL(href);
 		const starsRoute = stream === "starred" && url.pathname === `/stars/${username}`;
 		return !(starsRoute || (url.pathname === `/${username}` && url.searchParams.get("tab") === tab)) ||
@@ -972,6 +997,7 @@ export function inspectInventoryPage(
 		if (link.closest(OVERLAY_SELECTOR) !== null || nextControls.includes(link) || isDisabled(link)) return false;
 		const href = githubUrl(link.getAttribute("href"));
 		if (href === null) return true;
+		if (link === cursorLinks[0] && cursorNext !== null || backLink(link, href)) return false;
 		const url = new URL(href);
 		const targetPage = Number(url.searchParams.get("page"));
 		if (url.searchParams.has("after") || !Number.isInteger(targetPage) || targetPage < 1) return true;
@@ -979,7 +1005,8 @@ export function inspectInventoryPage(
 		return targetPage > pageNumber && nextUrl === null;
 	});
 	const ambiguous = unknownTargets || counterAmbiguous || foreignPagination || paginators.length > 1 || nextTargets.size > 1 ||
-		(next !== null && !disabled && nextUrl === null);
+		(next !== null && !disabled && nextUrl === null && cursorNext === null) ||
+		(cursorLinks.length > 0 && cursorNext === null);
 	const renderComplete = list !== null && !isUnreadable(list) && countersReady &&
 		paginators.every(node => !isUnreadable(node));
 	const terminalProof = InventoryEvidence.terminalProof({ disabledNext: disabled, total, distinct: parsedRows });
@@ -989,6 +1016,7 @@ export function inspectInventoryPage(
 		hasUnknownContinuation: ambiguous,
 		terminalProof,
 		nextUrl,
+		cursorNext,
 	});
 	const trusted = countersReady && result.reason !== "wrong_navigation" && result.reason !== "wrong_owner";
 	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
@@ -999,7 +1027,7 @@ export function inspectInventoryPage(
 }
 
 function inventoryContinuation(result: InventoryEndResult): Continuation {
-	if (result.nextUrl !== null) return { kind: "next", url: result.nextUrl };
+	if (result.nextUrl !== null) return { kind: "next", url: result.nextUrl, ...(result.cursor == null ? {} : { cursor: result.cursor }) };
 	if (result.complete) return { kind: "end" };
 	if (result.reason === "terminal_unverified") return { kind: "unproven" };
 	if (result.reason === "wrong_navigation" || result.reason === "wrong_owner") return { kind: "unbound", reason: result.reason };

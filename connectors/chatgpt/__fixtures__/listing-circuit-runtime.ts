@@ -34,6 +34,9 @@ runConnector({
 		const api: ChatGptApi = {
 			auth: () => Promise.reject(new Error("unused")),
 			async fetch(path) {
+				if (path.startsWith("/conversations?")) {
+					return { status: 200, json: { items: [], total: 0 } };
+				}
 				if (path.startsWith("/conversations/search")) {
 					const failure = process.env.LISTING_FIXTURE_FAILURE;
 					if (failure) {

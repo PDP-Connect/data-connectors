@@ -1,0 +1,29 @@
+{
+	"ok": true,
+	"messages": [
+		{
+			"type": "message",
+			"user": "U0123456789",
+			"text": "Old thread that is still getting replies",
+			"ts": "1788000000.000600",
+			"team": "T0123456789",
+			"thread_ts": "1788000000.000600",
+			"reply_count": 1,
+			"latest_reply": "1790000000.000700",
+			"reply_users": ["U0555555555"]
+		},
+		{
+			"type": "message",
+			"user": "U0555555555",
+			"text": "Late reply to the old thread",
+			"ts": "1790000000.000700",
+			"team": "T0123456789",
+			"thread_ts": "1788000000.000600",
+			"parent_user_id": "U0123456789"
+		}
+	],
+	"has_more": false,
+	"response_metadata": {
+		"next_cursor": ""
+	}
+}

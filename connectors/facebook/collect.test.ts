@@ -347,7 +347,7 @@ describe("collectFacebook", () => {
 		assert.equal(stateFor(h, "friends"), undefined);
 	});
 
-	it("reads posts with a module-resolved query, keeps only the viewer's own, and saves the newest time", async () => {
+	it("reads posts with a module-resolved query, keeps only the viewer's own, and marks the walk complete", async () => {
 		const timeline = loadFixture(TIMELINE);
 		const units = ((timeline.data as JsonRecord).node as JsonRecord)
 			.timeline_list_feed_units as JsonRecord;
@@ -370,7 +370,7 @@ describe("collectFacebook", () => {
 		assert.deepEqual(stateFor(h, "posts"), {
 			type: "STATE",
 			stream: "posts",
-			cursor: { newest_create_time: "2022-03-04T15:07:37.000Z" },
+			cursor: {},
 		});
 	});
 
@@ -413,7 +413,7 @@ describe("collectFacebook", () => {
 		assert.deepEqual(stateFor(h, "posts"), {
 			type: "STATE",
 			stream: "posts",
-			cursor: { newest_create_time: "2022-03-05T17:06:40.000Z" },
+			cursor: {},
 		});
 	});
 
@@ -457,7 +457,7 @@ describe("collectFacebook", () => {
 		assert.deepEqual(stateFor(h, "reactions"), {
 			type: "STATE",
 			stream: "reactions",
-			cursor: { newest_time: "2022-03-30T21:20:59.000Z" },
+			cursor: {},
 		});
 	});
 

@@ -1,0 +1,76 @@
+{
+  "turns": [
+    {
+      "turn_key": {
+        "chat_id": "b9f61186-a9f6-4a1c-87af-c1f2c4a0dbd0",
+        "turn_id": "2ad9cd58-7f59-4aea-81a1-0b65019e0eaf"
+      },
+      "create_time": "2026-01-02T10:01:07.123456Z",
+      "last_update_time": "2026-01-03T10:02:14.123456Z",
+      "state": "STATE_OK",
+      "author": {
+        "author_id": "YntB_ZeqRq2l_aVf2gWDCZl4oBttQzDvhj9cXafWcF8",
+        "name": "Synthetic name 4 lorem"
+      },
+      "candidates": [
+        {
+          "candidate_id": "9c1e0a52-3b7d-4f0e-9a51-6d2c8e4b7f10",
+          "create_time": "2026-01-07T10:06:42.123456Z",
+          "raw_content": "Synthetic raw_content 7 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+          "is_final": true,
+          "model_type": "MODEL_TYPE_PIPSQUEAK_3"
+        }
+      ],
+      "primary_candidate_id": "9c1e0a52-3b7d-4f0e-9a51-6d2c8e4b7f10"
+    },
+    {
+      "turn_key": {
+        "chat_id": "b9f61186-a9f6-4a1c-87af-c1f2c4a0dbd0",
+        "turn_id": "96d2c19a-a2c0-47ad-85d4-eadd07cb1d7e"
+      },
+      "create_time": "2026-01-10T10:09:03.123456Z",
+      "last_update_time": "2026-01-11T10:10:10.123456Z",
+      "state": "STATE_OK",
+      "author": {
+        "author_id": "100011",
+        "is_human": true,
+        "name": "Synthetic name 12 lorem"
+      },
+      "candidates": [
+        {
+          "candidate_id": "dc202f61-cc75-4870-8dd1-ab2cd0d22af8",
+          "create_time": "2026-01-14T10:13:31.123456Z",
+          "raw_content": "Synthetic raw_content 14 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+          "is_final": true
+        }
+      ],
+      "primary_candidate_id": "dc202f61-cc75-4870-8dd1-ab2cd0d22af8"
+    },
+    {
+      "turn_key": {
+        "chat_id": "b9f61186-a9f6-4a1c-87af-c1f2c4a0dbd0",
+        "turn_id": "fcd4b710-bcc8-427b-8faa-80804104e602"
+      },
+      "create_time": "2026-01-16T10:15:45.123456Z",
+      "last_update_time": "2026-01-17T10:16:52.123456Z",
+      "state": "STATE_OK",
+      "author": {
+        "author_id": "YntB_ZeqRq2l_aVf2gWDCZl4oBttQzDvhj9cXafWcF8",
+        "name": "Synthetic name 18 lorem"
+      },
+      "candidates": [
+        {
+          "candidate_id": "4f7a2d91-8e3c-4b6a-b5d0-1c9e7f3a2b64",
+          "create_time": "2026-01-21T10:20:20.123456Z",
+          "raw_content": "Synthetic raw_content 21 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+          "is_final": true,
+          "model_type": "MODEL_TYPE_PIPSQUEAK_3"
+        }
+      ],
+      "primary_candidate_id": "4f7a2d91-8e3c-4b6a-b5d0-1c9e7f3a2b64"
+    }
+  ],
+  "meta": {
+    "next_token": "Synthetic next_token 23 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+  }
+}

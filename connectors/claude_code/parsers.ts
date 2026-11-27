@@ -56,6 +56,19 @@ export function truncateBody(
 	return body.length > max ? body.slice(0, max) : body;
 }
 
+// ─── Tool-block bodies ──────────────────────────────────────────────────
+
+/**
+ * The body of a `tool_use` or `tool_result` content block, stored as written:
+ * tool input as JSON, a tool result as its text (JSON when it has no text).
+ */
+export function toolBlockBody(block: ContentPart): string {
+	if (block.type === "tool_use") {
+		return JSON.stringify(block.input ?? {});
+	}
+	return extractContent(block.content) ?? JSON.stringify(block.content ?? "");
+}
+
 // ─── Content extraction (messages + attachments) ────────────────────────
 
 function extractFromArrayPart(p: unknown): string {

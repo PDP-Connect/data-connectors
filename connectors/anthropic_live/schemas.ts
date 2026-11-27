@@ -57,7 +57,8 @@ export const messagesSchema = z.object({
 });
 
 export const accountPlanSchema = z.object({
-	id: idSchema,
+	id: z.string().min(1).max(141),
+	is_default: z.boolean().optional(),
 	account_id: idSchema.nullable(),
 	// "personal" / "workspace"
 	account_structure: pdppSafeText.max(80).nullable(),
@@ -80,6 +81,14 @@ export const accountPlanSchema = z.object({
 		})
 		.strict()
 		.nullable(),
+	// Country that issued the card on file; not the holder's address. Null
+	// without a card. Country is coarse, but with other fields it can narrow
+	// who a person is, so consumers should treat it as identifying.
+	payment_country: z
+		.string()
+		.regex(/^[A-Z]{2}$/)
+		.nullable()
+		.optional(),
 });
 
 export const usageLimitsSchema = z.object({

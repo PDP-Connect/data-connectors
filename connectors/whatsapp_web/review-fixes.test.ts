@@ -1,0 +1,1127 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * Review round 1 findings, one test each, over a synthetic page that answers
+ * the connector's store scripts with the live shapes (all values invented).
+ */
+
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import vm from "node:vm";
+import type {
+	DetailGapStartEntry,
+	StreamScope,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	makeRecordingEmit,
+	type RecordingEmit,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { collect, probeSession } from "./index.ts";
+import { SCHEMAS } from "./schemas.ts";
+import { validateRecord } from "./schemas.ts";
+
+const asObject = (value: unknown): Record<string, unknown> =>
+	typeof value === "object" && value !== null
+		? (value as Record<string, unknown>)
+		: {};
+
+const READY = {
+	require_function: true,
+	chats: true,
+	contacts: true,
+	groups: true,
+	find_messages: true,
+	send_request: true,
+};
+
+const TIMINGS = {
+	settleAttempts: 1,
+	settleMs: 0,
+	historyAttempts: 1,
+	historyMs: 0,
+};
+
+const STATE_0 = "COMPLETE_BUT_MORE_MESSAGES_REMAIN_ON_PRIMARY";
+const STATE_1 = "COMPLETE_AND_NO_MORE_MESSAGE_REMAIN_ON_PRIMARY";
+
+const PEER = "15550000001@c.us";
+const OTHER = "15550000003@c.us";
+const MEMBER = "15550000002@c.us";
+const GROUP = "120363000000000001@g.us";
+
+function chatRow(
+	id: string,
+	extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+	return {
+		id,
+		server: id.split("@")[1],
+		title: "Synthetic chat",
+		t: 1792608300,
+		archive: false,
+		pin: null,
+		mute_expiration: 0,
+		unread_count: 0,
+		read_only: false,
+		history_state: STATE_1,
+		msgs_in_memory: 1,
+		...extra,
+	};
+}
+
+function messageRow(
+	chatId: string,
+	n: number,
+	extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+	return {
+		id: `false_${chatId}_SYNTH${String(n)}`,
+		from_me: false,
+		remote: chatId,
+		author: null,
+		type: "chat",
+		subtype: null,
+		body: `Synthetic body ${String(n)}`,
+		caption: null,
+		t: 1792608000 + n,
+		quoted_id: null,
+		quoted_participant: null,
+		mimetype: null,
+		size: null,
+		filename: null,
+		duration: null,
+		is_forwarded: false,
+		star: false,
+		ack: 0,
+		is_view_once: false,
+		call_duration: null,
+		call_outcome: null,
+		is_video_call: false,
+		poll_name: null,
+		lat: null,
+		lng: null,
+		loc: null,
+		vcard_name: null,
+		title: null,
+		description: null,
+		url: null,
+		...extra,
+	};
+}
+
+/** A one-chunk walk that ends on the store's own short page. */
+const completeWalk = (
+	chatId: string,
+	rows: unknown[] = [messageRow(chatId, 1)],
+) => ({
+	chat_id: chatId,
+	status: 200,
+	memory: rows,
+	messages: [],
+	complete: true,
+	anchored: true,
+	stop: "short_page",
+	me_id: "15550000000@c.us",
+});
+
+interface World {
+	sync?: () => unknown;
+	chats: (call: number) => unknown;
+	walk?: (chatId: string, token: string | null) => unknown;
+	send?: (chatId: string) => unknown;
+	contacts?: (ids: string[]) => unknown;
+	groups?: (call: number) => unknown;
+}
+
+interface Calls {
+	scripts: string[];
+	walks: Array<{ chatId: string; token: string | null; sinceMs?: number }>;
+	sends: string[];
+	contactIds: string[][];
+}
+
+function fakePage(world: World): { page: unknown; calls: Calls } {
+	const calls: Calls = { scripts: [], walks: [], sends: [], contactIds: [] };
+	let chatReads = 0;
+	let groupReads = 0;
+	const page = {
+		evaluate: async (script: unknown): Promise<unknown> => {
+			const s = String(script);
+			calls.scripts.push(s);
+			if (s.includes("typeof window.require")) return READY;
+			if (s.includes("WAWebStreamModel"))
+				return world.sync
+					? world.sync()
+					: { mode: "MAIN", resume_complete: true };
+			if (s.includes("sendPeerDataOperationRequest")) {
+				const id = /chatId: "(.+?)"/u.exec(s)?.[1] ?? "";
+				calls.sends.push(id);
+				return world.send ? world.send(id) : { sent: true };
+			}
+			if (s.includes("getModelsArray().map((c) =>"))
+				return world.chats(chatReads++);
+			if (s.includes("msgFindBefore")) {
+				const id = /const chatId = "(.+?)";/u.exec(s)?.[1] ?? "";
+				const tokenMatch = /const resumeToken = (null|"(.*?)");/u.exec(s);
+				const token = tokenMatch?.[2] ?? null;
+				const since = /const sinceMs = (\d+);/u.exec(s)?.[1];
+				calls.walks.push({
+					chatId: id,
+					token,
+					...(since === undefined ? {} : { sinceMs: Number(since) }),
+				});
+				return world.walk ? world.walk(id, token) : completeWalk(id);
+			}
+			if (s.includes("__pdppWhatsAppWebWalks")) return true;
+			if (s.includes("Contact.getModelsArray().filter")) {
+				const ids = JSON.parse(
+					/new Set\((\[.*?\])\)/u.exec(s)?.[1] ?? "[]",
+				) as string[];
+				calls.contactIds.push(ids);
+				return world.contacts
+					? world.contacts(ids)
+					: ids.map((id) => ({
+							id,
+							name: "Synthetic name",
+							short_name: null,
+							push_name: null,
+							is_business: false,
+							verified_name: null,
+						}));
+			}
+			if (s.includes("WAWebGroupMetadataCollection.getModelsArray().map"))
+				return world.groups ? world.groups(groupReads++) : [];
+			throw new Error(`fake page: unexpected script ${s.slice(0, 60)}`);
+		},
+	};
+	return { page, calls };
+}
+
+interface Run {
+	harness: RecordingEmit;
+	calls: Calls;
+	failures: Array<{
+		stream: string;
+		message: string;
+		retryable: boolean;
+		recoveryHint?: unknown;
+	}>;
+}
+
+async function run(
+	world: World,
+	options: {
+		streams?: string[];
+		detailGaps?: DetailGapStartEntry[];
+		recoveryOnly?: boolean;
+		gapPages?: DetailGapStartEntry[][];
+		scopes?: Record<string, Omit<StreamScope, "name">>;
+	} = {},
+): Promise<Run> {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page, calls } = fakePage(world);
+	const failures: Run["failures"] = [];
+	const streams = options.streams ?? [
+		"chats",
+		"messages",
+		"contacts",
+		"groups",
+	];
+	await collect(
+		{
+			requested: new Map<string, StreamScope>(
+				streams.map((name) => [name, { name, ...options.scopes?.[name] }]),
+			),
+			page: page as Parameters<typeof collect>[0]["page"],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			detailGaps: options.detailGaps ?? [],
+			recoveryOnly: options.recoveryOnly === true,
+			reportStreamFailure: async (stream, message, opts = {}) => {
+				failures.push({
+					stream,
+					message,
+					retryable: opts.retryable === true,
+					recoveryHint: opts.recoveryHint,
+				});
+			},
+			...(options.gapPages
+				? {
+						requestDetailGapPage: async () => options.gapPages?.shift() ?? [],
+					}
+				: {}),
+		} as Parameters<typeof collect>[0],
+		TIMINGS,
+	);
+	return { harness, calls, failures };
+}
+
+const recordsOf = (r: Run, stream: string) =>
+	r.harness.emitted.filter((e) => e.stream === stream);
+const messagesOf = (r: Run, type: string) =>
+	r.harness.protocolMessages.map(asObject).filter((m) => m.type === type);
+const stateOf = (r: Run, stream: string) =>
+	messagesOf(r, "STATE").find((m) => m.stream === stream);
+
+// ─── #1 requested scope ──────────────────────────────────────────────────
+
+test("review 1 #1: a contacts-only run emits only contacts and sends no history request", async () => {
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER, { history_state: STATE_0 })],
+			groups: () => [],
+		},
+		{ streams: ["contacts"] },
+	);
+	assert.equal(recordsOf(r, "chats").length, 0);
+	assert.equal(recordsOf(r, "messages").length, 0);
+	assert.equal(recordsOf(r, "groups").length, 0);
+	assert.deepEqual(r.calls.sends, [], "no outbound history request");
+	assert.deepEqual(r.calls.walks, [], "no message is read");
+	assert.deepEqual(
+		recordsOf(r, "contacts").map((c) => c.data.id),
+		[PEER],
+	);
+	assert.ok(stateOf(r, "contacts"));
+	assert.equal(stateOf(r, "chats"), undefined);
+	assert.equal(stateOf(r, "groups"), undefined);
+	assert.equal(messagesOf(r, "DETAIL_COVERAGE").length, 0);
+});
+
+test("review 1 #1: messages without chats is refused, not collected", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER)] },
+		{ streams: ["messages"] },
+	);
+	assert.equal(r.harness.emitted.length, 0);
+	assert.deepEqual(r.calls.walks, []);
+	const skip = messagesOf(r, "SKIP_RESULT");
+	assert.equal(skip.length, 1);
+	assert.equal(skip[0]?.reason, "scope_not_supported");
+});
+
+// ─── #3 pending gaps ─────────────────────────────────────────────────────
+
+const pendingGap = (chatId: string): DetailGapStartEntry =>
+	({
+		gap_id: `gap-${chatId}`,
+		lease_id: `lease-${chatId}`,
+		stream: "messages",
+		record_key: chatId,
+	}) as unknown as DetailGapStartEntry;
+
+test("review 1 #3: a chat with a pending gap that now reads completely acknowledges the gap", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{ detailGaps: [pendingGap(PEER)] },
+	);
+	const recovered = messagesOf(r, "DETAIL_GAP_RECOVERED");
+	assert.equal(recovered.length, 1);
+	assert.equal(recovered[0]?.gap_id, `gap-${PEER}`);
+	assert.equal(recovered[0]?.lease_id, `lease-${PEER}`);
+	assert.equal(recovered[0]?.record_key, PEER);
+});
+
+test("review 1 #3: a recovery-only run re-reads only the pending chats and checkpoints nothing", async () => {
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER), chatRow(OTHER), chatRow(GROUP)],
+			groups: () => [],
+		},
+		{ detailGaps: [pendingGap(PEER)], recoveryOnly: true },
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER],
+	);
+	assert.equal(recordsOf(r, "groups").length, 0);
+	assert.equal(recordsOf(r, "contacts").length, 0);
+	assert.equal(messagesOf(r, "STATE").length, 0);
+	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 1);
+});
+
+// ─── #4 unsafe text ──────────────────────────────────────────────────────
+
+test("review 1 #4: a message whose text cannot be stored is withheld and its chat gaps", async () => {
+	const r = await run({
+		chats: () => [chatRow(PEER)],
+		walk: (id) =>
+			completeWalk(id, [
+				messageRow(id, 1),
+				messageRow(id, 2, { body: "bad\u0000text" }),
+			]),
+	});
+	const messages = recordsOf(r, "messages");
+	assert.equal(messages.length, 1, "only the safe message is emitted");
+	assert.ok(messages.every((m) => m.data.text !== null));
+	const gaps = messagesOf(r, "DETAIL_GAP");
+	assert.equal(gaps.length, 1);
+	assert.equal(asObject(gaps[0]?.last_error).class, "unsafe_text");
+	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
+	assert.deepEqual(coverage?.hydrated_keys ?? [], []);
+});
+
+test("review 1 #4: a chat title that cannot be stored fails chats without STATE", async () => {
+	const r = await run({
+		chats: () => [chatRow(PEER, { title: "bad\u0000title" }), chatRow(OTHER)],
+	});
+	assert.deepEqual(
+		recordsOf(r, "chats").map((c) => c.data.id),
+		[OTHER],
+	);
+	assert.equal(stateOf(r, "chats"), undefined);
+	assert.ok(r.failures.some((f) => f.stream === "chats"));
+});
+
+// ─── #5 missing history-state row ────────────────────────────────────────
+
+test("review 1 #5: a chat that drops out of the poll after its history request still gaps", async () => {
+	const r = await run({
+		// The two settle reads hold the chat; the history poll does not.
+		chats: (call) =>
+			call < 2 ? [chatRow(PEER, { history_state: STATE_0 })] : [],
+		send: () => ({ sent: true }),
+	});
+	assert.deepEqual(r.calls.sends, [PEER]);
+	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
+	assert.deepEqual(coverage?.hydrated_keys ?? [], []);
+	assert.deepEqual(coverage?.gap_keys, [PEER]);
+});
+
+// ─── #6 missing contacts ─────────────────────────────────────────────────
+
+test("review 1 #6: an id the contact collection does not hold still gets its record before the STATE", async () => {
+	const r = await run({
+		chats: () => [chatRow(PEER), chatRow(OTHER)],
+		contacts: (ids) =>
+			ids
+				.filter((id) => id === PEER)
+				.map((id) => ({
+					id,
+					name: "Synthetic name",
+					short_name: null,
+					push_name: null,
+					is_business: false,
+					verified_name: null,
+				})),
+	});
+	const ids = recordsOf(r, "contacts").map((c) => c.data.id);
+	assert.deepEqual(new Set(ids), new Set([PEER, OTHER]));
+	const other = recordsOf(r, "contacts").find((c) => c.data.id === OTHER);
+	assert.equal(other?.data.name, null);
+	assert.deepEqual(
+		new Set(asObject(stateOf(r, "contacts")?.cursor).ids as string[]),
+		new Set([PEER, OTHER]),
+	);
+});
+
+// ─── #7 inventory end ────────────────────────────────────────────────────
+
+test("review 1 #7: a client that has not caught up is not an inventory end", async () => {
+	await assert.rejects(
+		() =>
+			run({
+				sync: () => ({ mode: "SYNCING", resume_complete: false }),
+				chats: () => [chatRow(PEER)],
+			}),
+		(error: unknown) =>
+			asObject(error).code === "whatsapp_web_chat_list_never_settled",
+	);
+});
+
+test("review 1 #7: duplicate ids never pass as the same inventory", async () => {
+	const r = await run({ chats: () => [chatRow(PEER), chatRow(PEER)] });
+	assert.deepEqual(
+		recordsOf(r, "chats").map((c) => c.data.id),
+		[PEER],
+		"each chat once",
+	);
+	// [A, A] after [A, B] is not the same id set: within the budget the
+	// inventory is not proven, so nothing is checkpointed.
+	await assert.rejects(
+		() =>
+			run({
+				chats: (call) =>
+					call === 0
+						? [chatRow(PEER), chatRow(OTHER)]
+						: [chatRow(PEER), chatRow(PEER)],
+			}),
+		(error: unknown) =>
+			asObject(error).code === "whatsapp_web_chat_list_never_settled",
+	);
+});
+
+test("review 1 #7: a signed-out client (QR mode) is an authentication failure", async () => {
+	await assert.rejects(
+		() =>
+			run({
+				sync: () => ({ mode: "QR", resume_complete: null }),
+				chats: () => [],
+			}),
+		(error: unknown) => asObject(error).code === "whatsapp_web_auth_failed",
+	);
+});
+
+// ─── #8 group inventory ──────────────────────────────────────────────────
+
+test("review 1 #8: a group chat with no metadata yet fails groups (and contacts) without STATE", async () => {
+	const r = await run({
+		chats: () => [chatRow(PEER), chatRow(GROUP)],
+		groups: () => [],
+	});
+	assert.equal(stateOf(r, "groups"), undefined);
+	assert.equal(stateOf(r, "contacts"), undefined);
+	assert.ok(r.failures.some((f) => f.stream === "groups" && f.retryable));
+	assert.ok(r.failures.some((f) => f.stream === "contacts"));
+});
+
+test("review 1 #8: metadata that arrives within the budget proves the group inventory", async () => {
+	const group = {
+		id: GROUP,
+		subject: "Synthetic group",
+		creation: 1792000000,
+		owner: MEMBER,
+		announce: false,
+		restrict: false,
+		participants: [{ id: MEMBER, is_admin: true, is_super_admin: true }],
+	};
+	const r = await run({
+		chats: () => [chatRow(PEER), chatRow(GROUP)],
+		groups: (call) => (call === 0 ? [] : [group]),
+	});
+	assert.deepEqual(
+		recordsOf(r, "groups").map((g) => g.data.id),
+		[GROUP],
+	);
+	assert.ok(stateOf(r, "groups"));
+	assert.deepEqual(r.failures, []);
+});
+
+// ─── #9 run-level statuses ───────────────────────────────────────────────
+
+const statusWalk = (status: number) => (id: string) => ({
+	...completeWalk(id),
+	status,
+	complete: false,
+	stop: "status",
+});
+
+test("review 1 #9: a 401 from the local store is an authentication failure, not a gap", async () => {
+	await assert.rejects(
+		() => run({ chats: () => [chatRow(PEER)], walk: statusWalk(401) }),
+		(error: unknown) => asObject(error).code === "whatsapp_web_auth_failed",
+	);
+});
+
+test("review 1 #9: a 500 or 429 stops the run for a retry instead of gapping every chat", async () => {
+	for (const status of [500, 429]) {
+		await assert.rejects(
+			() => run({ chats: () => [chatRow(PEER)], walk: statusWalk(status) }),
+			(error: unknown) =>
+				asObject(error).code === "whatsapp_web_local_store_unavailable" &&
+				asObject(error).retryable === true,
+		);
+	}
+});
+
+test("review 1 #9: a 404 for one chat stays that chat's gap", async () => {
+	const r = await run({
+		chats: () => [chatRow(PEER), chatRow(OTHER)],
+		walk: (id) => (id === PEER ? statusWalk(404)(id) : completeWalk(id)),
+	});
+	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
+	assert.deepEqual(coverage?.gap_keys, [PEER]);
+	assert.deepEqual(coverage?.hydrated_keys, [OTHER]);
+});
+
+// ─── #10 manifest and zod agree ──────────────────────────────────────────
+
+test("review 1 #10: each stream's manifest required list is exactly zod's required keys", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			schema: { required: string[]; properties: Record<string, unknown> };
+		}>;
+	};
+	for (const stream of manifest.streams) {
+		const zod = SCHEMAS[stream.name] as unknown as {
+			shape: Record<string, { isOptional(): boolean }>;
+		};
+		const zodRequired = Object.entries(zod.shape)
+			.filter(([, field]) => !field.isOptional())
+			.map(([key]) => key)
+			.sort();
+		assert.deepEqual(
+			[...stream.schema.required].sort(),
+			zodRequired,
+			stream.name,
+		);
+		assert.deepEqual(
+			Object.keys(stream.schema.properties).sort(),
+			Object.keys(zod.shape).sort(),
+			stream.name,
+		);
+	}
+});
+
+// ─── #11 desktop probe ───────────────────────────────────────────────────
+
+function probePage(url: string, signedIn: boolean) {
+	const origin = new URL(url).origin;
+	const sandbox = vm.createContext({
+		location: { origin },
+		window: {
+			require: (name: string) => {
+				if (name !== "WAWebUserPrefsMeUser")
+					throw new Error(`no module ${name}`);
+				return {
+					getMaybeMePnUser: () =>
+						signedIn ? { _serialized: "15550000000@c.us" } : null,
+					getMaybeMeLidUser: () => null,
+				};
+			},
+		},
+	});
+	return {
+		url: () => url,
+		evaluate: async (script: unknown) =>
+			await vm.runInContext(String(script), sandbox),
+	};
+}
+
+test("review 1 #11: the desktop probe refuses look-alike hosts and the QR page", async () => {
+	const probe = (url: string, signedIn: boolean) =>
+		probeSession({ page: probePage(url, signedIn) } as unknown as Parameters<
+			typeof probeSession
+		>[0]);
+	assert.equal(await probe("https://web.whatsapp.com/", true), true);
+	assert.equal(
+		await probe("https://web.whatsapp.com.evil.example/", true),
+		false,
+	);
+	assert.equal(await probe("https://web.whatsapp.com/", false), false);
+});
+
+// ─── review round 2 ──────────────────────────────────────────────────────
+
+test("review 2 #1: a walk is not capped per run: it goes on chunk after chunk until the store's own end", async () => {
+	const CHUNKS = 600;
+	const r = await run({
+		chats: () => [chatRow(PEER)],
+		walk: (id, token) => {
+			const n = token === null ? 0 : Number(token);
+			if (n + 1 < CHUNKS)
+				return {
+					...completeWalk(id, [messageRow(id, n + 1)]),
+					complete: false,
+					stop: "chunk",
+					more: true,
+					token: String(n + 1),
+				};
+			return completeWalk(id, [messageRow(id, n + 1)]);
+		},
+	});
+	assert.equal(recordsOf(r, "messages").length, CHUNKS);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+});
+
+test("review 2 #2: later gap pages are drained, and a pending chat missing from the inventory keeps its gap pending", async () => {
+	const GONE = "15550000009@c.us";
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{
+			detailGaps: [pendingGap(GONE)],
+			// The runtime's next page holds a gap the START page did not.
+			gapPages: [[pendingGap(GONE), pendingGap(PEER)]],
+		},
+	);
+	const recovered = messagesOf(r, "DETAIL_GAP_RECOVERED");
+	assert.deepEqual(
+		recovered.map((g) => g.gap_id),
+		[`gap-${PEER}`],
+		"the second page's gap of a chat read completely is acknowledged",
+	);
+	assert.ok(
+		!recovered.some((g) => g.record_key === GONE),
+		"the absent chat's gap is never acknowledged",
+	);
+	const failure = r.failures.find((f) => f.stream === "messages");
+	assert.ok(
+		failure,
+		"messages are not checkpointed while a pending chat is unreadable",
+	);
+	assert.equal(failure.retryable, true);
+	assert.equal(messagesOf(r, "DETAIL_COVERAGE").length, 0);
+});
+
+test("review 3 #1: no child gap is emitted for a chat whose parent record this run never emitted", async () => {
+	const GONE = "15550000009@c.us";
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{ detailGaps: [pendingGap(GONE)] },
+	);
+	const parents = new Set(recordsOf(r, "chats").map((c) => String(c.data.id)));
+	for (const gap of messagesOf(r, "DETAIL_GAP")) {
+		assert.ok(
+			parents.has(String(gap.record_key)),
+			`gap ${String(gap.record_key)} has its parent chat record in this run`,
+		);
+	}
+	assert.ok(r.failures.some((f) => f.stream === "messages" && f.retryable));
+});
+
+test("review 2 #2: a recovery-only run walks pending chats from every gap page", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{
+			detailGaps: [pendingGap(PEER)],
+			recoveryOnly: true,
+			gapPages: [[pendingGap(OTHER)]],
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER, OTHER],
+	);
+	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 2);
+	assert.equal(messagesOf(r, "STATE").length, 0);
+});
+
+test("review 2 #3: a poll row without a history state keeps the chat's last known state and gaps it", async () => {
+	const r = await run({
+		chats: (call) =>
+			call < 2
+				? [chatRow(PEER, { history_state: STATE_0 })]
+				: [chatRow(PEER, { history_state: null })],
+		send: () => ({ sent: true }),
+	});
+	assert.deepEqual(r.calls.sends, [PEER]);
+	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
+	assert.deepEqual(coverage?.hydrated_keys ?? [], []);
+	assert.deepEqual(coverage?.gap_keys, [PEER]);
+});
+
+// ─── scope push-down ─────────────────────────────────────────────────────
+
+const OLD_T = 1_700_000_000;
+const SINCE = "2026-10-20T00:00:00Z";
+const SINCE_MS = Date.parse(SINCE);
+const releasesOf = (r: Run) =>
+	r.calls.scripts.filter(
+		(s) => s.includes("__pdppWhatsAppWebWalks") && !s.includes("msgFindBefore"),
+	).length;
+/** A chunk with more after it, as the in-page walk reports one. */
+const moreWalk = (chatId: string, rows: unknown[], token: string) => ({
+	...completeWalk(chatId, rows),
+	complete: false,
+	stop: "chunk",
+	more: true,
+	token,
+});
+
+test("since: a chat whose last activity is older than the window is still walked (no history request), so an in-window system message is kept", async () => {
+	const inWindow = Math.floor(SINCE_MS / 1000) + 60;
+	const r = await run(
+		{
+			chats: () => [
+				chatRow(PEER),
+				chatRow(OTHER, { t: OLD_T, history_state: STATE_0 }),
+			],
+			walk: (id) =>
+				id === OTHER
+					? completeWalk(id, [
+							messageRow(id, 1, {
+								type: "e2e_notification",
+								body: null,
+								t: inWindow,
+							}),
+						])
+					: completeWalk(id),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => [w.chatId, w.sinceMs]),
+		[
+			[PEER, SINCE_MS],
+			[OTHER, SINCE_MS],
+		],
+		"every chat is walked, each with the window's start",
+	);
+	assert.deepEqual(r.calls.sends, [], "no history request for the old chat");
+	assert.ok(
+		recordsOf(r, "messages").some((m) => m.data.id === `false_${OTHER}_SYNTH1`),
+		"the system message inside the window is emitted",
+	);
+	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
+	assert.deepEqual(coverage?.hydrated_keys, [PEER, OTHER]);
+	assert.deepEqual(coverage?.gap_keys ?? [], []);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+});
+
+test("since: a local walk that already reached the window's start sends no history request", async () => {
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER, { history_state: STATE_0 })],
+			walk: (id) => ({ ...completeWalk(id), stop: "before_since" }),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.deepEqual(r.calls.sends, []);
+	assert.equal(r.calls.walks.length, 1);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+});
+
+test("since: a local store that ends inside the window gets the history request, then a re-walk that emits nothing twice", async () => {
+	let walks = 0;
+	const r = await run(
+		{
+			chats: (call) =>
+				call < 2
+					? [chatRow(PEER, { history_state: STATE_0 })]
+					: [chatRow(PEER, { history_state: STATE_1 })],
+			send: () => ({ sent: true }),
+			walk: (id) => {
+				walks += 1;
+				return walks === 1
+					? completeWalk(id, [messageRow(id, 2)])
+					: completeWalk(id, [messageRow(id, 2), messageRow(id, 1)]);
+			},
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.deepEqual(r.calls.sends, [PEER]);
+	assert.equal(r.calls.walks.length, 2);
+	assert.deepEqual(
+		recordsOf(r, "messages").map((m) => m.data.id),
+		[`false_${PEER}_SYNTH2`, `false_${PEER}_SYNTH1`],
+	);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+});
+
+test("bounded: a chat read only within the window leaves its earlier gap pending", async () => {
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER)],
+			walk: (id) => ({ ...completeWalk(id), stop: "before_since" }),
+		},
+		{
+			streams: ["chats", "messages"],
+			detailGaps: [pendingGap(PEER)],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 0);
+	assert.deepEqual(r.failures, []);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+});
+
+test("bounded: a recovery run that reads a chat to its store's own end, nothing left on the phone, closes its gap", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER)] },
+		{
+			streams: ["chats", "messages"],
+			detailGaps: [pendingGap(PEER)],
+			recoveryOnly: true,
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	const recovered = messagesOf(r, "DETAIL_GAP_RECOVERED");
+	assert.deepEqual(
+		recovered.map((g) => g.gap_id),
+		[`gap-${PEER}`],
+	);
+	assert.deepEqual(r.failures, []);
+});
+
+test("bounded: a chat with no in-memory anchor still gets its history request, then the walk again", async () => {
+	let walks = 0;
+	const r = await run(
+		{
+			chats: (call) =>
+				call < 2
+					? [chatRow(PEER, { history_state: STATE_0, msgs_in_memory: 0 })]
+					: [chatRow(PEER, { history_state: STATE_1 })],
+			send: () => ({ sent: true }),
+			walk: (id) => {
+				walks += 1;
+				return walks === 1
+					? {
+							...completeWalk(id, []),
+							complete: false,
+							anchored: false,
+							stop: "no_anchor",
+						}
+					: completeWalk(id);
+			},
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.deepEqual(r.calls.sends, [PEER]);
+	assert.equal(r.calls.walks.length, 2);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+});
+
+test("resources: only the chats the requested message ids name are walked, each until its ids are found", async () => {
+	const wanted = `false_${PEER}_SYNTH1`;
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER), chatRow(OTHER)],
+			walk: (id) => moreWalk(id, [messageRow(id, 1)], "1"),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { resources: [wanted] } },
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER],
+		"one chunk of the named chat, no other chat",
+	);
+	assert.equal(releasesOf(r), 1, "the unfinished in-page walk is released");
+	assert.deepEqual(r.calls.sends, []);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+});
+
+test("resources: an id not found under the chat it names sends the walk over the other chats", async () => {
+	const wanted = `false_${PEER}_SYNTH9`;
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER), chatRow(OTHER)],
+			walk: (id) =>
+				id === OTHER
+					? completeWalk(id, [messageRow(PEER, 9, { remote: OTHER })])
+					: completeWalk(id),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { resources: [wanted] } },
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER, OTHER],
+	);
+	assert.ok(recordsOf(r, "messages").some((m) => m.data.id === wanted));
+	assert.deepEqual(r.calls.sends, [], "the fallback search asks no phone");
+});
+
+test("resources: contacts asks the page for the requested ids only", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{ streams: ["contacts"], scopes: { contacts: { resources: [OTHER] } } },
+	);
+	assert.deepEqual(r.calls.contactIds, [[OTHER]]);
+	assert.deepEqual(
+		recordsOf(r, "contacts").map((c) => c.data.id),
+		[OTHER],
+	);
+	assert.ok(stateOf(r, "contacts"));
+});
+
+test("resources: groups proves and emits only the requested groups", async () => {
+	const OTHER_GROUP = "120363000000000002@g.us";
+	const r = await run(
+		{
+			chats: () => [chatRow(GROUP), chatRow(OTHER_GROUP)],
+			// Only the requested group has metadata yet.
+			groups: () => [
+				{
+					id: GROUP,
+					subject: "Synthetic group",
+					creation: 1792600000,
+					owner: MEMBER,
+					participants: [{ id: MEMBER, is_admin: true, is_super_admin: true }],
+				},
+			],
+		},
+		{ streams: ["groups"], scopes: { groups: { resources: [GROUP] } } },
+	);
+	assert.deepEqual(
+		recordsOf(r, "groups").map((g) => g.data.id),
+		[GROUP],
+	);
+	assert.deepEqual(r.failures, []);
+	assert.ok(stateOf(r, "groups"));
+});
+
+test("bounded: a chat title that cannot be stored fails chats only when the scope selects that chat", async () => {
+	const unsafe = { title: "bad\u0000text" };
+	const outside = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER, { t: OLD_T, ...unsafe })] },
+		{
+			streams: ["chats"],
+			scopes: { chats: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.deepEqual(outside.failures, []);
+	assert.ok(stateOf(outside, "chats"));
+	const inside = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER, unsafe)] },
+		{
+			streams: ["chats"],
+			scopes: { chats: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.ok(inside.failures.some((f) => f.stream === "chats"));
+});
+
+test("bounded: a message that cannot be stored gaps its chat only when the scope selects it", async () => {
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER)],
+			walk: (id) =>
+				completeWalk(id, [
+					messageRow(id, 1),
+					messageRow(id, 2, { t: OLD_T, body: "bad\u0000text" }),
+				]),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.hydrated_keys, [PEER]);
+	const inside = await run(
+		{
+			chats: () => [chatRow(PEER)],
+			walk: (id) =>
+				completeWalk(id, [
+					messageRow(id, 1),
+					messageRow(id, 2, { body: "bad\u0000text" }),
+				]),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { time_range: { since: SINCE } } },
+		},
+	);
+	assert.equal(
+		asObject(messagesOf(inside, "DETAIL_GAP")[0]?.last_error).class,
+		"unsafe_text",
+	);
+});
+
+test("stream failures carry a portable recovery hint", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER, { title: "bad\u0000text" })] },
+		{ streams: ["chats"] },
+	);
+	const failure = r.failures.find((f) => f.stream === "chats");
+	assert.ok(failure);
+	assert.equal(failure.retryable, false);
+	assert.deepEqual(failure.recoveryHint, {
+		action: "retry_on_connector_upgrade",
+		retryable: false,
+	});
+});
+
+test("resources: an unrelated chat's pending gap does not hold a scoped run back", async () => {
+	const wanted = `false_${PEER}_SYNTH1`;
+	const r = await run(
+		{
+			chats: () => [chatRow(PEER), chatRow(OTHER, { title: "bad\u0000title" })],
+		},
+		{
+			streams: ["chats", "messages"],
+			detailGaps: [pendingGap(OTHER)],
+			scopes: {
+				chats: { resources: [PEER] },
+				messages: { resources: [wanted] },
+			},
+		},
+	);
+	assert.deepEqual(r.failures, []);
+	const coverage = messagesOf(r, "DETAIL_COVERAGE")[0];
+	assert.deepEqual(coverage?.hydrated_keys, [PEER]);
+	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 0);
+});
+
+test("resources: the unselected chats are reported as skipped by scope", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { resources: [`false_${PEER}_SYNTH1`] } },
+		},
+	);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.optional_skip_keys, [
+		OTHER,
+	]);
+});
+
+test("resources: a recovery-only run does not walk a pending chat the requested ids do not name", async () => {
+	const r = await run(
+		{ chats: () => [chatRow(PEER), chatRow(OTHER)] },
+		{
+			streams: ["chats", "messages"],
+			detailGaps: [pendingGap(PEER), pendingGap(OTHER)],
+			recoveryOnly: true,
+			scopes: { messages: { resources: [`false_${PEER}_SYNTH1`] } },
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER],
+	);
+	assert.deepEqual(r.calls.sends, []);
+	assert.deepEqual(r.failures, []);
+	assert.equal(messagesOf(r, "DETAIL_GAP_RECOVERED").length, 0);
+});
+
+test("resources: the fallback search for a missing id stops once it is found and asks no phone", async () => {
+	const THIRD = "15550000004@c.us";
+	const wanted = `false_${PEER}_SYNTH9`;
+	const r = await run(
+		{
+			chats: () => [
+				chatRow(PEER),
+				chatRow(OTHER, { history_state: STATE_0 }),
+				chatRow(THIRD, { history_state: STATE_0 }),
+			],
+			send: () => ({ sent: true }),
+			walk: (id) =>
+				id === OTHER
+					? moreWalk(id, [messageRow(PEER, 9, { remote: OTHER })], "1")
+					: completeWalk(id),
+		},
+		{
+			streams: ["chats", "messages"],
+			scopes: { messages: { resources: [wanted] } },
+		},
+	);
+	assert.deepEqual(
+		r.calls.walks.map((w) => w.chatId),
+		[PEER, OTHER],
+		"the third chat is not walked once the id is found",
+	);
+	assert.deepEqual(r.calls.sends, []);
+	assert.equal(releasesOf(r), 1);
+	assert.deepEqual(r.failures, []);
+	assert.equal(messagesOf(r, "DETAIL_GAP").length, 0);
+	assert.deepEqual(messagesOf(r, "DETAIL_COVERAGE")[0]?.optional_skip_keys, [
+		THIRD,
+	]);
+});

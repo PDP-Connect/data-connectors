@@ -3,6 +3,15 @@
 
 import { readFileSync } from "node:fs";
 
+const manifest = JSON.parse(
+	readFileSync(new URL("../../../connectors/chatgpt/manifest.json", import.meta.url), "utf8"),
+);
+/** Export-summary details: one count per manifest stream, zero unless given. */
+export const chatgptDetails = (counts) => ({
+	...Object.fromEntries(manifest.streams.map((stream) => [stream.name, 0])),
+	...counts,
+});
+
 // The connector's own accounts/check fixture: a real response shape with ids
 // and dates replaced by placeholders.
 const accountsCheck = readFileSync(
@@ -124,6 +133,37 @@ export function resolveFixture(raw) {
 			],
 		});
 	}
+	if (path === "/backend-api/gizmos/mine") {
+		return json({
+			items: [
+				{
+					resource: {
+						gizmo: {
+							id: "g-fixture-1",
+							display: { name: "Fixture planner", description: "Plans fixture work" },
+							tools: [{ type: "browser" }],
+							sharing: "private",
+						},
+					},
+				},
+			],
+		});
+	}
+	if (path === "/backend-api/user_system_messages") {
+		return json({ about_user_message: "Synthetic fixture user", enabled: true });
+	}
+	if (path === "/backend-api/shared_conversations") {
+		return json({
+			items: [
+				{
+					share_id: "share-fixture-1",
+					conversation_id: "conv-1",
+					title: "Mobile fixture 1",
+					create_time: 1780000000,
+				},
+			],
+		});
+	}
 	if (path === "/backend-api/accounts/check/v4-2023-04-27") {
 		return accountsCheckStatus === 200
 			? {
@@ -181,11 +221,11 @@ export const pageshimCase = {
 	exportSummary: {
 		count: 2,
 		label: "conversations",
-		details: { conversations: 2, messages: 2, memories: 0, account_plan: 0 },
+		details: chatgptDetails({ conversations: 2, messages: 2 }),
 	},
 	emptyExportSummary: {
 		count: 0,
 		label: "conversations",
-		details: { conversations: 0, messages: 0, memories: 0, account_plan: 0 },
+		details: chatgptDetails({}),
 	},
 };

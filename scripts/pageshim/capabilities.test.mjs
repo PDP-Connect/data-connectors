@@ -15,22 +15,30 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 	assert.deepEqual(pageShimConnectors(fileURLToPath(new URL("../..", import.meta.url))), [
 		"anthropic",
 		"anthropic_live",
+		"character_ai",
 		"chatgpt",
 		"discord_browser",
 		"facebook",
 		"github_browser",
 		"icloud_notes",
+		"instinct",
 		"linkedin",
 		"meta",
+		"mountain_project",
 		"muse",
 		"oura_browser",
+		"perplexity",
+		"polar_flow",
+		"reddit",
+		"slack_browser",
 		"spotify",
 		"strava_browser",
 		"tiktok",
+		"whatsapp_web",
 		"x_browser",
 		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "muse", "spotify", "youtube", "linkedin", "tiktok"]) {
+	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "character_ai", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "facebook", "meta", "mountain_project", "muse", "spotify", "youtube", "linkedin", "tiktok", "whatsapp_web", "perplexity", "instinct", "polar_flow", "slack_browser", "reddit"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -173,6 +181,18 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			network: ["same_origin_page_fetch", "host_http_request"],
 			browser: ["page_script_evaluation", "page_navigation", "host_http_request"],
 		},
+		character_ai: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
+		instinct: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
+		reddit: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		strava_browser: {
 			network: ["same_origin_page_fetch", "host_http_request"],
 			browser: ["page_script_evaluation", "page_navigation", "host_http_request"],
@@ -205,11 +225,30 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
+		mountain_project: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		muse: {
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		polar_flow: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
+		whatsapp_web: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
 		spotify: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation"],
+		},
+		perplexity: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation"],
+		},
+		slack_browser: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation"],
 		},

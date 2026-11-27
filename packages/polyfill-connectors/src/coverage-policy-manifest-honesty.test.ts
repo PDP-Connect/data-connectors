@@ -257,7 +257,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["chase.balances", "fe1f0c87463b52cf"],
 	// consent_time_field moved from create_time to update_time; the stream still
 	// has the same implicit required default.
-	["chatgpt.conversations", "00b3c285c36210c1"],
 	// The already-integrated memories.type schema changed this fingerprint before
 	// the root move; the stream still has the same implicit required default.
 	["chatgpt.memories", "6b3a868a27e1e75e"],
@@ -282,7 +281,6 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["github.starred", "9e311bc30648caf0"],
 	["github.issues", "78d301cf719a8421"],
 	["github.pull_requests", "d444968a557e6de5"],
-	["github.gists", "b373793ba858d2c5"],
 	// gmail.messages left this map by declaring `required: true` (it is the
 	// connector's state_stream and the parent of attachments, so a run that
 	// skipped it would not be a Gmail run at all).

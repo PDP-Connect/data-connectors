@@ -37,9 +37,7 @@ differs from this document, for example in binding names, `DONE.status`, or
 `coverage_strategy` values, this document governs.
 
 This profile does not standardize a source platform API, process sandbox,
-package format, artifact registry, or resource-server ingest transport. The
-retired legacy `*-playwright` artifacts used a different manifest, page API,
-and runner. They do not implement this profile.
+package format, artifact registry, or resource-server ingest transport.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY**, and

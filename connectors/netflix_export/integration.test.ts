@@ -88,6 +88,7 @@ function records(
 
 async function runNetflixImport(
 	importRoot: string,
+	state?: Record<string, unknown>,
 ): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
@@ -100,6 +101,7 @@ async function runNetflixImport(
 			TZ: "America/Chicago",
 		},
 		start: {
+			...(state ? { state } : {}),
 			scope: { streams: [{ name: "viewing_activity" }] },
 			type: "START",
 		},
@@ -303,6 +305,73 @@ test("Netflix connector resolves a mixed direct_history dataset using the one ro
 	}
 });
 
+for (const dates of [
+	["25/03/2024", "03/25/2024"],
+	["03/25/2024", "25/03/2024"],
+]) {
+	test(`Netflix connector refuses conflicting date orders with an ambiguous row (${dates[0]} first)`, async () => {
+		const importRoot = await mkdtemp(
+			join(tmpdir(), "pdpp-netflix-conflicting-date-order-"),
+		);
+		try {
+			await writeFile(
+				join(importRoot, "NetflixViewingHistory.csv"),
+				`Title,Date\nInvented Moon,${dates[0]}\nInvented Sun,${dates[1]}\nInvented River,05/03/2024\n`,
+				"utf8",
+			);
+			const { messages } = await runNetflixImport(importRoot);
+			assert.equal(records(messages, "viewing_activity").length, 0);
+			const skips = messages.filter(
+				(message) => message.type === "SKIP_RESULT",
+			);
+			assert.equal(skips.length, 1);
+			const skip = skips[0];
+			if (skip?.type === "SKIP_RESULT") {
+				assert.equal(skip.reason, "ambiguous_date_order");
+			}
+		} finally {
+			await rm(importRoot, { force: true, recursive: true });
+		}
+	});
+}
+
+test("Netflix connector imports conflicting self-evident dates without ambiguous rows", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-self-evident-dates-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Moon,25/03/2024\nInvented Sun,03/25/2024\n",
+			"utf8",
+		);
+		const { messages } = await runNetflixImport(importRoot);
+		const emitted = records(messages, "viewing_activity");
+		assert.equal(emitted.length, 2);
+		assert.deepEqual(emitted.map((record) => record.title).sort(), [
+			"Invented Moon",
+			"Invented Sun",
+		]);
+		assert.ok(
+			emitted.every(
+				(record) => record.watched_at === "2024-03-25T00:00:00.000Z",
+			),
+		);
+		assert.equal(
+			messages.some((message) => message.type === "SKIP_RESULT"),
+			false,
+		);
+		const done = messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "succeeded");
+			assert.equal(done.records_emitted, 2);
+		}
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
 test("Netflix connector emits a typed coverage-gap SKIP_RESULT when every date in the dataset is ambiguous", async () => {
 	const importRoot = await mkdtemp(
 		join(tmpdir(), "pdpp-netflix-all-ambiguous-"),
@@ -328,6 +397,76 @@ test("Netflix connector emits a typed coverage-gap SKIP_RESULT when every date i
 
 		const skip = messages.find((m) => m.type === "SKIP_RESULT");
 		assert.ok(skip, "expected a SKIP_RESULT for the all-ambiguous dataset");
+		if (skip?.type === "SKIP_RESULT") {
+			assert.equal(skip.reason, "ambiguous_date_order");
+		}
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Netflix connector skips only the malformed date between same-day rewatches", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-malformed-date-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Moon,2024-06-05\nInvented Moon,not-a-date\nInvented Moon,2024-06-05\n",
+			"utf8",
+		);
+		const { messages } = await runNetflixImport(importRoot);
+		const emitted = records(messages, "viewing_activity");
+		assert.equal(emitted.length, 2);
+		assert.equal(new Set(emitted.map((record) => record.id)).size, 2);
+		assert.ok(
+			emitted.every(
+				(record) =>
+					typeof record.id === "string" &&
+					record.id.length > 0 &&
+					record.title === "Invented Moon" &&
+					record.watched_at === "2024-06-05T00:00:00.000Z" &&
+					record.watched_at_raw === "2024-06-05",
+			),
+		);
+		assert.equal(
+			messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.reason === "ambiguous_date_order",
+			),
+			false,
+		);
+		assert.deepEqual(progressTexts(messages), [
+			"Reading 3 Netflix viewing records",
+		]);
+		// Per-row parse failures are omitted from records; DONE counts only the two valid rows.
+		const done = messages.at(-1);
+		assert.equal(done?.type, "DONE");
+		if (done?.type === "DONE") {
+			assert.equal(done.status, "succeeded");
+			assert.equal(done.records_emitted, 2);
+		}
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Netflix connector still refuses two genuinely ambiguous dates", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-ambiguous-pair-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Moon,03/04/2024\nInvented Sun,05/06/2024\n",
+			"utf8",
+		);
+		const { messages } = await runNetflixImport(importRoot);
+		assert.equal(records(messages, "viewing_activity").length, 0);
+		const skips = messages.filter((message) => message.type === "SKIP_RESULT");
+		assert.equal(skips.length, 1);
+		const skip = skips[0];
 		if (skip?.type === "SKIP_RESULT") {
 			assert.equal(skip.reason, "ambiguous_date_order");
 		}
@@ -558,5 +697,136 @@ test("connector subprocess integration: emits viewing_activity records", async (
 		assert.ok(result.rows[1]?.title, "Second row has title");
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+function viewingActivityState(
+	messages: EmittedMessage[],
+): Record<string, unknown> {
+	const state = messages.find(
+		(message) =>
+			message.type === "STATE" && message.stream === "viewing_activity",
+	);
+	assert.ok(
+		state?.type === "STATE",
+		"expected an emitted viewing_activity cursor",
+	);
+	return { viewing_activity: state.cursor };
+}
+
+function assertImportSucceeded(
+	messages: EmittedMessage[],
+	count: number,
+): void {
+	const done = messages.at(-1);
+	assert.ok(done?.type === "DONE");
+	assert.equal(done.status, "succeeded");
+	assert.equal(done.records_emitted, count);
+}
+
+test("Netflix direct_history replays the cursor day with stable occurrence ids but excludes earlier days", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-netflix-cursor-day-"));
+	try {
+		const path = join(importRoot, "NetflixViewingHistory.csv");
+		const row = "Invented Moon,2024-06-05";
+		await writeFile(path, `Title,Date\n${row}\n`, "utf8");
+		const first = await runNetflixImport(importRoot);
+		assertImportSucceeded(first.messages, 1);
+		const original = records(first.messages, "viewing_activity");
+		assert.equal(original.length, 1);
+		assert.equal(typeof original[0]?.id, "string");
+		const state = viewingActivityState(first.messages);
+		assert.deepEqual(state, {
+			viewing_activity: { last_timestamp: "2024-06-05T00:00:00.000Z" },
+		});
+
+		await writeFile(path, `Title,Date\n${row}\n${row}\n`, "utf8");
+		const second = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(second.messages, 2);
+		const replayed = records(second.messages, "viewing_activity");
+		assert.equal(replayed.length, 2);
+		assert.equal(replayed[0]?.id, original[0]?.id);
+		assert.equal(typeof replayed[1]?.id, "string");
+		assert.notEqual(replayed[1]?.id, original[0]?.id);
+		assert.ok(
+			replayed.every(
+				(record) => record.watched_at === "2024-06-05T00:00:00.000Z",
+			),
+		);
+		assert.deepEqual(viewingActivityState(second.messages), state);
+
+		await writeFile(path, "Title,Date\nInvented Moon,2024-06-04\n", "utf8");
+		const older = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(older.messages, 0);
+		assert.deepEqual(records(older.messages, "viewing_activity"), []);
+		assert.deepEqual(viewingActivityState(older.messages), state);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Netflix direct_history replays the day of a full_export instant cursor", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-cross-schema-cursor-"),
+	);
+	try {
+		const fullExportPath = join(importRoot, "ViewingActivity.csv");
+		await writeFile(
+			fullExportPath,
+			"Profile Name,Start Time (UTC),Duration (H:MM:SS),Attributes,Title,Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n" +
+				"Invented Profile,2024-06-15 10:30:00,0:10:00,,Invented Morning Orbit,,TV,0:10:00,0:10:00,US\n",
+			"utf8",
+		);
+		const first = await runNetflixImport(importRoot);
+		assertImportSucceeded(first.messages, 1);
+		const state = viewingActivityState(first.messages);
+		assert.deepEqual(state, {
+			viewing_activity: { last_timestamp: "2024-06-15T10:30:00.000Z" },
+		});
+
+		// Switch schemas, not state: only the day-precision file remains.
+		await rm(fullExportPath);
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			"Title,Date\nInvented Evening Comet,15/06/2024\nInvented Earlier Nebula,14/06/2024\n",
+			"utf8",
+		);
+		const second = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(second.messages, 1);
+		const replayed = records(second.messages, "viewing_activity");
+		assert.equal(replayed.length, 1);
+		assert.equal(replayed[0]?.title, "Invented Evening Comet");
+		assert.equal(replayed[0]?.watched_at, "2024-06-15T00:00:00.000Z");
+		assert.equal(typeof replayed[0]?.id, "string");
+		assert.ok(
+			replayed.every((record) => record.title !== "Invented Earlier Nebula"),
+		);
+		assert.deepEqual(viewingActivityState(second.messages), state);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Netflix full_export still excludes an exact timestamp equal to its emitted cursor", async () => {
+	const importRoot = await mkdtemp(
+		join(tmpdir(), "pdpp-netflix-exact-cursor-"),
+	);
+	try {
+		await writeFile(
+			join(importRoot, "ViewingActivity.csv"),
+			"Profile Name,Start Time (UTC),Duration (H:MM:SS),Attributes,Title,Supplemental Video Type,Device Type,Bookmark,Latest Bookmark,Country\n" +
+				"Invented Profile,2024-06-05 10:30:00,0:10:00,,Invented Moon,,TV,0:10:00,0:10:00,US\n",
+			"utf8",
+		);
+		const first = await runNetflixImport(importRoot);
+		assertImportSucceeded(first.messages, 1);
+		assert.equal(records(first.messages, "viewing_activity").length, 1);
+		const state = viewingActivityState(first.messages);
+		const second = await runNetflixImport(importRoot, state);
+		assertImportSucceeded(second.messages, 0);
+		assert.deepEqual(records(second.messages, "viewing_activity"), []);
+		assert.deepEqual(viewingActivityState(second.messages), state);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
 	}
 });

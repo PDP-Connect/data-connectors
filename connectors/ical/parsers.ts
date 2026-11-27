@@ -20,8 +20,7 @@ export const ICAL_LINE_FOLD_RE = /\r?\n[ \t]/g;
 export const ICAL_DATETIME_UTC_RE = /^\d{8}T\d{6}Z$/;
 export const ICAL_DATETIME_LOCAL_RE = /^\d{8}T\d{6}$/;
 export const ICAL_MAILTO_RE = /mailto:([^>]+)/i;
-export const ICAL_ESC_NEWLINE_RE = /\\n/g;
-export const ICAL_ESC_COMMA_RE = /\\,/g;
+const ICAL_TEXT_ESCAPE_RE = /\\([nN,;\\])/g;
 export const ICS_EXT_RE = /\.ics$/i;
 export const RETRYABLE_FETCH_RE = /ECONN|fetch failed/i;
 export const ICAL_LINE_SPLIT_RE = /\r?\n/;
@@ -41,9 +40,9 @@ export function unfoldIcal(text: string): string {
 }
 
 export function unescapeIcsText(value: string): string {
-	return value
-		.replace(ICAL_ESC_NEWLINE_RE, "\n")
-		.replace(ICAL_ESC_COMMA_RE, ",");
+	return value.replace(ICAL_TEXT_ESCAPE_RE, (_match, escaped: string) =>
+		escaped === "n" || escaped === "N" ? "\n" : escaped,
+	);
 }
 
 export function parseIcsDate(
@@ -142,7 +141,7 @@ export function applyIcsProperty(event: IcsEvent, line: IcsLine): void {
 			event.description = unescapeIcsText(line.value);
 			return;
 		case "LOCATION":
-			event.location = line.value;
+			event.location = unescapeIcsText(line.value);
 			return;
 		case "DTSTART":
 			event.start = parseIcsDate(line.value, line.isDateOnly);
