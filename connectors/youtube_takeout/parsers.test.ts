@@ -23,6 +23,7 @@ import {
 	parseWatchLaterCsv,
 	trimmedOrNull,
 } from "./parsers.ts";
+import { profileSchema } from "./schemas.ts";
 
 function columnsOf(header: readonly string[]): Map<string, number> {
 	return new Map(header.map((name, i) => [name, i]));
@@ -98,6 +99,29 @@ test("buildProfileRecordFromChannelCsvRow returns null with no Channel Id", () =
 		buildProfileRecordFromChannelCsvRow(["https://x"], columns, null),
 		null,
 	);
+});
+
+test("profile schema keeps a real-shaped channel id and refuses missing or blank keys", () => {
+	const columns = columnsOf(["Channel Id", "Channel Url"]);
+	const row = buildProfileRecordFromChannelCsvRow(
+		["UC123", "https://www.youtube.com/channel/UC123"],
+		columns,
+		null,
+	);
+	assert.ok(row);
+	assert.equal(profileSchema.parse(row).id, "UC123");
+	assert.equal(
+		buildProfileRecordFromChannelCsvRow(
+			["", "https://www.youtube.com/channel/UC123"],
+			columns,
+			null,
+		),
+		null,
+	);
+	const { id: _id, ...withoutId } = row;
+	assert.equal(profileSchema.safeParse(withoutId).success, false);
+	assert.equal(profileSchema.safeParse({ ...row, id: null }).success, false);
+	assert.equal(profileSchema.safeParse({ ...row, id: "" }).success, false);
 });
 
 test("parseSubscriptionsCsv maps rows and skips blank trailing lines", () => {
