@@ -25,6 +25,7 @@
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
+import { isIsoDateTime } from "./parsers.ts";
 import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 
 // Text fields below carry the pdpp-safe-escape-v1 encoding (see
@@ -33,16 +34,13 @@ import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 // over it is left absent (or, for message and document content, is a blob).
 const encodedText = pdppSafeText.max(INLINE_TEXT_MAX_UNITS);
 
-// Module-scoped regex (Biome useTopLevelRegex). Manifest declares date-time
-// format; accept an ISO-8601 datetime prefix.
-const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const PLAN_TYPE_RE = /^[a-z][a-z_-]{0,39}$/;
 
 // Opaque bounded id — tighten to UUID once a real export is observed.
 const idSchema = z.string().min(1).max(128);
 const isoDateTimeNullable = z
 	.string()
-	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
+	.refine(isIsoDateTime, "must be an ISO-8601 datetime")
 	.nullable();
 const blobRefSchema = z
 	.object({
@@ -220,6 +218,13 @@ export const accountPlanSchema = z.object({
 		})
 		.strict()
 		.nullable(),
+	// Declared so the export and live artifacts share one account_plan contract
+	// (see anthropic_live). An export has no payment data: never emitted here.
+	payment_country: z
+		.string()
+		.regex(/^[A-Z]{2}$/)
+		.nullable()
+		.optional(),
 });
 
 /**

@@ -56,9 +56,42 @@ const SHOP_MONEY_RE =
 	/(?:\$\s*([\d,]+(?:\.\d{1,2})?)|([\d,]+(?:\.\d{1,2})?)\s*(USD|EUR|GBP|CAD)\b)/i;
 const SHOP_ITEM_COUNT_RE = /\b(\d+)\s*items?\b/i;
 const SHOP_STATUS_RE =
-	/\b(delivered|shipped|in transit|processing|cancelled|canceled|fulfilled)\b/i;
+	/^(delivered|shipped|in transit|processing|cancelled|canceled|fulfilled|partially fulfilled|not shipped)$/i;
 const SHOP_AMOUNT_LINE_RE =
 	/^(?:\$\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD))\b/i;
+
+const CARD_BLOCK_TAGS = new Set([
+	"DIV", "P", "LI", "UL", "OL", "SECTION", "ARTICLE", "HEADER", "FOOTER",
+	"H1", "H2", "H3", "H4", "H5", "H6", "TR", "TD", "TH", "TABLE", "BR", "DT", "DD",
+]);
+const CARD_HIDDEN_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"]);
+
+// Separate fields unless adjacent inline fragments continue an unfinished price.
+function cardText(node: Node): string {
+	let text = "";
+	const walk = (current: Node): void => {
+		if (current.nodeType === 3) {
+			const fragment = current.nodeValue ?? "";
+			// SHOP_MONEY_RE accepts $ as its only currency symbol. A completed
+			// fraction or a block boundary must not absorb the next numeric field.
+			const continuesPrice = /(?:^|\s)\$[\d,]*(?:\.\d{0,1})?$/.test(text)
+				&& /^[\d.]/.test(fragment);
+			if (!continuesPrice) text += " ";
+			text += fragment;
+			return;
+		}
+		const tag = current.nodeType === 1
+			? (current as Element).tagName.toUpperCase()
+			: "";
+		if (CARD_HIDDEN_TAGS.has(tag)) return;
+		const block = CARD_BLOCK_TAGS.has(tag);
+		if (block) text += " ";
+		for (const child of current.childNodes) walk(child);
+		if (block) text += " ";
+	};
+	walk(node);
+	return text.replace(/\s+/g, " ").trim();
+}
 
 /**
  * Legacy-parity DOM fallback for cards visible when Apollo has not hydrated
@@ -85,7 +118,7 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 			link.closest<HTMLElement>(
 				'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
 			) ?? link;
-		const text = (card.textContent ?? "").replace(/\s+/g, " ").trim();
+		const text = cardText(card);
 		if (text.length < 10) continue;
 		const key = text.slice(0, 120);
 		if (seen.has(key)) continue;
@@ -111,7 +144,7 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		const amount = money
 			? Number((money[1] ?? money[2] ?? "").replaceAll(",", ""))
 			: Number.NaN;
-		const status = text.match(SHOP_STATUS_RE)?.[0] ?? null;
+		const status = readDomOrderStatus(card);
 		orders.push({
 			currency: money ? (money[3]?.toUpperCase() ?? "USD") : null,
 			detailUrl: canonicalShopUrl(orderUrl.href),
@@ -126,6 +159,29 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		});
 	}
 	return orders;
+}
+
+
+// The scoped fixtures have a standalone status div, not a dedicated status
+// attribute. Never search the flattened card (which includes merchant/product
+// names). Accept only complete phrases from standalone non-link text blocks;
+// ambiguous blocks and unsupported layouts stay unknown.
+function readDomOrderStatus(card: Element): string | null {
+	const candidates: string[] = [];
+	let afterOrderSummary = false;
+	for (const child of card.children) {
+		if (!child.matches("div, p, span")) continue;
+		const phrase = cardText(child);
+		if (SHOP_MONEY_RE.test(phrase) || SHOP_ITEM_COUNT_RE.test(phrase)) {
+			afterOrderSummary = true;
+			continue;
+		}
+		if (child.children.length !== 0) continue;
+		if (afterOrderSummary && SHOP_STATUS_RE.test(phrase)) candidates.push(phrase);
+	}
+	if (candidates.length !== 1) return null;
+	const phrase = candidates[0];
+	return phrase && !/^not shipped$/i.test(phrase) ? phrase : null;
 }
 
 function resolveCardOrderUrl(card: Element, fallback: URL): URL {

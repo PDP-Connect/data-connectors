@@ -24,6 +24,8 @@ export interface SiteData {
 	training: Array<Record<string, unknown>>;
 	/** Analysis summaries by session id; a missing one answers 404. */
 	summaries: Record<string, unknown>;
+	/** Analysis details (per-second series) by session id; a missing one answers 404. */
+	details: Record<string, unknown>;
 	/** Activity days by YYYY-MM-DD; any other day answers a day with nothing recorded. */
 	activity: Record<string, unknown>;
 	sleep: Array<Record<string, unknown>>;
@@ -45,6 +47,16 @@ export function fixtureData(): SiteData {
 		summaries: {
 			"8349588454": fixture("training-summary-8349588454.json"),
 			"8351200017": fixture("training-summary-8351200017.json"),
+		},
+		details: {
+			"8349588454": fixture("training-details-8349588454.json"),
+			// A manual entry's details, as Flow answers them: every series null.
+			"8351200017": {
+				id: 8351200017,
+				exercises: { "8380774100": { startTime: "2026-11-05T18:30:00" } },
+				samples: { "8380774100": { HEART_RATE: null, SPEED: null } },
+				zones: { "8380774100": {} },
+			},
 		},
 		activity: fixture("activity-loadfour.json") as Record<string, unknown>,
 		sleep: fixture("sleep-report.json") as Array<Record<string, unknown>>,
@@ -160,6 +172,11 @@ export function polarApi(data: SiteData = fixtureData()) {
 		const summary = /^\/api\/training\/analysis\/(\d+)\/summary$/.exec(path);
 		if (summary?.[1]) {
 			const found = data.summaries[summary[1]];
+			return found === undefined ? NOT_FOUND : json(found);
+		}
+		const details = /^\/api\/training\/analysis\/(\d+)\/details$/.exec(path);
+		if (details?.[1]) {
+			const found = data.details[details[1]];
 			return found === undefined ? NOT_FOUND : json(found);
 		}
 		if (path === "/api/activity-timeline/loadFour") {

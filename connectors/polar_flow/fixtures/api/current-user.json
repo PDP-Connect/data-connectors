@@ -35,7 +35,7 @@
 		"weeklyRecoveryTimeSum": null,
 		"functionalThresholdPower": null,
 		"speedCalibrationOffset": null,
-		"sleepGoal": 8,
+		"sleepGoal": 28800,
 		"maximumAerobicPower": null
 	},
 	"sportProfiles": [],

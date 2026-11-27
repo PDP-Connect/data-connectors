@@ -33,10 +33,25 @@ test("isTruthyEnv treats any other string as true", () => {
 	}
 });
 
-for (const skip of [null, "PATCHRIGHT_SKIP_BROWSER_DOWNLOAD", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"]) {
-  test(skip ? skip + " still skips the browser download" : "Ubuntu 26.04 x64 follows the normal Patchright install path", () => {
-    const script = fileURLToPath(new URL("./install-patchright-browser.mjs", import.meta.url));
-    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+for (const skip of [
+	null,
+	"PATCHRIGHT_SKIP_BROWSER_DOWNLOAD",
+	"PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD",
+]) {
+	test(
+		skip
+			? skip + " still skips the browser download"
+			: "Ubuntu 26.04 x64 follows the normal Patchright install path",
+		() => {
+			const script = fileURLToPath(
+				new URL("./install-patchright-browser.mjs", import.meta.url),
+			);
+			const result = spawnSync(
+				process.execPath,
+				[
+					"--input-type=module",
+					"--eval",
+					`
       import childProcess from "node:child_process";
       import fs from "node:fs";
       import { syncBuiltinESMExports } from "node:module";
@@ -57,17 +72,23 @@ for (const skip of [null, "PATCHRIGHT_SKIP_BROWSER_DOWNLOAD", "PLAYWRIGHT_SKIP_B
       if (${JSON.stringify(skip)}) process.env[${JSON.stringify(skip)}] = "1";
       process.argv[1] = ${JSON.stringify(script)};
       await import(${JSON.stringify(new URL("./install-patchright-browser.mjs", import.meta.url).href)});
-    `], { encoding: "utf8" });
-    assert.equal(result.status, 0, result.stderr);
-    if (skip) {
-      assert.match(result.stdout, /skip env variable/);
-      assert.doesNotMatch(result.stdout, /"command"/);
-    } else {
-      assert.deepEqual(JSON.parse(result.stdout), {
-        command: "patchright", args: ["install", "chromium"], options: { shell: false, stdio: "inherit" },
-      });
-    }
-  });
+    `,
+				],
+				{ encoding: "utf8" },
+			);
+			assert.equal(result.status, 0, result.stderr);
+			if (skip) {
+				assert.match(result.stdout, /skip env variable/);
+				assert.doesNotMatch(result.stdout, /"command"/);
+			} else {
+				assert.deepEqual(JSON.parse(result.stdout), {
+					command: "patchright",
+					args: ["install", "chromium"],
+					options: { shell: false, stdio: "inherit" },
+				});
+			}
+		},
+	);
 }
 
 test("macOS dependency installation skips bundled Chromium without needing a skip flag", () => {

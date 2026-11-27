@@ -118,7 +118,9 @@ export const MAX_SEARCH_PAGES = 100;
 /** How many conversations are read at once. */
 export const DEFAULT_CONCURRENCY = 3;
 const MAX_PAGES_PER_THREAD = 200;
-const MAX_LIST_PAGES = 500;
+const MAX_OTHER_LIST_PAGES = 500;
+// A channel inventory progress guard, not a listing-size limit.
+const NO_PROGRESS_PAGE_GUARD = 16;
 /** Slack allows up to 999 per history page; fewer round trips on busy channels. */
 const HISTORY_PAGE_LIMIT = "999";
 const LIST_PAGE_LIMIT = "200";
@@ -365,10 +367,14 @@ async function listAll<
 	method: string,
 	params: Record<string, string>,
 	schema: ZodType<T>,
+	idsOf?: (page: T) => readonly string[],
 ): Promise<T[]> {
 	const pages: T[] = [];
+	const seenCursors = new Set<string>();
+	const seenIds = new Set<string>();
+	let noProgress = 0;
 	let cursor = "";
-	for (let pageNo = 0; pageNo < MAX_LIST_PAGES; pageNo += 1) {
+	for (let pageNo = 0; idsOf !== undefined || pageNo < MAX_OTHER_LIST_PAGES; pageNo += 1) {
 		const answer = parseAnswer(
 			schema,
 			method,
@@ -380,14 +386,20 @@ async function listAll<
 		);
 		pages.push(answer);
 		cursor = answer.response_metadata?.next_cursor ?? "";
+		const before = seenIds.size;
+		for (const id of idsOf?.(answer) ?? []) seenIds.add(id);
 		if (cursor === "") {
 			return pages;
 		}
+		if (idsOf !== undefined) {
+			noProgress = seenIds.size === before ? noProgress + 1 : 0;
+			if (seenCursors.has(cursor) || noProgress > NO_PROGRESS_PAGE_GUARD) {
+				throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
+			}
+			seenCursors.add(cursor);
+		}
 	}
-	// The page cap ran out with a cursor still in hand: the list was not read
-	// to its end, and a STATE built on these pages would claim a boundary the
-	// source never named. The run fails instead; nothing moves past what was
-	// actually read.
+	// Other list methods retain their existing bound; no partial checkpoint.
 	throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
 }
 
@@ -491,6 +503,7 @@ async function listConversations(
 		"users.conversations",
 		{ types, limit: LIST_PAGE_LIMIT, exclude_archived: "false" },
 		conversationsListSchema,
+		(page) => (page.channels ?? []).map((channel) => channel.id),
 	);
 	const allowed = new Set(
 		run.options.channelAllowlist.map((entry) => entry.toLowerCase()),

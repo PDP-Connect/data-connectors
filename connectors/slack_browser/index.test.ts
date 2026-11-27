@@ -1046,6 +1046,40 @@ test("an answer this connector does not recognise on a required stream fails clo
 	assert.deepEqual(h.of("users"), []);
 });
 
+for (const mode of ["long", "no-progress", "repeat"] as const) {
+	test(`channel inventory ${mode}: only a terminal cursor commits`, async () => {
+		const h = harness(["channels"]);
+		let pages = 0;
+		const api = fakeApi((call) => {
+			if (call.method !== "users.conversations") return undefined;
+			pages += 1;
+			const ceiling = mode === "long" ? 501 : mode === "repeat" ? 2 : 18;
+			assert.ok(pages <= ceiling, "nonterminal inventory must be bounded");
+			assert.equal(call.params.cursor, pages === 1 ? undefined : String(pages));
+			const id = "C" + String(mode === "no-progress" ? 1 : pages).padStart(10, "0");
+			return {
+				ok: true,
+				channels: [{ id, name: "synthetic-" + id, is_channel: true, is_member: true }],
+				response_metadata: {
+					next_cursor: mode === "long" && pages === 501 ? "" : mode === "repeat" ? "2" : String(pages + 1),
+				},
+			};
+		});
+		await run(h, api);
+		if (mode === "long") {
+			assert.equal(pages, 501);
+			assert.equal(h.of("channels").length, 501);
+			assert.ok(h.state("channels"));
+		} else {
+			assert.equal(pages, mode === "repeat" ? 2 : 18);
+			assert.equal(h.of("channels").length, 0);
+			assert.equal(h.state("channels"), undefined);
+			assert.equal(h.coverage().some((entry) => entry.stream === "channels"), false);
+			assert.ok(h.skips().some((entry) => entry.stream === "channels" && entry.reason === "collection_interrupted"));
+		}
+	});
+}
+
 test("conversation kinds and the allowlist narrow what is asked for", async () => {
 	const kinds = harness(["messages"]);
 	const kindsApi = await run(kinds, fakeApi(), { channelTypes: ["im"] });
@@ -1298,7 +1332,7 @@ test("SLACK_WORKSPACE picks a workspace by subdomain, id, name or URL", () => {
 	assert.deepEqual(selectTeams([TEAM, other], "nobody"), []);
 });
 
-test("options come from SLACK_* variables with the archive profile's defaults", () => {
+test("options come from SLACK_* variables with unlimited catch-up by default", () => {
 	const saved = { ...process.env };
 	try {
 		for (const key of Object.keys(process.env)) {
@@ -1306,7 +1340,10 @@ test("options come from SLACK_* variables with the archive profile's defaults", 
 				delete process.env[key];
 			}
 		}
-		assert.deepEqual(readSlackBrowserOptions(), DEFAULT_OPTIONS);
+		assert.deepEqual(readSlackBrowserOptions(), {
+			...DEFAULT_OPTIONS,
+			maxBackfillDays: 0,
+		});
 		process.env.SLACK_LOOKBACK_DAYS = "30";
 		process.env.SLACK_CHANNEL_TYPES = "public,IM,bogus";
 		process.env.SLACK_CHANNEL_ALLOWLIST = "general, eng-alerts";
@@ -1322,7 +1359,7 @@ test("options come from SLACK_* variables with the archive profile's defaults", 
 		process.env.SLACK_LOOKBACK_DAYS = "-3";
 		process.env.SLACK_MAX_BACKFILL_DAYS = "-1";
 		assert.equal(readSlackBrowserOptions().lookbackDays, 7);
-		assert.equal(readSlackBrowserOptions().maxBackfillDays, 90);
+		assert.equal(readSlackBrowserOptions().maxBackfillDays, 0);
 	} finally {
 		for (const key of Object.keys(process.env)) {
 			if (key.startsWith("SLACK_")) {
@@ -1707,7 +1744,7 @@ test("the catch-up is clamped only by the max backfill and the requested start",
 		},
 	};
 	const clamped = harness(["messages"], { state });
-	const api = await run(clamped);
+	const api = await run(clamped, fakeApi(), { maxBackfillDays: 90 });
 	assert.equal(
 		historyCalls(api, "C0123456789")[0]?.params.oldest,
 		String(FIXTURE_NOW_SECONDS - 90 * DAY),
@@ -1858,4 +1895,108 @@ test("later gap pages are asked for the messages stream only", async () => {
 	};
 	await run(h);
 	assert.deepEqual(asked, [{ streams: ["messages"] }]);
+});
+
+/** Exercise actual option defaults, not the legacy fixture's explicit 90-day window. */
+async function catchUpAfter200Days(window?: string) {
+	const saved = Object.fromEntries(
+		Object.entries(process.env).filter(([key]) => key.startsWith("SLACK_")),
+	);
+	let options: ReturnType<typeof readSlackBrowserOptions>;
+	try {
+		for (const key of Object.keys(process.env))
+			if (key.startsWith("SLACK_")) delete process.env[key];
+		if (window !== undefined) process.env.SLACK_MAX_BACKFILL_DAYS = window;
+		options = readSlackBrowserOptions();
+	} finally {
+		for (const key of Object.keys(process.env))
+			if (key.startsWith("SLACK_")) delete process.env[key];
+		Object.assign(process.env, saved);
+	}
+	const cursorSec = FIXTURE_NOW_SECONDS - 200 * DAY;
+	const messageSec = FIXTURE_NOW_SECONDS - 150 * DAY;
+	const ts = `${String(messageSec)}.000100`;
+	const h = harness(["messages"], {
+		state: {
+			messages: {
+				channel_last_ts: { C0123456789: `${String(cursorSec)}.000100` },
+				floor_ts: cursorSec,
+				format: 1,
+				replies_checked_ts: cursorSec,
+			},
+		},
+	});
+	const api = fakeApi(({ method, params }) => {
+		if (method === "search.messages")
+			return {
+				ok: true,
+				messages: {
+					total: 0,
+					matches: [],
+					paging: { page: 1, pages: 1 },
+				},
+			};
+		if (
+			method === "conversations.history" &&
+			params.channel === "C0123456789"
+		) {
+			return {
+				ok: true,
+				has_more: false,
+				messages:
+					Number(params.oldest ?? 0) <= messageSec
+						? [
+								{
+									type: "message",
+									ts,
+									user: "U0123456789",
+									text: "Synthetic old-gap message",
+								},
+							]
+						: [],
+			};
+		}
+		return undefined;
+	});
+	await run(h, api, { ...options, channelAllowlist: ["C0123456789"] });
+	return { h, api, options, cursorSec, ts };
+}
+
+test("unset max backfill reads the whole 200-day cursor gap by default", async () => {
+	const { h, api, options, cursorSec, ts } = await catchUpAfter200Days();
+	assert.equal(options.maxBackfillDays, 0);
+	assert.equal(
+		historyCalls(api, "C0123456789")[0]?.params.oldest,
+		String(cursorSec - 7 * DAY),
+	);
+	assert.ok(
+		h.of("messages").some((message) => message.id === `C0123456789:${ts}`),
+	);
+	assert.ok(h.state("messages"));
+	assert.deepEqual(h.gaps(), []);
+	assert.equal(
+		h.progress.some((entry) =>
+			entry.message.includes("SLACK_MAX_BACKFILL_DAYS"),
+		),
+		false,
+	);
+});
+
+test("an explicit 90-day max backfill still limits a 200-day cursor gap", async () => {
+	const { h, api, options, ts } = await catchUpAfter200Days("90");
+	assert.equal(options.maxBackfillDays, 90);
+	assert.equal(
+		historyCalls(api, "C0123456789")[0]?.params.oldest,
+		String(FIXTURE_NOW_SECONDS - 90 * DAY),
+	);
+	assert.equal(
+		h.of("messages").some((message) => message.id === `C0123456789:${ts}`),
+		false,
+	);
+	assert.ok(h.state("messages"));
+	assert.ok(
+		h.progress.some((entry) =>
+			entry.message.includes("SLACK_MAX_BACKFILL_DAYS"),
+		),
+	);
 });
