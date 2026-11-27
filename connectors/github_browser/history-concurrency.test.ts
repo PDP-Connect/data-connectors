@@ -29,7 +29,10 @@ interface Harness {
 }
 
 /** Browser pages stay pending until `release()`; API calls answer from the fixtures. */
-function start(overrides: { emit?: (message: EmittedMessage) => Promise<void> } = {}): Harness {
+function start(overrides: {
+	emit?: (message: EmittedMessage) => Promise<void>;
+	failHistorySearch?: boolean;
+} = {}): Harness {
 	const log: string[] = [];
 	const messages: EmittedMessage[] = [];
 	const records: string[] = [];
@@ -51,6 +54,9 @@ function start(overrides: { emit?: (message: EmittedMessage) => Promise<void> } 
 			if (isHistory(url)) {
 				log.push("history:request");
 				markStarted();
+				if (overrides.failHistorySearch) {
+					return { requestedUrl: url, responseUrl: url, status: 503, link: null, data: {} };
+				}
 			}
 			const response = resolveFixture(url);
 			return { requestedUrl: url, responseUrl: url, status: response.status,
@@ -106,6 +112,22 @@ test("each stream still emits its record before its checkpoint and coverage, wha
 	}
 	assert.equal(harness.messages.filter((message) => message.type === "SKIP_RESULT").length, 0);
 	assert.equal(harness.messages.filter((message) => message.type === "STATE" && streamOf(message) === "history").length, 1);
+});
+
+test("a failed history search sends no history checkpoint while the other lanes finish", async () => {
+	const harness = start({ failHistorySearch: true });
+	setTimeout(harness.release, 1_500).unref();
+	try {
+		await Promise.race([harness.historyStarted, timeout(1_000, "history never requested a page")]);
+	} finally {
+		harness.release();
+	}
+	await harness.run;
+	assert.ok(harness.log.includes("history:request"));
+	assert.equal(harness.log.includes("emit:STATE:history"), false);
+	for (const stream of ALL.filter((stream) => stream !== "history")) {
+		assert.ok(harness.log.includes(`emit:STATE:${stream}`), `${stream} did not finish`);
+	}
 });
 
 test("a publication failure in a browser stream lets history finish before collection rejects", async () => {
