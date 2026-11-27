@@ -895,61 +895,95 @@ test("collectAllStreams: id-less-only activity history refuses without emitting"
 	assert.deepEqual(messages, []);
 });
 
+const detailFailureFetch = (operation: string, status: number, transport: boolean) => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-1" }, { uuid: "trip-2" }]) },
+		],
+		getTrip: {
+			"trip-1": {
+				status: operation === "GetTrip" ? status : 200,
+				body: getTripBody({ status: "COMPLETED" }),
+			},
+			"trip-2": { body: getTripBody({ status: "COMPLETED" }) },
+		},
+		getReceipt: {
+			"trip-1": {
+				status: operation === "GetReceipt" ? status : 200,
+				body: getReceiptBody(RECEIPT_HTML("$10.00")),
+			},
+			"trip-2": { body: getReceiptBody(RECEIPT_HTML("$20.00")) },
+		},
+	});
+	const scripted: UberPageFetch = async (name, query, variables) => {
+		const response = await fetchPath(name, query, variables);
+		if (transport && name === operation) {
+			throw new Error(`uber_transport_error [endpoint ${name}]: synthetic offline`);
+		}
+		return response;
+	};
+	return { calls, scripted };
+};
+
 [
-	{ operation: "GetTrip", status: 401, prefix: "uber_session_expired" },
-	{ operation: "GetTrip", status: 429, prefix: "uber_rate_limited" },
-	{ operation: "GetReceipt", status: 403, prefix: "uber_session_expired" },
-	{ operation: "GetReceipt", status: 429, prefix: "uber_rate_limited" },
-	{ operation: "GetTrip", status: 200, prefix: "uber_transport_error" },
-	{ operation: "GetReceipt", status: 200, prefix: "uber_transport_error" },
-].forEach(({ operation, status, prefix }) => {
-	test(`collectAllStreams: ${operation} ${prefix} stops before the next trip`, async () => {
-		const { fetchPath, calls } = makeScriptedFetch({
-			activitiesPages: [
-				{ body: activitiesBody([{ uuid: "trip-1" }, { uuid: "trip-2" }]) },
-			],
-			getTrip: {
-				"trip-1": {
-					status: operation === "GetTrip" ? status : 200,
-					body: getTripBody({ status: "COMPLETED" }),
-				},
-				"trip-2": { body: getTripBody({ status: "COMPLETED" }) },
-			},
-			getReceipt: {
-				"trip-1": {
-					status: operation === "GetReceipt" ? status : 200,
-					body: getReceiptBody(RECEIPT_HTML("$10.00")),
-				},
-				"trip-2": { body: getReceiptBody(RECEIPT_HTML("$20.00")) },
-			},
-		});
-		const scripted: UberPageFetch = async (name, query, variables) => {
-			const response = await fetchPath(name, query, variables);
-			if (prefix === "uber_transport_error" && name === operation) {
-				throw new Error(
-					`uber_transport_error [endpoint ${name}]: synthetic offline`,
-				);
-			}
-			return response;
-		};
+	{ operation: "GetTrip", status: 401 },
+	{ operation: "GetReceipt", status: 403 },
+].forEach(({ operation, status }) => {
+	test(`collectAllStreams: ${operation} uber_session_expired stops the run before the next trip`, async () => {
+		const { calls, scripted } = detailFailureFetch(operation, status, false);
 		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
 		await assert.rejects(
 			collectAllStreams(ctx, scripted, NO_DELAY),
-			(error: unknown) =>
-				error instanceof Error && error.message.startsWith(prefix),
+			/^Error: uber_session_expired/,
 		);
-		const failedCalls = Array(prefix === "uber_rate_limited" ? 3 : 1).fill(
-			`${operation}:trip-1`,
+		assert.deepEqual(
+			calls,
+			operation === "GetTrip"
+				? ["Activities", "GetTrip:trip-1"]
+				: ["Activities", "GetTrip:trip-1", "GetReceipt:trip-1"],
 		);
+		assert.equal(emitted.length, operation === "GetTrip" ? 0 : 1);
+		assert.deepEqual(messages, []);
+	});
+});
+
+[
+	{ operation: "GetTrip", status: 429, transport: false, attempts: 3 },
+	{ operation: "GetReceipt", status: 429, transport: false, attempts: 3 },
+	{ operation: "GetTrip", status: 200, transport: true, attempts: 1 },
+	{ operation: "GetReceipt", status: 200, transport: true, attempts: 1 },
+].forEach(({ operation, status, transport, attempts }) => {
+	const failure = transport ? "a dropped request" : "a rate limit past its retries";
+	test(`collectAllStreams: ${operation} with ${failure} keeps emitted trips and reports a retryable gap`, async () => {
+		const { calls, scripted } = detailFailureFetch(operation, status, transport);
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await collectAllStreams(ctx, scripted, NO_DELAY);
+		const failedCalls = Array(attempts).fill(`${operation}:trip-1`);
 		assert.deepEqual(
 			calls,
 			operation === "GetTrip"
 				? ["Activities", ...failedCalls]
 				: ["Activities", "GetTrip:trip-1", ...failedCalls],
+			"no request for the next trip",
 		);
-		assert.equal(emitted.length, operation === "GetTrip" ? 0 : 1);
-		assert.ok(emitted.every((record) => record.stream === "trips"));
-		assert.deepEqual(messages, []);
+		assert.deepEqual(
+			emitted.map((record) => record.stream),
+			operation === "GetTrip" ? [] : ["trips"],
+		);
+		assert.deepEqual(
+			messages
+				.filter((message) => message.type === "SKIP_RESULT")
+				.map((skip) => [skip.stream, skip.reason, skip.recovery_hint]),
+			["trips", "receipts"].map((stream) => [
+				stream,
+				"trips_detail_interrupted",
+				{ action: "retry_by_runtime", retryable: true },
+			]),
+		);
+		const coverage = messages.find((message) => message.type === "DETAIL_COVERAGE");
+		assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+		assert.equal(coverage.considered, 2);
+		assert.equal(coverage.covered, operation === "GetTrip" ? 0 : 1);
 	});
 });
 

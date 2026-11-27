@@ -339,12 +339,20 @@ async function retryTripDetail<T>(
 	}
 }
 
-/** Session-wide failures must reach the runtime rather than become per-trip gaps. */
-function isRunLevelUberError(error: unknown): boolean {
+/** An expired session needs the owner, so it must reach the runtime. */
+function isSessionExpiredError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
-	return /^(uber_session_expired|uber_rate_limited|uber_transport_error)/.test(
-		message,
-	);
+	return message.startsWith("uber_session_expired");
+}
+
+/**
+ * A rate limit that outlasts its retries, or a dropped request, stops the
+ * detail loop: the trips already emitted stay, and the rest are a
+ * retryable gap instead of a failed run.
+ */
+function stopsDetailLoop(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /^(uber_rate_limited|uber_transport_error)/.test(message);
 }
 
 /**
@@ -559,6 +567,7 @@ export async function collectAllStreams(
 
 	const tripsRequired: string[] = [];
 	const tripsHydrated: string[] = [];
+	let detailStopped = false;
 	for (const [index, tripId] of tripIds.entries()) {
 		if (wantTrips) {
 			tripsRequired.push(tripId);
@@ -572,8 +581,12 @@ export async function collectAllStreams(
 					delay,
 				);
 			} catch (error) {
-				if (isRunLevelUberError(error)) {
+				if (isSessionExpiredError(error)) {
 					throw error;
+				}
+				if (stopsDetailLoop(error)) {
+					detailStopped = true;
+					break;
 				}
 				getTrip = undefined;
 			}
@@ -594,8 +607,12 @@ export async function collectAllStreams(
 					delay,
 				);
 			} catch (error) {
-				if (isRunLevelUberError(error)) {
+				if (isSessionExpiredError(error)) {
 					throw error;
+				}
+				if (stopsDetailLoop(error)) {
+					detailStopped = true;
+					break;
 				}
 				fareBreakdown = [];
 			}
@@ -608,6 +625,15 @@ export async function collectAllStreams(
 		const isLast = index === tripIds.length - 1;
 		if (!isLast && (wantTrips || wantReceipts)) {
 			await delay(DETAIL_DELAY_MS);
+		}
+	}
+
+	if (detailStopped && wantTrips) {
+		// Trips the loop never reached still count as considered, not covered.
+		for (const tripId of tripIds) {
+			if (!tripsRequired.includes(tripId)) {
+				tripsRequired.push(tripId);
+			}
 		}
 	}
 
@@ -637,6 +663,16 @@ export async function collectAllStreams(
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message:
 					"Uber answered part of the trip history with errors or repeated a page; the next run reads it again",
+			});
+		}
+		if (detailStopped) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "trips_detail_interrupted",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message:
+					"Uber rate-limited or dropped a trip detail request, so the remaining trips were not read; the next run tries again",
 			});
 		}
 		if (detailTruncated) {

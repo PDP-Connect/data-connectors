@@ -4753,7 +4753,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 570,
+			line: 579,
 			column: 15,
 			category: "provider_pacing_backpressure",
 			note: "collectAllStreams(): trip and receipt detail requests share one politely paced loop, and records are emitted in trip order.",
