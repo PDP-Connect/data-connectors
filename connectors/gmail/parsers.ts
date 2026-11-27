@@ -398,19 +398,6 @@ function decodeQuotedPrintableBytes(buffer: Buffer): Buffer {
 	return Buffer.from(bytes);
 }
 
-function isSupportedCharset(charset: string | null): boolean {
-	const label = charset || "utf8";
-	if (Buffer.isEncoding(label)) {
-		return true;
-	}
-	try {
-		new TextDecoder(label);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 /** Decode MIME charset labels without discarding transfer-decoded bytes. */
 export function decodeCharset(bytes: Buffer, charset: string | null): string {
 	const label = charset || "utf8";
@@ -433,36 +420,17 @@ export function decodeBodyPart(
 	encoding: string | null,
 	charset: string | null,
 ): string {
-	return decodeBodyPartWithStatus(buffer, encoding, charset).text;
-}
-
-/** Like decodeBodyPart, with a fixed status and no source text in the diagnostic. */
-export function decodeBodyPartWithStatus(
-	buffer: Buffer | null | undefined,
-	encoding: string | null,
-	charset: string | null,
-): {
-	text: string;
-	status: "decoded" | "unsupported_charset" | "transfer_decode_failed";
-} {
 	if (!buffer?.length) {
-		return { text: "", status: "decoded" };
+		return "";
 	}
 	const enc = (encoding || "").toLowerCase();
 	let bytes = buffer;
-	try {
-		if (enc === "base64") {
-			bytes = Buffer.from(buffer.toString("ascii"), "base64");
-		} else if (enc === "quoted-printable") {
-			bytes = decodeQuotedPrintableBytes(buffer);
-		}
-	} catch {
-		return { text: buffer.toString("utf8"), status: "transfer_decode_failed" };
+	if (enc === "base64") {
+		bytes = Buffer.from(buffer.toString("ascii"), "base64");
+	} else if (enc === "quoted-printable") {
+		bytes = decodeQuotedPrintableBytes(buffer);
 	}
-	return {
-		text: decodeCharset(bytes, charset),
-		status: isSupportedCharset(charset) ? "decoded" : "unsupported_charset",
-	};
+	return decodeCharset(bytes, charset);
 }
 
 /**
