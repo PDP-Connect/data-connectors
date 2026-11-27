@@ -676,15 +676,17 @@ test("collectAllStreams: a partial GraphQL page keeps its trips and reports a re
 [
 	{
 		name: "errors without data",
-		damaged: { errors: [{ message: "temporarily unavailable" }] },
+		body: JSON.stringify({ errors: [{ message: "temporarily unavailable" }] }),
 	},
-	{ name: "a missing Activities container", damaged: { data: {} } },
-].forEach(({ name, damaged }) => {
+	{ name: "a missing Activities container", body: JSON.stringify({ data: {} }) },
+	{ name: "an empty body", body: "" },
+	{ name: "truncated JSON", body: '{"data":' },
+].forEach(({ name, body }) => {
 	test(`collectAllStreams: a later page with ${name} keeps the good prefix and reports a retryable skip`, async () => {
 		const { fetchPath, calls } = makeScriptedFetch({
 			activitiesPages: [
 				{ body: activitiesBody([{ uuid: "good-trip" }], "page-2") },
-				{ body: JSON.stringify(damaged) },
+				{ body },
 			],
 			getTrip: { "good-trip": { body: getTripBody({ status: "COMPLETED" }) } },
 			getReceipt: {
@@ -714,6 +716,15 @@ test("collectAllStreams: a partial GraphQL page keeps its trips and reports a re
 			]),
 		);
 	});
+});
+
+test("collectAllStreams: truncated JSON on the first page refuses before emitting anything", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({ activitiesPages: [{ body: '{"data":' }] });
+	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+	await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), /uber_graphql_error .* malformed JSON/i);
+	assert.deepEqual(calls, ["Activities"]);
+	assert.deepEqual(emitted, []);
+	assert.deepEqual(messages, []);
 });
 
 [
@@ -881,6 +892,28 @@ test("collectAllStreams: a rate-limited GetTrip is retried and hydrates the trip
 	assert.ok((delays[0] ?? 0) > 0);
 	assert.equal(emitted.length, 1);
 	assert.equal(emitted[0]?.stream, "trips");
+});
+
+test("collectAllStreams: GetReceipt recovers on attempt three with growing waits", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
+		getReceipt: { "trip-1": { body: getReceiptBody(RECEIPT_HTML("$10.00")) } },
+	});
+	let attempts = 0;
+	const waits: number[] = [];
+	const scripted: UberPageFetch = (name, query, variables) => {
+		if (name === "GetReceipt" && ++attempts < 3) {
+			return Promise.resolve({ status: 429, body: "fixture rate limit" });
+		}
+		return fetchPath(name, query, variables);
+	};
+	const { ctx, emitted } = makeCtx(["receipts"]);
+	await collectAllStreams(ctx, scripted, async (ms) => { waits.push(ms); });
+	assert.equal(attempts, 3);
+	assert.equal(waits.length, 2);
+	assert.ok((waits[0] ?? 0) > 0);
+	assert.ok((waits[1] ?? 0) > (waits[0] ?? 0));
+	assert.deepEqual(emitted.map(record => record.stream), ["receipts"]);
 });
 
 test("collectAllStreams: GetTrip HTTP 404 remains a per-trip coverage gap", async () => {

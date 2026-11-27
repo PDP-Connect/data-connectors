@@ -380,9 +380,20 @@ export async function fetchAllActivities(
 				...(nextPageToken ? { nextPageToken } : {}),
 			});
 			assertUberOk(status, body, "Activities");
-			const parsed = JSON.parse(body) as
+			let parsed:
 				| (UberActivitiesResponse & { errors?: { message?: unknown }[] })
 				| null;
+			try {
+				parsed = JSON.parse(body);
+			} catch (error) {
+				if (!(error instanceof SyntaxError)) throw error;
+				// A bad later page does not invalidate the usable prefix.
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
+				throw new Error("uber_graphql_error [endpoint Activities]: malformed JSON");
+			}
 			const hasErrors =
 				Array.isArray(parsed?.errors) && parsed.errors.length > 0;
 			if (parsed?.data == null) {
