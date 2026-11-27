@@ -791,7 +791,7 @@ const IMPERVA_PROXY_ID_RE = /"proxyId"\s*:/;
 const IMPERVA_INCIDENT_MAX_BYTES = 4000;
 
 function isImpervaIncidentReport(html: string): boolean {
-	if (html.length > IMPERVA_INCIDENT_MAX_BYTES) {
+	if (Buffer.byteLength(html, "utf8") > IMPERVA_INCIDENT_MAX_BYTES) {
 		return false;
 	}
 	if (!IMPERVA_INCIDENT_ID_RE.test(html)) {
@@ -800,25 +800,35 @@ function isImpervaIncidentReport(html: string): boolean {
 	return IMPERVA_HOST_NAME_RE.test(html) || IMPERVA_PROXY_ID_RE.test(html);
 }
 
+const HTML_BODY_PREFIX_RE =
+	/^(?:<!--[\s\S]*?-->\s*)*<(?:!doctype\s+html\b|[a-z][^<>]*>)/i;
+
 export function isIncapsulaBlocked(html: string): boolean {
-	if (isImpervaIncidentReport(html)) {
-		return true;
-	}
-	const { document } = parseHTML(html);
-	const { body } = document;
-	if (!body) {
+	if (!HTML_BODY_PREFIX_RE.test(html.trimStart())) {
 		return false;
 	}
-	const hasH3 = Boolean(document.querySelector("h3"));
-	const hasBreadcrumb = Boolean(
-		document.querySelector(
-			'nav[aria-label*="breadcrumb" i], [class*="breadcrumb" i]',
-		),
-	);
-	const hasTestId = Boolean(document.querySelector("[data-testid]"));
-	const hasIframe = Boolean(document.querySelector("iframe"));
-	const shallowBody = body.children.length <= 2;
-	return !(hasH3 || hasBreadcrumb || hasTestId) && shallowBody && hasIframe;
+	try {
+		const { document } = parseHTML(html);
+		const { body } = document;
+		if (!body) {
+			return false;
+		}
+		if (isImpervaIncidentReport(html)) {
+			return true;
+		}
+		const hasH3 = Boolean(document.querySelector("h3"));
+		const hasBreadcrumb = Boolean(
+			document.querySelector(
+				'nav[aria-label*="breadcrumb" i], [class*="breadcrumb" i]',
+			),
+		);
+		const hasTestId = Boolean(document.querySelector("[data-testid]"));
+		const hasIframe = Boolean(document.querySelector("iframe"));
+		const shallowBody = body.children.length <= 2;
+		return !(hasH3 || hasBreadcrumb || hasTestId) && shallowBody && hasIframe;
+	} catch {
+		return false;
+	}
 }
 
 // ─── Session probe (deep check) ───────────────────────────────────────────

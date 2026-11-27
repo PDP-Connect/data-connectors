@@ -1355,3 +1355,29 @@ test("buildNutritionRecord uses unknown error outcome and observed product name 
 			"https://images.heb.com/is/image/HEBGrocery/prd-small/000000999.jpg",
 	});
 });
+
+test("isIncapsulaBlocked bounds the incident-report shape by bytes, not characters", () => {
+	// 1,500 three-byte characters plus the incident fields: under 4,000
+	// characters but over the 4,000-byte bound, so it is not a tiny
+	// incident report and must not be classified as one.
+	const body = `<html><body><pre>{"incidentId":"1","hostName":"h","note":"${"€".repeat(1500)}"}</pre></body></html>`;
+	assert.ok(body.length < 4000);
+	assert.ok(Buffer.byteLength(body, "utf8") > 4000);
+	assert.equal(isIncapsulaBlocked(body), false);
+});
+
+test("isIncapsulaBlocked returns false for a plain text body", () => {
+	assert.equal(isIncapsulaBlocked("gateway unavailable"), false);
+});
+test("isIncapsulaBlocked returns false for raw JSON", () => {
+	assert.equal(isIncapsulaBlocked('{"incidentId":"1","hostName":"fixture"}'), false);
+});
+test("isIncapsulaBlocked returns false for an empty body", () => {
+	assert.equal(isIncapsulaBlocked(""), false);
+});
+test("isIncapsulaBlocked returns false for malformed markup", () => {
+	assert.equal(isIncapsulaBlocked("<html"), false);
+});
+test("isIncapsulaBlocked still recognizes a small HTML block page", () => {
+	assert.equal(isIncapsulaBlocked("<html><body><iframe></iframe></body></html>"), true);
+});
