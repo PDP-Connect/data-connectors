@@ -91,6 +91,84 @@ test("buildTweetRecord: modern tweet → full record with media/url counts", () 
 	assert.equal(rec.in_reply_to_screen_name, null);
 });
 
+test("buildTweetRecord: counts all extended media without changing other fields", () => {
+	const tweet = unwrapTweetEntry(TWEET_ENTRY_MODERN);
+	const original = buildTweetRecord(tweet);
+	assert.ok(original);
+	const rec = buildTweetRecord(
+		unwrapTweetEntry({
+			tweet: {
+				...tweet,
+				extended_entities: {
+					media: [{ id: "m1" }, { id: "m2" }, { id: "m3" }, { id: "m4" }],
+					urls: [{ url: "https://example.invalid/ignored" }],
+				},
+			},
+		}),
+	);
+	assert.deepEqual(rec, { ...original, media_count: 4 });
+});
+
+test("buildTweetRecord: extended media repeats rather than adds the first item", () => {
+	const tweet = unwrapTweetEntry(TWEET_ENTRY_MODERN);
+	assert.deepEqual(
+		buildTweetRecord(
+			unwrapTweetEntry({
+				tweet: { ...tweet, extended_entities: { media: [{ id: "m1" }] } },
+			}),
+		),
+		buildTweetRecord(tweet),
+	);
+});
+
+test("buildTweetRecord: an empty extended media array takes precedence", () => {
+	const tweet = unwrapTweetEntry(TWEET_ENTRY_MODERN);
+	const original = buildTweetRecord(tweet);
+	assert.ok(original);
+	assert.deepEqual(
+		buildTweetRecord(
+			unwrapTweetEntry({
+				tweet: { ...tweet, extended_entities: { media: [] } },
+			}),
+		),
+		{ ...original, media_count: 0 },
+	);
+});
+
+test("buildTweetRecord: malformed extended media falls back to entities", () => {
+	const tweet = unwrapTweetEntry(TWEET_ENTRY_MODERN);
+	for (const media of [undefined, null, "not-an-array", { length: 4 }]) {
+		assert.deepEqual(
+			buildTweetRecord(
+				unwrapTweetEntry({
+					tweet: { ...tweet, extended_entities: { media } },
+				}),
+			),
+			buildTweetRecord(tweet),
+		);
+	}
+});
+
+test("buildTweetRecord: missing or malformed media arrays count as zero", () => {
+	const tweet = unwrapTweetEntry(TWEET_ENTRY_MODERN);
+	const original = buildTweetRecord(tweet);
+	assert.ok(original);
+	for (const media of [undefined, null, "not-an-array", { length: 4 }]) {
+		assert.deepEqual(
+			buildTweetRecord(
+				unwrapTweetEntry({
+					tweet: {
+						...tweet,
+						entities: { ...tweet.entities, media },
+						extended_entities: { media: null },
+					},
+				}),
+			),
+			{ ...original, media_count: 0 },
+		);
+	}
+});
+
 test("buildTweetRecord: reply tweet populates reply fields", () => {
 	const t = unwrapTweetEntry(TWEET_REPLY);
 	const rec = buildTweetRecord(t);

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.66",
+	"version": "0.2.69",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -116,7 +116,7 @@
 			},
 			"display": {
 				"label": "Your Claude plan",
-				"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates."
+				"detail": "Which plan each chat-capable organization is on (free, Pro, Max, Team…) and when the organization was created, read from the account's organization list. No name, email, billing or message data. Other than record identity and is_default, every other field of this stream is empty here; the live-session connector fills the subscription dates and the card-issuing country (payment_country); an export has no payment data."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -184,6 +184,11 @@
 						},
 						"required": ["plan_type", "changes_at"],
 						"additionalProperties": false
+					},
+					"payment_country": {
+						"type": ["string", "null"],
+						"pattern": "^[A-Z]{2}$",
+						"description": "Country that issued the card on file (from the payment method), as an ISO 3166-1 alpha-2 code. Not the account holder's address; null for accounts without a card. A country code can help re-identify a person when combined with other fields; only the country is read, never the card brand, last four digits or type."
 					}
 				},
 				"required": ["id"]

@@ -3411,7 +3411,7 @@ async function main(): Promise<void> {
 
 		if (captureResult.complete) {
 			process.stdout.write(
-				`\nrecorded_replay candidate scenario captured ${capturedAt} (candidate oracle - see docs/reference/connector-evidence-claims.md)\n`,
+				`\nrecorded_replay candidate scenario captured ${capturedAt} (candidate oracle - see packages/polyfill-connectors/docs/connector-authoring-guide.md#92-scenario-replay-evidence-claimjson)\n`,
 			);
 			process.exitCode = 0;
 			return;

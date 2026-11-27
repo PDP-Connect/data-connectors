@@ -1241,6 +1241,11 @@ export interface ConnectorDriver {
 }
 
 export const CONNECTOR_DRIVERS: Record<string, ConnectorDriver> = {
+	readwise: {
+		coveredStreams: ["books", "highlights"],
+		run: async () =>
+			(await import("../readwise/coverage-driver.ts")).runCoverageDriver(),
+	},
 	amazon: { coveredStreams: ["orders"], run: driveAmazon },
 	apple_contacts: {
 		coveredStreams: ["address_books", "contacts", "contact_groups"],
@@ -1370,7 +1375,6 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"github.starred",
 	"github.issues",
 	"github.pull_requests",
-	"github.gists",
 	"github.user",
 	"github.user_stats",
 	"github.contributions",
@@ -1449,6 +1453,9 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	// driver exists for it yet.
 	"character_ai.chats",
 	"character_ai.messages",
+	// Mountain Project: auth-walled mountainproject.com session (the exports
+	// are read as the signed-in owner); no credential-free coverage driver yet.
+	"mountain_project.ticks",
 	// Oura browser profile: auth-walled cloud.ouraring.com browser-session
 	// collection with no credential-free coverage driver yet. The PAT/API Oura
 	// connector remains the supported setup profile; this profile is listed as

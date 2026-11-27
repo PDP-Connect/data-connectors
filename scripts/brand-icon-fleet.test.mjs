@@ -45,9 +45,14 @@ function assertSafeRecognisableSvg(source, filename) {
 // only the mark's white shape (no ® glyph), scaled uniformly to fit 24x24, and
 // rewritten from even-odd to nonzero filling where needed:
 //   character_ai  https://character.ai/icon.svg
+//   coros_browser https://www.coros.com/public/images/COROS.svg, the site
+//                 favicon
 //   heb           https://www.heb.com/ header logo
 //   instinct      https://instinct.com/redesign/wordmark.svg, the "I" glyph
 //                 that app.instinct.com/favicon.ico shows
+//   mountain_project
+//                 https://www.mountainproject.com/img/climb/logoHex2.svg, the
+//                 climber tile that /img/climb/favicons/favicon-180.png shows
 //   oura*         https://static.ouraring.com/pdfs/Oura_BrandGuidelines_v1.pdf
 //   usaa          https://www.usaa.com/favicon.svg
 //   wholefoods    https://www.wholefoodsmarket.com/ header logo, the leaf O

@@ -2593,6 +2593,7 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 				assert.notEqual(r.streamResult?.completed, true);
 				assert.deepEqual(r.streamScopeFiles, {});
 				assert.ok(r.data.error, "the run reports an error");
+				assert.equal(r.data.scopeCounts, undefined);
 			},
 		);
 	}
@@ -2619,6 +2620,34 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 				),
 				{ activities: [] },
 			);
+			// The mobile host reads this to tell an empty account from a list
+			// it could not read: both arrive as an empty scope.
+			assert.deepEqual(r.data.scopeCounts, {
+				"strava.activities": { found: 0, ok: true },
+			});
+		},
+	);
+
+	await t.test(
+		"a list whose activities are all unreadable reports the scope as not answered",
+		async () => {
+			const r = await thinHost(
+				firstPage({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						models: [{ id: 1 }, { id: 2, start_time: "yesterday" }],
+						page: 1,
+						perPage: 20,
+						total: 2,
+					}),
+				}),
+				"strava-page1-unreadable",
+			);
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assert.deepEqual(r.data.scopeCounts, {
+				"strava.activities": { found: 0, ok: false },
+			});
 		},
 	);
 
@@ -2743,6 +2772,9 @@ test("strava_browser: every PageShim run delivers the whole activity list, even 
 	assertCleanRun(first);
 	assert.deepEqual(first.result.errors, []);
 	assert.equal(first.result["strava.activities"].activities.length, 205);
+	assert.deepEqual(first.data.scopeCounts, {
+		"strava.activities": { found: 205, ok: true },
+	});
 	assert.deepEqual(
 		detailRequests,
 		[],
