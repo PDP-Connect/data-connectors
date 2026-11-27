@@ -223,7 +223,9 @@ export async function collectOrderNodes(args: {
 			.goto(ORDERS_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
 			.catch((): undefined => undefined);
 	});
-	const initialUnreadable = initialBody.kind === "unreadable";
+	// A first reply that is missing or cannot be read means the newest orders may
+	// never have been seen, so a walk that later finds older orders is not complete.
+	const initialUnseen = initialBody.kind !== "body";
 	if (initialBody.kind === "body") {
 		addNodes(parseOrdersResponse(initialBody.body));
 	}
@@ -241,7 +243,7 @@ export async function collectOrderNodes(args: {
 		if (body.kind === "unreadable") return { nodes, incompletePage: pageNumber };
 		// DoorDash stops firing the request once the list is exhausted, so no
 		// reply to a scroll ends the walk; a reply that cannot be read does not.
-		if (body.kind === "none") return { nodes, incompletePage: initialUnreadable && nodes.length > 0 ? 0 : null };
+		if (body.kind === "none") return { nodes, incompletePage: initialUnseen && nodes.length > 0 ? 0 : null };
 		const added = addNodes(parseOrdersResponse(body.body));
 		await progress?.("Fetched DoorDash orders page", {
 			phase: "page",
@@ -250,7 +252,7 @@ export async function collectOrderNodes(args: {
 		});
 		zeroAddResponses = added === 0 ? zeroAddResponses + 1 : 0;
 		// One refetch may overlap before new rows render; require a repeat.
-		if (zeroAddResponses >= 2) return { nodes, incompletePage: initialUnreadable && nodes.length > 0 ? 0 : null };
+		if (zeroAddResponses >= 2) return { nodes, incompletePage: initialUnseen && nodes.length > 0 ? 0 : null };
 		await delay(SCROLL_SETTLE_MS);
 	}
 }
@@ -338,7 +340,10 @@ export async function collectAllStreams(
 				type: "SKIP_RESULT",
 				stream,
 				reason: "doordash_orders_response_unreadable",
-				message: "The next DoorDash orders page could not be read. Older orders may be missing.",
+				message:
+					incompletePage === 0
+						? "The first DoorDash orders page could not be read. Your newest orders may be missing."
+						: "The next DoorDash orders page could not be read. Older orders may be missing.",
 				diagnostics: { page_index: incompletePage, total_seen: nodes.length },
 			});
 		};

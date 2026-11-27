@@ -158,6 +158,28 @@ test("collectOrderNodes: unreadable first page keeps older orders and marks page
 	assert.equal(result.incompletePage, 0);
 });
 
+test("collectOrderNodes: a missing first page with older orders after it is incomplete at page zero", async () => {
+	const result = await collectWithReplies([
+		{ kind: "none" },
+		{ kind: "body", body: graphqlEnvelope([makeOrderNode("older-order")]) },
+		{ kind: "none" },
+	]);
+	assert.deepEqual(result.nodes.map((node) => node.orderUuid), ["older-order"]);
+	assert.equal(result.incompletePage, 0);
+});
+
+test("collectOrderNodes: an unreadable first page stays incomplete when two replies add no orders", async () => {
+	const older = graphqlEnvelope([makeOrderNode("older-order")]);
+	const result = await collectWithReplies([
+		{ kind: "unreadable" },
+		{ kind: "body", body: older },
+		{ kind: "body", body: older },
+		{ kind: "body", body: older },
+	]);
+	assert.deepEqual(result.nodes.map((node) => node.orderUuid), ["older-order"]);
+	assert.equal(result.incompletePage, 0);
+});
+
 test("collectOrderNodes: readable first page followed by no response is complete", async () => {
 	const result = await collectWithReplies([
 		{ kind: "body", body: graphqlEnvelope([makeOrderNode("current-order")]) },
@@ -377,6 +399,21 @@ test("collectAllStreams: unreadable scroll emits incomplete-history signal for b
 		harness.protocolMessages.some((message) => message.type === "STATE"),
 		false,
 	);
+});
+
+test("collectAllStreams: an unreadable first page names the first page and the newest orders", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			harness,
+			["orders"],
+			capturePage(["unreadable", { body: graphqlEnvelope([makeOrderNode("older-order")]) }, "none"]),
+		),
+		async () => undefined,
+	);
+	const skip = harness.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.equal(skip?.reason, "doordash_orders_response_unreadable");
+	assert.match(String(skip?.message), /first DoorDash orders page.*newest orders/);
 });
 
 test("collectAllStreams: unreadable initial capture with no orders retains not-observed signal", async () => {
