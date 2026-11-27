@@ -2841,17 +2841,23 @@ export async function collectAllStreams(
 			for (const ad of readableAds) {
 				await emitRecord("ads", ad as RecordData);
 			}
-			// The retained live dialogs state neither exact totals nor a terminal
-			// pagination signal. Layout/expansion diagnostics never prove inventory.
-			// An unreachable sub-section only names itself in the skip: the rows
-			// above still upsert and the other streams finish with their STATE.
+			// Reached means a source count, a proven terminal traversal, or
+			// source-authored empty evidence, never merely missing controls.
 			const unreached = [advertisers, adTopics, categories]
 				.filter((scrape) => !scrape.reached)
 				.map((scrape) => `${scrape.surface} (${scrape.step ?? "unread"})`);
-			await queueInventoryResult(ctx, "ads", readableAds.length, false,
+			const fullyReadable = readableAds.length === ads.length;
+			await queueInventoryResult(
+				ctx,
+				"ads",
+				readableAds.length,
+				unreached.length === 0 && fullyReadable,
 				unreached.length > 0
 					? `the ads sections not reached: ${unreached.join(", ")}`
-					: undefined);
+					: !fullyReadable
+						? "some ads rows could not be validated"
+						: undefined,
+			);
 		}
 		await Promise.all(responseReads);
 		await checkAuthentication();

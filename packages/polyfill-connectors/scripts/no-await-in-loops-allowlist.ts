@@ -3584,7 +3584,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/meta/index.ts",
-			line: 2875,
+			line: 2881,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emit deferred inventory claims only after the run-wide authentication check, in stream order.",
@@ -3605,7 +3605,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/meta/integration.test.ts",
-			line: 2809,
+			line: 2853,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "classifyAdsDialogInPage returns closed states for reviewer fixtures: one Chromium page is reloaded with each fixture in turn before classifying it.",
