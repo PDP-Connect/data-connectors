@@ -4746,10 +4746,17 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/uber/index.ts",
-			line: 437,
+			line: 328,
+			column: 11,
+			category: "provider_pacing_backpressure",
+			note: "retryTripDetail(): each rate-limited GetTrip or GetReceipt attempt waits for the previous result and a growing delay.",
+		},
+		{
+			path: "connectors/uber/index.ts",
+			line: 528,
 			column: 15,
 			category: "provider_pacing_backpressure",
-			note: "fetchGetTrip()/fetchFareBreakdown() per trip id, and emitRecord('trips'|'receipts', ...) after each — one detail-fetch loop shared by both streams, politely paced between trips (D5 revised: trips hydrates from GetTrip, receipts from GetReceipt).",
+			note: "collectAllStreams(): trip and receipt detail requests share one politely paced loop, and records are emitted in trip order.",
 		},
 		{
 			path: "connectors/usaa/credit-card-billing-stats.test.ts",

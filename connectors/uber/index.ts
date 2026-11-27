@@ -386,6 +386,11 @@ export async function fetchAllActivities(
 			const hasErrors =
 				Array.isArray(parsed?.errors) && parsed.errors.length > 0;
 			if (parsed?.data == null) {
+				// The usable prefix is still evidence; its coverage is incomplete.
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
 				const message = Array.isArray(parsed?.errors)
 					? parsed.errors[0]?.message
 					: undefined;
@@ -407,6 +412,10 @@ export async function fetchAllActivities(
 				(past.activities !== null && !Array.isArray(past.activities)) ||
 				(hasErrors && !Array.isArray(past.activities))
 			) {
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
 				throw new Error(
 					"uber_graphql_error [endpoint Activities]: Malformed Activities data",
 				);

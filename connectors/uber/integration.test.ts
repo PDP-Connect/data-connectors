@@ -604,13 +604,6 @@ test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying
 		bodies: [JSON.stringify({ errors: [{ message: "unavailable" }] })],
 	},
 	{
-		name: "errors after a valid first page",
-		bodies: [
-			activitiesBody([{ uuid: "trip-1" }], "next-page"),
-			JSON.stringify({ errors: [{ message: "second page unavailable" }] }),
-		],
-	},
-	{
 		name: "missing Activities containers",
 		bodies: [JSON.stringify({ data: {} })],
 	},
@@ -678,6 +671,49 @@ test("collectAllStreams: a partial GraphQL page keeps its trips and reports a re
 			],
 		],
 	);
+});
+
+[
+	{
+		name: "errors without data",
+		damaged: { errors: [{ message: "temporarily unavailable" }] },
+	},
+	{ name: "a missing Activities container", damaged: { data: {} } },
+].forEach(({ name, damaged }) => {
+	test(`collectAllStreams: a later page with ${name} keeps the good prefix and reports a retryable skip`, async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [
+				{ body: activitiesBody([{ uuid: "good-trip" }], "page-2") },
+				{ body: JSON.stringify(damaged) },
+			],
+			getTrip: { "good-trip": { body: getTripBody({ status: "COMPLETED" }) } },
+			getReceipt: {
+				"good-trip": { body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+			},
+		});
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await collectAllStreams(ctx, fetchPath, NO_DELAY);
+		assert.deepEqual(calls, [
+			"Activities",
+			"Activities",
+			"GetTrip:good-trip",
+			"GetReceipt:good-trip",
+		]);
+		assert.deepEqual(
+			emitted.map((record) => record.stream),
+			["trips", "receipts"],
+		);
+		assert.deepEqual(
+			messages
+				.filter((message) => message.type === "SKIP_RESULT")
+				.map((skip) => [skip.stream, skip.reason, skip.recovery_hint]),
+			["trips", "receipts"].map((stream) => [
+				stream,
+				"trips_source_incomplete",
+				{ action: "retry_by_runtime", retryable: true },
+			]),
+		);
+	});
 });
 
 [
