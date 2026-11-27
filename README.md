@@ -1,34 +1,22 @@
 # Data Connectors
 
-This repository is the source home for PDPP Collection Profile connectors. Each implementation lives in `connectors/<key>/` with its `manifest.json`, code, icon, tests, and reviewed scrubbed fixtures. `packages/polyfill-connectors/` contains shared runtime libraries and local development tools. New connector work starts with [Connector authoring](AUTHORING.md). The [PDPP Collection Profile](docs/spec/collection-profile.md) defines the normative connector manifest and protocol.
+This repository holds connectors that collect a person's own data from a platform, such as an API, a signed-in website or an exported file, and emit it as records in the format of the [PDPP Collection Profile](docs/spec/collection-profile.md). Each connector is a directory in `connectors/`. The runtime and tools they share are in `packages/polyfill-connectors/`.
 
-## Build and verify
+## Contribute a connector
 
-Start with the [connector authoring loop](AUTHORING.md) for the scaffold, local run, capture, replay, and safe evidence workflow.
+1. Follow [AUTHORING.md](AUTHORING.md). It takes you from install to an open PR, step by step, and says how to choose each manifest setting.
+2. For a browser connector, also follow the [browser connector guidelines](CONNECTOR-GUIDELINES.md). They say what works in the desktop app and in the mobile app.
+3. Sign off each commit with `git commit -s`. If AI helped with a commit, add an `Assisted-by: AI` trailer. [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob/main/CONTRIBUTING.md) gives the full policy.
 
-Install from the repository root so TypeScript and runtime imports resolve the declared workspace dependencies:
+A maintainer reviews the PR against [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md). Coding agents start at [AGENTS.md](AGENTS.md).
 
-```bash
-npm ci
-npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
-npm run verify --workspace @pdpp/polyfill-connectors
-npm test --workspace @pdpp/polyfill-connectors
-npm run connector-implementation-index:check
-npm run legacy-shapes:check
-npm run legacy-shapes:test
-```
+## Reference
 
-The package's `npm run pack-install-run` builds a tarball, installs it in an isolated project, and imports every remaining library export. `scripts/build-connector-oci-artifact.mjs` bundles an individual root connector into an OCI artifact. The [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) covers source, manifest, and fixture review.
-
-## Distribution
-
-Collection Profiles are published as individually versioned, signed OCI artifacts. The source manifest at `connectors/<key>/manifest.json` owns its version and runtime bindings. The root [`connector-implementation-index.json`](connector-implementation-index.json) is generated from these implementations; `npm run connector-implementation-index:check` verifies it.
-
-The repository no longer contains the retired `*-playwright` and `claude-code-local` tarballs, root `scope-catalog.json`, `connector-index.json`, and `fixture-index.json`, or their hand-dispatched signing and release workflow. Existing GitHub release assets are separate; this change does not modify them.
-
-The permanent [`legacy-shapes.json`](legacy-shapes.json) retains all 54 published old-format scope IDs and their exact schema bytes. `npm run legacy-shapes:check` pins only that mapping and its schemas, and checks the generated [scope index](SCOPES.md) for drift. `npm run legacy-shapes:generate` renders the index from the same mapping and schemas; the generated document is not a separate definition. `scripts/no-legacy-connectors.test.mjs` keeps every other legacy connector artifact out of the repository.
-
-The root layout changes the private `@pdpp/polyfill-connectors` workspace API: connector implementations, manifest discovery, source-dependent registries, and the local device exporter are no longer shipped in its tarball. Consumers of the previous package must migrate those imports before repinning. This source change does not modify artifacts already published to GitHub Releases.
-
-## Further references
-
+| You want to | Read |
+|---|---|
+| Look up a rule for runtime, schemas or capture | [Connector authoring guide](packages/polyfill-connectors/docs/connector-authoring-guide.md) |
+| Look up what each evidence tier needs | [Connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) |
+| Add a connector to the mobile app | [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md) |
+| Run the test suites | [TESTING.md](TESTING.md) |
+| Learn how connectors are versioned and published | [docs/publishing.md](docs/publishing.md) |
+| Review, merge and publish a connector PR | [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md) |

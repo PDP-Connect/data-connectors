@@ -63,7 +63,8 @@ export const isoFromUnix = (
 	if (!Number.isFinite(n) || n <= 0) {
 		return null;
 	}
-	return new Date(n * 1000).toISOString();
+	const date = new Date(n * 1000);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
 export const absolutePermalink = (

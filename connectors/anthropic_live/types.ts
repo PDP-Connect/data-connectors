@@ -41,12 +41,16 @@ export interface RawMessage {
 	parent_message_uuid?: unknown;
 }
 
-/** `GET …/subscription_details`. `payment_method` is never read. */
+/**
+ * `GET …/subscription_details`. Of `payment_method`, only `country` is read;
+ * brand, last4 and type are never read.
+ */
 export interface RawSubscriptionDetails {
 	status?: unknown;
 	billing_interval?: unknown;
 	next_charge_at?: unknown;
 	plan_ending_at?: unknown;
+	payment_method?: unknown;
 }
 
 /** One `{ utilization, resets_at }` window of `GET …/usage`. */

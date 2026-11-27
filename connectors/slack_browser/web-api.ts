@@ -245,7 +245,12 @@ type Verdict =
 	| { kind: "retry"; reason: string; waitMs?: number }
 	| { kind: "fatal"; error: Error };
 
-function classifyBody(method: string, status: number, body: string): Verdict {
+function classifyBody(
+	method: string,
+	status: number,
+	body: string,
+	retryAfterSeconds: number | null,
+): Verdict {
 	let json: unknown;
 	try {
 		json = JSON.parse(body);
@@ -267,7 +272,11 @@ function classifyBody(method: string, status: number, body: string): Verdict {
 		return { kind: "fatal", error: new SlackSessionLostError(reason) };
 	}
 	if (reason === "ratelimited") {
-		return { kind: "retry", reason, waitMs: RATE_LIMIT_FALLBACK_S * 1000 };
+		const seconds =
+			retryAfterSeconds === null
+				? RATE_LIMIT_FALLBACK_S
+				: retryAfterSeconds + 1;
+		return { kind: "retry", reason, waitMs: seconds * 1000 };
 	}
 	return {
 		kind: "fatal",
@@ -339,7 +348,7 @@ function classify(method: string, outcome: SlackCallOutcome): Verdict {
 			error: new SlackApiError(method, `http_${status}`, false, status),
 		};
 	}
-	return classifyBody(method, status, outcome.body);
+	return classifyBody(method, status, outcome.body, outcome.retryAfterSeconds);
 }
 
 export interface SlackApiClientDeps {

@@ -94,6 +94,14 @@ export function secondsToIso(value: unknown): string | null {
 /** A zoned ISO string normalized to UTC `Z`; null for a zoneless or bad value. */
 export function zonedIsoToIso(value: unknown): string | null {
 	if (typeof value !== "string" || !ZONED_ISO_RE.test(value)) return null;
+	// Validate the written date before applying the offset: Date.parse normalizes overflow days.
+	const day = value.slice(0, 10);
+	const midnight = new Date(day + "T00:00:00Z");
+	if (
+		!Number.isFinite(midnight.getTime()) ||
+		midnight.toISOString().slice(0, 10) !== day
+	)
+		return null;
 	const ms = Date.parse(value);
 	return Number.isNaN(ms) ? null : msToIso(ms);
 }

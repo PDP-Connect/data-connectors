@@ -220,16 +220,16 @@ function buildManifest(
 		capabilities: {
 			human_interaction: [],
 			refresh_policy: {
-				recommended_mode: "manual",
+				recommended_mode: "automatic",
 				recommended_interval_seconds: 21_600,
 				minimum_interval_seconds: 3600,
 				maximum_staleness_seconds: 86_400,
 				interaction_posture: "none",
 				rate_limit_sensitivity: "medium",
 				bot_detection_sensitivity: "low",
-				background_safe: false,
+				background_safe: true,
 				rationale:
-					"Scaffolded connector: manual refresh until a real rate profile is measured against the live API.",
+					"Scaffolded connector: a token-based API run needs no person, so it may refresh on a schedule. Replace the intervals with the platform's published or measured rate limits.",
 			},
 			public_listing: {
 				tier: "development",
@@ -597,7 +597,7 @@ if (isMainModule(import.meta.url)) {
   runConnector({
     name: "${name}",
     validateRecord,
-    retryablePattern: /ECONN|fetch failed/i,
+    retryablePattern: /ECONN|ETIMEDOUT|timeout|fetch failed|${name}_http_(?:408|429|5\\d\\d)\\b/i,
     auth: { kind: "env", required: ["${envVar}"] },
     async collect({ state, requested, credentials, emit, emitRecord, progress }) {
       const token = credentials.${envVar};

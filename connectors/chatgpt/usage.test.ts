@@ -329,6 +329,51 @@ test("conversation projection keeps counts, models and features and drops every 
 	);
 });
 
+test("conversation projection retains 6000 ordered metadata events and no message text", () => {
+	// Exercise the self-contained page projector without calling its transport.
+	const source = String(chatGptUsageFetchInBrowser);
+	const start = source.search(/\bconst h\s*=/);
+	const end = source.search(/\bconst controller\s*=/);
+	assert.ok(start >= 0 && end > start, "page projection helper block");
+	const project = runInThisContext(
+		`(input) => { ${source.slice(start, end)} return h.conversation(input); }`,
+	) as (input: unknown) => { events: unknown[] };
+
+	const first = 1_800_000_000;
+	const text = "SYNTHETIC_MESSAGE_TEXT_MUST_NOT_SURVIVE";
+	const model = "example-model";
+	const count = 6000;
+	const mapping = Object.fromEntries(
+		Array.from({ length: count }, (_, i) => [
+			`sample-${i}`,
+			{
+				parent: i > 0 ? `sample-${i - 1}` : null,
+				message: {
+					author: { role: i % 2 === 0 ? "user" : "assistant" },
+					content: { content_type: "text", parts: [text] },
+					create_time: first + i,
+					metadata: i % 2 === 0 ? {} : { model_slug: model },
+				},
+			},
+		]),
+	);
+	const result = project({
+		conversation_id: "sample-thread",
+		current_node: `sample-${count - 1}`,
+		mapping,
+		title: text,
+	});
+
+	assert.equal(JSON.stringify(result).includes(text), false);
+	assert.equal(result.events.length, count);
+	assert.deepEqual(
+		result.events,
+		Array.from({ length: count }, (_, i) =>
+			i % 2 === 0 ? [first + i, 0, null] : [first + i, 1, model],
+		),
+	);
+});
+
 test("batch projection maps every element and a non-200 returns no body", async () => {
 	installFakeSite(siteRoutes());
 	const batch = await inPage("/conversations/batch", "conversation_detail", {
@@ -493,6 +538,9 @@ test("beta features keep only enabled slug keys; side endpoints keep counts and 
 	const tasks = await inPage("/tasks", "task_stats");
 	assert.deepEqual(tasks.json, {
 		task_count: 3,
+		task_keys: ["2026-09-01", "2026-09-02", "2026-09-03"].map(
+			(day) => `created-${Date.parse(`${day}T08:00:00Z`)}`,
+		),
 		by_status: { active: 2, other: 1 },
 		cursor: null,
 		has_more: false,
@@ -1566,10 +1614,11 @@ test("cursor steps honour explicit ends, empty pages and repeated cursors", () =
 			done: "ok",
 		},
 	);
+	// Empty pages with a fresh continuation do not prove source end.
 	assert.deepEqual(
 		nextCursorStep({ has_more: true, cursor: "c" }, seen, "b", 0, 0),
 		{
-			done: "ok",
+			next: "c",
 		},
 	);
 	// The last page echoes its own cursor: done, nothing refetched.
@@ -1821,4 +1870,294 @@ test("the summary and profile advertise no resource selection", () => {
 		const stream = manifest.streams.find((s) => s.name === name);
 		assert.equal(stream?.selection?.resources, false, name);
 	}
+});
+
+/** Synthetic projected pager responses; other reads use the existing fake site. */
+function uncappedUsageHarness(
+	projectIds: string[],
+	pagesPerProject: number,
+	sidebarPages = 1,
+	taskPages = 1,
+	repeatSidebar = false,
+) {
+	const projects = Object.fromEntries(
+		projectIds.map((id, project) => [
+			id,
+			Array.from({ length: pagesPerProject }, (_, page) => [
+				projectItem(project * pagesPerProject + page),
+			]),
+		]),
+	);
+	const fake = fakeApi(siteRoutes({ conversations: [], projects }));
+	const harness = makeRecordingEmit(validateRecord);
+	const sidebarCursors: number[] = [];
+	const taskCursors: number[] = [];
+	const api: ChatGptApi = {
+		...fake.api,
+		fetch(path, opts) {
+			const url = new URL(path, "https://synthetic.invalid");
+			const page = Number(url.searchParams.get("cursor") ?? 0);
+			if (url.pathname === "/gizmos/snorlax/sidebar") {
+				sidebarCursors.push(page);
+				const ids =
+					sidebarPages === 1 ? projectIds : projectIds.slice(page, page + 1);
+				return Promise.resolve({
+					status: 200,
+					json: {
+						item_count: ids.length,
+						file_count: 0,
+						project_ids: ids,
+						has_more: page + 1 < sidebarPages || repeatSidebar,
+						cursor: repeatSidebar && page === 2 ? "1" : String(page + 1),
+					},
+				});
+			}
+			if (url.pathname === "/tasks") {
+				taskCursors.push(page);
+				return Promise.resolve({
+					status: 200,
+					json: {
+						task_count: 1,
+						by_status: { active: 1 },
+						has_more: page + 1 < taskPages,
+						cursor: String(page + 1),
+					},
+				});
+			}
+			return fake.api.fetch(path, opts);
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map(
+			["account_profile", "usage_summary"].map((name) => [name, { name }]),
+		),
+	};
+	return {
+		harness,
+		sidebarCursors,
+		taskCursors,
+		run: () =>
+			runUsageStreams(
+				deps,
+				{},
+				{
+					classifyError: () => "other",
+					accountsCheckPath: "/accounts/check/v4-2023-04-27",
+					now: () => NOW_MS,
+				},
+			),
+	};
+}
+
+test("usage project inventory reads all 101 projects without truncation", async () => {
+	const h = uncappedUsageHarness(
+		Array.from({ length: 101 }, (_, i) => `g-p-Synthetic${i}`),
+		1,
+	);
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+	await h.run();
+	const [summary] = records(h.harness, "usage_summary");
+	const listing = sub(sub(summary, "coverage"), "project_listing");
+	assert.equal(listing.projects, 101);
+	assert.equal(listing.pages, 101);
+	assert.equal(listing.conversations_added, 101);
+	assert.equal(listing.truncated, false);
+	assert.equal(sub(summary, "coverage").listing_complete, true);
+});
+
+test("usage project inventory reads beyond 400 total and 200 per-project pages", async () => {
+	const h = uncappedUsageHarness(["g-p-SyntheticA", "g-p-SyntheticB"], 201);
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+	await h.run();
+	const [summary] = records(h.harness, "usage_summary");
+	const listing = sub(sub(summary, "coverage"), "project_listing");
+	assert.equal(listing.pages, 402);
+	assert.equal(listing.conversations_added, 402);
+	assert.equal(listing.failed, 0);
+	assert.equal(listing.truncated, false);
+	assert.equal(sub(summary, "coverage").listing_complete, true);
+});
+
+test("usage profile reads six task pages as an exact count", async () => {
+	const h = uncappedUsageHarness([], 0, 1, 6);
+	await h.run();
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(profile?.scheduled_task_count, 6);
+	assert.equal(sub(profile, "source_status").tasks, "ok");
+	assert.deepEqual(h.taskCursors, [0, 1, 2, 3, 4, 5]);
+});
+
+test("usage sidebar reads 21 pages and feeds every project id", async () => {
+	const h = uncappedUsageHarness(
+		Array.from({ length: 21 }, (_, i) => `g-p-Synthetic${i}`),
+		1,
+		21,
+	);
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+	await h.run();
+	const [summary] = records(h.harness, "usage_summary");
+	const listing = sub(sub(summary, "coverage"), "project_listing");
+	assert.equal(listing.projects, 21);
+	assert.equal(listing.conversations_added, 21);
+	assert.equal(listing.sidebar, "ok");
+	assert.equal(listing.truncated, false);
+	assert.deepEqual(
+		h.sidebarCursors,
+		Array.from({ length: 21 }, (_, i) => i),
+	);
+});
+
+test("usage sidebar cursor cycle stops and remains partial", async () => {
+	const h = uncappedUsageHarness(
+		["g-p-SyntheticA", "g-p-SyntheticB", "g-p-SyntheticC"],
+		1,
+		3,
+		1,
+		true,
+	);
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+	await h.run();
+	const [profile] = records(h.harness, "account_profile");
+	const [summary] = records(h.harness, "usage_summary");
+	assert.equal(sub(profile, "source_status").projects, "partial");
+	assert.equal(
+		sub(sub(summary, "coverage"), "project_listing").sidebar,
+		"partial",
+	);
+	assert.equal(sub(summary, "coverage").listing_complete, false);
+	assert.deepEqual(h.sidebarCursors, [0, 1, 2]);
+});
+
+type ProgressPagerTarget = "project" | "sidebar" | "tasks";
+function progressPagerHarness(
+	target: ProgressPagerTarget,
+	pageAt: (page: number) => { ids: number[]; has_more: boolean; cursor?: string },
+	maxPages: number,
+	options: { profileOnly?: boolean; wallClockAfter?: number } = {},
+) {
+	const fake = fakeApi(siteRoutes({ conversations: [] }));
+	const harness = makeRecordingEmit(validateRecord);
+	let pages = 0;
+	const api: ChatGptApi = {
+		...fake.api,
+		fetch(path, opts) {
+			const url = new URL(path, "https://synthetic.invalid");
+			const isSidebar = url.pathname === "/gizmos/snorlax/sidebar";
+			const isProject = url.pathname === "/gizmos/g-p-Progress/conversations";
+			const isTasks = url.pathname === "/tasks";
+			const selected = target === "sidebar" ? isSidebar : target === "project" ? isProject : isTasks;
+			if (selected) {
+				assert.ok(++pages <= maxPages, "fresh-cursor non-progress must stop");
+				const page = pageAt(pages - 1);
+				const body = target === "project"
+					? { items: page.ids.map((id) => listItem(rawConvId(id))) }
+					: target === "sidebar"
+						? { item_count: page.ids.length, file_count: 0, project_ids: page.ids.map((id) => "g-p-Progress" + id) }
+						: { task_count: page.ids.length, task_keys: page.ids.map((id) => `task${id}`), by_status: {} };
+				return Promise.resolve({ status: 200, json: { ...body, has_more: page.has_more, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) } });
+			}
+			if (isSidebar) return Promise.resolve({ status: 200, json: {
+				item_count: target === "project" ? 1 : 0, file_count: 0,
+				project_ids: target === "project" ? ["g-p-Progress"] : [], has_more: false,
+			} });
+			return fake.api.fetch(path, opts);
+		},
+	};
+	const deps: StreamDeps = {
+		api, emit: harness.emit, emitRecord: harness.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map((options.profileOnly ? ["account_profile"] : ["account_profile", "usage_summary"]).map((name) => [name, { name }])),
+		...(options.wallClockAfter === undefined ? {} : { runBudget: {
+			reason: () => pages >= options.wallClockAfter! ? "max_wall_clock" : null,
+		} as NonNullable<StreamDeps["runBudget"]> }),
+	};
+	return {
+		harness, pages: () => pages,
+		run: () => runUsageStreams(deps, {}, {
+			classifyError: () => "other", accountsCheckPath: "/accounts/check/v4-2023-04-27",
+			now: () => NOW_MS,
+		}),
+	};
+}
+
+for (const partial of [false, true]) {
+	test(`account profile checkpoints only complete sidebar walks (wall clock=${partial})`, async () => {
+		const h = progressPagerHarness("sidebar", () => ({ ids: [1], has_more: partial,
+			...(partial ? { cursor: "next" } : {}),
+		}), 1, { profileOnly: true, ...(partial ? { wallClockAfter: 1 } : {}) });
+		await h.run();
+		assert.equal(h.pages(), 1);
+		const [profile] = records(h.harness, "account_profile");
+		assert.ok(profile, "retain observable profile record after a partial walk");
+		assert.equal(sub(profile, "source_status").projects, partial ? "partial" : "ok");
+		for (const kind of ["STATE", "DETAIL_COVERAGE"]) {
+			assert.equal(h.harness.protocolMessages.some((message) =>
+				message.type === kind && "stream" in message && message.stream === "account_profile"), !partial, kind);
+		}
+	});
+}
+
+// One page with a new item, then fresh cursors that add nothing: the walk
+// stops once more than 16 pages in a row make no progress, and is partial.
+test("usage sidebar stops on fresh cursors that add no project", async () => {
+	const h = progressPagerHarness("sidebar", (page) => ({ ids: [1], has_more: true, cursor: `c${page + 1}` }), 18, {
+		profileOnly: true,
+	});
+	await h.run();
+	assert.equal(h.pages(), 18);
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(sub(profile, "source_status").projects, "partial");
+});
+
+test("usage project listing stops on fresh cursors that add no conversation", async () => {
+	const h = progressPagerHarness("project", (page) => ({ ids: [1], has_more: true, cursor: `c${page + 1}` }), 18);
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+	await h.run();
+	assert.equal(h.pages(), 18);
+	const [summary] = records(h.harness, "usage_summary");
+	const listing = sub(sub(summary, "coverage"), "project_listing");
+	assert.equal(listing.failed, 1);
+	assert.equal(sub(summary, "coverage").listing_complete, false);
+});
+
+test("usage tasks read past the no-progress guard while each page adds a task", async () => {
+	const h = progressPagerHarness("tasks", (page) => ({ ids: [page], has_more: page < 23, cursor: `t${page + 1}` }), 24, {
+		profileOnly: true,
+	});
+	await h.run();
+	assert.equal(h.pages(), 24);
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(profile?.scheduled_task_count, 24);
+	assert.equal(sub(profile, "source_status").tasks, "ok");
+});
+
+test("usage tasks stop on fresh cursors that add no task", async () => {
+	const h = progressPagerHarness("tasks", (page) => ({ ids: [1], has_more: true, cursor: `t${page + 1}` }), 18, {
+		profileOnly: true,
+	});
+	await h.run();
+	assert.equal(h.pages(), 18);
+	const [profile] = records(h.harness, "account_profile");
+	assert.equal(sub(profile, "source_status").tasks, "partial");
+});
+
+test("task keys come from the task id or creation time, never its text", async () => {
+	installFakeSite({
+		"/tasks": () =>
+			json({
+				tasks: [
+					{ id: "task-a", created_at: "2026-10-01T00:00:00Z", title: "CANARY title" },
+					{ created_at: "2026-10-02T00:00:00Z", prompt: "CANARY prompt", status: "paused" },
+					{ title: "CANARY no id or time" },
+				],
+			}),
+	});
+	const projected = (await inPage("/tasks", "task_stats")).json as { task_count: number; task_keys: string[] };
+	assert.equal(projected.task_count, 3);
+	assert.deepEqual(projected.task_keys, ["task-a", `created-${Date.parse("2026-10-02T00:00:00Z")}`]);
+	assert.equal(JSON.stringify(projected).includes("CANARY"), false);
 });

@@ -55,13 +55,10 @@ const HEADER_FOLD_RE = /\r?\n[ \t]+/g;
 const REFERENCES_HEADER_RE = /^references:\s*(.*)$/im;
 const ANGLE_ID_RE = /<([^>]+)>/g;
 const QUOTED_REPLY_RE = /^\s*>/;
-const HEX_ESCAPE_RE = /[=]([0-9A-Fa-f]{2})/g;
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
 export const SNIPPET_MAX_CHARS = 200;
-const KB = 1024;
-export const MAX_BODY_FIELD_CHARS = 32 * KB;
 
 // ─── BigInt narrowing ───────────────────────────────────────────────────
 
@@ -379,6 +376,41 @@ export function findLeafByPath(
 
 // ─── Body decoding helpers ──────────────────────────────────────────────
 
+function decodeQuotedPrintableBytes(buffer: Buffer): Buffer {
+	const raw = buffer.toString("ascii");
+	const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
+	// Decode the =HH sequences as raw bytes, then interpret in charset.
+	const bytes: number[] = [];
+	let i = 0;
+	while (i < unfolded.length) {
+		if (
+			unfolded[i] === "=" &&
+			i + 2 < unfolded.length &&
+			HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))
+		) {
+			bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
+			i += 3;
+		} else {
+			bytes.push(unfolded.charCodeAt(i));
+			i += 1;
+		}
+	}
+	return Buffer.from(bytes);
+}
+
+/** Decode MIME charset labels without discarding transfer-decoded bytes. */
+export function decodeCharset(bytes: Buffer, charset: string | null): string {
+	const label = charset || "utf8";
+	if (Buffer.isEncoding(label)) {
+		return bytes.toString(label);
+	}
+	try {
+		return new TextDecoder(label).decode(bytes);
+	} catch {
+		return bytes.toString("utf8");
+	}
+}
+
 /**
  * Decode a body part buffer according to its MIME transfer encoding and
  * charset into a JavaScript string. Best-effort; never throws.
@@ -391,37 +423,14 @@ export function decodeBodyPart(
 	if (!buffer?.length) {
 		return "";
 	}
-	const cs = (charset || "utf8") as BufferEncoding;
-	try {
-		const enc = (encoding || "").toLowerCase();
-		if (enc === "base64") {
-			return Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-		}
-		if (enc === "quoted-printable") {
-			const raw = buffer.toString("ascii");
-			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-			// Decode the =HH sequences as raw bytes, then interpret in charset.
-			const bytes: number[] = [];
-			let i = 0;
-			while (i < unfolded.length) {
-				if (
-					unfolded[i] === "=" &&
-					i + 2 < unfolded.length &&
-					HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))
-				) {
-					bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
-					i += 3;
-				} else {
-					bytes.push(unfolded.charCodeAt(i));
-					i += 1;
-				}
-			}
-			return Buffer.from(bytes).toString(cs);
-		}
-		return buffer.toString(cs);
-	} catch {
-		return buffer.toString("utf8");
+	const enc = (encoding || "").toLowerCase();
+	let bytes = buffer;
+	if (enc === "base64") {
+		bytes = Buffer.from(buffer.toString("ascii"), "base64");
+	} else if (enc === "quoted-printable") {
+		bytes = decodeQuotedPrintableBytes(buffer);
 	}
+	return decodeCharset(bytes, charset);
 }
 
 /**
@@ -523,25 +532,7 @@ export function makeSnippet(
 	if (!buffer?.length) {
 		return null;
 	}
-	let decoded: string;
-	try {
-		const enc = (encoding || "").toLowerCase();
-		const cs = (charset || "utf8") as BufferEncoding;
-		if (enc === "base64") {
-			decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-		} else if (enc === "quoted-printable") {
-			// Minimal QP decode: =HH hex + soft line breaks (=\r?\n)
-			const raw = buffer.toString("ascii");
-			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-			decoded = unfolded.replace(HEX_ESCAPE_RE, (_, h: string) =>
-				String.fromCharCode(Number.parseInt(h, 16)),
-			);
-		} else {
-			decoded = buffer.toString(cs);
-		}
-	} catch {
-		decoded = buffer.toString("utf8");
-	}
+	const decoded = decodeBodyPart(buffer, encoding, charset);
 	// Drop lines that are obviously quoted replies ("> ...") and signature separators
 	const collapsed = decoded
 		.split(NEWLINE_SPLIT_RE)
@@ -560,9 +551,16 @@ export function makeSnippet(
 	if (!cleaned) {
 		return null;
 	}
-	return cleaned.length > maxChars
-		? cleaned.slice(0, maxChars).trim()
-		: cleaned;
+	if (cleaned.length > maxChars) {
+		let end = maxChars;
+		const lastCodeUnit = cleaned.charCodeAt(end - 1);
+		// Do not leave a lone high surrogate when the cap splits a character.
+		if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
+			end -= 1;
+		}
+		return cleaned.slice(0, end).trim();
+	}
+	return cleaned;
 }
 
 // ─── Thread aggregation ────────────────────────────────────────────────
@@ -756,11 +754,15 @@ export function canonicalBodyBlobCandidates(params: {
 	bodyTextFull: string | null;
 }): CanonicalBodyBlobCandidate[] {
 	const candidates: CanonicalBodyBlobCandidate[] = [];
+	const { bodyText } = classifyBodySource(
+		params.bodyTextFull,
+		params.bodyHtmlFull,
+	);
 	for (const [value, jsonPath, mimeType] of [
-		[params.bodyTextFull, "/body_text", "text/plain"],
+		[bodyText, "/body_text", "text/plain"],
 		[params.bodyHtmlFull, "/body_html", "text/html"],
 	] as const) {
-		if (typeof value === "string" && safeTextPreview(value).kind === "binary") {
+		if (typeof value === "string" && bodyRequiresBlob(value)) {
 			candidates.push({
 				content: Buffer.from(value, "utf8"),
 				jsonPath,
@@ -771,21 +773,28 @@ export function canonicalBodyBlobCandidates(params: {
 	return candidates;
 }
 
-function truncateField(value: string | null, max: number): string | null {
-	if (value === null) {
-		return toCleanString(value);
-	}
-	if (value.length > max) {
-		return toCleanString(`${value.slice(0, max)}…[truncated]`);
-	}
-	return toCleanString(value);
+// Conservative inline limit, matching ChatGPT's inline-to-blob policy.
+// This is a routing threshold, never a truncation limit.
+const BODY_INLINE_MAX_CHARS = 1_048_576;
+
+function bodyRequiresBlob(value: string): boolean {
+	return (
+		value.length > BODY_INLINE_MAX_CHARS ||
+		safeTextPreview(value).kind === "binary"
+	);
+}
+
+function inlineBody(value: string | null): string | null {
+	return value !== null && bodyRequiresBlob(value)
+		? null
+		: toCleanString(value);
 }
 
 /**
  * Build the `message_bodies` RECORD payload for one message. Mirrors the
- * original in-loop semantics:
- *   - Truncate body_text / body_html to MAX_BODY_FIELD_CHARS + "…[truncated]"
- *   - Emit body_*_bytes from the FULL (pre-truncation) decoded body
+ * body routing semantics:
+ *   - Preserve complete inline bodies; oversized/control-rich fields use blobs
+ *   - Emit body_*_bytes from the FULL decoded body
  *   - Fall back to html_stripped when text/plain is absent/empty
  *   - charset = textCharset || htmlCharset || null
  *
@@ -811,8 +820,8 @@ export function buildMessageBodyRecord(params: {
 		id: params.gmMsgid,
 		message_id: params.gmMsgid,
 		message_received_at: params.receivedAt,
-		body_text: truncateField(bodyText, MAX_BODY_FIELD_CHARS),
-		body_html: truncateField(params.bodyHtmlFull, MAX_BODY_FIELD_CHARS),
+		body_text: inlineBody(bodyText),
+		body_html: inlineBody(params.bodyHtmlFull),
 		body_text_bytes: bodyText ? Buffer.byteLength(bodyText, "utf8") : null,
 		body_html_bytes: params.bodyHtmlFull
 			? Buffer.byteLength(params.bodyHtmlFull, "utf8")

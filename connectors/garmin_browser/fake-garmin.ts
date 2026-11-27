@@ -30,6 +30,14 @@ export interface SiteData {
 	hrv: unknown[];
 	/** Activity rows, newest first. */
 	activities: unknown[];
+	/**
+	 * Whether `v2/dailysummaries` answers: off, it is a path the fake does not know (404), as the
+	 * live web app was not seen to load it. On, it answers `daily` in Garmin's documented range
+	 * shape; `rangeDaily` replaces a day's entry with what it holds, or drops the day when it
+	 * holds undefined, so a range answer can disagree with the day's own summary.
+	 */
+	summaryRange?: boolean;
+	rangeDaily?: Record<string, unknown>;
 }
 
 const fixture = (name: string): unknown =>
@@ -72,6 +80,37 @@ const days = (from: string, to: string): number =>
 	1;
 const within = (day: unknown, from: string, to: string): boolean =>
 	typeof day === "string" && day >= from && day <= to;
+const nextDay = (day: string): string =>
+	new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000)
+		.toISOString()
+		.slice(0, 10);
+
+/** A day's summary in the range shape: the same values, in the groups the Personal API documents. */
+function rangeEntry(day: string, summary: unknown): unknown {
+	const value = (key: string): unknown => field(summary, key) ?? null;
+	const metrics = [
+		"totalSteps",
+		"restingHeartRate",
+		"minHeartRate",
+		"averageStressLevel",
+		"bodyBatteryHighestValue",
+		"bodyBatteryLowestValue",
+	].map(value);
+	return {
+		calendarDate: day,
+		includesWellnessData: metrics.some((metric) => metric !== null),
+		movement: { steps: { value: value("totalSteps") } },
+		heartRate: {
+			minValue: value("minHeartRate"),
+			restingValue: value("restingHeartRate"),
+		},
+		stress: { avgLevel: value("averageStressLevel") },
+		bodyBattery: {
+			minValue: value("bodyBatteryLowestValue"),
+			maxValue: value("bodyBatteryHighestValue"),
+		},
+	};
+}
 
 /**
  * Answers one same-origin path as Garmin would for the account `data` describes. `change`, called
@@ -89,6 +128,24 @@ export function garminApi(
 		const query = url.searchParams;
 		if (at === "/gc-api/userprofile-service/userprofile/settings") {
 			return json(data.settings);
+		}
+		if (at === "/gc-api/usersummary-service/v2/dailysummaries") {
+			if (!data.summaryRange) return NOT_FOUND;
+			const from = query.get("startDate") ?? "";
+			const to = query.get("endDate") ?? "";
+			if (!DAY.test(from) || !DAY.test(to)) return BAD_RANGE;
+			// Garmin's Personal API documents at most 365 days per request.
+			if (days(from, to) < 1 || days(from, to) > 365) return BAD_RANGE;
+			const entries: unknown[] = [];
+			for (let day = from; day <= to; day = nextDay(day)) {
+				if (data.rangeDaily && Object.hasOwn(data.rangeDaily, day)) {
+					const entry = data.rangeDaily[day];
+					if (entry !== undefined) entries.push(entry);
+					continue;
+				}
+				entries.push(rangeEntry(day, data.daily[day]));
+			}
+			return json({ data: entries });
 		}
 		if (at === "/gc-api/usersummary-service/usersummary/daily") {
 			const day = query.get("calendarDate") ?? "";

@@ -31,6 +31,7 @@ import {
 	probeSession,
 	readCursor,
 	sleepRequest,
+	trainingDetailsRequest,
 	trainingHistoryRequest,
 	trainingSummaryRequest,
 	windows,
@@ -323,6 +324,216 @@ test("Nightly Recharge and session summaries use the web app's paths", () => {
 		trainingSummaryRequest(8349588454).url,
 		"/api/training/analysis/8349588454/summary",
 	);
+	assert.deepEqual(trainingDetailsRequest(8349588454), {
+		url: "/api/training/analysis/8349588454/details",
+		method: "GET",
+		pick: "heart_rate",
+	});
+});
+
+test("the page hands over only the heart rate of a session's details: no GPS, no other series", async () => {
+	const s = site();
+	const r = await pageFetch(pageOn(s), trainingDetailsRequest(8349588454));
+	assert.ok(r.kind === "response" && r.status === 200);
+	const body = JSON.parse(r.body) as Record<string, unknown>;
+	assert.deepEqual(Object.keys(body).sort(), ["exercises", "id", "samples"]);
+	assert.equal(r.body.includes("latitude"), false);
+	assert.equal(r.body.includes("SPEED"), false);
+	assert.equal(r.body.includes("HEART_RATE"), true);
+	assert.deepEqual(body.exercises, {
+		"8379162593": { startTime: "2026-11-03T07:12:09" },
+	});
+	// A non-JSON answer is handed over untouched, for classify to refuse.
+	const moved = site({
+		override: (url) =>
+			url.endsWith("/details")
+				? new Response("<html>moved</html>", {
+						status: 200,
+						headers: { "content-type": "text/html" },
+					})
+				: undefined,
+	});
+	const m = await pageFetch(pageOn(moved), trainingDetailsRequest(8349588454));
+	assert.ok(m.kind === "response" && m.body === "<html>moved</html>");
+});
+
+test("details that fail ship the session without samples, once held; a 404 is no samples", async () => {
+	const failing = site({
+		override: (url) =>
+			url.endsWith("/details")
+				? new Response("upstream", { status: 502 })
+				: undefined,
+	});
+	const a = context(
+		failing,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(a.ctx, { sleep: instant }, NOW);
+	const rows = recordsOf(a.out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.max_heart_rate_bpm, 176);
+	assert.equal(rows[0]?.heart_rate_samples, null);
+	const [skip] = skipsOf(a.out);
+	assert.equal(skip?.reason, "source_unreadable");
+	assert.deepEqual(
+		(skip?.diagnostics as { fields: string[] } | undefined)?.fields,
+		["(heart rate samples unanswered)"],
+	);
+	assert.equal(
+		(stateOf(a.out, "training_sessions") as { held_at?: string }).held_at,
+		"2026-11-01",
+	);
+
+	const data = fixtureData();
+	data.details = {};
+	const b = context(
+		site({ data }),
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(b.ctx, { sleep: instant }, NOW);
+	assert.deepEqual(skipsOf(b.out), []);
+	assert.equal(
+		recordsOf(b.out, "training_sessions")[0]?.heart_rate_samples,
+		null,
+	);
+});
+
+test("details in a shape the connector cannot read ship the session without samples and do not hold", async () => {
+	const s = site({
+		override: (url) =>
+			url.endsWith("/details")
+				? new Response(JSON.stringify({ id: 1, samples: [] }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					})
+				: undefined,
+	});
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	const rows = recordsOf(out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.heart_rate_samples, null);
+	assert.deepEqual(skipsOf(out), []);
+	assert.equal(
+		(stateOf(out, "training_sessions") as { held_at?: string }).held_at,
+		undefined,
+	);
+	assert.ok(
+		out.messages.some(
+			(m) =>
+				m.type === "PROGRESS" &&
+				String(m.message).includes("not in the shape expected"),
+		),
+	);
+});
+
+test("past the heart rate budget, sessions ship without samples and no details are asked", async () => {
+	const s = site();
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant, heartRateBudgetMs: 0 }, NOW);
+	const rows = recordsOf(out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.max_heart_rate_bpm, 176);
+	assert.equal(rows[0]?.heart_rate_samples, null);
+	assert.equal(s.fetches.filter((f) => f.url.endsWith("/details")).length, 0);
+	assert.deepEqual(skipsOf(out), []);
+	const progress = out.messages.find(
+		(m) =>
+			m.type === "PROGRESS" &&
+			String(m.message).includes("time for heart rate ran out"),
+	);
+	assert.equal(progress?.count, 1);
+});
+
+test("sessions older than the recent heart rate days ship without samples and no details are asked", async () => {
+	const s = site();
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	// 2027-02-03 makes the fixture's November sessions 90+ days old.
+	await collectPolarFlow(
+		ctx,
+		{ sleep: instant },
+		new Date("2027-02-03T12:00:00.000Z"),
+	);
+	const rows = recordsOf(out, "training_sessions");
+	assert.equal(rows.length, 2);
+	assert.equal(rows[0]?.heart_rate_samples, null);
+	assert.equal(s.fetches.filter((f) => f.url.endsWith("/details")).length, 0);
+	const progress = out.messages.find(
+		(m) =>
+			m.type === "PROGRESS" && String(m.message).includes("older than 90 days"),
+	);
+	assert.equal(progress?.count, 1);
+});
+
+test("an empty details answer is a session without samples, not a bad shape", async () => {
+	const s = site({
+		override: (url) =>
+			url.endsWith("/details")
+				? new Response("null", {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					})
+				: undefined,
+	});
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.equal(
+		recordsOf(out, "training_sessions")[0]?.heart_rate_samples,
+		null,
+	);
+	assert.deepEqual(skipsOf(out), []);
+	assert.ok(
+		!out.messages.some(
+			(m) =>
+				m.type === "PROGRESS" &&
+				String(m.message).includes("not in the shape expected"),
+		),
+	);
+});
+
+test("a lost sign-in on the details stops the stream as sign_in_required", async () => {
+	const s = site({
+		override: (url) =>
+			url.endsWith("/details")
+				? new Response(JSON.stringify({ error: "NotAuthenticated" }), {
+						status: 401,
+						headers: { "content-type": "application/json" },
+					})
+				: undefined,
+	});
+	const { ctx, out } = context(
+		s,
+		["training_sessions"],
+		{},
+		{ training_sessions: { since: "2026-11-01" } },
+	);
+	await collectPolarFlow(ctx, { sleep: instant }, NOW);
+	assert.equal(recordsOf(out, "training_sessions").length, 0);
+	assert.equal(skipsOf(out)[0]?.reason, "sign_in_required");
 });
 
 test("windows cut a span oldest first, the last one short", () => {
@@ -454,6 +665,20 @@ test("collects every stream from the fixtures, with a cursor at the owner's tomo
 	assert.equal(sessions[0]?.device_name, "Polar Pacer Pro");
 	assert.equal(sessions[0]?.note, null);
 	assert.equal(sessions[1]?.average_heart_rate_bpm, null);
+	// The recorded run carries its per-second heart rate; the manual entry none, and its details
+	// were never asked for.
+	const series = (
+		sessions[0]?.heart_rate_samples as
+			| Array<{ interval_s: number; bpm: Array<number | null> }>
+			| undefined
+	)?.[0];
+	assert.equal(series?.interval_s, 1);
+	assert.equal(series?.bpm.length, 32);
+	assert.equal(sessions[1]?.heart_rate_samples, null);
+	assert.deepEqual(
+		s.fetches.filter((f) => f.url.endsWith("/details")).map((f) => f.url),
+		["/api/training/analysis/8349588454/details"],
+	);
 
 	assert.deepEqual(
 		recordsOf(out, "daily_activity").map((r) => [r.date, r.steps]),
@@ -654,7 +879,7 @@ test("a summary that is not the JSON expected ships the list fields but counts a
 	assert.equal(skip?.reason, "source_unreadable");
 	assert.deepEqual(
 		(skip?.diagnostics as { fields: string[] } | undefined)?.fields,
-		["(analysis summary)"],
+		["(analysis summary)", "(heart rate samples unanswered)"],
 	);
 	assert.equal(
 		(stateOf(out, "training_sessions") as { held_at?: string }).held_at,

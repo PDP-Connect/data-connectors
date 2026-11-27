@@ -16,6 +16,8 @@
 				"status_detail": null,
 				"recipient_name": null,
 				"shipping_address_summary": null,
+				"shipping_postal_code": null,
+				"store": "amazon.com",
 				"payment_method_summary": null,
 				"gift_order": false,
 				"digital_order": false,
