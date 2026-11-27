@@ -53,6 +53,15 @@ test("isoFromUnix: finite timestamps outside the Date range return null", () => 
 	assert.equal(isoFromUnix("8640000000001"), null);
 });
 
+test("isoFromUnix: out-of-range positive seconds return null", () => {
+	assert.equal(isoFromUnix(1e20), null);
+	assert.equal(isoFromUnix("1e20"), null);
+});
+
+test("isoFromUnix: largest valid seconds value remains an ISO string", () => {
+	assert.equal(isoFromUnix(8.64e12), "+275760-09-13T00:00:00.000Z");
+});
+
 // ─── domainOf ───────────────────────────────────────────────────────────
 
 test("domainOf: extracts lowercase hostname from a link URL", () => {

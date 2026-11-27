@@ -13,7 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+	buildViewingActivityRecord,
 	detectViewingActivitySchema,
+	directHistoryOccurrences,
+	hashId,
 	inferDirectHistoryDateOrder,
 	inferDirectHistoryDateOrderFromRows,
 	parseCSVFile,
@@ -292,6 +295,22 @@ test("inferDirectHistoryDateOrder resolves a mixed dataset using the row that di
 	assert.equal(inferDirectHistoryDateOrder(dates), "DMY");
 });
 
+test("inferDirectHistoryDateOrder rejects conflicting evidence in either row order", () => {
+	for (const dates of [
+		["25/03/2024", "03/25/2024"],
+		["03/25/2024", "25/03/2024"],
+	]) {
+		assert.equal(inferDirectHistoryDateOrder(dates), null);
+	}
+});
+
+test("inferDirectHistoryDateOrder retains consistent evidence across multiple rows", () => {
+	assert.equal(
+		inferDirectHistoryDateOrder(["25/03/2024", "26/03/2024", "05/03/2024"]),
+		"DMY",
+	);
+});
+
 test("inferDirectHistoryDateOrder ignores ISO rows when inferring order (they don't inform DMY/MDY)", () => {
 	const order = inferDirectHistoryDateOrder([
 		"2024-01-15",
@@ -351,4 +370,70 @@ test("parseFullExportDurationSeconds rejects malformed or missing durations", ()
 	assert.equal(parseFullExportDurationSeconds("not-a-duration"), null);
 	assert.equal(parseFullExportDurationSeconds(""), null);
 	assert.equal(parseFullExportDurationSeconds(undefined), null);
+});
+
+test("same-day direct-history rewatches retain each occurrence and the original first ID", () => {
+	const row = { title: "Invented Moon Garden", date: "2024-06-05" };
+	const original = hashId("Invented Moon Garden|2024-06-05T00:00:00.000Z");
+	for (const count of [2, 3]) {
+		const rows = Array.from({ length: count }, () => ({ ...row }));
+		const occurrences = directHistoryOccurrences(rows);
+		const records = rows.map((item, index) =>
+			buildViewingActivityRecord(
+				item,
+				"direct_history",
+				null,
+				occurrences[index],
+			),
+		);
+		assert.ok(records.every((record) => record !== null));
+		assert.equal(new Set(records.map((record) => record?.id)).size, count);
+		assert.equal(records[0]?.id, original);
+		for (let index = 1; index < count; index += 1) {
+			assert.equal(
+				records[index]?.id,
+				hashId(`Invented Moon Garden|2024-06-05T00:00:00.000Z|${index + 1}`),
+			);
+		}
+	}
+	assert.equal(buildViewingActivityRecord(row, "direct_history")?.id, original);
+	assert.deepEqual(
+		directHistoryOccurrences([
+			row,
+			{ title: "Invented River", date: "2024-06-05" },
+			{ ...row, date: "2024-06-06" },
+			row,
+		]),
+		[1, 1, 1, 2],
+	);
+});
+
+test("full-export IDs ignore direct-history occurrence numbers", () => {
+	const row = { title: "Invented River", "start time": "2024-02-29 23:59:59" };
+	assert.deepEqual(
+		buildViewingActivityRecord(row, "full_export", null, 3),
+		buildViewingActivityRecord(row, "full_export"),
+	);
+});
+
+test("full-export timestamps reject calendar rollover but accept leap days", () => {
+	for (const value of [
+		"2024-02-30 12:00:00",
+		"2023-02-29",
+		"2024-06-05 24:00:00",
+	]) {
+		assert.equal(parseFullExportStartTime(value), null);
+	}
+	assert.equal(
+		parseFullExportStartTime("2024-02-29 23:59:59"),
+		"2024-02-29T23:59:59.000Z",
+	);
+	assert.equal(
+		parseFullExportStartTime("2024-02-29"),
+		"2024-02-29T00:00:00.000Z",
+	);
+	assert.equal(
+		parseFullExportStartTime("2024-02-29 23:59"),
+		"2024-02-29T23:59:00.000Z",
+	);
 });

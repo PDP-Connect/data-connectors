@@ -145,6 +145,51 @@ export function dailySummary(day: string, json: unknown): Built {
 	return built({ id: day, date: day, ...metrics });
 }
 
+/** A metric group of a range entry: absent or null holds no metric; anything else not an object is a shape this parser does not know. */
+function group(value: unknown): Obj | null | undefined {
+	if (value === null || value === undefined) return undefined;
+	return isObj(value) ? value : null;
+}
+
+/**
+ * The days of one `v2/dailysummaries` answer that carry wellness data, each as the one-day summary
+ * `dailySummary` reads, so a day built from either answer is built by the same code. Garmin's
+ * Personal API documents the shape (`{ data: [...] }`, one entry per day, its metrics in groups);
+ * the web app was not seen to load it, so an answer of any other shape is null and none of its days
+ * is trusted. A day the answer does not mark `includesWellnessData: true` is absent, however its
+ * metrics read: the range answers every calendar day, worn or not, and a day it holds nothing for
+ * is no proof the day's own summary holds nothing. An absent day is read on its own.
+ */
+export function summaryRangeDays(
+	json: unknown,
+	window: Window,
+): Map<string, Obj> | null {
+	if (!isObj(json) || !Array.isArray(json.data)) return null;
+	const days = new Map<string, Obj>();
+	for (const entry of json.data) {
+		if (!isObj(entry)) return null;
+		const day = entry.calendarDate;
+		if (!isDay(day) || !inWindow(day, window) || days.has(day)) return null;
+		const movement = group(entry.movement);
+		const steps = group(movement?.steps);
+		const heart = group(entry.heartRate);
+		const stress = group(entry.stress);
+		const battery = group(entry.bodyBattery);
+		if ([movement, steps, heart, stress, battery].includes(null)) return null;
+		if (entry.includesWellnessData !== true) continue;
+		days.set(day, {
+			calendarDate: day,
+			totalSteps: steps?.value,
+			restingHeartRate: heart?.restingValue,
+			minHeartRate: heart?.minValue,
+			averageStressLevel: stress?.avgLevel,
+			bodyBatteryHighestValue: battery?.maxValue,
+			bodyBatteryLowestValue: battery?.minValue,
+		});
+	}
+	return days;
+}
+
 const stamp = (entry: Obj): number =>
 	typeof entry.timestamp === "number" && Number.isFinite(entry.timestamp)
 		? entry.timestamp

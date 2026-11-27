@@ -507,21 +507,20 @@ function unambiguousOrderFor(
 /**
  * Infer direct_history's date field ordering (DD/MM vs MM/DD — Netflix's own
  * help center documents the immediate CSV but not its date encoding, so this
- * is never assumed) from the dataset as a whole: scan every row's Date value
- * for the first one that is unambiguous on its own (day or month > 12), and
- * apply that SAME ordering to the entire file. This is a per-upload
- * inference, not a per-row guess — a file mixing "15/03/2024" (unambiguous:
- * DMY) and "05/03/2024" (ambiguous alone) resolves the ambiguous row using
- * the order the unambiguous row already proved for this dataset.
+ * is never assumed) from the dataset as a whole. Scan every row's Date value
+ * for self-evident ordering (day or month > 12). Apply that order to ambiguous
+ * rows only when all such evidence agrees.
  *
- * Returns null only when every non-ISO row in the dataset is itself
- * ambiguous (no row has a field > 12) — callers must treat that as a real,
- * actionable gap (surface a typed coverage-gap / validation outcome asking
- * the owner to clarify date order), never silently guess or drop rows.
+ * Returns null when no row proves an order or rows prove both DMY and MDY.
+ * Callers must surface a typed coverage gap if any row needs an explicit
+ * order to parse, never silently guess or drop it. Files containing only
+ * self-evident dates can still be parsed row by row without a shared order.
  */
 export function inferDirectHistoryDateOrder(
 	dateStrings: readonly (string | undefined)[],
 ): DirectHistoryDateOrder | null {
+	let inferredOrder: DirectHistoryDateOrder | null = null;
+	let conflicting = false;
 	for (const raw of dateStrings) {
 		if (!raw) {
 			continue;
@@ -536,10 +535,13 @@ export function inferDirectHistoryDateOrder(
 		}
 		const order = unambiguousOrderFor(components);
 		if (order) {
-			return order;
+			if (inferredOrder && inferredOrder !== order) {
+				conflicting = true;
+			}
+			inferredOrder = order;
 		}
 	}
-	return null;
+	return conflicting ? null : inferredOrder;
 }
 
 /**
@@ -616,7 +618,18 @@ export function parseFullExportStartTime(
 	const withZ =
 		normalized.length === 10 ? `${normalized}T00:00:00Z` : `${normalized}Z`;
 	const parsed = new Date(withZ);
-	return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+	if (
+		Number.isNaN(parsed.getTime()) ||
+		parsed.getUTCFullYear() !== Number(normalized.slice(0, 4)) ||
+		parsed.getUTCMonth() + 1 !== Number(normalized.slice(5, 7)) ||
+		parsed.getUTCDate() !== Number(normalized.slice(8, 10)) ||
+		parsed.getUTCHours() !== Number(normalized.slice(11, 13) || "0") ||
+		parsed.getUTCMinutes() !== Number(normalized.slice(14, 16) || "0") ||
+		parsed.getUTCSeconds() !== Number(normalized.slice(17, 19) || "0")
+	) {
+		return null;
+	}
+	return parsed.toISOString();
 }
 
 const DURATION_HMS_RE = /^(\d+):([0-5]\d):([0-5]\d)$/;
@@ -642,6 +655,24 @@ export function parseFullExportDurationSeconds(
 	return Number(h) * 3600 + Number(m) * 60 + Number(s);
 }
 
+/** Number same-title/day repeats across the entire file before cursor filtering. */
+export function directHistoryOccurrences(
+	rows: readonly ViewingActivityCSVRow[],
+	dateOrder: DirectHistoryDateOrder | null = null,
+): number[] {
+	const counts = new Map<string, number>();
+	return rows.map((row) => {
+		const watchedAt = parseDirectHistoryDate(rowValue(row, "date"), dateOrder);
+		if (!watchedAt) {
+			return 1;
+		}
+		const key = JSON.stringify([rowValue(row, "title") ?? null, watchedAt]);
+		const occurrence = (counts.get(key) ?? 0) + 1;
+		counts.set(key, occurrence);
+		return occurrence;
+	});
+}
+
 /**
  * Build a viewing_activity record from a CSV row, dispatching on the
  * detected schema. Returns null for rows that don't carry a parseable
@@ -650,15 +681,17 @@ export function parseFullExportDurationSeconds(
  * dataset-inferred DD/MM-vs-MM/DD ordering (see inferDirectHistoryDateOrder),
  * applied consistently to every ambiguous row in the file rather than
  * guessed per row. Ignored for full_export (its Start Time (UTC) column has
- * no field-order ambiguity).
+ * no field-order ambiguity). `occurrence` numbers direct-history repeats;
+ * omitted, it preserves the original single-row ID behavior.
  */
 export function buildViewingActivityRecord(
 	row: ViewingActivityCSVRow,
 	schema: ViewingActivitySourceSchema,
 	dateOrder: DirectHistoryDateOrder | null = null,
+	occurrence = 1,
 ): ViewingActivityRecord | null {
 	if (schema === "direct_history") {
-		return buildDirectHistoryRecord(row, dateOrder);
+		return buildDirectHistoryRecord(row, dateOrder, occurrence);
 	}
 	return buildFullExportRecord(row);
 }
@@ -666,6 +699,7 @@ export function buildViewingActivityRecord(
 function buildDirectHistoryRecord(
 	row: ViewingActivityCSVRow,
 	dateOrder: DirectHistoryDateOrder | null,
+	occurrence: number,
 ): ViewingActivityRecord | null {
 	const title = rowValue(row, "title") ?? null;
 	const dateRaw = rowValue(row, "date");
@@ -673,7 +707,9 @@ function buildDirectHistoryRecord(
 	if (!watchedAt) {
 		return null;
 	}
-	const idInput = [title, watchedAt].map((v) => String(v)).join("|");
+	const idInput = [title, watchedAt, ...(occurrence > 1 ? [occurrence] : [])]
+		.map((v) => String(v))
+		.join("|");
 	return {
 		country: null,
 		device_type: null,

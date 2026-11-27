@@ -14,7 +14,7 @@
  *   - /gizmos/snorlax/sidebar (cursor pages): one walk shared by the
  *     profile's project counts and the project conversation listing.
  *   - account_profile: /me, /accounts/check, /settings/beta_features,
- *     /user_system_messages, /memories, /tasks (cursor pages, at most 5),
+ *     /user_system_messages, /memories, /tasks (cursor pages to source end),
  *     /cdn-cgi/trace. Each source is optional: a failure leaves its fields
  *     null and is named in `source_status`.
  *   - Conversation list: `/conversations?offset=N&limit=100&order=updated`,
@@ -25,8 +25,8 @@
  *     `/gizmos/{id}/conversations?cursor=0`, then `?cursor=<cursor>` until
  *     none, per sidebar project (~10 items per page). Unioned with the main
  *     list by id. A failing project is counted in
- *     `usage_summary.coverage.project_listing`, not fatal. Run-wide budget:
- *     100 projects and 400 project pages (`truncated` beyond).
+ *     `usage_summary.coverage.project_listing`, not fatal. Cursor walks continue
+ *     to source end, subject to the run wall-clock budget.
  *   List, project and detail requests share one limiter: at most 4 in flight.
  *
  *   Then detail, `/conversations/batch` (10 ids per request, up to 3 in
@@ -66,6 +66,7 @@ import {
 	type DetailStatus,
 	lastActivityOf,
 	mergeListItems,
+	OPAQUE_ID,
 	type ProfileSourceStatus,
 	readClientContext,
 	readConversationListPage,
@@ -81,6 +82,9 @@ export const CHATGPT_USAGE_DETAIL_ENV = "PDPP_CHATGPT_USAGE_DETAIL";
 /** Set by hosts that never persist STATE (PageShim): emit without fingerprints. */
 export const CHATGPT_USAGE_STATELESS_ENV = "PDPP_CHATGPT_USAGE_STATELESS";
 
+// Progress guard against endless fresh cursors, not a listing-size limit.
+const NO_PROGRESS_PAGE_GUARD = 16;
+
 export const DEFAULT_DETAIL_SAMPLE = 30;
 export const LIST_PAGE_LIMIT = 100;
 const LIST_MAX_PAGES = 300;
@@ -90,9 +94,6 @@ const DETAIL_BATCH_SIZE = 10;
 const DETAIL_WORKERS = 3;
 const SHARED_PAGE_LIMIT = 100;
 const SHARED_MAX_PAGES = 50;
-const PROFILE_MAX_PAGES = 5;
-const SIDEBAR_MAX_PAGES = 20;
-const PROJECT_MAX_PAGES = 200;
 
 export type UsageFetchErrorClass = "auth" | "forbidden" | "deferred" | "other";
 
@@ -285,30 +286,25 @@ interface ProjectPass {
 	projects: number;
 	pages: number;
 	failed: number;
-	/** True when the run-wide project or page budget left projects or pages unread. */
+	/** True when an explicit caller budget left projects or pages unread. */
 	truncated: boolean;
 }
 
-/** Run-wide budget for project listings (the per-project cap is PROJECT_MAX_PAGES). */
-export const PROJECT_LISTING_MAX_PROJECTS = 100;
-export const PROJECT_LISTING_MAX_PAGES = 400;
-
 /**
- * Decide what a cursor page means. Terminal when the page says so (explicit
- * `has_more: false`, no cursor) or is empty. A cursor already used is also
- * terminal, so nothing is fetched twice: done when it echoes the cursor just
- * used (a last page that repeats its own cursor) or the page brought nothing
- * new; partial when it points back to an earlier page after new items (a
- * loop that may hide more).
+ * A page ends when has_more is not true, even if empty. With has_more true,
+ * follow a fresh cursor even for an empty page; a missing cursor is partial.
+ * A seen cursor ends successfully when it echoes the current cursor or adds
+ * no new items; a loop back after new items is partial. Callers separately
+ * guard consecutive fresh-cursor pages that add no items.
  */
 export function nextCursorStep(
 	j: Record<string, unknown>,
 	seen: ReadonlySet<string>,
 	current: string | null,
-	pageItems: number,
+	_pageItems: number,
 	newItems: number,
 ): { next: string } | { done: "ok" | "partial" } {
-	if (pageItems === 0 || j.has_more !== true) return { done: "ok" };
+	if (j.has_more !== true) return { done: "ok" };
 	const next =
 		typeof j.cursor === "string"
 			? j.cursor
@@ -327,9 +323,9 @@ export function nextCursorStep(
  * account), while `/gizmos/{id}/conversations?cursor=0`, followed by
  * `?cursor=<cursor>` until none is returned, lists them (~10 per page).
  * Items are reduced in the page like the main list. A project whose walk
- * fails counts in `failed`; its pages read so far are kept. At most
- * PROJECT_LISTING_MAX_PROJECTS projects and PROJECT_LISTING_MAX_PAGES pages
- * are read per run; anything beyond sets `truncated`.
+ * fails counts in `failed`; its pages read so far are kept. By default all
+ * projects and cursor pages are read. Explicit caller budgets are optional;
+ * reaching one sets `truncated`. Cursor guards and the run clock still apply.
  */
 export async function walkProjectConversations(
 	deps: StreamDeps,
@@ -337,8 +333,8 @@ export async function walkProjectConversations(
 	limit: Limiter,
 	sidebar: PagedRead,
 	budget: { maxProjects: number; maxPages: number } = {
-		maxProjects: PROJECT_LISTING_MAX_PROJECTS,
-		maxPages: PROJECT_LISTING_MAX_PAGES,
+		maxProjects: Number.POSITIVE_INFINITY,
+		maxPages: Number.POSITIVE_INFINITY,
 	},
 ): Promise<ProjectPass> {
 	const all = sidebar.value?.project_ids ?? [];
@@ -352,7 +348,8 @@ export async function walkProjectConversations(
 	const walkOne = async (projectId: string): Promise<void> => {
 		const seenCursors = new Set<string>();
 		let cursor = "0";
-		for (let page = 0; page < PROJECT_MAX_PAGES; page += 1) {
+		let noProgressPages = 0;
+		for (;;) {
 			if (deps.runBudget?.reason() === "max_wall_clock") {
 				failed += 1;
 				return;
@@ -395,9 +392,13 @@ export async function walkProjectConversations(
 				if (step.done === "partial") failed += 1;
 				return;
 			}
+			noProgressPages = added === 0 ? noProgressPages + 1 : 0;
+			if (noProgressPages > NO_PROGRESS_PAGE_GUARD) {
+				failed += 1;
+				return;
+			}
 			cursor = step.next;
 		}
-		failed += 1;
 	};
 	await Promise.all(ids.map((id) => walkOne(id)));
 	return {
@@ -607,16 +608,15 @@ export type PagedRead = {
 };
 
 /**
- * Follow a `{..., cursor}` listing for at most PROFILE_MAX_PAGES pages,
- * summing the in-page counts. A later page that fails, a cursor that is not
- * a plain token, or the page cap returns what was counted as "partial".
+ * Follow a `{..., cursor}` listing to source end, summing in-page counts.
+ * Failed pages, non-progressing cursor cycles and the run wall-clock stop
+ * retain the existing partial-read outcome.
  */
 async function readPagedCounts(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
 	path: string,
 	projection: "project_sidebar" | "task_stats",
-	maxPages = PROFILE_MAX_PAGES,
 ): Promise<PagedRead> {
 	const acc: PagedCounts = {
 		count: 0,
@@ -626,7 +626,12 @@ async function readPagedCounts(
 	};
 	let cursor: string | null = null;
 	const seen = new Set<string>();
-	for (let page = 0; page < maxPages; page += 1) {
+	// Keys of the tasks read so far; kept only to measure progress.
+	const taskKeys = new Set<string>();
+	let noProgressPages = 0;
+	for (let page = 0; ; page += 1) {
+		if (deps.runBudget?.reason() === "max_wall_clock")
+			return { value: acc, status: "partial" };
 		const url: string =
 			cursor === null
 				? path
@@ -650,15 +655,20 @@ async function readPagedCounts(
 		}
 		acc.count += n;
 		if (typeof j.file_count === "number") acc.files += j.file_count;
-		const projectsBefore = acc.project_ids.length;
+		const knownBefore = acc.project_ids.length + taskKeys.size;
 		if (Array.isArray(j.project_ids)) {
 			for (const id of j.project_ids) {
 				if (
 					typeof id === "string" &&
-					/^[A-Za-z0-9_-]{1,128}$/.test(id) &&
+					OPAQUE_ID.test(id) &&
 					!acc.project_ids.includes(id)
 				)
 					acc.project_ids.push(id);
+			}
+		}
+		if (Array.isArray(j.task_keys)) {
+			for (const key of j.task_keys) {
+				if (typeof key === "string" && OPAQUE_ID.test(key)) taskKeys.add(key);
 			}
 		}
 		if (isRecord(j.by_status)) {
@@ -667,16 +677,14 @@ async function readPagedCounts(
 					acc.by_status[k] = (acc.by_status[k] ?? 0) + v;
 			}
 		}
-		// Tasks carry no ids to compare, so an echoed cursor counts as done.
-		const fresh =
-			projection === "project_sidebar"
-				? acc.project_ids.length - projectsBefore
-				: 0;
+		const fresh = acc.project_ids.length + taskKeys.size - knownBefore;
 		const step = nextCursorStep(j, seen, cursor, n, fresh);
 		if ("done" in step) return { value: acc, status: step.done };
+		noProgressPages = fresh === 0 ? noProgressPages + 1 : 0;
+		if (noProgressPages > NO_PROGRESS_PAGE_GUARD)
+			return { value: acc, status: "partial" };
 		cursor = step.next;
 	}
-	return { value: acc, status: "partial" };
 }
 
 async function runAccountProfile(
@@ -772,6 +780,11 @@ async function runAccountProfile(
 			message: "The account profile did not match its schema",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		});
+		return;
+	}
+	if (projects.status === "partial" || tasks.status === "partial") {
+		// Keep the observed profile, but partial inventories cannot checkpoint it.
+		await deps.emitRecord("account_profile", record);
 		return;
 	}
 	await emitGated(deps, state, "account_profile", stateless, [record]);
@@ -879,6 +892,9 @@ async function runUsageSummary(
 		};
 	});
 
+	const listingComplete = projectPass.failed === 0 &&
+		!projectPass.truncated &&
+		(projectPass.sidebar === "ok" || projectPass.sidebar === "not_available");
 	const summary = buildUsageSummaryRecord({
 		conversations,
 		sharedIds,
@@ -887,11 +903,7 @@ async function runUsageSummary(
 			archived_listing: archivedRead ? "read" : "not_available",
 			list_pages: main.pages + archived.pages,
 			detail_mode: plan.size > 0 ? "sample" : "none",
-			listing_complete:
-				projectPass.failed === 0 &&
-				!projectPass.truncated &&
-				(projectPass.sidebar === "ok" ||
-					projectPass.sidebar === "not_available"),
+			listing_complete: listingComplete,
 			project_listing: {
 				sidebar: projectPass.sidebar,
 				projects: projectPass.projects,
@@ -907,6 +919,11 @@ async function runUsageSummary(
 			(id) => outcomes.get(id)?.status === "fetched",
 		),
 	});
+	if (!listingComplete) {
+		// Keep the partial observation, but do not checkpoint or certify a full scan.
+		await deps.emitRecord("usage_summary", summary);
+		return;
+	}
 	await emitGated(deps, state, "usage_summary", stateless, [summary]);
 	await deps.emit(buildFullScanCoverageMessage("usage_summary", 1));
 }
@@ -928,7 +945,6 @@ export async function runUsageStreams(
 		hooks,
 		"/gizmos/snorlax/sidebar",
 		"project_sidebar",
-		SIDEBAR_MAX_PAGES,
 	);
 	// Both consumers await it; this keeps an early rejection from going unhandled.
 	sidebar.catch(() => undefined);

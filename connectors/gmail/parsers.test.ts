@@ -448,6 +448,43 @@ test("decodeBodyPart identifies an unsupported charset after decoding MIME trans
 	}
 });
 
+["us-ascii", "US-ASCII"].forEach((charset) => {
+	test(`decodeBodyPart: base64 decodes MIME charset ${charset}`, () => {
+		const body = Buffer.from(
+			Buffer.from("Hello world").toString("base64"),
+			"ascii",
+		);
+		assert.equal(decodeBodyPart(body, "base64", charset), "Hello world");
+	});
+});
+
+test("decodeBodyPart: quoted-printable supports Windows-1252 punctuation", () => {
+	assert.equal(
+		decodeBodyPart(
+			Buffer.from("=93Quoted=94", "ascii"),
+			"quoted-printable",
+			"windows-1252",
+		),
+		"\u201cQuoted\u201d",
+	);
+});
+
+test("decodeBodyPart: base64 supports ISO-8859-1", () => {
+	const body = Buffer.from(
+		Buffer.from([0x43, 0x61, 0x66, 0xe9]).toString("base64"),
+		"ascii",
+	);
+	assert.equal(decodeBodyPart(body, "base64", "iso-8859-1"), "Café");
+});
+
+test("decodeBodyPart: unknown charset retains base64 decoding before UTF-8 fallback", () => {
+	const body = Buffer.from(
+		Buffer.from("Café", "utf8").toString("base64"),
+		"ascii",
+	);
+	assert.equal(decodeBodyPart(body, "base64", "x-unknown-charset"), "Café");
+});
+
 test("decodeBodyPart: null/empty → empty string", () => {
 	assert.equal(decodeBodyPart(null, null, null), "");
 	assert.equal(decodeBodyPart(undefined, null, null), "");
@@ -530,16 +567,63 @@ test("makeSnippet: drops quoted-reply lines and collapses whitespace", () => {
 	);
 });
 
-test("makeSnippet: quoted-printable does byte-wise decode (Latin-1 interpretation quirk)", () => {
-	// BUG (flagged, not fixed): makeSnippet's QP path uses String.fromCharCode
-	// per hex escape, which treats each =HH as a codepoint instead of a raw
-	// byte. For a UTF-8 'é' encoded as =C3=A9 this yields "Ã©" (Latin-1) rather
-	// than "é". decodeBodyPart does the correct byte-accumulation; makeSnippet
-	// does not. Documenting the current behavior here so a future fix is a
-	// conscious change, not a silent one.
-	const qpInput = Buffer.from("caf=C3=A9 snippet", "ascii");
-	const snippet = makeSnippet(qpInput, "quoted-printable", "utf8");
-	assert.equal(snippet, "cafÃ© snippet");
+test("makeSnippet: quoted-printable decodes bytes in the declared charset", () => {
+	for (const [body, charset, expected] of [
+		["Caf=C3=A9 au lait", "utf-8", "Café au lait"],
+		["Caf=C3=A9 au lait", null, "Café au lait"],
+		["Caf=E9", "ISO-8859-1", "Café"],
+		["Caf=E9", "latin1", "Café"],
+		["hel=\r\nlo", "utf8", "hello"],
+		["hel=\nlo", "utf8", "hello"],
+		["Hello=20world=21", "utf8", "Hello world!"],
+	] as const) {
+		assert.equal(
+			makeSnippet(Buffer.from(body, "ascii"), "quoted-printable", charset),
+			expected,
+		);
+	}
+});
+
+test("makeSnippet: unknown charset retains quoted-printable decoding before UTF-8 fallback", () => {
+	assert.equal(
+		makeSnippet(
+			Buffer.from("Caf=C3=A9 au lait", "ascii"),
+			"quoted-printable",
+			"x-unknown-charset",
+		),
+		"Café au lait",
+	);
+});
+
+test("makeSnippet: truncation does not leave half of a decoded surrogate pair", () => {
+	const body = Buffer.from("a".repeat(199) + "=F0=9F=98=80", "ascii");
+	assert.equal(
+		makeSnippet(body, "quoted-printable", "UTF-8", 200),
+		"a".repeat(199),
+	);
+});
+
+test("makeSnippet: a complete surrogate pair at the cap is preserved", () => {
+	const body = Buffer.from("a".repeat(198) + "=F0=9F=98=80", "ascii");
+	assert.equal(
+		makeSnippet(body, "quoted-printable", "UTF-8", 200),
+		"a".repeat(198) + "\u{1F600}",
+	);
+});
+
+test("makeSnippet: a 250-character ASCII body still keeps its first 200 characters", () => {
+	const body = "abcde".repeat(50);
+	assert.equal(
+		makeSnippet(Buffer.from(body, "ascii"), null, "UTF-8", 200),
+		body.slice(0, 200),
+	);
+});
+
+test("makeSnippet: base64 behavior is unchanged", () => {
+	assert.equal(
+		makeSnippet(Buffer.from("SGVsbG8gd29ybGQh", "ascii"), "base64", "utf8"),
+		"Hello world!",
+	);
 });
 
 test("makeSnippet: respects maxChars (truncates)", () => {

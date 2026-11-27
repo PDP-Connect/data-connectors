@@ -920,3 +920,88 @@ test("reusing one XHR records only its own completion and leaves fetch unchanged
 	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
 	assert.equal(page.run(`window[${JSON.stringify(OBSERVER_GLOBAL)}].seen`), 3);
 });
+
+test("a fresh collection discards buffered entries, overflow and late XHR responses", () => {
+	const page = fakePage();
+	page.run(INSTALL);
+	const open = page.Xhr.prototype.open;
+	const send = page.Xhr.prototype.send;
+	for (let i = 0; i < 6; i += 1) page.request(graphql("Likes"), 200, "old");
+	const old = new page.Xhr();
+	old.open("GET", graphql("Likes"));
+	old.send();
+	page.run(INSTALL);
+	assert.equal(page.Xhr.prototype.open, open);
+	assert.equal(page.Xhr.prototype.send, send);
+	old.finish(200, "late old");
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(POLL_SCRIPT).dropped, 0);
+	page.request(graphql("Likes"), 200, "current");
+	const reading = page.run(POLL_SCRIPT);
+	assert.equal(reading.entries.length, 1);
+	assert.equal(reading.entries[0].body, "current");
+	assert.equal(reading.dropped, 0);
+});
+
+test("fetch keeps its request generation across delayed response and body completion", async () => {
+	const page = fakePage();
+	let answer!: (response: Response) => void;
+	let bodyDone!: (body: string) => void;
+	let bodyRead!: () => void;
+	const atBody = new Promise<void>((resolve) => {
+		bodyRead = resolve;
+	});
+	page.window["fetch"] = () =>
+		new Promise<Response>((resolve) => {
+			answer = resolve;
+		});
+	page.run(INSTALL);
+	const wrapped = page.window["fetch"] as (input: string) => Promise<Response>;
+	const pending = wrapped(graphql("Likes"));
+	answer({
+		status: 200,
+		clone: () => ({
+			text: () => {
+				bodyRead();
+				return new Promise<string>((resolve) => {
+					bodyDone = resolve;
+				});
+			},
+		}),
+	} as Response);
+	await atBody;
+	page.run(INSTALL);
+	assert.equal(page.window["fetch"], wrapped);
+	bodyDone("old body");
+	await pending;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(POLL_SCRIPT).dropped, 0);
+	const late = wrapped(graphql("Likes"));
+	page.run(INSTALL);
+	answer({
+		status: 200,
+		clone: () => ({ text: async () => "old response" }),
+	} as Response);
+	await late;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	const current = wrapped(graphql("Likes"));
+	answer({
+		status: 200,
+		clone: () => ({ text: async () => "current" }),
+	} as Response);
+	await current;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(page.run(POLL_SCRIPT).entries[0].body, "current");
+});
+
+test("an incompatible observer is refused rather than stacking wrappers", () => {
+	const page = fakePage();
+	const open = page.Xhr.prototype.open;
+	const send = page.Xhr.prototype.send;
+	page.window[OBSERVER_GLOBAL] = { version: 3, buffer: [], dropped: 0 };
+	assert.equal(page.run(INSTALL), null);
+	assert.equal(page.Xhr.prototype.open, open);
+	assert.equal(page.Xhr.prototype.send, send);
+});

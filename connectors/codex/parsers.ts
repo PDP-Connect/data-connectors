@@ -65,10 +65,52 @@ export function payloadOutputPreview(
 // ─── Epoch / ISO conversion ─────────────────────────────────────────────
 
 export function epochToIso(sec: number | null | undefined): string | null {
-	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) return null;
+	if (typeof sec !== "number" || !Number.isFinite(sec) || sec <= 0) {
+		return null;
+	}
 	const date = new Date(sec * 1000);
-	// A finite source value can still exceed JavaScript's representable Date range.
-	return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+const ZONED_TIMESTAMP_RE =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+
+function timestampToIso(value: string | null | undefined): string | null {
+	if (typeof value !== "string") {
+		return null;
+	}
+	const match = ZONED_TIMESTAMP_RE.exec(value);
+	if (!match) {
+		return null;
+	}
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const hour = Number(match[4]);
+	const minute = Number(match[5]);
+	const second = Number(match[6] ?? "0");
+	if (
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59
+	) {
+		return null;
+	}
+	// setUTCFullYear preserves years 0–99; Date.UTC remaps them to 1900–1999.
+	const calendar = new Date(0);
+	calendar.setUTCFullYear(year, month - 1, day);
+	if (
+		calendar.getUTCFullYear() !== year ||
+		calendar.getUTCMonth() !== month - 1 ||
+		calendar.getUTCDate() !== day
+	) {
+		return null;
+	}
+	const ms = Date.parse(value);
+	return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────
@@ -183,8 +225,10 @@ export function buildThreadSessionRecord(
 		git_branch: t.git_branch || null,
 		repository_url: t.git_origin_url || null,
 		started_at:
-			epochToIso(t.created_at) || agg?.meta?.timestamp || agg?.firstTs || null,
-		last_event_at: epochToIso(t.updated_at) || agg?.lastTs || null,
+			epochToIso(t.created_at) ||
+			timestampToIso(agg?.meta?.timestamp) ||
+			timestampToIso(agg?.firstTs),
+		last_event_at: epochToIso(t.updated_at) || timestampToIso(agg?.lastTs),
 		message_count: messageCount,
 		function_call_count: functionCallCount,
 		// Codex can stuff large assistant output into `title` and
@@ -250,8 +294,8 @@ export function buildRolloutOnlySessionRecord(
 		git_commit: meta.git?.commit_hash || null,
 		git_branch: meta.git?.branch || null,
 		repository_url: meta.git?.repository_url || null,
-		started_at: meta.timestamp || agg.firstTs,
-		last_event_at: agg.lastTs,
+		started_at: timestampToIso(meta.timestamp) || timestampToIso(agg.firstTs),
+		last_event_at: timestampToIso(agg.lastTs),
 		message_count: agg.messageCount,
 		function_call_count: agg.functionCallCount,
 		title: null,
@@ -285,7 +329,7 @@ export function buildRuleRecord(args: {
 	return {
 		id: `rules:${args.ruleset}:${args.index}`,
 		ruleset: args.ruleset,
-		rule_text: textPreview(args.line, 4000),
+		rule_text: textPreview(args.line, 3999),
 		rule_index: args.index,
 		path: args.path,
 		mtime_epoch: args.mtime,
@@ -334,17 +378,46 @@ export interface TimestampRange {
 	lastTs: string | null;
 }
 
+function compareTimestampInstants(
+	left: string,
+	leftIso: string,
+	right: string | null,
+	rightIso: string,
+): number {
+	const milliseconds = Date.parse(leftIso) - Date.parse(rightIso);
+	if (milliseconds !== 0) return milliseconds;
+	// Integral-minute offsets leave digits below a millisecond unchanged.
+	const tail = (value: string | null) =>
+		(/\.(\d+)(?:Z|[+-]\d{2}:?\d{2})$/.exec(value ?? "")?.[1] ?? "").slice(3);
+	const l = tail(left);
+	const r = tail(right);
+	for (let i = 0; i < Math.max(l.length, r.length); i++) {
+		const difference = (l.charCodeAt(i) || 48) - (r.charCodeAt(i) || 48);
+		if (difference !== 0) return difference;
+	}
+	return 0;
+}
+
 export function extendTimestampRange(
 	range: TimestampRange,
 	ts: string | null,
 ): void {
-	if (!ts) {
+	const iso = timestampToIso(ts);
+	if (ts === null || iso === null) {
 		return;
 	}
-	if (!range.firstTs || ts < range.firstTs) {
+	const first = timestampToIso(range.firstTs);
+	const last = timestampToIso(range.lastTs);
+	if (
+		first === null ||
+		compareTimestampInstants(ts, iso, range.firstTs, first) < 0
+	) {
 		range.firstTs = ts;
 	}
-	if (!range.lastTs || ts > range.lastTs) {
+	if (
+		last === null ||
+		compareTimestampInstants(ts, iso, range.lastTs, last) > 0
+	) {
 		range.lastTs = ts;
 	}
 }

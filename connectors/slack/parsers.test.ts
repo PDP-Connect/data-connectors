@@ -82,6 +82,47 @@ test("tsToIso: zero/unparseable ts is absence, never 1970 and never a throw", ()
 	assert.equal(tsToIso("-1.000000"), null);
 });
 
+test("time helpers: out-of-range dates are null and the inclusive maximum is valid", () => {
+	assert.equal(tsToIso("99999999999999999.000000"), null);
+	assert.equal(epochToIso(1e18), null);
+	assert.equal(tsToIso("8640000000000"), "+275760-09-13T00:00:00.000Z");
+	assert.equal(epochToIso(8.64e12), "+275760-09-13T00:00:00.000Z");
+	assert.equal(tsToIso("8640000000001"), null);
+	assert.equal(epochToIso(8.64e12 + 1), null);
+});
+
+test("parseMessageRow: out-of-range ts uses the sent_at fallback without throwing", () => {
+	const row: MessageRow = {
+		CHANNEL_ID: "Csynthetic",
+		TS: "99999999999999999.000000",
+		THREAD_TS: null,
+		IS_PARENT: 0,
+		TXT: "synthetic",
+		NUM_FILES: null,
+		DATA: "{}",
+	};
+	const fallback = "2026-04-22T00:00:00.000Z";
+	assert.doesNotThrow(() => parseMessageRow(row, fallback));
+	const parsed = parseMessageRow(row, fallback);
+	assert.equal(parsed.sentAt, fallback);
+	assert.equal(buildMessageRecord(parsed).sent_at, fallback);
+});
+
+test("buildMessageRecord: null reaction entries do not abort reaction counts", () => {
+	const row: MessageRow = {
+		CHANNEL_ID: "Csynthetic",
+		TS: "1714000000.000100",
+		THREAD_TS: null,
+		IS_PARENT: 0,
+		TXT: "synthetic",
+		NUM_FILES: null,
+		DATA: JSON.stringify({ reactions: [null, { name: "eyes", count: 2 }] }),
+	};
+	const parsed = parseMessageRow(row, "2026-04-22T00:00:00.000Z");
+	assert.doesNotThrow(() => buildMessageRecord(parsed));
+	assert.equal(buildMessageRecord(parsed).reaction_count, 2);
+});
+
 test("epochToIso: only finite seconds produce an ISO string", () => {
 	assert.equal(
 		epochToIso(1_700_000_000),

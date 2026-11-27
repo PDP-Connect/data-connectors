@@ -154,6 +154,50 @@ test("timestamps normalise to UTC with microseconds, including the list's zonele
 	assert.equal(normalizeInstant(null), null);
 });
 
+test("timestamps reject calendar and clock rollover before applying offsets", () => {
+	for (const value of [
+		"2026-02-30T10:00:00Z",
+		"2026-01-01T24:00:00Z",
+		"2023-02-29T00:00:00Z",
+		"2026-04-31T08:00:00+02:00",
+		"2026-13-01T00:00:00Z",
+		"2026-01-00T00:00:00Z",
+		"2026-01-01T00:60:00Z",
+		"2026-01-01T00:00:60Z",
+	]) {
+		assert.equal(normalizeInstant(value), null, value);
+	}
+	assert.equal(
+		normalizeInstant("2024-02-29T23:59:59.123456Z"),
+		"2024-02-29T23:59:59.123456Z",
+	);
+	assert.equal(
+		normalizeInstant("2026-01-01T00:30:00+01:00"),
+		"2025-12-31T23:30:00.000000Z",
+	);
+	// Numeric Date constructors remap years 0-99; calendar validation must not.
+	assert.equal(
+		normalizeInstant("0004-02-29T00:00:00Z"),
+		"0004-02-29T00:00:00.000000Z",
+	);
+});
+
+test("a listed thread with a rolled calendar date has no readable update time", () => {
+	const item = {
+		context_uuid: "cccccccc-cccc-4ccc-8ccc-ccccccccccc4",
+		slug: "synthetic-calendar-thread",
+		last_query_datetime: "2026-02-30T10:00:00Z",
+	};
+	const listed = parseListedThread(item);
+	assert.ok(listed);
+	assert.equal(listed.updateTime, null);
+	assert.deepEqual(
+		listed,
+		parseListedThread({ ...item, last_query_datetime: "yesterday" }),
+	);
+	assert.equal(listItemTime(item), null);
+});
+
 test("the whole-answer block wins; section blocks are never concatenated with it", () => {
 	const detail = parseThreadDetailPage(fixture("thread-detail.json"));
 	assert.equal(detail.ok, true);

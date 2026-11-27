@@ -55,7 +55,6 @@ const HEADER_FOLD_RE = /\r?\n[ \t]+/g;
 const REFERENCES_HEADER_RE = /^references:\s*(.*)$/im;
 const ANGLE_ID_RE = /<([^>]+)>/g;
 const QUOTED_REPLY_RE = /^\s*>/;
-const HEX_ESCAPE_RE = /[=]([0-9A-Fa-f]{2})/g;
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -377,6 +376,54 @@ export function findLeafByPath(
 
 // ─── Body decoding helpers ──────────────────────────────────────────────
 
+function decodeQuotedPrintableBytes(buffer: Buffer): Buffer {
+	const raw = buffer.toString("ascii");
+	const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
+	// Decode the =HH sequences as raw bytes, then interpret in charset.
+	const bytes: number[] = [];
+	let i = 0;
+	while (i < unfolded.length) {
+		if (
+			unfolded[i] === "=" &&
+			i + 2 < unfolded.length &&
+			HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))
+		) {
+			bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
+			i += 3;
+		} else {
+			bytes.push(unfolded.charCodeAt(i));
+			i += 1;
+		}
+	}
+	return Buffer.from(bytes);
+}
+
+function isSupportedCharset(charset: string | null): boolean {
+	const label = charset || "utf8";
+	if (Buffer.isEncoding(label)) {
+		return true;
+	}
+	try {
+		new TextDecoder(label);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Decode MIME charset labels without discarding transfer-decoded bytes. */
+export function decodeCharset(bytes: Buffer, charset: string | null): string {
+	const label = charset || "utf8";
+	if (Buffer.isEncoding(label)) {
+		return bytes.toString(label);
+	}
+	try {
+		return new TextDecoder(label).decode(bytes);
+	} catch {
+		return bytes.toString("utf8");
+	}
+}
+
 /**
  * Decode a body part buffer according to its MIME transfer encoding and
  * charset into a JavaScript string. Best-effort; never throws.
@@ -401,45 +448,20 @@ export function decodeBodyPartWithStatus(
 	if (!buffer?.length) {
 		return { text: "", status: "decoded" };
 	}
-	const cs = charset || "utf8";
-	let decodedBytes = buffer;
+	const enc = (encoding || "").toLowerCase();
+	let bytes = buffer;
 	try {
-		const enc = (encoding || "").toLowerCase();
 		if (enc === "base64") {
-			decodedBytes = Buffer.from(buffer.toString("ascii"), "base64");
+			bytes = Buffer.from(buffer.toString("ascii"), "base64");
 		} else if (enc === "quoted-printable") {
-			const raw = buffer.toString("ascii");
-			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-			// Decode the =HH sequences as raw bytes, then interpret in charset.
-			const bytes: number[] = [];
-			let i = 0;
-			while (i < unfolded.length) {
-				if (
-					unfolded[i] === "=" &&
-					i + 2 < unfolded.length &&
-					HEX_PAIR_RE.test(unfolded.slice(i + 1, i + 3))
-				) {
-					bytes.push(Number.parseInt(unfolded.slice(i + 1, i + 3), 16));
-					i += 3;
-				} else {
-					bytes.push(unfolded.charCodeAt(i));
-					i += 1;
-				}
-			}
-			decodedBytes = Buffer.from(bytes);
+			bytes = decodeQuotedPrintableBytes(buffer);
 		}
 	} catch {
 		return { text: buffer.toString("utf8"), status: "transfer_decode_failed" };
 	}
-	if (!Buffer.isEncoding(cs)) {
-		return {
-			text: decodedBytes.toString("utf8"),
-			status: "unsupported_charset",
-		};
-	}
 	return {
-		text: decodedBytes.toString(cs as BufferEncoding),
-		status: "decoded",
+		text: decodeCharset(bytes, charset),
+		status: isSupportedCharset(charset) ? "decoded" : "unsupported_charset",
 	};
 }
 
@@ -542,25 +564,7 @@ export function makeSnippet(
 	if (!buffer?.length) {
 		return null;
 	}
-	let decoded: string;
-	try {
-		const enc = (encoding || "").toLowerCase();
-		const cs = (charset || "utf8") as BufferEncoding;
-		if (enc === "base64") {
-			decoded = Buffer.from(buffer.toString("ascii"), "base64").toString(cs);
-		} else if (enc === "quoted-printable") {
-			// Minimal QP decode: =HH hex + soft line breaks (=\r?\n)
-			const raw = buffer.toString("ascii");
-			const unfolded = raw.replace(QP_SOFT_BREAK_RE, "");
-			decoded = unfolded.replace(HEX_ESCAPE_RE, (_, h: string) =>
-				String.fromCharCode(Number.parseInt(h, 16)),
-			);
-		} else {
-			decoded = buffer.toString(cs);
-		}
-	} catch {
-		decoded = buffer.toString("utf8");
-	}
+	const decoded = decodeBodyPart(buffer, encoding, charset);
 	// Drop lines that are obviously quoted replies ("> ...") and signature separators
 	const collapsed = decoded
 		.split(NEWLINE_SPLIT_RE)
@@ -579,9 +583,16 @@ export function makeSnippet(
 	if (!cleaned) {
 		return null;
 	}
-	return cleaned.length > maxChars
-		? cleaned.slice(0, maxChars).trim()
-		: cleaned;
+	if (cleaned.length > maxChars) {
+		let end = maxChars;
+		const lastCodeUnit = cleaned.charCodeAt(end - 1);
+		// Do not leave a lone high surrogate when the cap splits a character.
+		if (lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
+			end -= 1;
+		}
+		return cleaned.slice(0, end).trim();
+	}
+	return cleaned;
 }
 
 // ─── Thread aggregation ────────────────────────────────────────────────

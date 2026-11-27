@@ -283,7 +283,7 @@ test("buildThreadSessionRecord: falls back started_at to agg.firstTs", () => {
 		makeThreadRow({ created_at: null, updated_at: null }),
 		agg,
 	);
-	assert.equal(r.started_at, "2026-01-01T00:00:00Z");
+	assert.equal(r.started_at, "2026-01-01T00:00:00.000Z");
 });
 
 // ─── buildRolloutOnlySessionRecord ───────────────────────────────────────
@@ -309,11 +309,45 @@ test("buildRolloutOnlySessionRecord: maps meta fields, state_5-only fields null"
 	assert.equal(r.git_commit, "abc");
 	assert.equal(r.git_branch, "main");
 	assert.equal(r.repository_url, "u");
-	assert.equal(r.started_at, "2026-04-22T00:00:00Z");
+	assert.equal(r.started_at, "2026-04-22T00:00:00.000Z");
 	assert.equal(r.message_count, 5);
 	assert.equal(r.title, null);
 	assert.equal(r.archived, null);
 	assert.equal(r.rollout_path, "/rollouts/foo.jsonl");
+});
+
+test("session builders: mixed-offset aggregate bounds stay chronological in either arrival order", () => {
+	for (const timestamps of [
+		["2026-07-31T14:00:00Z", "2026-07-31T15:00:00+02:00"],
+		["2026-07-31T15:00:00+02:00", "2026-07-31T14:00:00Z"],
+	]) {
+		const agg: RolloutAggregate = {
+			meta: {},
+			firstTs: null,
+			lastTs: null,
+			messageCount: 2,
+			functionCallCount: 0,
+			rolloutPath: "/invented/mixed-offset.jsonl",
+		};
+		for (const timestamp of timestamps) {
+			extendTimestampRange(agg, timestamp);
+		}
+		for (const record of [
+			buildRolloutOnlySessionRecord("synthetic", agg),
+			buildThreadSessionRecord(
+				"synthetic",
+				makeThreadRow({ created_at: null, updated_at: null }),
+				agg,
+			),
+		]) {
+			assert.equal(record.started_at, "2026-07-31T13:00:00.000Z");
+			assert.equal(record.last_event_at, "2026-07-31T14:00:00.000Z");
+			assert.ok(
+				Date.parse(record.started_at as string) <
+					Date.parse(record.last_event_at as string),
+			);
+		}
+	}
 });
 
 // ─── buildRuleRecord / buildPromptRecord / buildSkillRecord ─────────────
@@ -402,6 +436,61 @@ test("extendTimestampRange: null ts no-op", () => {
 	assert.equal(r.lastTs, "2026-04-22T12:00:00Z");
 });
 
+test("extendTimestampRange: compares instants but preserves original offset strings", () => {
+	for (const timestamps of [
+		["2026-07-31T14:00:00Z", "2026-07-31T15:00:00+02:00"],
+		["2026-07-31T15:00:00+02:00", "2026-07-31T14:00:00Z"],
+	]) {
+		const range: TimestampRange = { firstTs: null, lastTs: null };
+		for (const timestamp of timestamps) {
+			extendTimestampRange(range, timestamp);
+		}
+		assert.deepEqual(range, {
+			firstTs: "2026-07-31T15:00:00+02:00",
+			lastTs: "2026-07-31T14:00:00Z",
+		});
+	}
+});
+
+test("extendTimestampRange: orders sub-millisecond instants and retains original strings", () => {
+	for (const [earlier, later] of [
+		["2026-04-22T00:00:00.000001Z", "2026-04-22T00:00:00.000002Z"],
+		[
+			"2026-04-22T01:00:00.123456789001+01:00",
+			"2026-04-21T19:00:00.123456789002-0500",
+		],
+		["2026-04-22T00:00:00Z", "2026-04-22T00:00:00.0000000000001Z"],
+	] as const) {
+		for (const timestamps of [
+			[later, earlier],
+			[earlier, later],
+		]) {
+			const range: TimestampRange = { firstTs: null, lastTs: null };
+			for (const timestamp of timestamps)
+				extendTimestampRange(range, timestamp);
+			assert.deepEqual(range, { firstTs: earlier, lastTs: later });
+		}
+	}
+});
+
+test("extendTimestampRange: trailing zeros and offsets do not break an exact tie", () => {
+	const first = "2026-04-22T01:00:00.000010+0100";
+	const range: TimestampRange = { firstTs: first, lastTs: first };
+	extendTimestampRange(range, "2026-04-22T00:00:00.00001Z");
+	assert.deepEqual(range, { firstTs: first, lastTs: first });
+});
+
+test("extendTimestampRange: invalid calendar day never becomes an endpoint", () => {
+	const empty: TimestampRange = { firstTs: null, lastTs: null };
+	extendTimestampRange(empty, "2026-02-30T10:00:00Z");
+	assert.deepEqual(empty, { firstTs: null, lastTs: null });
+	const populated: TimestampRange = { firstTs: null, lastTs: null };
+	extendTimestampRange(populated, "2026-07-31T14:00:00Z");
+	const before = { ...populated };
+	extendTimestampRange(populated, "2026-02-30T10:00:00Z");
+	assert.deepEqual(populated, before);
+});
+
 // ─── Binary content tests ────────────────────────────────────────────────
 
 test("payloadOutputPreview: binary content with U+0000 returns null preview with reason", () => {
@@ -414,4 +503,83 @@ test("payloadOutputPreview: binary content with U+0000 returns null preview with
 test("textPreview: string with U+0000 returns null", () => {
 	const result = textPreview("hello\x00world");
 	assert.equal(result, null);
+});
+
+test("epochToIso: out-of-range epoch is null and ordinary epoch is unchanged", () => {
+	assert.equal(epochToIso(1.7e15), null);
+	assert.equal(epochToIso(Number.MAX_VALUE), null);
+	assert.equal(epochToIso(1785506486), "2026-07-31T14:01:26.000Z");
+});
+
+test("session builders normalize every timestamp fallback", () => {
+	const cases: [string, string | null][] = [
+		["2026-07-31T14:01:26Z", "2026-07-31T14:01:26.000Z"],
+		["2026-07-31T14:01:26+02:00", "2026-07-31T12:01:26.000Z"],
+		["2026-07-31T14:01:26.123Z", "2026-07-31T14:01:26.123Z"],
+		["2026-07-31T14:01:26", null],
+		["2026-02-30T00:00:00Z", null],
+		["2026-01-01T24:00:00Z", null],
+		["2026-07-31T16:01:26+02:00", "2026-07-31T14:01:26.000Z"],
+		["0000-02-29T00:00:00Z", "0000-02-29T00:00:00.000Z"],
+		["0099-02-29T00:00:00Z", null],
+		["2026-00-01T00:00:00Z", null],
+		["2026-13-01T00:00:00Z", null],
+		["2026-01-00T00:00:00Z", null],
+		["2026-01-01T00:60:00Z", null],
+		["2026-01-01T00:00:60Z", null],
+		["invalid", null],
+		["+999999-01-01T00:00:00Z", null],
+	];
+	for (const [timestamp, expected] of cases) {
+		for (const useMeta of [true, false]) {
+			const agg: RolloutAggregate = {
+				meta: useMeta ? { timestamp } : {},
+				firstTs: useMeta ? null : timestamp,
+				lastTs: timestamp,
+				messageCount: 0,
+				functionCallCount: 0,
+				rolloutPath: "/invented/rollout.jsonl",
+			};
+			const row = makeThreadRow({ created_at: null, updated_at: null });
+			for (const record of [
+				buildRolloutOnlySessionRecord("synthetic", agg),
+				buildThreadSessionRecord("synthetic", row, agg),
+			]) {
+				assert.equal(record.started_at, expected);
+				assert.equal(record.last_event_at, expected);
+			}
+		}
+	}
+});
+
+test("session builders use first event when metadata timestamp is invalid", () => {
+	const agg: RolloutAggregate = {
+		meta: { timestamp: "2026-02-30T00:00:00Z" },
+		firstTs: "2026-07-31T16:01:26+02:00",
+		lastTs: "2026-07-31T14:01:26.123Z",
+		messageCount: 0,
+		functionCallCount: 0,
+		rolloutPath: "/invented/rollout.jsonl",
+	};
+	const row = makeThreadRow({ created_at: null, updated_at: null });
+	for (const record of [
+		buildRolloutOnlySessionRecord("synthetic", agg),
+		buildThreadSessionRecord("synthetic", row, agg),
+	]) {
+		assert.equal(record.started_at, "2026-07-31T14:01:26.000Z");
+		assert.equal(record.last_event_at, "2026-07-31T14:01:26.123Z");
+	}
+});
+
+test("buildRuleRecord: ellipsis fits within 4000 characters", () => {
+	const record = buildRuleRecord({
+		ruleset: "invented",
+		line: "x".repeat(5000),
+		index: 0,
+		path: "/invented/example.rules",
+		mtime: 1,
+	});
+	assert.equal(typeof record.rule_text, "string");
+	assert.equal((record.rule_text as string).length, 4000);
+	assert.equal(record.rule_text, `${"x".repeat(3999)}…`);
 });

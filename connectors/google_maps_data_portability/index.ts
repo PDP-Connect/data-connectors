@@ -319,8 +319,26 @@ export async function collectGoogleMapsDataPortability(
 			state,
 			timeRange,
 		});
-		await ctx.emitRecord("archive_jobs", record);
 		nextJobs[resourceGroup] = archiveCursorFromRecord(record);
+		const checkpoint = () => ctx.emit({
+			type: "STATE",
+			stream: "archive_jobs",
+			cursor: {
+				google_maps_data_portability: {
+					archive_jobs: { ...nextJobs },
+					fetched_at: nowIso(),
+				},
+			},
+		});
+		const emitRecord = () => ctx.emitRecord("archive_jobs", record);
+		// Persist newly consumed grants before publishing their records. A polled
+		// terminal cursor must still wait for its record: otherwise a failed
+		// emission could make a retry initiate a different archive.
+		const initiatedJob = Boolean(record.archive_job_id) &&
+			!shouldPollExisting(cursorForResource(state, resourceGroup));
+		await (initiatedJob
+			? checkpoint().then(emitRecord)
+			: emitRecord().then(checkpoint));
 		emitted.push(resourceGroup);
 	}
 
@@ -331,17 +349,6 @@ export async function collectGoogleMapsDataPortability(
 		hydratedKeys: emitted,
 		considered: selected.length,
 		covered: emitted.length,
-	});
-
-	await ctx.emit({
-		type: "STATE",
-		stream: "archive_jobs",
-		cursor: {
-			google_maps_data_portability: {
-				archive_jobs: nextJobs,
-				fetched_at: nowIso(),
-			},
-		},
 	});
 }
 
