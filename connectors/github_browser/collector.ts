@@ -26,7 +26,7 @@ import {
 	parseRepositoriesPage,
 	parseStarredPage,
 } from "./parsers.ts";
-import { createRateLimitPacer } from "./rate-limit.ts";
+import { createRateLimitPacer, githubHttpStatus } from "./rate-limit.ts";
 import { validateEntity, validateRecord } from "./schemas.ts";
 import type { BrowserServices, LegacyContributionDay } from "./types.ts";
 
@@ -77,9 +77,9 @@ export async function collectGitHubBrowser(
 		try { return await request(); }
 		catch (error) {
 			if (error instanceof CollectionError) throw error;
-			const status = error instanceof Error ? /^github_browser_http_(\d{3})$/u.exec(error.message)?.[1] : undefined;
+			const status = githubHttpStatus(error);
 			throw new CollectionError({ ...counts, origin: "source", cause: "source_request_failed",
-				...(status === undefined ? {} : { status: Number(status) }) });
+				...(status === undefined ? {} : { status }) });
 		}
 	};
 	// Every API call is paced from GitHub's own rate-limit headers.
