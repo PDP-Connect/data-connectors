@@ -718,6 +718,89 @@ test("collectAllStreams: a partial GraphQL page keeps its trips and reports a re
 	});
 });
 
+const activitiesWithInvalidCursor = (token: unknown) =>
+	JSON.stringify({
+		data: { activities: { past: { activities: [], nextPageToken: token } } },
+	});
+
+[
+	{ name: "HTTP 503", status: 503, body: "" },
+	{ name: "rejected transport", rejects: true, body: "" },
+	{ name: "malformed continuation", body: activitiesWithInvalidCursor(0) },
+].forEach(({ name, status, rejects, body }) => {
+	test("collectAllStreams: later " + name + " keeps the prefix and emits a retryable gap", async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [
+				{ body: activitiesBody([{ uuid: "good-trip" }], "page-2") },
+				{ ...(status === undefined ? {} : { status }), body },
+			],
+			getTrip: { "good-trip": { body: getTripBody({ status: "COMPLETED" }) } },
+			getReceipt: { "good-trip": { body: getReceiptBody(RECEIPT_HTML("$10.00")) } },
+		});
+		let pages = 0;
+		const fetch: UberPageFetch = (operation, query, variables) => {
+			if (operation === "Activities" && ++pages === 2 && rejects) {
+				return Promise.reject(new Error("uber_transport_error fixture"));
+			}
+			return fetchPath(operation, query, variables);
+		};
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await collectAllStreams(ctx, fetch, NO_DELAY);
+		assert.equal(pages, 2);
+		assert.ok(calls.includes("GetTrip:good-trip"));
+		assert.deepEqual(emitted.map((item) => item.stream), ["trips", "receipts"]);
+		assert.deepEqual(
+			messages.filter((item) => item.type === "SKIP_RESULT").map((item) =>
+				[item.stream, item.reason, item.recovery_hint],
+			),
+			["trips", "receipts"].map((stream) => [
+				stream, "trips_source_incomplete", { action: "retry_by_runtime", retryable: true },
+			]),
+		);
+	});
+});
+
+[
+	{ status: 401, prefix: "uber_session_expired" },
+	{ status: 403, prefix: "uber_session_expired" },
+	{ status: 429, prefix: "uber_rate_limited" },
+].forEach(({ status, prefix }) => {
+	[false, true].forEach((later) => {
+		test("collectAllStreams: Activities HTTP " + status + " before details, later=" + later, async () => {
+			const { fetchPath, calls } = makeScriptedFetch({
+				activitiesPages: [
+					...(later ? [{ body: activitiesBody([{ uuid: "good-trip" }], "page-2") }] : []),
+					{ status, body: "" },
+				],
+			});
+			const { ctx, emitted, messages } = makeCtx(["trips"]);
+			await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), {
+				message: prefix + " [endpoint Activities]",
+			});
+			assert.deepEqual(calls, later ? ["Activities", "Activities"] : ["Activities"]);
+			assert.deepEqual(emitted, []);
+			assert.deepEqual(messages, []);
+		});
+	});
+});
+
+[
+	{ status: 503, body: "", prefix: /uber_http_503 \[endpoint Activities\]/ },
+	{ body: activitiesWithInvalidCursor(0), prefix: /uber_graphql_error .* malformed continuation/i },
+	{ body: activitiesWithInvalidCursor({ fixture: true }), prefix: /uber_graphql_error .* malformed continuation/i },
+].forEach(({ status, body, prefix }) => {
+	test("collectAllStreams: rejects unusable first Activities response: " + (status ?? body), async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [{ ...(status === undefined ? {} : { status }), body }],
+		});
+		const { ctx, emitted, messages } = makeCtx(["trips"]);
+		await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), prefix);
+		assert.deepEqual(calls, ["Activities"]);
+		assert.deepEqual(emitted, []);
+		assert.deepEqual(messages, []);
+	});
+});
+
 test("collectAllStreams: truncated JSON on the first page refuses before emitting anything", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({ activitiesPages: [{ body: '{"data":' }] });
 	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);

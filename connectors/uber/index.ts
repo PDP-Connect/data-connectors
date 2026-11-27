@@ -371,14 +371,38 @@ export async function fetchAllActivities(
 	const walk = await walkPagesWithCeiling({
 		maxPages: MAX_ACTIVITY_PAGES,
 		fetchPage: async (pageNumber) => {
-			const { status, body } = await fetchPath("Activities", ACTIVITIES_QUERY, {
-				includePast: true,
-				includeUpcoming: false,
-				limit: ACTIVITIES_PAGE_SIZE,
-				orderTypes: ["RIDES", "TRAVEL"],
-				profileType: "PERSONAL",
-				...(nextPageToken ? { nextPageToken } : {}),
-			});
+			let reply: Awaited<ReturnType<UberPageFetch>>;
+			try {
+				reply = await fetchPath("Activities", ACTIVITIES_QUERY, {
+					includePast: true,
+					includeUpcoming: false,
+					limit: ACTIVITIES_PAGE_SIZE,
+					orderTypes: ["RIDES", "TRAVEL"],
+					profileType: "PERSONAL",
+					...(nextPageToken ? { nextPageToken } : {}),
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (
+					all.length === 0 ||
+					/^(uber_session_expired|uber_rate_limited)/.test(message)
+				) {
+					throw error;
+				}
+				incomplete = true;
+				return false;
+			}
+			const { status, body } = reply;
+			if (
+				all.length > 0 &&
+				status !== 401 &&
+				status !== 403 &&
+				status !== 429 &&
+				(status < 200 || status >= 300)
+			) {
+				incomplete = true;
+				return false;
+			}
 			assertUberOk(status, body, "Activities");
 			let parsed:
 				| (UberActivitiesResponse & { errors?: { message?: unknown }[] })
@@ -431,6 +455,16 @@ export async function fetchAllActivities(
 					"uber_graphql_error [endpoint Activities]: Malformed Activities data",
 				);
 			}
+			const token: unknown = past.nextPageToken;
+			if (token != null && (typeof token !== "string" || token.length === 0)) {
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
+				throw new Error(
+					"uber_graphql_error [endpoint Activities]: malformed continuation token",
+				);
+			}
 			incomplete ||= hasErrors;
 			const page = past.activities ?? [];
 			for (const activity of page) {
@@ -441,18 +475,15 @@ export async function fetchAllActivities(
 					all.push(activity);
 				}
 			}
-			const token = parsed.data?.activities?.past?.nextPageToken;
-			// Duplicate records do not prove exhaustion; only cursor progress does.
-			if (token) {
-				if (seenContinuations.has(token)) {
-					incomplete = true;
-					return false;
-				}
-				seenContinuations.add(token);
-			}
-			if (!token) {
+			if (token == null) {
 				return false;
 			}
+			// Duplicate records do not prove exhaustion; only cursor progress does.
+			if (seenContinuations.has(token)) {
+				incomplete = true;
+				return false;
+			}
+			seenContinuations.add(token);
 			nextPageToken = token;
 			if (pageNumber < MAX_ACTIVITY_PAGES) {
 				await delay(PAGE_DELAY_MS);
