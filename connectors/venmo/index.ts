@@ -88,7 +88,7 @@ import {
 	userRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
-import type { VenmoStory, VenmoUser } from "./types.ts";
+import type { VenmoStory, VenmoStoryAmbiguity, VenmoUser } from "./types.ts";
 
 const FRIENDS_PAGE_SIZE = 200;
 const TRANSACTIONS_PAGE_SIZE = 50;
@@ -316,6 +316,10 @@ function parseVenmoInventory<T>(body: string, path: string): T[] {
 		Array.isArray(parsed) ||
 		!("data" in parsed) ||
 		!Array.isArray(parsed.data) ||
+		("error" in parsed && parsed.error != null && parsed.error !== false) ||
+		("errors" in parsed &&
+			parsed.errors != null &&
+			(!Array.isArray(parsed.errors) || parsed.errors.length > 0)) ||
 		!parsed.data.every(
 			(item: unknown) =>
 				item && typeof item === "object" && !Array.isArray(item),
@@ -448,6 +452,7 @@ async function emitTransactionsPage(
 	shouldEmit: (record: Record<string, unknown>) => boolean,
 ): Promise<{
 	accepted: number;
+	ambiguousCounts: Partial<Record<VenmoStoryAmbiguity, number>>;
 	firstSafeId: string | null;
 	firstRejectedIndex: number | null;
 	rejectionReason: string | null;
@@ -458,13 +463,16 @@ async function emitTransactionsPage(
 	let firstRejectedIndex: number | null = null;
 	let rejectionReason: string | null = null;
 	let latestSeenAt: string | null = null;
+	const ambiguousCounts: Partial<Record<VenmoStoryAmbiguity, number>> = {};
 	for (const [index, story] of stories.entries()) {
 		const parsed = parseTransactionStory(story, ownerId);
 		if (parsed.kind === "unsupported") {
 			firstSafeId ??= typeof story.id === "string" ? story.id : null;
 			continue;
 		}
-		if (parsed.kind === "invalid") {
+		if (parsed.kind === "ambiguous") {
+			ambiguousCounts[parsed.reason] =
+				(ambiguousCounts[parsed.reason] ?? 0) + 1;
 			firstRejectedIndex ??= index;
 			rejectionReason ??= parsed.reason;
 			continue;
@@ -499,6 +507,7 @@ async function emitTransactionsPage(
 	}
 	return {
 		accepted,
+		ambiguousCounts,
 		firstSafeId,
 		firstRejectedIndex,
 		rejectionReason,
@@ -513,6 +522,7 @@ export async function collectTransactions(
 	delay: (ms: number) => Promise<void> = politeDelay,
 ): Promise<{
 	backfillBeforeId: string | null;
+	ambiguousCounts: Partial<Record<VenmoStoryAmbiguity, number>>;
 	blockedByRejected: boolean;
 	considered: number;
 	covered: number;
@@ -565,6 +575,7 @@ export async function collectTransactions(
 	const refreshFingerprints: Record<string, string> = {};
 	const emittedFingerprints = new Map<string, string>();
 	let totalSeen = 0;
+	const ambiguousCounts: Partial<Record<VenmoStoryAmbiguity, number>> = {};
 	let totalAccepted = 0;
 	let pagesFetched = 0;
 	let latestSeenAt: string | null = null;
@@ -608,9 +619,7 @@ export async function collectTransactions(
 			? parseTransactionStory(finalStory, ownerId)
 			: null;
 		const missingSupportedId =
-			!lastStoryId &&
-			finalOutcome?.kind === "invalid" &&
-			finalOutcome.reason === "missing_id";
+			!lastStoryId && finalOutcome?.kind === "ambiguous";
 		if (
 			!reachedStop &&
 			((!lastStoryId && !missingSupportedId) || seenBeforeIds.has(lastStoryId))
@@ -638,6 +647,10 @@ export async function collectTransactions(
 		if (lastStoryId) seenBeforeIds.add(lastStoryId);
 		totalSeen += stories.length;
 		totalAccepted += page.accepted;
+		for (const [reason, count] of Object.entries(page.ambiguousCounts)) {
+			const code = reason as VenmoStoryAmbiguity;
+			ambiguousCounts[code] = (ambiguousCounts[code] ?? 0) + (count ?? 0);
+		}
 		if (
 			page.latestSeenAt &&
 			(!latestSeenAt || isLaterVenmoDate(page.latestSeenAt, latestSeenAt))
@@ -856,6 +869,7 @@ export async function collectTransactions(
 
 	return {
 		backfillBeforeId,
+		ambiguousCounts,
 		blockedByRejected,
 		considered: totalSeen + (truncated ? 1 : 0),
 		covered: totalAccepted,
@@ -1024,6 +1038,7 @@ export async function collectAllStreams(
 	if (requested.has("transactions")) {
 		const {
 			backfillBeforeId,
+			ambiguousCounts,
 			blockedByRejected,
 			considered,
 			covered,
@@ -1062,7 +1077,11 @@ export async function collectAllStreams(
 			await reportVenmoStreamFailure(
 				ctx,
 				"transactions",
-				`Venmo returned a supported payment with ${reason}; this page remains unfinished`,
+				`Venmo returned an incomplete transaction page (${reason}); ambiguous stories: ${
+					Object.entries(ambiguousCounts)
+						.map(([code, count]) => `${code}=${count}`)
+						.join(", ") || "none"
+				}; this page remains unfinished`,
 				{ retryable: true },
 			);
 		}

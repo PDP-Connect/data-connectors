@@ -248,6 +248,19 @@ export async function spotifyMobileCollect(context: Context): Promise<void> {
 	};
 	await spotifyCollect({
 		...context,
+		// A retryable stream failure keeps mobile's retryable gap, as every
+		// other mobile gap does. A non-retryable one goes to the host as the
+		// portable stream failure, so the owner is not told to retry it.
+		reportStreamFailure: async (stream, message, options) => {
+			const retryable =
+				(options?.recoveryHint?.retryable ?? options?.retryable) === true;
+			if (retryable || !context.reportStreamFailure) {
+				await incomplete(stream, message);
+				return;
+			}
+			gaps.add(stream);
+			await context.reportStreamFailure(stream, message, options);
+		},
 		emit: async (message) => {
 			if (message.type === "SKIP_RESULT") {
 				await incomplete(String(message.stream), String(message.message ?? message.reason));

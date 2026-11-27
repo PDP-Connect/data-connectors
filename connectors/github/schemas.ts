@@ -28,7 +28,7 @@ const urlSchema = pdppSafeText.max(4096).nullable();
 const loginSchema = pdppSafeText.max(80).nullable();
 const titleSchema = pdppSafeText.max(500).nullable();
 const descriptionSchema = pdppSafeText.max(65_000).nullable();
-const bodySchema = pdppSafeText.max(65_000).nullable(); // truncateBody caps at 20k
+const bodySchema = pdppSafeText.max(65_536).nullable(); // GitHub issue and pull request body limit
 const numericSchema = z.number().int().nullable();
 const booleanSchema = z.boolean();
 const booleanNullableSchema = z.boolean().nullable();
@@ -177,7 +177,7 @@ export const pullRequestsSchema = z.object({
 	created_at: isoDateSchema,
 	updated_at: isoDateSchema,
 	closed_at: isoDateSchema,
-	draft: booleanSchema,
+	draft: booleanNullableSchema,
 	merged_at: isoDateSchema,
 	merged_by_login: loginSchema,
 	commits_count: numericSchema,

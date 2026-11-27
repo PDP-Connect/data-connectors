@@ -201,6 +201,57 @@ test("automatic human-interaction manifests are explicitly session-reuse/assiste
 	);
 });
 
+// Mirrors refreshPolicyContradictions in the consuming app
+// (data-connect reference-implementation/server/refresh-policy-consistency.ts),
+// which rejects a manifest at registration when these fields disagree.
+const GESTURE_FREE_POSTURES = new Set(["none", "credentials"]);
+const WAIVABLE_POSTURES = new Set(["manual_action_likely", "otp_likely"]);
+
+function refreshPolicyContradiction(
+	policy: NonNullable<Manifest["capabilities"]>["refresh_policy"],
+): string | null {
+	if (!policy || policy.recommended_mode === "paused") return null;
+	const backgroundSafe =
+		typeof policy.background_safe === "boolean"
+			? policy.background_safe
+			: undefined;
+	const posture =
+		typeof policy.interaction_posture === "string"
+			? policy.interaction_posture
+			: undefined;
+	if (backgroundSafe === false && policy.assisted_after_owner_auth === true) {
+		return "background_safe:false with assisted_after_owner_auth:true";
+	}
+	if (
+		backgroundSafe === false &&
+		posture !== undefined &&
+		GESTURE_FREE_POSTURES.has(posture)
+	) {
+		return `background_safe:false with interaction_posture:${posture}`;
+	}
+	if (typeof policy.recommended_mode === "string" && posture !== undefined) {
+		const derived =
+			WAIVABLE_POSTURES.has(posture) && backgroundSafe !== true
+				? "manual"
+				: "automatic";
+		if (policy.recommended_mode !== derived) {
+			return `recommended_mode:${policy.recommended_mode} where interaction_posture:${posture} and background_safe:${String(backgroundSafe)} derive ${derived}`;
+		}
+	}
+	return null;
+}
+
+test("refresh_policy fields agree, so the app does not reject the manifest", () => {
+	const offenders: string[] = [];
+	for (const name of MANIFEST_NAMES) {
+		const contradiction = refreshPolicyContradiction(
+			readManifest(name).capabilities?.refresh_policy,
+		);
+		if (contradiction) offenders.push(`${name}: ${contradiction}`);
+	}
+	assert.deepEqual(offenders, []);
+});
+
 test("human_interaction and interaction_posture stay coarse stable hints", () => {
 	const allowedInteractions = new Set(["credentials", "manual_action", "otp"]);
 	const allowedPostures = new Set([

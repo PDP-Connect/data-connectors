@@ -41,6 +41,28 @@ import type {
 	StatementClosing,
 } from "./types.ts";
 
+test("isoDate: statement calendar dates are host-zone independent", () => {
+	const previous = process.env.TZ;
+	try {
+		for (const zone of ["Pacific/Auckland", "America/Los_Angeles"]) {
+			process.env.TZ = zone;
+			for (const raw of ["04/13/2026", "Apr 13, 2026", "April 13, 2026", "2026-04-13"]) {
+				assert.equal(isoDate(raw), "2026-04-13", zone + ": " + raw);
+			}
+		}
+	} finally {
+		if (previous === undefined) delete process.env.TZ;
+		else process.env.TZ = previous;
+	}
+});
+
+test("isoDate: rejects calendar rollover instead of normalizing it", () => {
+	assert.equal(isoDate("02/29/2025"), null);
+	assert.equal(isoDate("Apr 31, 2026"), null);
+	assert.equal(isoDate("2026-02-30"), null);
+	assert.equal(isoDate("02/29/2024"), "2024-02-29");
+});
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
 const LOCAL_RAW_DIR = join(__dirname, "..", "..", "fixtures", "usaa", "raw");
@@ -670,6 +692,86 @@ test("buildInboxMessageRecord: parses 'MMM DD' + year into ISO date", () => {
 	const rec = buildInboxMessageRecord(m, 2026, "t");
 	assert.ok(rec);
 	assert.equal(rec.date_received, "2026-04-13");
+});
+
+
+test("buildInboxMessageRecord: yearless dates do not move past collection day", () => {
+	for (const [date_short, year, fetchedAt, expected] of [
+		["Dec 30", 2027, "2027-01-02T08:00:00Z", "2026-12-30"],
+		["Jan 2", 2027, "2027-01-02T08:00:00Z", "2027-01-02"],
+		["Apr 13", 2026, "2026-04-22T00:00:00Z", "2026-04-13"],
+		["Apr 13", 2026, "t", "2026-04-13"],
+	] as const) {
+		const row: InboxRow = { status: "UNREAD", date_short, preview: "Invented message" };
+		const before = buildInboxMessageRecord(row, year, "t");
+		const record = buildInboxMessageRecord(row, year, fetchedAt);
+		assert.ok(before);
+		assert.ok(record);
+		assert.equal(record.date_received, expected);
+		assert.deepEqual(record, { ...before, date_received: expected }, "only the date changes");
+	}
+});
+
+test("buildInboxMessageRecord: invalid collection days retain the caller year", () => {
+	for (const fetchedAt of ["t", "", "2027-02-30T00:00:00Z", "2027-13-02T00:00:00Z",
+		"2027-00-02T00:00:00Z", "2027-01-00T00:00:00Z", "0000-01-02T00:00:00Z",
+		"2027-1-02T00:00:00Z", "01/02/2027"]) {
+		const record = buildInboxMessageRecord(
+			{ status: "Read", date_short: "Dec 30", preview: "Invented message" }, 2027, fetchedAt,
+		);
+		assert.equal(record?.date_received, "2027-12-30", fetchedAt);
+	}
+});
+
+test("buildInboxMessageRecord: calendar date is host-zone independent", () => {
+	const previous = process.env.TZ;
+	try {
+		for (const zone of ["Pacific/Auckland", "America/Los_Angeles"]) {
+			process.env.TZ = zone;
+			const rec = buildInboxMessageRecord(
+				{ status: "Read", date_short: "Apr 13", preview: "hi" }, 2026, "t",
+			);
+			assert.ok(rec);
+			assert.equal(rec.date_received, "2026-04-13", zone);
+		}
+	} finally {
+		if (previous === undefined) delete process.env.TZ;
+		else process.env.TZ = previous;
+	}
+});
+
+test("buildInboxMessageRecord: validates leap days without rollover", () => {
+	const m: InboxRow = { status: "Read", date_short: "Feb 29", preview: "hi" };
+	const invalid = buildInboxMessageRecord(m, 2025, "t");
+	const valid = buildInboxMessageRecord(m, 2024, "t");
+	assert.ok(invalid);
+	assert.ok(valid);
+	assert.equal(invalid.date_received, null);
+	assert.equal(valid.date_received, "2024-02-29");
+});
+
+test("buildInboxMessageRecord: unknown month keeps record with null date", () => {
+	const rec = buildInboxMessageRecord(
+		{ status: "Read", date_short: "Foo 13", preview: "hi" }, 2026, "t",
+	);
+	assert.ok(rec);
+	assert.equal(rec.date_received, null);
+});
+
+test("buildInboxMessageRecord: accepts trimmed abbreviated month variants", () => {
+	for (const date_short of [" apr. 3 ", "APR 03", "Apr\t3"]) {
+		const rec = buildInboxMessageRecord({ status: "Read", date_short, preview: "hi" }, 2026, "t");
+		assert.ok(rec);
+		assert.equal(rec.date_received, "2026-04-03", date_short);
+	}
+});
+
+test("buildInboxMessageRecord: rejects non-inbox formats and invalid days", () => {
+	for (const date_short of ["April 13", "Apr 13, 2026", "2026-04-13", "Feb 30", "Apr 31", "Apr 0"]) {
+		const rec = buildInboxMessageRecord({ status: "Read", date_short, preview: "hi" }, 2026, "t");
+		assert.ok(rec);
+		assert.equal(rec.date_received, null, date_short);
+	}
 });
 
 const CC_BILLING_KV: BillingKv = {

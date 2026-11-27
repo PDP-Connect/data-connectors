@@ -9,7 +9,7 @@
 	},
 	"connector_key": "x-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-	"version": "0.1.19",
+	"version": "0.1.21",
 	"display_name": "X (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
@@ -669,7 +669,7 @@
 		"collection_interrupted": "X stopped answering normally partway through, so this run stopped straight away. What was already read is saved. Wait a while, then run it again.",
 		"list_end_unconfirmed": "X stopped loading more before the end of the list, so some older items may be missing. What was read is saved.",
 		"records_unreadable": "Some posts couldn't be read and were skipped. Everything else was collected normally.",
-		"run_budget_reached": "This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. Run it again tomorrow for the rest.",
+		"run_budget_reached": "This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. What was read is saved. A later run may read some of the same posts again.",
 		"run_stopped_early": "The run stopped before it got to this part. Nothing is wrong with it. Run it again later.",
 		"sign_in_required": "X needs you to sign in again before this can continue.",
 		"source_rate_limited": "X asked this connector to slow down, so the run stopped straight away. What was already read is saved. Wait a day before running it again.",

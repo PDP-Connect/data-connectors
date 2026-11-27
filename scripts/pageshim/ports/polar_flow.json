@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "polar_flow",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}
