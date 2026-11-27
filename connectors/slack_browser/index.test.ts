@@ -1046,22 +1046,56 @@ test("an answer this connector does not recognise on a required stream fails clo
 	assert.deepEqual(h.of("users"), []);
 });
 
-for (const mode of ["long", "no-progress", "repeat"] as const) {
+for (const mode of ["long", "empty", "repeat"] as const) {
 	test(`channel inventory ${mode}: only a terminal cursor commits`, async () => {
 		const h = harness(["channels"]);
 		let pages = 0;
 		const api = fakeApi((call) => {
 			if (call.method !== "users.conversations") return undefined;
 			pages += 1;
-			const ceiling = mode === "long" ? 501 : mode === "repeat" ? 2 : 18;
-			assert.ok(pages <= ceiling, "nonterminal inventory must be bounded");
+			const ceiling = mode === "long" ? 501 : mode === "repeat" ? 2 : 21;
+			assert.ok(
+				pages <= ceiling,
+				"inventory must not request a page after its terminal cursor",
+			);
 			assert.equal(call.params.cursor, pages === 1 ? undefined : String(pages));
-			const id = "C" + String(mode === "no-progress" ? 1 : pages).padStart(10, "0");
+			const id = "C" + String(pages).padStart(10, "0");
+			const channels =
+				mode === "empty"
+					? pages < 21
+						? []
+						: [
+								{
+									id: "C0123456789",
+									name: "synthetic-first",
+									is_channel: true,
+									is_member: true,
+								},
+								{
+									id: "C0987654321",
+									name: "synthetic-second",
+									is_channel: true,
+									is_member: true,
+								},
+							]
+					: [
+							{
+								id,
+								name: "synthetic-" + id,
+								is_channel: true,
+								is_member: true,
+							},
+						];
 			return {
 				ok: true,
-				channels: [{ id, name: "synthetic-" + id, is_channel: true, is_member: true }],
+				channels,
 				response_metadata: {
-					next_cursor: mode === "long" && pages === 501 ? "" : mode === "repeat" ? "2" : String(pages + 1),
+					next_cursor:
+						mode === "repeat"
+							? "2"
+							: pages === ceiling
+								? ""
+								: String(pages + 1),
 				},
 			};
 		});
@@ -1070,12 +1104,46 @@ for (const mode of ["long", "no-progress", "repeat"] as const) {
 			assert.equal(pages, 501);
 			assert.equal(h.of("channels").length, 501);
 			assert.ok(h.state("channels"));
+		} else if (mode === "empty") {
+			assert.equal(pages, 21);
+			assert.deepEqual(
+				h
+					.of("channels")
+					.map((row) => row.id)
+					.sort(),
+				["C0123456789", "C0987654321"],
+			);
+			assert.ok(h.state("channels"));
+			assert.equal(
+				h.skips().some((entry) => entry.stream === "channels"),
+				false,
+			);
 		} else {
-			assert.equal(pages, mode === "repeat" ? 2 : 18);
+			assert.equal(pages, 2);
 			assert.equal(h.of("channels").length, 0);
 			assert.equal(h.state("channels"), undefined);
-			assert.equal(h.coverage().some((entry) => entry.stream === "channels"), false);
-			assert.ok(h.skips().some((entry) => entry.stream === "channels" && entry.reason === "collection_interrupted"));
+			assert.equal(
+				h.coverage().some((entry) => entry.stream === "channels"),
+				false,
+			);
+			assert.ok(
+				h
+					.skips()
+					.some(
+						(entry) =>
+							entry.stream === "channels" &&
+							entry.reason === "collection_interrupted",
+					),
+			);
+			assert.ok(
+				h
+					.skips()
+					.some(
+						(entry) =>
+							entry.stream === "channels" &&
+							entry.message?.includes("(page_cap_reached)"),
+					),
+			);
 		}
 	});
 }

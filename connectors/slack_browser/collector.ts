@@ -119,8 +119,6 @@ export const MAX_SEARCH_PAGES = 100;
 export const DEFAULT_CONCURRENCY = 3;
 const MAX_PAGES_PER_THREAD = 200;
 const MAX_OTHER_LIST_PAGES = 500;
-// A channel inventory progress guard, not a listing-size limit.
-const NO_PROGRESS_PAGE_GUARD = 16;
 /** Slack allows up to 999 per history page; fewer round trips on busy channels. */
 const HISTORY_PAGE_LIMIT = "999";
 const LIST_PAGE_LIMIT = "200";
@@ -356,7 +354,13 @@ function countFullScan(
 	);
 }
 
-/** Every page of a cursor-paginated list method. */
+/**
+ * Every page of a cursor-paginated list method. A `"to_end"` listing (the
+ * channel inventory) follows fresh cursors until Slack stops returning one:
+ * Slack filters these pages server-side, so a page can be empty and still
+ * carry a new cursor. It refuses only a repeated cursor. Other listings keep
+ * a page bound.
+ */
 async function listAll<
 	T extends {
 		response_metadata?: { next_cursor?: string | undefined } | undefined;
@@ -367,14 +371,16 @@ async function listAll<
 	method: string,
 	params: Record<string, string>,
 	schema: ZodType<T>,
-	idsOf?: (page: T) => readonly string[],
+	extent: "bounded" | "to_end" = "bounded",
 ): Promise<T[]> {
 	const pages: T[] = [];
 	const seenCursors = new Set<string>();
-	const seenIds = new Set<string>();
-	let noProgress = 0;
 	let cursor = "";
-	for (let pageNo = 0; idsOf !== undefined || pageNo < MAX_OTHER_LIST_PAGES; pageNo += 1) {
+	for (
+		let pageNo = 0;
+		extent === "to_end" || pageNo < MAX_OTHER_LIST_PAGES;
+		pageNo += 1
+	) {
 		const answer = parseAnswer(
 			schema,
 			method,
@@ -386,14 +392,11 @@ async function listAll<
 		);
 		pages.push(answer);
 		cursor = answer.response_metadata?.next_cursor ?? "";
-		const before = seenIds.size;
-		for (const id of idsOf?.(answer) ?? []) seenIds.add(id);
 		if (cursor === "") {
 			return pages;
 		}
-		if (idsOf !== undefined) {
-			noProgress = seenIds.size === before ? noProgress + 1 : 0;
-			if (seenCursors.has(cursor) || noProgress > NO_PROGRESS_PAGE_GUARD) {
+		if (extent === "to_end") {
+			if (seenCursors.has(cursor)) {
 				throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
 			}
 			seenCursors.add(cursor);
@@ -503,7 +506,7 @@ async function listConversations(
 		"users.conversations",
 		{ types, limit: LIST_PAGE_LIMIT, exclude_archived: "false" },
 		conversationsListSchema,
-		(page) => (page.channels ?? []).map((channel) => channel.id),
+		"to_end",
 	);
 	const allowed = new Set(
 		run.options.channelAllowlist.map((entry) => entry.toLowerCase()),
