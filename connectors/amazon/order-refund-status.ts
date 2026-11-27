@@ -6,8 +6,11 @@ const ITEM_COMPLETE =
 // completed item return. They also override a conflicting order label.
 const NEGATED_COMPLETE =
 	/\b(?:not|no|never)\s+(?:\w+\s+)?(?:refunded|refund issued|return complete|returned)\b|\b(?:not|never)\s+(?:been\s+)?picked up and returned\b/i;
-const FUTURE_COMPLETE =
-	/\b(?:will|may|can|could|should|would|to)\s+be\s+(?:returned|refunded)\b|\brefund\s+(?:will|may|can|could|should|would|to)\s+be\s+issued\b/i;
+export const RETURN_MODAL_BE_PATTERN = String.raw`\b(?:will|may|can|could|should|would|might|must|to)\s+(?:\w+\s+)?be`;
+const FUTURE_COMPLETE = new RegExp(
+	String.raw`${RETURN_MODAL_BE_PATTERN}\s+(?:returned|refunded)\b|\brefund\s+${RETURN_MODAL_BE_PATTERN}\s+issued\b`,
+	"i",
+);
 const SHIPPING_ONLY =
 	/\b(?:shipping|postage)(?:\s+(?:fee|charge|cost))?\s+only\b|\b(?:refunded|refund issued)(?:\s+for)?\s+(?:the\s+)?(?:shipping|postage)\b/i;
 const PENDING_ITEM =

@@ -11,6 +11,7 @@ import {
 	buildOrderItemRecord,
 	buildOrderRecord,
 	countOrderCardsWithoutOrderId,
+	isActualReturn,
 	itemId,
 	mergeDetailByKey,
 	mergeOrderItems,
@@ -966,6 +967,37 @@ test("buildOrderItemRecord: distinguishes returns from return-window wording", (
 		});
 		assert.equal(rec.returned, returned, `status=${JSON.stringify(status)}`);
 		assert.equal(rec.refund_status, status || null);
+	}
+});
+
+test("return wording agrees in the simple and order-context paths", () => {
+	const cases: [string, boolean][] = [
+		["This item might be returned", false],
+		["Item must be returned by January 31", false],
+		["This item can also be returned", false],
+		["This item can still be returned", false],
+		["Refund will be issued", false],
+		["Returned", true],
+		["has been returned", true],
+		["Item returned on January 5", true],
+		["Refunded", true],
+		["Refund issued", true],
+	];
+	for (const [status, returned] of cases) {
+		assert.equal(isActualReturn(status), returned, `standalone: ${status}`);
+		const item = buildOrderItemRecord(
+			"111-2222222-3333333",
+			"2024-01-15",
+			{
+				name: "Widget",
+				refund_status: status,
+			},
+			{
+				orderStatus: "Delivered",
+				itemCount: 1,
+			},
+		);
+		assert.equal(item.returned, returned, `order context: ${status}`);
 	}
 });
 

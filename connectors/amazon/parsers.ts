@@ -5,7 +5,10 @@
 // I/O so they can be unit-tested in isolation.
 
 import { parseHTML } from "linkedom";
-import { deriveItemReturnState } from "./order-refund-status.ts";
+import {
+	deriveItemReturnState,
+	RETURN_MODAL_BE_PATTERN,
+} from "./order-refund-status.ts";
 import {
 	type AmazonStore,
 	absoluteStoreUrl,
@@ -1098,19 +1101,18 @@ export function mergeDetailByKey(detailItems: DetailItem[]): {
 
 // ─── Order record + item merge ───────────────────────────────────────────
 
+const ACTUAL_RETURN = new RegExp(
+	String.raw`(?<!${RETURN_MODAL_BE_PATTERN}\s+)\breturned\b|\breturn\s+(?:is\s+)?(?:started|complete|received)\b|\brefund\s+(?:has\s+been\s+)?issued\b|\brefunded\b`,
+	"i",
+);
+
 export function isActualReturn(status: string | null | undefined): boolean {
 	if (!status) {
 		return false;
 	}
 	// Affirmative phrases win even when eligibility text is also present.
 	// Window/eligibility wording alone does not match these phrases.
-	// 'returned' counts only when it is not modal eligibility wording:
-	// 'can/may/could/might/should/will/would/to be returned' is a return
-	// window, not a return, so the lookbehind keeps it from matching.
-	// 'has been returned' still matches: 'been' is not a modal + 'be'.
-	return /(?<!\b(?:can|may|could|might|should|will|would|to) be )\breturned\b|\breturn\s+(?:is\s+)?(?:started|complete|received)\b|\brefund\s+(?:has\s+been\s+)?issued\b|\brefunded\b/i.test(
-		status,
-	);
+	return ACTUAL_RETURN.test(status);
 }
 
 /**
