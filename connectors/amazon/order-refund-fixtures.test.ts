@@ -18,7 +18,7 @@ const cases = [
 		status: "Delivered",
 		count: 1,
 		itemStatus: "Return or replace items",
-		current: true,
+		current: false,
 		expected: false,
 	},
 	{
