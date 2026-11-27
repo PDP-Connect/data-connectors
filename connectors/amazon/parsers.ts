@@ -228,7 +228,10 @@ function parseOrderCard(
 
 // ─── Order-detail DOM parsing ───────────────────────────────────────────
 
-const CANCELLED_RE = /has been cancelled/i;
+// Only an explicit whole-order statement may discard items and totals.
+// Unknown or item-level wording must not become a guessed order state.
+const CANCELLED_RE = /^(?:this|your) order has been cancelled[.!]?$/i;
+const ITEM_CANCELLED_RE = /^one item has been cancelled[.!]?$/i;
 const PAY_PREFIX_RE = /^Payment method\s*/i;
 const PAY_SUFFIX_RE = /\s*View related transactions.*$/i;
 const CARD_PATCH_RE =
@@ -739,6 +742,12 @@ export function parseOrderDetailDom(
 	let status_detail: string | null = null;
 	if (isCancelled) {
 		status_detail = "This order has been cancelled";
+	} else if (ITEM_CANCELLED_RE.test(cancelledText)) {
+		// Preserve the recognized partial cancellation without dropping
+		// purchased items. Unrecognized wording falls through to alerts.
+		if (cancelledText.length < STATUS_MAX_LEN) {
+			status_detail = cancelledText;
+		}
 	} else {
 		const alertsEl = od.querySelector('[data-component="alerts"]');
 		const alertText = normText(alertsEl);
@@ -1003,7 +1012,21 @@ export function parseOrderDate(raw: string | null | undefined): string | null {
 	if (localized) {
 		return localized;
 	}
-	const d = new Date(raw);
+	const value = raw.trim();
+	const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (iso) {
+		return isoDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+	}
+	// Date parses zone-less text in the host zone. Accept it only when the text
+	// carries both a time and an explicit zone, so the UTC day is host-independent.
+	if (
+		!/(?:T|\s)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|[+-]\d{2}:?\d{2}|(?:GMT|UTC)(?:[+-]\d{2}:?\d{2})?|UT|[ECMP][SD]T)$/i.test(
+			value,
+		)
+	) {
+		return null;
+	}
+	const d = new Date(value);
 	if (Number.isNaN(d.getTime())) {
 		return null;
 	}
@@ -1075,7 +1098,16 @@ export function mergeDetailByKey(detailItems: DetailItem[]): {
 
 // ─── Order record + item merge ───────────────────────────────────────────
 
-const RETURNED_RE = /return/i;
+export function isActualReturn(status: string | null | undefined): boolean {
+	if (!status) {
+		return false;
+	}
+	// Affirmative phrases win even when eligibility text is also present.
+	// Window/eligibility wording alone does not match these phrases.
+	return /\breturned\b|\breturn\s+(?:is\s+)?(?:started|complete|received)\b|\brefund\s+(?:has\s+been\s+)?issued\b|\brefunded\b/i.test(
+		status,
+	);
+}
 
 /**
  * Merge list-page items with detail-page items into the final emit-ordered
@@ -1146,7 +1178,7 @@ export function buildOrderItemRecord(
 				...orderContext,
 			})
 		: {
-				returned: RETURNED_RE.test(merged.refund_status || ""),
+				returned: isActualReturn(merged.refund_status),
 				refund_status: merged.refund_status || null,
 			};
 	return {

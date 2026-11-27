@@ -2800,6 +2800,10 @@ if (isMainModule(import.meta.url)) {
 				},
 			};
 
+			// False once a year ends early (recognized stop, truncation). Coverage
+			// below then stays unclaimed: its denominator only counts the orders listed,
+			// so it would read as complete while later years were never read.
+			let yearSweepFinished = true;
 			for (const year of years) {
 				const prior = yearsState[String(year)];
 				// Year-freezing: skip if already frozen
@@ -2837,6 +2841,8 @@ if (isMainModule(import.meta.url)) {
 					}
 					// Keep prior success, but make sure this interrupted year retries.
 					markYearIncomplete(newYearsState, year, prior);
+					yearSweepFinished = false;
+					// Not frozen and no STATE for this year: the next run reads it again.
 					connectorDiagnostic("amazon", "stopped_early_kept_orders", {
 						code,
 						year,
@@ -2868,6 +2874,7 @@ if (isMainModule(import.meta.url)) {
 				} = yearResult;
 
 				ordersSeen += yearOrderCount;
+				if (truncated) yearSweepFinished = false;
 				await applyYearCompletionState({
 					newYearsState,
 					prior,
@@ -2925,13 +2932,13 @@ if (isMainModule(import.meta.url)) {
 			// the console can tell a fully-hydrated run from one that degraded some
 			// order-detail fetches without inferring it from gaps alone. No-ops when
 			// order_items is out of scope or no order was considered.
-			if (orderItemsCoverage) {
+			if (yearSweepFinished && orderItemsCoverage) {
 				await emitOrderItemsCoverage(deps, orderItemsCoverage);
 			}
 			// Same honesty posture as order_items: emit once the year sweep
 			// completes, including the zero-considered steady-state case, so the
 			// `orders` list stream is never left permanently unmeasured.
-			if (ordersCoverage) {
+			if (yearSweepFinished && ordersCoverage) {
 				await emitOrdersCoverage(deps, ordersCoverage);
 			}
 		},

@@ -104,6 +104,92 @@ test("off app.slack.com nothing is sent and the error is not retried", async () 
 	assert.deepEqual(sleeps, []);
 });
 
+for (const { status, retryAfter, expectedMs } of [
+	{ status: 200, retryAfter: "30", expectedMs: 31_000 },
+	{ status: 200, retryAfter: null, expectedMs: 5000 },
+	{ status: 429, retryAfter: "30", expectedMs: 31_000 },
+	{ status: 429, retryAfter: null, expectedMs: 6000 },
+]) {
+	test(`rate limit HTTP ${status} with Retry-After ${retryAfter} sleeps before retry`, async () => {
+		let calls = 0;
+		const sleeps: number[] = [];
+		const api = client(
+			async () => {
+				calls += 1;
+				if (calls === 1) {
+					const response = jsonResponse(
+						{ ok: false, error: "ratelimited" },
+						status,
+					);
+					if (retryAfter !== null)
+						response.headers.set("retry-after", retryAfter);
+					return response;
+				}
+				assert.deepEqual(
+					sleeps,
+					[expectedMs],
+					"the delay must precede the second fetch",
+				);
+				return jsonResponse({ ok: true });
+			},
+			{ sleeps },
+		);
+		assert.deepEqual(await api.call("T0123456789", "users.list", {}), {
+			ok: true,
+		});
+		assert.equal(calls, 2);
+		assert.deepEqual(sleeps, [expectedMs]);
+	});
+}
+
+for (const status of [200, 401]) {
+	test(`session loss HTTP ${status} is not retried despite Retry-After`, async () => {
+		let calls = 0;
+		const sleeps: number[] = [];
+		const api = client(
+			async () => {
+				calls += 1;
+				const response = jsonResponse(
+					{ ok: false, error: "invalid_auth" },
+					status,
+				);
+				response.headers.set("retry-after", "30");
+				return response;
+			},
+			{ sleeps },
+		);
+		await assert.rejects(
+			api.call("T0123456789", "users.list", {}),
+			SlackSessionLostError,
+		);
+		assert.equal(calls, 1);
+		assert.deepEqual(sleeps, []);
+	});
+}
+
+test("a fatal method refusal is not retried despite Retry-After", async () => {
+	let calls = 0;
+	const sleeps: number[] = [];
+	const api = client(
+		async () => {
+			calls += 1;
+			const response = jsonResponse({ ok: false, error: "channel_not_found" });
+			response.headers.set("retry-after", "30");
+			return response;
+		},
+		{ sleeps },
+	);
+	await assert.rejects(
+		api.call("T0123456789", "conversations.history", {}),
+		(error: unknown) =>
+			error instanceof SlackApiError &&
+			error.reason === "channel_not_found" &&
+			error.retryable === false,
+	);
+	assert.equal(calls, 1);
+	assert.deepEqual(sleeps, []);
+});
+
 test("HTTP 429 waits for Retry-After and tries again", async () => {
 	let calls = 0;
 	const sleeps: number[] = [];
