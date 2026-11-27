@@ -10,6 +10,7 @@ import {
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { collectGitHubBrowser } from "./collector.ts";
+import type { BrowserPageObservation } from "./page-evidence.ts";
 import { probeGitHubBrowserSession } from "./probe.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -21,13 +22,36 @@ const CONTRIBUTION_CALENDAR_WAIT_TIMEOUT_MS = 8_000;
 export async function openContributionPage(
 	page: BrowserCollectContext["page"],
 	url: string,
-): Promise<string> {
-	await page.goto(url, { waitUntil: "domcontentloaded" });
+): Promise<BrowserPageObservation> {
+	let navigated = false;
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			await page.goto(url, { waitUntil: "domcontentloaded" });
+			navigated = true;
+			break;
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	if (!navigated)
+		throw lastError instanceof Error
+			? lastError
+			: new Error("github_browser_navigation_failed");
 	try {
 		const ready = await page.waitForFunction(
-			({ minimumDays, selector }) =>
-				Boolean(document.querySelector("h2.f4.text-normal.mb-2")) &&
-				document.querySelectorAll(selector).length >= minimumDays,
+			({ minimumDays, selector }) => {
+				const heading = document.querySelector("h2#js-contribution-activity-description");
+				const cells = Array.from(document.querySelectorAll(selector));
+				if (heading === null || cells.length < minimumDays) return false;
+				const pending = '[aria-busy="true"], [data-loading="true"], .loading, .AnimatedEllipsis, .skeleton, .Skeleton, include-fragment[src]';
+				const unreadable = (node: Element): boolean =>
+					node.closest(pending) !== null || node.querySelector(pending) !== null;
+				const graph = heading.closest(".js-yearly-contributions, .js-calendar-graph")
+					?? heading.parentElement;
+				return !unreadable(heading) && (graph === null || !unreadable(graph)) &&
+					cells.every((cell) => !unreadable(cell));
+			},
 			{
 				minimumDays: CONTRIBUTION_CALENDAR_MINIMUM_DAYS,
 				selector: CONTRIBUTION_CALENDAR_SELECTOR,
@@ -38,7 +62,38 @@ export async function openContributionPage(
 	} catch {
 		// Leave incomplete pages for the collector's completeness check to skip.
 	}
-	return await page.content();
+	return {
+		requestedUrl: url,
+		currentUrl: await page.evaluate(() => location.href),
+		html: await page.content(),
+	};
+}
+
+async function openGitHubPage(
+	page: BrowserCollectContext["page"],
+	url: string,
+): Promise<BrowserPageObservation> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			await page.goto(url, { waitUntil: "domcontentloaded" });
+			await page
+				.waitForFunction(() => document.readyState === "complete", undefined, {
+					timeout: 4_000,
+				})
+				.catch(() => undefined);
+			return {
+				requestedUrl: url,
+				currentUrl: await page.evaluate(() => location.href),
+				html: await page.content(),
+			};
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error("github_browser_navigation_failed");
 }
 
 async function ensureSession({
@@ -58,7 +113,7 @@ async function ensureSession({
 		completeAssistance,
 		isProbeSuccessful: (result) => result === true,
 		message:
-			"Sign in to GitHub in the secure browser, then continue. PDPP will verify the session before collecting.",
+			"Sign in to GitHub in the secure browser, then continue. Collection starts once the session is verified.",
 		page,
 		probe: () => probeGitHubBrowserSession(page),
 		readinessProbe: (readinessPage) => probeGitHubBrowserSession(readinessPage),
@@ -74,27 +129,40 @@ export async function collect({
 	emitRecord,
 	page,
 	progress,
+	reportStreamFailure,
 	requested,
 	state,
 }: Pick<
 	BrowserCollectContext,
-	"emit" | "emitRecord" | "page" | "progress" | "requested" | "state"
+	| "emit"
+	| "emitRecord"
+	| "page"
+	| "progress"
+	| "reportStreamFailure"
+	| "requested"
+	| "state"
 >): Promise<void> {
 	const services = {
-		fetchPublicJson: async (url: string): Promise<unknown> =>
+		fetchPublicJson: async (url: string) =>
 			page.evaluate(async (target) => {
 				const response = await fetch(target, {
-					headers: { Accept: "application/vnd.github+json" },
+					headers: {
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+					},
 				});
 				if (!response.ok)
 					throw new Error(`github_browser_http_${response.status}`);
-				return await response.json();
+				return {
+					requestedUrl: target,
+					responseUrl: response.url,
+					status: response.status,
+					link: response.headers.get("Link"),
+					data: await response.json(),
+				};
 			}, url),
 		now: () => new Date(),
-		openPage: async (url: string) => {
-			await page.goto(url, { waitUntil: "domcontentloaded" });
-			return await page.content();
-		},
+		openPage: async (url: string) => openGitHubPage(page, url),
 		openContributionPage: async (url: string) =>
 			openContributionPage(page, url),
 		sleep: async (ms: number) =>
@@ -102,7 +170,14 @@ export async function collect({
 	};
 	await progress("Collecting the selected GitHub browser streams");
 	await collectGitHubBrowser(
-		{ emit, emitRecord, progress, requested: new Set(requested.keys()), state },
+		{
+			emit,
+			emitRecord,
+			progress,
+			...(reportStreamFailure === undefined ? {} : { reportStreamFailure }),
+			requested: new Set(requested.keys()),
+			state,
+		},
 		services,
 	);
 }

@@ -615,27 +615,27 @@ function unknownSurfaceMessage(observed: UnknownSurfaceObservation): string {
 	];
 	const titlePart = observed.title ? ` titled “${observed.title}”` : "";
 	return (
-		`PDPP could not identify what H-E-B is showing. The page at ${observed.url}${titlePart} ` +
-		`had ${sawParts.join(" and ")}, which does not match any surface PDPP recognizes. ` +
+		`Could not identify what H-E-B is showing. The page at ${observed.url}${titlePart} ` +
+		`had ${sawParts.join(" and ")}, which does not match any surface the connector recognizes. ` +
 		"Open the secure browser, do whatever the page actually asks for, then continue. " +
-		"PDPP will re-check the session afterward."
+		"The session is re-checked afterward."
 	);
 }
 
 function manualLoginMessage(surface: Exclude<HebAuthSurface, "live">): string {
 	switch (surface) {
 		case "login_form":
-			return "H-E-B did not finish signing in automatically. Complete the sign-in form in the secure browser, then continue. PDPP will re-check the session afterward.";
+			return "H-E-B did not finish signing in automatically. Complete the sign-in form in the secure browser, then continue. The session is re-checked afterward.";
 		case "passkey":
-			return "H-E-B is asking for a passkey. Complete the prompt in the secure browser, then continue. PDPP will re-check the session afterward.";
+			return "H-E-B is asking for a passkey. Complete the prompt in the secure browser, then continue. The session is re-checked afterward.";
 		case "passkey_enrollment":
-			return "H-E-B is offering to set up a passkey and PDPP could not decline it automatically. Choose “Not now” in the secure browser, then continue. PDPP will re-check the session afterward.";
+			return "H-E-B is offering to set up a passkey, and the connector could not decline it automatically. Choose “Not now” in the secure browser, then continue. The session is re-checked afterward.";
 		case "verification_code":
-			return "H-E-B is asking for a verification code. Enter it in the secure browser, then continue. PDPP will re-check the session afterward.";
+			return "H-E-B is asking for a verification code. Enter it in the secure browser, then continue. The session is re-checked afterward.";
 		case "captcha":
-			return "H-E-B is showing a CAPTCHA. Complete it in the secure browser, then continue. PDPP will re-check the session afterward.";
+			return "H-E-B is showing a CAPTCHA. Complete it in the secure browser, then continue. The session is re-checked afterward.";
 		case "incapsula":
-			return "H-E-B is showing an Imperva Incapsula challenge. Complete it in the secure browser, then continue. PDPP will re-check the session afterward.";
+			return "H-E-B is showing an Imperva Incapsula challenge. Complete it in the secure browser, then continue. The session is re-checked afterward.";
 		default:
 			// `unknown` never reaches here: it routes through `unknownSurfaceMessage`,
 			// which describes the page instead of asserting a cause. Keeping this
@@ -877,7 +877,7 @@ async function handOffToOwner({
 	}
 	if (assist && completeAssistance && readinessCheck) {
 		const automaticMessage = message.replace(
-			"then continue. PDPP will re-check the session afterward.",
+			"then continue. The session is re-checked afterward.",
 			"The import will continue automatically when sign-in is detected.",
 		);
 		return await manualBrowserLogin({

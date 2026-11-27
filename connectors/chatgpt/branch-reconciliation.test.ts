@@ -26,6 +26,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, test } from "node:test";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
@@ -228,10 +229,10 @@ async function runWithFilteredRecords(
 		},
 		emit: harness.emit,
 		emitRecord: async (stream, data) => {
-			if (excluded.has(String(data.id))) return;
+			if (excluded.has(String(data.node_id))) return;
 			await harness.emitRecord(stream, data);
 		},
-		isRecordSelected: (_stream, data) => !excluded.has(String(data.id)),
+		isRecordSelected: (_stream, data) => !excluded.has(String(data.node_id)),
 		progress: (): Promise<void> => Promise.resolve(),
 		requested: new Map([
 			["conversations", { name: "conversations" }],
@@ -290,7 +291,7 @@ test("filtered current branch fixtures reconcile count, tip, and parent chain", 
 		);
 		assert.equal(
 			branch.some(
-				(record) => record.data.id === conversation?.data.current_node,
+				(record) => record.data.node_id === conversation?.data.current_node,
 			),
 			true,
 		);
@@ -298,7 +299,8 @@ test("filtered current branch fixtures reconcile count, tip, and parent chain", 
 		const byId = new Map(
 			branch.map((record) => [String(record.data.id), record]),
 		);
-		let node = String(conversation?.data.current_node);
+		// parent_id names a record by its id, `<conversation_id>:<node_id>`.
+		let node = `convo-abc:${String(conversation?.data.current_node)}`;
 		const visited = new Set<string>();
 		while (byId.has(node) && !visited.has(node)) {
 			visited.add(node);
@@ -551,4 +553,79 @@ test("chatgpt branch: a conversation with no current_node is not reconciled", as
 		0,
 		"no declared tip means no claim to reconcile against",
 	);
+});
+
+// ─── model_counts ────────────────────────────────────────────────────────
+//
+// `model_counts` is computed from the same mapping as the branch count, so the
+// useful check is against the other side: the `messages` records the same call
+// emitted. A model name or count that differs from those records would be a
+// metadata claim no message backs.
+
+const modelSwitch = JSON.parse(
+	readFileSync(
+		new URL("./__fixtures__/conversation-model-switch.json", import.meta.url),
+		"utf8",
+	),
+) as { mapping: Record<string, ChatGptNode>; current_node: string };
+
+function modelsOfEmittedBranch(
+	emitted: readonly { stream: string; data: Record<string, unknown> }[],
+): Record<string, number> {
+	const tally: Record<string, number> = {};
+	for (const record of emitted) {
+		const { data } = record;
+		if (
+			record.stream === "messages" &&
+			data.on_current_branch === true &&
+			data.role === "assistant" &&
+			typeof data.model_slug === "string"
+		) {
+			tally[data.model_slug] = (tally[data.model_slug] ?? 0) + 1;
+		}
+	}
+	return tally;
+}
+
+test("model_counts names the models of the assistant messages emitted on the branch, across a mid-conversation model switch", async () => {
+	const { emitted } = await runWithFilteredRecords(
+		modelSwitch.mapping,
+		modelSwitch.current_node,
+		new Set(),
+	);
+	const conversation = emitted.find((r) => r.stream === "conversations");
+	assert.deepEqual(conversation?.data.model_counts, { "gpt-4o": 2, o3: 2 });
+	assert.deepEqual(
+		conversation?.data.model_counts,
+		modelsOfEmittedBranch(emitted),
+	);
+});
+
+test("model_counts narrows with the messages when one is not selected", async () => {
+	const { emitted } = await runWithFilteredRecords(
+		modelSwitch.mapping,
+		modelSwitch.current_node,
+		new Set(["a2"]),
+	);
+	const conversation = emitted.find((r) => r.stream === "conversations");
+	assert.deepEqual(conversation?.data.model_counts, { "gpt-4o": 1, o3: 2 });
+	assert.deepEqual(
+		conversation?.data.model_counts,
+		modelsOfEmittedBranch(emitted),
+	);
+});
+
+test("model_counts is null when the conversation detail could not be read", async () => {
+	const harness = makeHarness();
+	await processConversationDetail(
+		harness.deps,
+		makeConvo("a1"),
+		{ status: 404, json: null },
+		emitConversation(harness.deps),
+	);
+	const conversation = harness.emitted.find(
+		(r) => r.stream === "conversations",
+	);
+	assert.equal(conversation?.data.message_count_on_current_branch, null);
+	assert.equal(conversation?.data.model_counts, null);
 });

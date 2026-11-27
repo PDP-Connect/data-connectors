@@ -1,0 +1,22 @@
+{
+	"ok": true,
+	"messages": [
+		{
+			"type": "message",
+			"user": "U0555555555",
+			"text": "Older but still inside the window",
+			"ts": "1790300000.000300",
+			"team": "T0123456789",
+			"client_msg_id": "6b1a9d6e-0000-4000-8000-000000000003",
+			"edited": {
+				"user": "U0555555555",
+				"ts": "1790300100.000000"
+			}
+		}
+	],
+	"has_more": false,
+	"pin_count": 0,
+	"response_metadata": {
+		"next_cursor": ""
+	}
+}

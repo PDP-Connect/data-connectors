@@ -8,15 +8,7 @@ import test from "node:test";
 
 const repoRoot = join(dirname(new URL(import.meta.url).pathname), "..");
 const manifestsDir = join(repoRoot, "connectors");
-const indexPath = join(repoRoot, "connector-index.json");
-const expectedUrlPrefix = "https://raw.githubusercontent.com/PDP-Connect/data-connectors/";
 const drawableElementPattern = /<(?:path|rect|circle|ellipse|line|polygon|polyline)\b[^>]*>/g;
-
-function iconPathFromUrl(url) {
-  const match = url.match(/\/(?:packages\/polyfill-connectors\/manifests\/icons\/([^/?#]+)\.svg|connectors\/([^/?#]+)\/icon\.svg)$/);
-  assert.ok(match, `${url}: must resolve to a pinned connector icon`);
-  return `connectors/${match[1] ?? match[2]}/icon.svg`;
-}
 
 function parseSquareViewBox(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);
@@ -45,43 +37,31 @@ function assertSafeRecognisableSvg(source, filename) {
   }
 }
 
-// Connectors with no legitimate brand mark available in any vendored, offline,
-// build-time-only source checked (verified, not assumed): simple-icons v16.31.0
-// (slack/openai/pocket removed after brand-owner takedown/product-retirement;
-// whoop/ynab/oura never added; heb/usaa/wholefoods/google_takeout have no
-// vendor-published entry), home-assistant/brands (PNG-only, incompatible with
-// this repo's SVG-only pipeline; also has zero coverage of heb/pocket/usaa/
-// wholefoods/ynab/google_takeout even as PNG), and @iconify/json's `logos`
-// collection (CC0-1.0, ~2,174 marks) — this last source covers codex and
-// slack, but not heb/oura/pocket/usaa/wholefoods/whoop/ynab. codex.svg and
-// slack.svg were vendored from that collection's `codex` and `slack-icon`
-// keys respectively (256x256 source viewBox), rescaled to this fleet's
-// 0 0 24 24 grid via a uniform linear transform (svgpath(...).scale(24/256)),
-// with slack-icon's 4 separate colored <path> elements merged into one path
-// under a single root fill="#FFFFFF" to match every other icon here. These
-// manifests declare no `brand` object at all, so the console falls back to
-// the deterministic monogram rather than shipping an invented or hand-drawn
-// logo. See /home/tnunamak/code/pdpp/local/ICON-SOURCES-0918.md for full
-// source research and coverage numbers, and ICON-ART-0918.md for the
-// original per-connector removal verdict.
-const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
-  "heb.json",
-  "fitbit.json", // a mark exists; omitted by choice (trademark)
-  "garmin_browser.json",
-  "google_takeout.json",
-  "oura.json",
-  "oura_browser.json",
-  "pocket.json",
-  "usaa.json",
-  "wholefoods.json",
-  "whoop.json",
-  "whoop_browser.json",
-  "ynab.json",
-]);
-
-// These Collection Profiles are carried by signed OCI artifacts, not by the
-// frozen Desktop connector index. Their manifest-local icons still need proof.
-const MODERN_ONLY_PROFILE_ICONS = new Set(["anthropic_live.json", "discord_browser.json", "github_browser.json", "strava_browser.json", "x_browser.json", "youtube_takeout.json"]);
+// Icon provenance. Most marks are simple-icons paths used verbatim (16.36.0;
+// pocket from 15.22.0, the last release that carried it before Pocket shut
+// down). codex.svg and slack.svg come from @iconify/json's CC0 `logos`
+// collection, rescaled from 256 to 24 and merged into one path. Brands that
+// simple-icons does not carry use the owner's own published vector, keeping
+// only the mark's white shape (no ® glyph), scaled uniformly to fit 24x24, and
+// rewritten from even-odd to nonzero filling where needed:
+//   character_ai  https://character.ai/icon.svg
+//   coros_browser https://www.coros.com/public/images/COROS.svg, the site
+//                 favicon
+//   heb           https://www.heb.com/ header logo
+//   instinct      https://instinct.com/redesign/wordmark.svg, the "I" glyph
+//                 that app.instinct.com/favicon.ico shows
+//   mountain_project
+//                 https://www.mountainproject.com/img/climb/logoHex2.svg, the
+//                 climber tile that /img/climb/favicons/favicon-180.png shows
+//   oura*         https://static.ouraring.com/pdfs/Oura_BrandGuidelines_v1.pdf
+//   usaa          https://www.usaa.com/favicon.svg
+//   wholefoods    https://www.wholefoodsmarket.com/ header logo, the leaf O
+//                 that the site favicon shows
+//   whoop*        https://developer.whoop.com/docs/developing/design-guidelines
+//   ynab          https://www.ynab.com/press, Tree Logo
+// A connector with no legitimately available mark is listed here and declares
+// no `brand`, so consumers fall back to the monogram instead of an invented logo.
+const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([]);
 
 function assertRealBrandMarkShape(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);
@@ -138,75 +118,29 @@ test("every shipped polyfill manifest either declares a local brand icon or has 
   for (const filename of CONNECTORS_WITHOUT_A_BRAND_MARK) {
     assert.ok(files.includes(filename), `${filename}: no longer exists — remove it from CONNECTORS_WITHOUT_A_BRAND_MARK`);
   }
-  for (const filename of MODERN_ONLY_PROFILE_ICONS) {
-    assert.ok(files.includes(filename), `${filename}: no longer exists — remove it from MODERN_ONLY_PROFILE_ICONS`);
-  }
 });
 
-test("connector index resolves every shipped polyfill brand icon, and omits connectors with none", () => {
-  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+test("every declared brand icon is a self-contained, intentionally inked SVG mark", () => {
   for (const filename of manifestFiles()) {
     const { path, manifest } = readManifest(filename);
-    if (MODERN_ONLY_PROFILE_ICONS.has(filename)) {
-      assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: modern profile must not change the frozen connector index`);
-      const iconPath = join(dirname(path), manifest.brand.icon);
-      const source = readFileSync(iconPath, "utf8");
-      assertSafeRecognisableSvg(source, iconPath);
-      assertRealBrandMarkShape(source, iconPath);
-      continue;
-    }
-    if (manifest.brand === undefined) {
-      assert.equal(index.brandIcons?.[manifest.connector_id], undefined, `${filename}: has no brand but connector-index.json still has a brandIcons entry`);
-      continue;
-    }
-    const icon = index.brandIcons?.[manifest.connector_id];
-    assert.ok(icon, `${filename}: connector-index.json is missing brandIcons.${manifest.connector_id}`);
-    assert.match(
-      icon.url,
-      new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/(?:packages/polyfill-connectors/manifests/icons/${filename.replace(/\.json$/, "")}.svg|connectors/${filename.replace(/\.json$/, "")}/${manifest.brand.icon})$`),
-      `${filename}: resolved icon URL`,
-    );
-    if (manifest.brand.dark_icon !== undefined) {
-      assert.match(
-        icon.darkUrl,
-        new RegExp(`^${expectedUrlPrefix}[0-9a-f]{40}/(?:packages/polyfill-connectors/manifests/icons/${filename.replace(/\.json$/, "")}.svg|connectors/${filename.replace(/\.json$/, "")}/${manifest.brand.dark_icon})$`),
-        `${filename}: resolved dark icon URL`,
-      );
-    }
-    assert.equal(icon.backgroundColor, manifest.brand.background_color, `${filename}: background color`);
-  }
-});
-
-test("every indexed brand icon is a self-contained, intentionally inked SVG mark", () => {
-  const index = JSON.parse(readFileSync(indexPath, "utf8"));
-  const referenced = Object.values(index.brandIcons ?? {});
-  const expectedCount = manifestFiles().length - CONNECTORS_WITHOUT_A_BRAND_MARK.size - MODERN_ONLY_PROFILE_ICONS.size;
-  assert.equal(referenced.length, expectedCount, "expected every legacy connector with a brand mark to be indexed, and no others");
-
-  for (const icon of referenced) {
-    assert.equal(typeof icon?.url, "string", "brand icon URL is required");
-    const relativePath = iconPathFromUrl(icon.url);
-    const source = readFileSync(join(repoRoot, relativePath), "utf8");
-    assertSafeRecognisableSvg(source, relativePath);
-    if (icon.darkUrl !== undefined) {
-      assert.equal(typeof icon.darkUrl, "string", `${relativePath}: darkUrl must be a string`);
-      const darkPath = iconPathFromUrl(icon.darkUrl);
-      assertSafeRecognisableSvg(readFileSync(join(repoRoot, darkPath), "utf8"), darkPath);
+    if (manifest.brand === undefined) continue;
+    for (const field of ["icon", "dark_icon"]) {
+      if (manifest.brand[field] === undefined) continue;
+      const iconPath = join(dirname(path), manifest.brand[field]);
+      assertSafeRecognisableSvg(readFileSync(iconPath, "utf8"), iconPath);
     }
   }
 });
 
-test("every indexed brand icon is a real brand mark, not a hand-drawn glyph", () => {
-  // Every connector without a confidently-sourced brand mark has been dropped from the
-  // index (see CONNECTORS_WITHOUT_A_BRAND_MARK above) rather than shipping a placeholder,
-  // so nothing indexed here should need an exemption. This guard exists to catch a
-  // regression: a future manifest that adds a `brand.icon` pointing at a hand-drawn glyph.
-  const index = JSON.parse(readFileSync(indexPath, "utf8"));
-  const referenced = Object.values(index.brandIcons ?? {});
-
-  for (const icon of referenced) {
-    const relativePath = iconPathFromUrl(icon.url);
-    const source = readFileSync(join(repoRoot, relativePath), "utf8");
-    assertRealBrandMarkShape(source, relativePath);
+test("every declared brand icon is a real brand mark, not a hand-drawn glyph", () => {
+  // Every connector without a confidently-sourced brand mark declares none
+  // (see CONNECTORS_WITHOUT_A_BRAND_MARK above) rather than shipping a
+  // placeholder, so no declared icon here needs an exemption. This guard
+  // catches a future manifest whose `brand.icon` points at a hand-drawn glyph.
+  for (const filename of manifestFiles()) {
+    const { path, manifest } = readManifest(filename);
+    if (manifest.brand === undefined) continue;
+    const iconPath = join(dirname(path), manifest.brand.icon);
+    assertRealBrandMarkShape(readFileSync(iconPath, "utf8"), iconPath);
   }
 });

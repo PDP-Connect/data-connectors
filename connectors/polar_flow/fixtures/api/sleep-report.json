@@ -1,0 +1,36 @@
+[
+	{
+		"date": "2026-11-03",
+		"sleepStartTime": "2026-11-02T23:14:00",
+		"sleepEndTime": "2026-11-03T06:52:30",
+		"sleepStartOffset": 540,
+		"sleepEndOffset": -120,
+		"sleepScore": 78.4213,
+		"continuityClass": 4,
+		"sleepCycles": 5,
+		"continuityIndex": 3.9,
+		"sleepRating": "SLEPT_WELL",
+		"sleepWakeStates": [
+			{ "sleepWakeState": 2, "offsetFromStart": 0 },
+			{ "sleepWakeState": 3, "offsetFromStart": 1260 },
+			{
+				"sleepWakeState": 0,
+				"offsetFromStart": 9000,
+				"longInterruption": false
+			}
+		]
+	},
+	{
+		"date": "2026-11-04",
+		"sleepStartTime": "2026-11-04T00:41:00",
+		"sleepEndTime": "2026-11-04T06:30:00",
+		"sleepStartOffset": 0,
+		"sleepEndOffset": 0,
+		"sleepScore": null,
+		"continuityClass": null,
+		"sleepCycles": null,
+		"continuityIndex": null,
+		"sleepRating": null,
+		"sleepWakeStates": []
+	}
+]

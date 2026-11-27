@@ -1,32 +1,22 @@
 # Data Connectors
 
-This repository is the source home for PDPP Collection Profile connectors. Each implementation lives in `connectors/<key>/` with its `manifest.json`, code, icon, tests, and reviewed scrubbed fixtures. `packages/polyfill-connectors/` contains shared runtime libraries and local development tools. New connector work starts with [Connector authoring](AUTHORING.md). The [PDPP Collection Profile](docs/spec/collection-profile.md) defines the normative connector manifest and protocol.
+This repository holds connectors that collect a person's own data from a platform, such as an API, a signed-in website or an exported file, and emit it as records in the format of the [PDPP Collection Profile](docs/spec/collection-profile.md). Each connector is a directory in `connectors/`. The runtime and tools they share are in `packages/polyfill-connectors/`.
 
-## Build and verify
+## Contribute a connector
 
-Install from the repository root so TypeScript and runtime imports resolve the declared workspace dependencies:
+1. Follow [AUTHORING.md](AUTHORING.md). It takes you from install to an open PR, step by step, and says how to choose each manifest setting.
+2. For a browser connector, also follow the [browser connector guidelines](CONNECTOR-GUIDELINES.md). They say what works in the desktop app and in the mobile app.
+3. Sign off each commit with `git commit -s`. If AI helped with a commit, add an `Assisted-by: AI` trailer. [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob/main/CONTRIBUTING.md) gives the full policy.
 
-```bash
-npm ci
-npm run verify --workspace @pdpp/polyfill-connectors
-npm test --workspace @pdpp/polyfill-connectors
-npm run connector-implementation-index:check
-npm run historical-contract:check
-```
+A maintainer reviews the PR against [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md). Coding agents start at [AGENTS.md](AGENTS.md).
 
-The package's `npm run pack-install-run` builds a tarball, installs it in an isolated project, and imports every remaining library export. `scripts/build-connector-oci-artifact.mjs` bundles an individual root connector into an OCI artifact. The [connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) covers source, manifest, and fixture review.
+## Reference
 
-## Distribution
-
-Collection Profiles are published as individually versioned, signed OCI artifacts. The source manifest at `connectors/<key>/manifest.json` owns its version and runtime bindings. The root [`connector-implementation-index.json`](connector-implementation-index.json) is generated from these implementations; `npm run connector-implementation-index:check` verifies it.
-
-The legacy Playwright source, runner, and registry have been retired. [`scope-catalog.json`](scope-catalog.json), [`SCOPES.md`](SCOPES.md), [`connector-index.json`](connector-index.json), and [`fixture-index.json`](fixture-index.json) remain as historical public contracts. They are frozen along with the schemas and fixtures they reference. `npm run historical-contract:check` verifies their bytes and references. Do not regenerate them from the new Collection Profile manifests or reuse their legacy scope IDs for raw connector streams.
-
-Vana Desktop installs those historical artifacts from the signed `connectors-latest` GitHub release, verified against the Sigstore identity of `.github/workflows/publish-connector-release-index.yml` on `main`. That workflow is dispatched by hand: it builds a release copy of the frozen index (`scripts/build-connector-release-index.mjs`), signs it and every committed tarball (`scripts/sign-connector-release.mjs`), and publishes both to `connectors-<sha12>` and `connectors-latest`. Merging an artifact does not reach a Desktop until the lane runs.
-
-The root layout changes the private `@pdpp/polyfill-connectors` workspace API: connector implementations, manifest discovery, source-dependent registries, and the local device exporter are no longer shipped in its tarball. Consumers of the previous package must migrate those imports before repinning. The existing data-connect tarball pin and signed legacy artifacts are separate release inputs; changing this source tree does not establish replacement Desktop projections by itself.
-
-## Further references
-
-- [Collection Profile cutover contracts](docs/migration/connector-cutover/CONTRACTS.md)
-- [Connector capability map](docs/migration/connector-cutover/capability-map.json)
+| You want to | Read |
+|---|---|
+| Look up a rule for runtime, schemas or capture | [Connector authoring guide](packages/polyfill-connectors/docs/connector-authoring-guide.md) |
+| Look up what each evidence tier needs | [Connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) |
+| Add a connector to the mobile app | [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md) |
+| Run the test suites | [TESTING.md](TESTING.md) |
+| Learn how connectors are versioned and published | [docs/publishing.md](docs/publishing.md) |
+| Review, merge and publish a connector PR | [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md) |

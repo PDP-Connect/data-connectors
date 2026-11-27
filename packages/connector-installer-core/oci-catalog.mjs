@@ -24,6 +24,7 @@ const MAX_CATALOG_BYTES = 8 * 1024 * 1024;
 export async function fetchCatalog({
   registry = DEFAULT_OCI_REGISTRY,
   identity = DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
+  catalogDigest,
   lastAcceptedGeneratedAt,
   // Explicit caller-owned transport/trust hooks for the local registry fixture.
   scheme = "https",
@@ -33,7 +34,13 @@ export async function fetchCatalog({
   allowedRegistries,
   sigstoreVerifier,
 } = {}) {
-  parseOciReference({ registry, repository: CATALOG_REPOSITORY, version: "latest", allowedRegistries });
+  const reference = parseOciReference({
+    registry,
+    repository: CATALOG_REPOSITORY,
+    digest: catalogDigest === undefined ? null : catalogDigest,
+    version: catalogDigest === undefined ? "latest" : null,
+    allowedRegistries,
+  });
   if (typeof identity !== "string" || identity.length === 0) {
     throw new OciRegistryError("Catalog requires a trusted certificate identity", "misidentified");
   }
@@ -49,7 +56,7 @@ export async function fetchCatalog({
     fetchImpl,
     retryOptions,
   };
-  const digest = await resolveVersionToDigest({ ...transport, version: "latest" });
+  const digest = reference.digest ?? await resolveVersionToDigest({ ...transport, version: "latest" });
   const { manifest } = await fetchManifestByDigest({ ...transport, digest });
   await verifyOciSignature({
     ...transport,

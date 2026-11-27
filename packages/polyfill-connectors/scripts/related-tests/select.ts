@@ -70,6 +70,35 @@ function collectDependentTestFiles(
 	return selected;
 }
 
+const CONNECTOR_DIR_PATTERN = /^connectors\/([^/_][^/]*)\//;
+
+/**
+ * Directory affinity: connector tests often start the connector as a
+ * subprocess by path, so no import edge links them. A changed file under
+ * `connectors/<name>/` therefore selects every `*.test.ts` under that
+ * directory. Names starting with `_` are shared dirs and keep graph-only
+ * behavior.
+ */
+function collectAffinityTestFiles(
+	changedRelativePaths: readonly string[],
+	allRelativePaths: readonly string[],
+): Set<string> {
+	const dirs = new Set<string>();
+	for (const changed of changedRelativePaths) {
+		const match = CONNECTOR_DIR_PATTERN.exec(changed);
+		if (match) {
+			dirs.add(`connectors/${match[1]}/`);
+		}
+	}
+	const affinity = new Set<string>();
+	for (const path of allRelativePaths) {
+		if (isTestFile(path) && [...dirs].some((dir) => path.startsWith(dir))) {
+			affinity.add(path);
+		}
+	}
+	return affinity;
+}
+
 export interface SelectTestsInput {
 	/** Every package-relative *.ts path the package considers source (used to build the fallback inventory). */
 	readonly allRelativePaths: readonly string[];
@@ -157,9 +186,18 @@ export function selectRelatedTests(input: SelectTestsInput): SelectionResult {
 		}
 	}
 
+	const graphCount = selected.size;
+	for (const testFile of collectAffinityTestFiles(
+		changedRelativePaths,
+		allRelativePaths,
+	)) {
+		selected.add(testFile);
+	}
+	const affinityAdded = selected.size - graphCount;
+
 	return {
 		kind: "related",
 		testFiles: [...selected].sort(),
-		reason: `${changedRelativePaths.length} changed file(s) resolved to ${selected.size} related test file(s) via the static import graph`,
+		reason: `${changedRelativePaths.length} changed file(s) resolved to ${graphCount} related test file(s) via the static import graph; directory affinity added ${affinityAdded} more`,
 	};
 }

@@ -2,53 +2,64 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Historical Desktop scope IDs and signed artifact references remain pinned
-// until their consumers are explicitly migrated. The Playwright registry and
-// source generators were retired with the root connector cut, so this check
-// guards their last published bytes and every schema/fixture they reference.
+// Permanent old-data identities and shapes. Executable release metadata and
+// fixture proofs belong to the temporary F10 lane, not this reference set.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { checkLegacyScopes } from "./generate-legacy-scopes.mjs";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const pinned = JSON.parse(readFileSync(join(root, "scripts/frozen-legacy-contracts.sha256.json"), "utf8"));
-const catalog = JSON.parse(readFileSync(join(root, "scope-catalog.json"), "utf8"));
-const fixtureIndex = JSON.parse(readFileSync(join(root, "fixture-index.json"), "utf8"));
 
-assert.equal(catalog.scopes.length, pinned.scopeCount, "historical scope count changed");
-assert.equal(fixtureIndex.fixtures.length, pinned.fixtureCount, "historical fixture count changed");
-
-const referenced = new Set([
-	"SCOPES.md",
-	"scope-catalog.json",
-	"fixture-index.json",
-	"connector-index.json",
-]);
-for (const scope of catalog.scopes) {
-	assert.match(scope.schema?.path ?? "", /^connectors\/[^/]+\/schemas\/[^/]+\.json$/);
-	referenced.add(scope.schema.path);
+export function checkFrozenLegacyShapes(directory = root) {
+	const read = (path) =>
+		JSON.parse(readFileSync(join(directory, path), "utf8"));
+	const pinned = read("scripts/frozen-legacy-contracts.sha256.json");
+	const shapes = read("legacy-shapes.json");
+	assert.deepEqual(Object.keys(shapes).sort(), ["schemaVersion", "scopes"]);
+	assert.equal(shapes.schemaVersion, 1);
+	assert.equal(
+		shapes.scopes.length,
+		pinned.scopeCount,
+		"frozen scope count changed",
+	);
+	const ids = new Set();
+	const referenced = new Set(["legacy-shapes.json"]);
+	for (const scope of shapes.scopes) {
+		assert.deepEqual(Object.keys(scope).sort(), ["id", "schemaPath"]);
+		assert.equal(typeof scope.id, "string");
+		assert.ok(
+			scope.id.length > 0 && !ids.has(scope.id),
+			"duplicate or empty frozen scope ID",
+		);
+		ids.add(scope.id);
+		assert.match(scope.schemaPath, /^connectors\/[^/]+\/schemas\/[^/]+\.json$/);
+		referenced.add(scope.schemaPath);
+	}
+	assert.deepEqual(
+		[...referenced].sort(),
+		Object.keys(pinned.sha256).sort(),
+		"permanent shape reference set changed",
+	);
+	for (const [path, expected] of Object.entries(pinned.sha256)) {
+		const actual = createHash("sha256")
+			.update(readFileSync(join(directory, path)))
+			.digest("hex");
+		assert.equal(actual, expected, `${path} changed from its frozen bytes`);
+	}
+	checkLegacyScopes(directory);
+	return { files: referenced.size, scopes: ids.size };
 }
-for (const fixture of fixtureIndex.fixtures) {
-	assert.match(fixture.path ?? "", /^connectors\/[^/]+\/fixtures\/[^/]+\.json$/);
-	assert.match(fixture.schemaPath ?? "", /^connectors\/[^/]+\/schemas\/[^/]+\.json$/);
-	referenced.add(fixture.path);
-	referenced.add(fixture.schemaPath);
-}
 
-assert.deepEqual(
-	[...referenced].sort(),
-	Object.keys(pinned.sha256).sort(),
-	"frozen public contract reference set changed",
-);
-
-for (const [path, expected] of Object.entries(pinned.sha256)) {
-	const actual = createHash("sha256").update(readFileSync(join(root, path))).digest("hex");
-	assert.equal(actual, expected, `${path} changed from its frozen bytes`);
+if (
+	process.argv[1] &&
+	resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+	const result = checkFrozenLegacyShapes();
+	console.log(
+		`PASS frozen legacy shapes: ${result.files} files, ${result.scopes} scope IDs`,
+	);
 }
-for (const fixture of fixtureIndex.fixtures) {
-	assert.equal(fixture.sha256, `sha256:${pinned.sha256[fixture.path]}`, `${fixture.path} index digest changed`);
-}
-
-console.log(`PASS frozen legacy contracts: ${referenced.size} files, ${catalog.scopes.length} scope IDs, ${fixtureIndex.fixtures.length} fixtures`);

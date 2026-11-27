@@ -14,8 +14,8 @@
  * "something's wrong":
  *   - Node version satisfies this package's declared `engines.node` range.
  *   - Every dependency this package declares is actually installed.
- *   - The Chromium revision the installed Patchright build needs is
- *     present in the browser cache (prints the install command otherwise).
+ *   - The selected local browser is present. macOS defaults to system Chrome;
+ *     other platforms and explicit Chromium use the pinned browser cache.
  *   - Display availability for a headed run (Linux only — DISPLAY/
  *     WAYLAND_DISPLAY, plus the PDPP_BROWSER_EXTRA_ARGS=--ozone-platform=x11
  *     hint for the common tmux/SSH GPU-init failure; macOS/Windows don't
@@ -58,6 +58,11 @@ import {
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "../src/connector-paths.ts";
+import {
+	MACOS_CHROME_GUIDANCE,
+	macosBrowserExecutable,
+	selectedLocalBrowserChannel,
+} from "../src/local-browser.ts";
 
 // ─── Context: the one seam every check is written against ────────────────
 
@@ -325,6 +330,26 @@ export function resolveBrowsersCacheDir(ctx: DoctorContext): string {
 }
 
 export function checkChromiumRevision(ctx: DoctorContext): DoctorCheckResult {
+	const channel = selectedLocalBrowserChannel(ctx.env, ctx.platform);
+	if (ctx.platform === "darwin" && channel && channel !== "chromium") {
+		const executable = macosBrowserExecutable(channel);
+		if (executable && ctx.fs.existsSync(executable)) {
+			return {
+				name: "chromium-revision",
+				status: "pass",
+				message: `Selected Chrome/Edge channel '${channel}' is present at ${executable}. Keep it updated; presence does not establish its security patch level.`,
+			};
+		}
+		return {
+			name: "chromium-revision",
+			status: "fail",
+			message: `Selected browser '${channel}' is unavailable${executable ? ` at ${executable}` : " or unsupported"}.`,
+			fix:
+				channel === "chrome"
+					? MACOS_CHROME_GUIDANCE
+					: "Install or update the selected browser in /Applications, or correct PDPP_BROWSER_CHANNEL, then retry.",
+		};
+	}
 	const revision = readRequiredChromiumRevision(ctx);
 	if (!revision) {
 		return {

@@ -14,8 +14,14 @@
  *
  * `id` shapes are intentionally loose (`z.string().min(1).max(200)`)
  * because Voyager entity ids mix URNs (`urn:li:fsd_profilePosition:...`)
- * and positional fallback ids (`exp-0-1`) — see `subEntityId` in
+ * and positional fallback ids (`exp-0-1`) — see `idOf` in
  * parsers.ts. Connections use the member URN directly.
+ *
+ * Every field is present on an emitted record: a Personal Server upsert
+ * replaces the whole record, so a row with an unreadable field is withheld,
+ * never emitted partial (see field-read.ts). `null` means the source says the
+ * field is empty. profile.connection_count falls back to the walked distinct
+ * count when the owner-bound summary is unavailable, with a diagnostic.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -89,7 +95,7 @@ export const educationSchema = z.object({
 export const skillsSchema = z.object({
 	endorsement_count: z.number().int().min(0).nullable(),
 	id: idSchema,
-	name: pdppSafeText.min(1).max(300),
+	name: pdppSafeText.max(300),
 });
 
 /**
@@ -97,23 +103,24 @@ export const skillsSchema = z.object({
  */
 export const languagesSchema = z.object({
 	id: idSchema,
-	name: pdppSafeText.min(1).max(200),
+	name: pdppSafeText.max(200),
 	proficiency: pdppSafeText.max(200).nullable(),
 });
 
 /**
- * connections stream (D7: new stream). One record per connection, keyed by
- * the connected member's URN. `full_name`/`headline`/`profile_url` are
- * `null` when the batch profile-resolution pass failed for that member
- * (rate limit, restricted profile) — the connection edge itself is still
- * real and worth keeping, per "fail null, never fail wrong".
+ * connections stream (D7: new stream). One record per listed connection,
+ * keyed by the connected member's URN. Profile enrichment fields are
+ * optional for a permanently missing member. Include them only when resolved
+ * source data is readable or explicitly empty. Transient failures and
+ * malformed or incomplete data withhold the whole row so an upsert cannot
+ * erase stored values.
  */
 export const connectionsSchema = z.object({
-	connected_at: isoDateTimeNullable,
-	full_name: pdppSafeText.max(300).nullable(),
-	headline: pdppSafeText.max(1000).nullable(),
+	connected_at: isoDateTimeNullable.optional(),
+	full_name: pdppSafeText.max(300).nullable().optional(),
+	headline: pdppSafeText.max(1000).nullable().optional(),
 	id: z.string().min(1).max(300),
-	profile_url: urlNullable,
+	profile_url: urlNullable.optional(),
 });
 
 /**

@@ -25,7 +25,7 @@ const pages: Record<string, string> = {
 	"/playlist?list=LL": card,
 	"/playlist?list=WL": card,
 	"/feed/history":
-		'<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Yesterday</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=abc123XYZ0"></a><h3 title="Real title"></h3><span class="yt-content-metadata-view-model__metadata-text">1.2K views</span></yt-lockup-view-model></ytd-item-section-renderer>',
+		'<button id="avatar-btn">Account</button><ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Yesterday</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=abc123XYZ0"></a><h3 title="Real title"></h3><span class="yt-content-metadata-view-model__metadata-text">1.2K views</span></yt-lockup-view-model></ytd-item-section-renderer><script>var ytInitialData = {"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"selected":true,"content":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":{"contents":[{"videoRenderer":{"videoId":"abc123XYZ0"}}]}}]}}}}]}}};</script>',
 };
 
 test("routed browser collection emits seven schema-valid streams without a Takeout file", async () => {
@@ -34,6 +34,18 @@ test("routed browser collection emits seven schema-valid streams without a Takeo
 		const page = await browser.newPage();
 		await page.route("https://www.youtube.com/**", async (route) => {
 			const url = new URL(route.request().url());
+			if (url.pathname === "/youtubei/v1/browse") {
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						onResponseReceivedActions: [
+							{ appendContinuationItemsAction: { continuationItems: [] } },
+						],
+					}),
+				});
+				return;
+			}
 			const html = pages[`${url.pathname}${url.search}`];
 			await route.fulfill({
 				status: html ? 200 : 404,
@@ -167,11 +179,11 @@ test("history waits for delayed client DOM before recording", async () => {
 		await page.route("https://www.youtube.com/**", async (route) => {
 			await route.fulfill({
 				contentType: "text/html",
-				body: `<html><body><script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Sep 22, 2026</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=delayed123"></a><h3 title="Delayed title"></h3></yt-lockup-view-model></ytd-item-section-renderer>'), 75)</script></body></html>`,
+				body: `<html><body><button id="avatar-btn">Account</button><script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Sep 22, 2026</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=delayed123"></a><h3 title="Delayed title"></h3></yt-lockup-view-model></ytd-item-section-renderer>'), 75)</script></body></html>`,
 			});
 		});
 		const records: Record<string, unknown>[] = [];
-		const skips: unknown[] = [];
+		const skips: Record<string, unknown>[] = [];
 		const failures: unknown[] = [];
 		await collectYoutubeBrowser({
 			page: page as never,
@@ -182,7 +194,7 @@ test("history waits for delayed client DOM before recording", async () => {
 				records.push(data);
 			},
 			emit: async (message) => {
-				skips.push(message);
+				skips.push(message as Record<string, unknown>);
 			},
 			reportStreamFailure: async (stream, _message, options) => {
 				failures.push([stream, options]);
@@ -193,7 +205,9 @@ test("history waits for delayed client DOM before recording", async () => {
 		assert.equal(records[0]?.video_title, "Delayed title");
 		// The page shows no end of the list: a stream failure, not a completion.
 		assert.deepEqual(failures, [["watch_history", { retryable: true }]]);
-		assert.deepEqual(skips, []);
+		assert.equal(skips.length, 1);
+		assert.equal(skips[0]?.type, "STATE");
+		assert.equal((skips[0]?.cursor as Record<string, unknown>).complete, false);
 	} finally {
 		await browser.close();
 	}
@@ -665,6 +679,75 @@ test("profile emits email-only authenticated accounts without a channel link", a
 	} finally {
 		await browser.close();
 	}
+});
+
+const SWITCH_ACCOUNT_MENU =
+	'<ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a id="endpoint"><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>';
+
+async function collectProfileWithSwitchView(
+	switchView: string,
+	handlerOn: "renderer" | "anchor" = "renderer",
+) {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			let body = "";
+			if (url.pathname === "/")
+				body = `<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span><span id="email"></span></ytd-active-account-header-renderer>${SWITCH_ACCOUNT_MENU}<script>document.querySelector(${JSON.stringify(handlerOn === "anchor" ? "a#endpoint" : "ytd-compact-link-renderer")}).addEventListener("click", () => document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(switchView)}))</script>`;
+			else if (url.pathname === "/@owner")
+				body =
+					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';
+			else if (url.pathname === "/@owner/about")
+				body =
+					"<ytd-channel-about-metadata-renderer><span>Joined Jan 3, 2020</span></ytd-channel-about-metadata-renderer>";
+			await route.fulfill({
+				status: body ? 200 : 404,
+				contentType: "text/html",
+				body: `<html><body>${body}</body></html>`,
+			});
+		});
+		const records: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["profile", { name: "profile" }]]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async () => undefined,
+			progress: async () => undefined,
+		});
+		return records;
+	} finally {
+		await browser.close();
+	}
+}
+
+test("profile reads the owner's email from the Switch account view, not other listed accounts", async () => {
+	const records = await collectProfileWithSwitchView(
+		'<ytd-google-account-header-renderer><yt-formatted-string id="email">owner@example.com</yt-formatted-string></ytd-google-account-header-renderer><ytd-account-item-renderer><span id="email">other@example.com</span></ytd-account-item-renderer>',
+	);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.email, "owner@example.com");
+	assert.equal(records[0]?.title, "Real Owner");
+});
+
+test("profile reads the email when the Switch account click handler is on the nested anchor", async () => {
+	const records = await collectProfileWithSwitchView(
+		'<ytd-google-account-header-renderer><yt-formatted-string id="email">owner@example.com</yt-formatted-string></ytd-google-account-header-renderer>',
+		"anchor",
+	);
+	assert.equal(records[0]?.email, "owner@example.com");
+});
+
+test("profile omits email when the Switch account view does not show one", async () => {
+	const records = await collectProfileWithSwitchView(
+		'<ytd-google-account-header-renderer><yt-formatted-string id="email"></yt-formatted-string></ytd-google-account-header-renderer>',
+	);
+	assert.equal(records.length, 1);
+	assert.equal("email" in (records[0] ?? {}), false);
+	assert.equal(records[0]?.title, "Real Owner");
 });
 
 test("profile never reads document-level counts outside About metadata", async () => {

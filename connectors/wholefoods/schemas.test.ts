@@ -77,12 +77,12 @@ test("orders schema accepts null order_date/total_cents (unparseable source)", (
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("orders schema rejects null item_count because source completeness must be proven", () => {
+test("orders schema accepts unknown item_count while source completeness is unproven", () => {
 	const result = ordersSchema.safeParse({
 		...ORDER_RECORD,
 		item_count: null,
 	});
-	assert.equal(result.success, false);
+	assert.equal(result.success, true);
 });
 
 test("orders schema rejects an order_date with a fabricated time component", () => {
@@ -127,19 +127,35 @@ test("order_items schema strips an unknown nutrition field rather than emitting 
 });
 
 const NUTRITION_RECORD = {
+	added_sugar_g: null,
+	allergens: null,
+	calcium_mg: null,
+	id: PRODUCT_ID,
 	calories: 105,
 	carbs_g: 27,
+	category: [],
+	cholesterol_mg: null,
 	confidence: "high" as const,
 	fat_g: 0.4,
 	fiber_g: 3.1,
+	highlights: [],
+	ingredients: null,
+	iron_mg: null,
 	name: "Organic Bananas",
 	product_id: PRODUCT_ID,
+	potassium_mg: null,
 	protein_g: 1.3,
+	raw_nutrition_text: null,
+	saturated_fat_g: null,
 	serving_size: "1 medium (118g)",
 	servings_per_container: 1,
 	sodium_mg: 1,
 	source: "wholefoods_product_page" as const,
 	sugar_g: 14,
+	trans_fat_g: null,
+	type: "https://schema.org/NutritionInformation",
+	upc: null,
+	vitamin_d_mcg: null,
 };
 
 test("nutrition schema accepts a fully-populated wholefoods_product_page record", () => {
@@ -147,31 +163,39 @@ test("nutrition schema accepts a fully-populated wholefoods_product_page record"
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("nutrition schema accepts a usda_fdc record with medium confidence", () => {
-	const result = nutritionSchema.safeParse({
-		...NUTRITION_RECORD,
-		confidence: "medium",
-		source: "usda_fdc",
-	});
-	assert.ok(result.success, JSON.stringify(result.error?.issues));
+test("nutrition schema accepts a full record from each observed source", () => {
+	for (const source of [
+		"amazon_product_page",
+		"wholefoods_product_page",
+		"wholefoods_structured_data",
+	] as const) {
+		const result = nutritionSchema.safeParse({ ...NUTRITION_RECORD, source });
+		assert.ok(
+			result.success,
+			`${source}: ${JSON.stringify(result.error?.issues)}`,
+		);
+	}
 });
 
-for (const source of ["not_found", "error", "blocked"] as const) {
-	test(`nutrition schema accepts a source-backed ${source} outcome`, () => {
-		const result = nutritionSchema.safeParse({
-			...NUTRITION_RECORD,
-			calories: null,
-			confidence: "low",
-			source,
-		});
-		assert.ok(result.success, JSON.stringify(result.error?.issues));
+test("nutrition schema rejects the sources the connector no longer writes", () => {
+	for (const source of ["usda_fdc", "not_found", "error", "blocked"]) {
+		const result = nutritionSchema.safeParse({ ...NUTRITION_RECORD, source });
+		assert.equal(result.success, false, source);
+	}
+});
+
+test("nutrition schema rejects an id that is not its product_id", () => {
+	const result = nutritionSchema.safeParse({
+		...NUTRITION_RECORD,
+		id: "B087654321",
 	});
-}
+	assert.equal(result.success, false);
+});
 
 test("nutrition schema rejects an unknown source", () => {
 	const result = nutritionSchema.safeParse({
 		...NUTRITION_RECORD,
-		source: "amazon_product_page",
+		source: "made_up_source",
 	});
 	assert.equal(result.success, false);
 });

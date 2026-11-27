@@ -1,0 +1,39 @@
+{
+  "extra": {
+    "fatal_item_ids": [],
+    "logid": "Synthetic logid 1 lorem lorem lorem lorem",
+    "now": 1792644431000
+  },
+  "log_pb": {
+    "impr_id": "Synthetic impr_id 2 lorem lorem lorem lorem"
+  },
+  "settings": {
+    "adAuthorization": false,
+    "imSet": 1,
+    "languageSettings": {
+      "enableForeignCaption": 0,
+      "enableMasterTranslation": 0,
+      "enableNativeCaption": 0,
+      "selectedTranslationLanguage": ""
+    },
+    "privateAccount": false,
+    "proAccountStatus": 0,
+    "pushSettings": {
+      "commentPush": 1,
+      "diggPush": 1,
+      "followNewVideoPush": 1,
+      "followPush": 1,
+      "imPush": 1,
+      "liveInnerPush": 1,
+      "livePush": 1,
+      "mentionPush": 1,
+      "noticeWebappPush": 1,
+      "otherChannel": 1,
+      "recommendVideoPush": 1
+    },
+    "tcmSetting": 0
+  },
+  "statusCode": 0,
+  "status_code": 0,
+  "status_msg": ""
+}

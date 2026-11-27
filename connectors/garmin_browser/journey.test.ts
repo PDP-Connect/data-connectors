@@ -18,7 +18,7 @@ import type {
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { garminApi } from "./fake-garmin.ts";
+import { fixtureData, garminApi } from "./fake-garmin.ts";
 import {
 	APP_URL,
 	collectGarminBrowser,
@@ -36,7 +36,7 @@ const NOW = new Date("2026-09-20T13:30:00.000Z");
 const read = (path: string): string =>
 	readFileSync(new URL(path, import.meta.url), "utf8");
 const MESSAGE =
-	"Sign in to Garmin Connect in the secure browser. PDPP continues on its own once you are signed in.";
+	"Sign in to Garmin Connect in the secure browser. The import continues on its own once you are signed in.";
 
 // ── Layer 3.2: the real handoff against probeOnPage ────────────────────────
 
@@ -294,7 +294,19 @@ test("garmin_browser: sign-in and collection keep one headless Patchright page",
 		try {
 			const api: ApiRead[] = [];
 			const unrouted: string[] = [];
-			const fake = garminApi();
+			// An owner who wears the watch every day, on an account that answers the daily
+			// summaries' range, so the real page reads it too.
+			const data = { ...fixtureData(), summaryRange: true };
+			const own = data.daily["2026-09-16"] as Record<string, unknown>;
+			for (let i = 0; i < 90; i += 1) {
+				const day = new Date(
+					Date.parse("2026-06-24T00:00:00Z") + i * 86_400_000,
+				)
+					.toISOString()
+					.slice(0, 10);
+				data.daily[day] = { ...own, calendarDate: day, totalSteps: 4000 + i };
+			}
+			const fake = garminApi(data);
 			let documents = 0;
 			/** A broken cookie or a redirect loop fails fast instead of navigating on. */
 			const document = (): boolean => {
@@ -487,7 +499,7 @@ test("garmin_browser: sign-in and collection keep one headless Patchright page",
 			for (const stream of STREAMS) {
 				assert.equal(
 					h.emitted.filter((r) => r.stream === stream).length,
-					COUNTS[stream],
+					stream === "daily_summaries" ? 90 : COUNTS[stream],
 					stream,
 				);
 			}
@@ -504,7 +516,26 @@ test("garmin_browser: sign-in and collection keep one headless Patchright page",
 			);
 			const reads = api.slice(readsBefore);
 			assert.equal(reads[0]?.path, PROBE_PATH);
-			assert.equal(reads.length, 1 + 90 + 4 + 4 + 90 + 4);
+			// Daily summaries: four ranges, newest first, the five days that check them and today,
+			// then every other stream.
+			assert.deepEqual(
+				reads
+					.map(({ path }) => path)
+					.filter((path) => path.startsWith("/gc-api/usersummary-service/")),
+				[
+					"/gc-api/usersummary-service/v2/dailysummaries?startDate=2026-09-16&endDate=2026-09-20",
+					"/gc-api/usersummary-service/v2/dailysummaries?startDate=2026-08-19&endDate=2026-09-15",
+					"/gc-api/usersummary-service/v2/dailysummaries?startDate=2026-07-22&endDate=2026-08-18",
+					"/gc-api/usersummary-service/v2/dailysummaries?startDate=2026-06-24&endDate=2026-07-21",
+					"/gc-api/usersummary-service/usersummary/daily?calendarDate=2026-09-20",
+					"/gc-api/usersummary-service/usersummary/daily?calendarDate=2026-09-15",
+					"/gc-api/usersummary-service/usersummary/daily?calendarDate=2026-08-18",
+					"/gc-api/usersummary-service/usersummary/daily?calendarDate=2026-07-21",
+					"/gc-api/usersummary-service/usersummary/daily?calendarDate=2026-06-24",
+					"/gc-api/usersummary-service/usersummary/daily?calendarDate=2026-09-21",
+				],
+			);
+			assert.equal(reads.length, 1 + 4 + 6 + 4 + 4 + 90 + 4);
 			for (const r of reads) {
 				assert.equal(r.method, "GET", r.path);
 				assert.equal(r.session, true, r.path);

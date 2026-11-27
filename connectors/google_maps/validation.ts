@@ -126,7 +126,7 @@ function remediationFor(status: TimelineValidationStatus): string | null {
 		case "stale":
 			return "This file only covers dates that are already imported. Export a newer Timeline file from your phone.";
 		case "too_large":
-			return "This file is larger than the upload limit. A Timeline export this large is unusual — ask your PDPP operator to raise the deployment limit if this is a genuine export.";
+			return "This file is larger than the upload limit. A Timeline export this large is unusual — ask your operator to raise the deployment limit if this is a genuine export.";
 		case "unsupported":
 			return "Choose the Timeline JSON export from Google Maps on your phone. Google account passwords and Data Portability archives are not Timeline exports.";
 		case "valid":

@@ -17,7 +17,7 @@
  *      or Preview (a visible connector missing from the roster fails CI);
  *   2. every roster entry's `testFile` exists on disk;
  *   3. its connector set is disjoint from `KNOWN_SCAFFOLD_CONNECTORS`
- *      (loom, wholefoods) — all
+ *      (loom) — all
  *      of which MUST remain Development until they collect.
  *
  * `testFile` names each connector's own named collection/integration test —
@@ -42,10 +42,10 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		heb: { testFile: "connectors/heb/index.test.ts" },
 		google_maps: { testFile: "connectors/google_maps/parsers.test.ts" },
 		jellyfin: { testFile: "connectors/jellyfin/protocol-subprocess.test.ts" },
+		linkedin: { testFile: "connectors/linkedin/integration.test.ts" },
 		notion: { testFile: "connectors/notion/schemas.test.ts" },
 		reddit: { testFile: "connectors/reddit/integration.test.ts" },
 		signal: { testFile: "connectors/signal/integration.test.ts" },
-		slack: { testFile: "connectors/slack/integration.test.ts" },
 		steam: { testFile: "connectors/steam/index.test.ts" },
 		strava: { testFile: "connectors/strava/index.test.ts" },
 		uber: { testFile: "connectors/uber/integration.test.ts" },
@@ -54,13 +54,22 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		whatsapp: { testFile: "connectors/whatsapp/integration.test.ts" },
 		whoop: { testFile: "connectors/whoop/integration.test.ts" },
 		ynab: { testFile: "connectors/ynab/integration.test.ts" },
+		anthropic: { testFile: "connectors/anthropic/integration.test.ts" },
+		meta: { testFile: "connectors/meta/integration.test.ts" },
+		youtube: { testFile: "connectors/youtube/index.test.ts" },
+		spotify: { testFile: "connectors/spotify/schemas.test.ts" },
+		github_browser: { testFile: "connectors/github_browser/protocol.test.ts" },
+		icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
+		oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
+		strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
+		shopify: { testFile: "connectors/shopify/index.test.ts" },
 	};
 /**
  * Connectors that are scaffolded (unconditional `SKIP_RESULT`, no real
  * collection) and MUST stay outside `PRODUCTION_READY_CONNECTORS` and outside
  * the owner-selectable listing until they actually collect.
  */
-export const KNOWN_SCAFFOLD_CONNECTORS = ["loom", "wholefoods"] as const;
+export const KNOWN_SCAFFOLD_CONNECTORS = ["loom"] as const;
 
 /**
  * Connectors with a REAL collector (verified: no unconditional `SKIP_RESULT`
@@ -71,15 +80,17 @@ export const KNOWN_SCAFFOLD_CONNECTORS = ["loom", "wholefoods"] as const;
  * or Supported; the conformance test keeps the rosters disjoint.
  */
 export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
-	anthropic: { testFile: "connectors/anthropic/integration.test.ts" },
+	readwise: { testFile: "connectors/readwise/index.test.ts" },
 	// Tier development. The oracle is the end-to-end protocol test, matching
 	// strava.
 	apple_health: { testFile: "connectors/apple_health/index.test.ts" },
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
+	character_ai: { testFile: "connectors/character_ai/parsers.test.ts" },
+	coros_browser: { testFile: "connectors/coros_browser/index.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
+	facebook: { testFile: "connectors/facebook/collect.test.ts" },
 	garmin_browser: { testFile: "connectors/garmin_browser/index.test.ts" },
-	icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
 	fitbit: { testFile: "connectors/fitbit/index.test.ts" },
 	google_calendar: { testFile: "connectors/google_calendar/index.test.ts" },
 	google_contacts: { testFile: "connectors/google_contacts/index.test.ts" },
@@ -90,25 +101,48 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 		testFile: "connectors/google_messages/integration.test.ts",
 	},
 	google_takeout: { testFile: "connectors/google_takeout/schemas.test.ts" },
-	github_browser: { testFile: "connectors/github_browser/protocol.test.ts" },
 	groupme: { testFile: "connectors/groupme/collection.test.ts" },
-	meta: { testFile: "connectors/meta/integration.test.ts" },
+	// Real collector, Development tier: exercised live over CDP against an
+	// owner account, but Instinct is invite-only private beta and that account
+	// had no connections, devices, trusted people, or vault entries, so four of
+	// its eight streams are unproven against non-empty data.
+	instinct: { testFile: "connectors/instinct/integration.test.ts" },
+	// Tier development. Collects through the signed-in muse.ai app's own
+	// gateway client; the oracle is the collection protocol test.
+	muse: { testFile: "connectors/muse/index.test.ts" },
+	// Tier development. Reads the signed-in mountainproject.com session's own
+	// tick and to-do CSV exports; the oracle is the collection test over a
+	// synthetic page and the real exports of a project-owned test account. No
+	// full run through the browser handoff on a real account yet.
+	mountain_project: { testFile: "connectors/mountain_project/index.test.ts" },
 	// Import-only (CSV/zip upload); no collection path is implemented. Real,
 	// not scaffold: it parses a
 	// genuine Netflix export rather than emitting a SKIP_RESULT placeholder.
 	netflix_export: { testFile: "connectors/netflix_export/integration.test.ts" },
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
-	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
-	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
+	perplexity: { testFile: "connectors/perplexity/index.test.ts" },
+	// Tier development. Reads the signed-in flow.polar.com web app's own JSON;
+	// shapes are inferred from the web bundle until a seeded account confirms them.
+	polar_flow: { testFile: "connectors/polar_flow/index.test.ts" },
+	// Real collector, Development tier: the artifact still depends on a host
+	// helper and installability is not yet proven.
+	slack: { testFile: "connectors/slack/integration.test.ts" },
+	// Tier development. Reads the Slack Web API from the owner's signed-in
+	// app.slack.com page, the way the web client calls it; the oracle is the
+	// collection protocol test over a synthetic page + API fixture.
+	slack_browser: { testFile: "connectors/slack_browser/index.test.ts" },
+	// Tier development. Reads the signed-in WhatsApp Web page's own in-page
+	// stores (chats, messages, contacts, groups); the oracle is the collection
+	// walk test over a synthetic page.
+	whatsapp_web: { testFile: "connectors/whatsapp_web/collect-fixes.test.ts" },
+	// Real collection and fixture evidence; live installability remains unproven.
+	wholefoods: { testFile: "connectors/wholefoods/integration.test.ts" },
 	whoop_browser: { testFile: "connectors/whoop_browser/index.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
-	linkedin: { testFile: "connectors/linkedin/integration.test.ts" },
 	pocket: { testFile: "connectors/pocket/schemas.test.ts" },
-	shopify: { testFile: "connectors/shopify/index.test.ts" },
-	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
+	tiktok: { testFile: "connectors/tiktok/parsers.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
 	x_browser: { testFile: "connectors/x_browser/index.test.ts" },
-	youtube: { testFile: "connectors/youtube/index.test.ts" },
 	youtube_takeout: { testFile: "connectors/youtube_takeout/index.test.ts" },
 };

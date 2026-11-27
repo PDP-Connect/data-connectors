@@ -154,7 +154,11 @@ import {
 	KNOWN_CONNECTOR_NAMES,
 	readManifest,
 } from "../src/orchestrator.ts";
-import { buildRunSummary, type RunSummary } from "../src/run-summary.ts";
+import {
+	buildRunSummary,
+	type RunSummary,
+	sanitizeSkipResult,
+} from "../src/run-summary.ts";
 
 dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
 
@@ -717,14 +721,9 @@ function renderMessage(message: EmittedMessage): void {
 			return;
 		}
 		case "SKIP_RESULT": {
-			const hint =
-				typeof message.recovery_hint === "object"
-					? message.recovery_hint.action
-					: message.recovery_hint;
-			// A hint is the connector's suggestion; this tool never acts on it.
-			printLine(
-				`  WARN     [${message.stream}] skip: ${message.reason} — ${message.message}${hint ? ` (connector's suggestion: ${hint})` : ""}`,
-			);
+			const diagnostic = sanitizeSkipResult(message);
+			printLine(`  WARN     [${diagnostic.stream}] skip: ${diagnostic.reason}`);
+			printLine(`  skip-result-diagnostics ${JSON.stringify(diagnostic)}`);
 			return;
 		}
 		case "DETAIL_GAP": {
@@ -992,8 +991,9 @@ export function runAndStream(
 			}
 		};
 
-		child.stdout?.on("data", (chunk: Buffer) => {
-			stdoutBuffer += chunk.toString();
+		child.stdout?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			stdoutBuffer += chunk;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
 				const line = stdoutBuffer.slice(0, newlineIndex);
@@ -1167,8 +1167,8 @@ function printBrowserRendererNote(env: NodeJS.ProcessEnv): void {
 	printLine(
 		"BROWSER  no DISPLAY/WAYLAND_DISPLAY detected — browser-class connectors run headless. " +
 			"Headless browser dev currently has no attach surface from this CLI (no CDP/devtools URL is " +
-			"observable outside the connector subprocess); see src/browser-launch.ts's module docstring " +
-			"and docs/reference/ for the streaming-companion path used in production.",
+			"observable outside the connector subprocess); see the module comment in " +
+			"packages/polyfill-connectors/src/browser-launch.ts.",
 	);
 }
 

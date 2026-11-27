@@ -16,7 +16,7 @@ Run from the repository root with Node 24 and dependencies installed:
 TZ=UTC node --import tsx --test connectors/anthropic_live/*.test.ts
 npm run verify --workspace @pdpp/polyfill-connectors
 npm run connector-implementation-index:check
-npm run historical-contract:check
+npm run scripts:test
 npm run manifest-schema:test
 TZ=UTC npm test --workspace @pdpp/polyfill-connectors
 ```

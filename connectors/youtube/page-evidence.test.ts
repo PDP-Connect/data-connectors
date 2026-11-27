@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
 	enumerationEnded,
+	readHistoryResponseEvidence,
 	type ListEnd,
 	readListEnd,
 	readPageReadiness,
@@ -21,6 +22,7 @@ const NO_EVIDENCE: ListEnd = {
 	domHasEndMarker: false,
 	verifiedEmpty: false,
 	pageBlocked: false,
+	latestHistoryResponse: null,
 };
 
 function setPageLocation(window: object, url: string) {
@@ -585,6 +587,7 @@ test("readListEnd reads the header total, continuation and row count from the pa
 			verifiedEmpty: false,
 			// The parsed page has no YouTube route.
 			pageBlocked: true,
+			latestHistoryResponse: null,
 		});
 		assert.equal(readListEnd("history").declaredTotal, null);
 		assert.equal(readListEnd("history").domItemCount, 0);
@@ -592,6 +595,50 @@ test("readListEnd reads the header total, continuation and row count from the pa
 	} finally {
 		globals.document = undefined;
 		globals.window = undefined;
+	}
+});
+
+test("latest history continuation response overrides stale bootstrap continuation evidence", () => {
+	const initial = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [{ tabRenderer: { selected: true, content: {
+					sectionListRenderer: { contents: [
+						{ lockupViewModel: { contentId: "v1" } },
+						{ lockupViewModel: { contentId: "v2" } },
+						{ lockupViewModel: { contentId: "v3" } },
+						{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "stale-token" } } } },
+					] },
+				} } }],
+			},
+		},
+	};
+	const { document, window } = parseHTML(
+		`<button id="avatar-btn"></button><ytd-item-section-renderer>${["v1", "v2", "v3"].map((id) => `<yt-lockup-view-model><a href="/watch?v=${id}"></a></yt-lockup-view-model>`).join("")}</ytd-item-section-renderer><script>var ytInitialData = ${JSON.stringify(initial)};</script>`,
+	);
+	setPageLocation(window, "https://www.youtube.com/feed/history");
+	const globals = globalThis as Record<string, unknown>;
+	const oldDocument = globals.document;
+	const oldWindow = globals.window;
+	globals.document = document;
+	globals.window = window;
+	try {
+		const finalResponse = readHistoryResponseEvidence(
+			{ onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: [] } }] },
+			"old-token",
+			new Set(["old-token"]),
+		);
+		const end = readListEnd({
+			kind: "history",
+			sessionPresent: true,
+			latestHistoryResponse: finalResponse,
+		});
+		assert.equal(end.dataHasContinuation, true, "bootstrap still contains its old token");
+		assert.equal(end.latestHistoryResponse?.recognized, true);
+		assert.equal(enumerationEnded(end, 3), true);
+	} finally {
+		globals.document = oldDocument;
+		globals.window = oldWindow;
 	}
 });
 
@@ -613,4 +660,61 @@ test("a blocked page vetoes every kind of end evidence", () => {
 		false,
 		"a missing block fact is not a clear page",
 	);
+});
+
+test("only an authenticated selected history empty message proves a zero-row end", () => {
+	const data = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								sectionListRenderer: {
+									contents: [
+										{
+											itemSectionRenderer: {
+												contents: [
+													{
+														messageRenderer: {
+															text: { runs: [{ text: "No watch history" }] },
+														},
+													},
+												],
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		},
+	};
+	const { document, window } = parseHTML(
+		`<script>var ytInitialData = ${JSON.stringify(data)};</script>`,
+	);
+	const globals = globalThis as Record<string, unknown>;
+	globals.document = document;
+	globals.window = window;
+	setPageLocation(window, "https://www.youtube.com/feed/history");
+	try {
+		const end = readListEnd({ kind: "history", sessionPresent: true });
+		assert.equal(end.verifiedEmpty, true);
+		assert.equal(end.pageBlocked, false);
+		assert.equal(enumerationEnded(end, 0), true);
+
+		const signedOut = readListEnd({
+			kind: "history",
+			sessionPresent: false,
+		});
+		assert.equal(signedOut.verifiedEmpty, false);
+		assert.equal(signedOut.pageBlocked, true);
+		assert.equal(enumerationEnded(signedOut, 0), false);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
 });

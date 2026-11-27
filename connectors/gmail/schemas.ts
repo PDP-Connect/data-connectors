@@ -20,9 +20,9 @@ import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schem
 //   - Regex-validated structural strings (message IDs, ISO dates) → z.string().regex(...)
 
 // Module-scoped regexes (Biome useTopLevelRegex).
-const GMAIL_MESSAGE_ID_RE = /^[0-9a-f]{1,32}$/;
+export const GMAIL_MESSAGE_ID_RE = /^[0-9a-f]{1,32}$/;
 const ISO_Z_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
-const PART_INDEX_RE = /^\d+(\.\d+)*$/;
+export const PART_INDEX_RE = /^\d+(\.\d+)*$/;
 
 // Shared field schemas.
 const isoDateTimeSchema = z.string().regex(ISO_Z_RE, "must be ISO-8601");

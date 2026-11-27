@@ -115,7 +115,7 @@ export interface InboxItemNotice {
 }
 
 export function notifyInboxItem(item: InboxItemNotice): Promise<NtfyResult> {
-	const title = `PDPP needs you: ${item.kind}`;
+	const title = `Action needed: ${item.kind}`;
 	const msg =
 		item.message ||
 		`A connector (${item.connector_id}) is parked waiting for ${item.kind}.`;
@@ -156,7 +156,7 @@ export function notifyOvernightSummary({
 		}
 	}
 	return notify({
-		title: ok ? "PDPP overnight: all green" : "PDPP overnight: check the logs",
+		title: ok ? "Overnight run: all green" : "Overnight run: check the logs",
 		message: lines.join("\n"),
 		tags: ok ? ["white_check_mark"] : ["warning"],
 		priority: ok ? "default" : "high",

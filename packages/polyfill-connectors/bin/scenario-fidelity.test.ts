@@ -44,6 +44,7 @@ import {
 	isNamespaceIsolationAvailable,
 	spawnWithNetworkIsolation,
 } from "../src/scenario/isolation.ts";
+import { namespaceSkip } from "../src/scenario/namespace-skip.ts";
 import { createReplayFetch } from "../src/scenario/replay.ts";
 import {
 	cleanupScenarioEvidenceWorkspace,
@@ -774,6 +775,7 @@ test("scenario-fidelity: isolation capability detection reports honestly", () =>
 test("scenario-fidelity: under namespace isolation, a spawned curl cannot reach a parent-side canary (skip if unavailable)", async (t) => {
 	const capability = isNamespaceIsolationAvailable();
 	if (!capability.available) {
+		namespaceSkip(true);
 		t.skip(`network isolation unavailable on this host: ${capability.reason}`);
 		return;
 	}

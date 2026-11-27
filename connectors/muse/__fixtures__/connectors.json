@@ -1,0 +1,90 @@
+{
+  "connectors": [
+    {
+      "id": "asana",
+      "name": "Synthetic name 1",
+      "description": "Synthetic description 2 lorem lorem lorem lorem",
+      "icon": "asana",
+      "icon_url": "https://example.com/item/3",
+      "supports_multiple_accounts": true,
+      "is_custom": false,
+      "management_kind": "auth",
+      "needs_reauth": false,
+      "state": "disconnected",
+      "consent": {
+        "hatch": {
+          "bullets": [
+            {
+              "icon": "data_types",
+              "title": "Synthetic title 4 lorem lorem",
+              "text": "Synthetic text 5 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+            },
+            {
+              "icon": "info",
+              "title": "Synthetic title 6 lorem lorem lorem",
+              "text": "Synthetic text 7 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+            },
+            {
+              "icon": "caution",
+              "title": "Synthetic title 8 lorem lorem",
+              "text": "Synthetic text 9 lorem lorem lorem lorem lorem lorem lorem"
+            }
+          ],
+          "footer_paragraphs": [
+            "Synthetic footer_paragraphs 10 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+            "Synthetic footer_paragraphs 11 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+          ]
+        }
+      }
+    },
+    {
+      "id": "box",
+      "name": "Synthetic name 12",
+      "description": "Synthetic description 13 lorem lorem lorem lorem lorem lorem",
+      "icon": "box",
+      "icon_url": "https://example.com/item/14",
+      "supports_multiple_accounts": false,
+      "is_custom": false,
+      "management_kind": "auth",
+      "needs_reauth": false,
+      "state": "disconnected",
+      "consent": {
+        "hatch": {
+          "bullets": [
+            {
+              "icon": "data_types",
+              "title": "Synthetic title 15 lorem",
+              "text": "Synthetic text 16 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+            },
+            {
+              "icon": "info",
+              "title": "Synthetic title 17 lorem lorem lorem",
+              "text": "Synthetic text 18 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+            },
+            {
+              "icon": "caution",
+              "title": "Synthetic title 19 lorem lorem",
+              "text": "Synthetic text 20 lorem lorem lorem lorem lorem lorem lorem"
+            }
+          ],
+          "footer_paragraphs": [
+            "Synthetic footer_paragraphs 21 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+            "Synthetic footer_paragraphs 22 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem"
+          ]
+        }
+      }
+    },
+    {
+      "id": "browser",
+      "name": "Synthetic name 23",
+      "description": "Synthetic description 24 lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem lorem",
+      "icon": "browser",
+      "icon_url": "https://example.com/item/25",
+      "supports_multiple_accounts": false,
+      "is_custom": false,
+      "management_kind": "policy_only",
+      "needs_reauth": false,
+      "state": "connected"
+    }
+  ]
+}

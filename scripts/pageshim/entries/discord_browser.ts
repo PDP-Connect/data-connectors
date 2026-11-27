@@ -26,12 +26,13 @@ import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
 // Defined by build.mjs from connectors/discord_browser/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 type ScopeEntriesPage = ShimPage & {
 	requestedScopeEntries?: () => unknown;
 };
 
-const STREAMS = ["profile", "servers", "connections", "messages"];
+const STREAMS = PAGESHIM_CONNECTOR_STREAMS;
 
 const summarizeCounts = (counts: Record<string, number>) => {
 	const details = Object.fromEntries(
@@ -77,7 +78,7 @@ const summarizeCounts = (counts: Record<string, number>) => {
 			},
 			toScope: (_stream, records) => ({ records }),
 			streamScopeRecords: {
-				order: ["messages", "profile", "servers", "connections"],
+				order: ["messages"],
 				summarizeCounts,
 			},
 			summarize: (scopes) =>

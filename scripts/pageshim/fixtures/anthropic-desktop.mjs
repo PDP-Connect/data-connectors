@@ -8,7 +8,7 @@
 // goto() of the export URL fires a Playwright-style download of the archive.
 
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,18 @@ import { resolveFixture } from "./anthropic.mjs";
 
 const scratchRoot = fileURLToPath(new URL("../../../.tmp/pageshim/", import.meta.url));
 mkdirSync(scratchRoot, { recursive: true });
-process.env.PDPP_BLOB_SPOOL_DIR ??= mkdtempSync(join(scratchRoot, "blobs-"));
+// The spool this module creates is removed on a passing exit. A spool that the
+// caller set stays, and a failed run keeps its spool for debugging.
+let ownedBlobSpool;
+if (process.env.PDPP_BLOB_SPOOL_DIR === undefined) {
+	ownedBlobSpool = mkdtempSync(join(scratchRoot, "blobs-"));
+	process.env.PDPP_BLOB_SPOOL_DIR = ownedBlobSpool;
+}
+process.on("exit", (code) => {
+	if (code === 0 && ownedBlobSpool) {
+		rmSync(ownedBlobSpool, { recursive: true, force: true });
+	}
+});
 
 const { collectAnthropic } = await import(
 	"../../../connectors/anthropic/index.ts"

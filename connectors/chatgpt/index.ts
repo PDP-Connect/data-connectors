@@ -40,7 +40,6 @@ import {
 	CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE,
 	ensureChatGptSession,
 } from "../../packages/polyfill-connectors/src/auto-login/chatgpt.ts";
-import { browserConfigPreservationFor } from "../../packages/polyfill-connectors/src/browser-surface-policy.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
@@ -77,7 +76,7 @@ import {
 	spoolMessageBlob,
 } from "./message-blob.ts";
 import {
-	buildAccountPlanRecord,
+	buildAccountPlanRecords,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
 	buildGizmoRecord,
@@ -88,10 +87,22 @@ import {
 	extractRawMessageText,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
+	messageRecordId,
 	minUpdateTimeIso,
 	reconcileEmittedBranchMessages,
+	toMessageRecord,
 	tsToIso,
 } from "./parsers.ts";
+import {
+	advanceDetailProgress,
+	CONVERSATION_BACKFILL_PER_RUN,
+	countRowsRead,
+	type DetailProgress,
+	detailListCursor,
+	encodeDetailProgress,
+	planDetailReads,
+	readDetailProgress,
+} from "./conversation-detail-progress.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
 import {
 	isSourceUnrepresentable,
@@ -105,12 +116,24 @@ import type {
 	ChatGptFetchResult,
 	ChatGptJson,
 	ChatGptNode,
+	ChatGptUsageProjection,
 	ConversationListItem,
 	RawAccountsCheckBody,
 	RawCustomInstructionsBody,
 	RawMemoryEntry,
 	RawSharedConversation,
 } from "./types.ts";
+import { drainDetailWindows } from "./detail-lane-drain.ts";
+import {
+	DetailNotFoundTracker,
+	type NotFoundTable,
+} from "./detail-not-found.ts";
+import {
+	chatGptUsageFetchInBrowser,
+	usageCaptureBody,
+	usageCaptureRoute,
+} from "./usage.ts";
+import { runUsageStreams, type UsageStreamHooks } from "./usage-stream.ts";
 
 // schemas.js is a plain-JS Zod validator; cast at the boundary to the
 // runtime's ValidateRecord contract. The JS module's safeParse already
@@ -155,7 +178,7 @@ function scrubChatGptTerminalDiagnostic(message: string): string {
 			"$1[redacted]",
 		)
 		.replace(
-			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts)(?:[/?]|$))[^\s)"'<>]*/giu,
+			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts|settings|cdn-cgi|me|tasks)(?:[/?]|$))[^\s)"'<>]*/giu,
 			"[redacted-path]",
 		)
 		.replace(/\s+/g, " ")
@@ -310,8 +333,17 @@ const CHATGPT_RATE_LIMIT_MAX_RETRY_AFTER_MS = 15 * 60_000;
 const CHATGPT_LONG_SLEEP_PROGRESS_THRESHOLD_MS = 5000;
 const CHATGPT_CONVERSATION_BATCH_MAX_IDS = 10;
 const CHATGPT_BATCH_INITIAL_PARALLELISM = 2;
+// Batch requests in flight at most. The reference connector measured no
+// throttling up to three in a short burst and runs four.
 const CHATGPT_BATCH_MAX_PARALLELISM = 4;
+const CHATGPT_BATCH_MAX_PARALLELISM_ENV = "PDPP_CHATGPT_BATCH_MAX_PARALLELISM";
+const CHATGPT_BATCH_MAX_PARALLELISM_CEILING = 8;
+// Clean requests needed to add one more in flight: two full rounds at the
+// current width, as in the reference connector's two clean waves.
 const CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP = 2;
+// Consecutive failed batch requests before the rest of the pass uses single
+// fetches. One failure only falls back for that request's conversations.
+const CHATGPT_BATCH_FAILURES_TO_DISABLE = 3;
 const CHATGPT_DETAIL_PROGRESS_EVERY = 25;
 // Source-pressure fast-open. The live A/B probe (2026-06-02) showed ChatGPT's
 // private detail endpoint returns BARE 429s — no `Retry-After` — and that the
@@ -1642,7 +1674,9 @@ async function reportChatGptRetryPressure({
 }: {
 	delayMs: number;
 	emit?: CollectContext["emit"] | undefined;
-	onUnlanedRateLimited?: (() => void) | undefined;
+	onUnlanedRateLimited?:
+		| ((retryAfterWaitMs: number | undefined) => void)
+		| undefined;
 	laneContext?: AdaptiveLaneRunContext | undefined;
 	providerBudget?: ProviderBudgetController | null | undefined;
 	recordPacingThrottle: boolean;
@@ -1663,7 +1697,7 @@ async function reportChatGptRetryPressure({
 		...(retryAfterMs === undefined ? {} : { retryAfterMs }),
 	});
 	if (laneContext === undefined && response?.status === 429) {
-		onUnlanedRateLimited?.();
+		onUnlanedRateLimited?.(retryAfterMs === undefined ? undefined : delayMs);
 	}
 }
 
@@ -1681,7 +1715,9 @@ export function createChatGptApi({
 	// In-lane 429s are already counted by the detail lane's cooldown event, so
 	// they intentionally do NOT call this — avoiding a double count. Lets the run
 	// carry pre-detail source pressure into the detail-phase density stop.
-	onUnlanedRateLimited?: () => void;
+	// `retryAfterWaitMs` is the wait before the retry when the server sent
+	// Retry-After.
+	onUnlanedRateLimited?: (retryAfterWaitMs: number | undefined) => void;
 	page: Page;
 	providerBudget?: ProviderBudgetController | null;
 }): ChatGptApi {
@@ -1750,7 +1786,13 @@ export function createChatGptApi({
 			method,
 			body,
 			parseJson = true,
-		}: { method: string; body?: unknown; parseJson?: boolean },
+			projection,
+		}: {
+			method: string;
+			body?: unknown;
+			parseJson?: boolean;
+			projection?: ChatGptUsageProjection | undefined;
+		},
 	): Promise<ChatGptFetchResult> {
 		const timeoutMs = resolveChatGptBackendFetchTimeoutMs();
 		const measureProviderFetch =
@@ -1762,15 +1804,24 @@ export function createChatGptApi({
 			).__pdppPageshimDetailFetched === "function";
 		const evaluate = (a: ChatGptAuth): Promise<ChatGptFetchResult> =>
 			withTimeout(
-				page.evaluate(chatGptBackendFetchInBrowser, {
-					path,
-					method,
-					body,
-					parseJson,
-					...(measureProviderFetch ? { measureProviderFetch: true } : {}),
-					auth: a,
-					timeoutMs,
-				}),
+				projection
+					? page.evaluate(chatGptUsageFetchInBrowser, {
+							path,
+							method,
+							body,
+							projection,
+							auth: a,
+							timeoutMs,
+						})
+					: page.evaluate(chatGptBackendFetchInBrowser, {
+							path,
+							method,
+							body,
+							parseJson,
+							...(measureProviderFetch ? { measureProviderFetch: true } : {}),
+							auth: a,
+							timeoutMs,
+						}),
 				timeoutMs + CHATGPT_BACKEND_EVALUATE_TIMEOUT_BUFFER_MS,
 				`chatgpt_backend_fetch_evaluate_timeout after ${timeoutMs + CHATGPT_BACKEND_EVALUATE_TIMEOUT_BUFFER_MS}ms`,
 			);
@@ -1819,12 +1870,14 @@ export function createChatGptApi({
 			laneContext,
 			method,
 			parseJson,
+			projection,
 		}: {
 			body?: unknown;
 			captureResult: boolean;
 			laneContext?: AdaptiveLaneRunContext | undefined;
 			method: string;
 			parseJson: boolean;
+			projection?: ChatGptUsageProjection | undefined;
 		},
 	): Promise<ChatGptFetchResult> {
 		let plannedProviderBudgetDefer: ChatGptPlannedProviderBudgetDeferredError | null =
@@ -1910,15 +1963,28 @@ export function createChatGptApi({
 			},
 			request: async () => {
 				try {
-					const result = await fetchOnce(path, { method, body, parseJson });
+					const result = await fetchOnce(path, {
+						method,
+						body,
+						parseJson,
+						projection,
+					});
 					if (
 						captureResult &&
 						capture &&
 						!isChatGptRetryableStatus(result.status)
 					) {
-						capture.captureHttp(`${method}-${path}`, result.json, {
+						// Projected usage reads name provider ids in the path; capture
+						// them under a route template so no raw id reaches a fixture.
+						const capturePath = projection ? usageCaptureRoute(path) : path;
+						// Their bodies carry raw ids too (the connector needs them in
+						// memory); capture a copy with ids and cursors replaced.
+						const captureBody = projection
+							? usageCaptureBody(result.json)
+							: result.json;
+						capture.captureHttp(`${method}-${capturePath}`, captureBody, {
 							status: result.status,
-							path,
+							path: capturePath,
 							method,
 						});
 					}
@@ -1977,10 +2043,12 @@ export function createChatGptApi({
 				method = "GET",
 				body,
 				laneContext,
+				projection,
 			}: {
 				method?: string;
 				body?: unknown;
 				laneContext?: AdaptiveLaneRunContext | undefined;
+				projection?: ChatGptUsageProjection | undefined;
 			} = {},
 		): Promise<ChatGptFetchResult> {
 			return fetchWithRetry(path, {
@@ -1989,6 +2057,7 @@ export function createChatGptApi({
 				laneContext,
 				parseJson: true,
 				captureResult: true,
+				projection,
 			});
 		},
 		async fetchBatch(ids: readonly string[]): Promise<ChatGptFetchResult[]> {
@@ -2330,6 +2399,11 @@ function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
 /** Per-run dependency bag threaded through every emit-path helper. Mirrors
  *  the amazon/chase pattern: one stable bag so collect() becomes pure
  *  orchestration and the helpers are individually testable. */
+export {
+	NOT_FOUND_ID_MAX_LENGTH,
+	NOT_FOUND_TRACKED_MAX,
+} from "./detail-not-found.ts";
+
 export interface StreamDeps {
 	api: ChatGptApi;
 	/** Optional clock seam for deterministic list retry tests. */
@@ -2343,12 +2417,14 @@ export interface StreamDeps {
 	) => Promise<void>;
 	/** Mirrors the runtime's resource/time selection gate before metadata is built. */
 	isRecordSelected?: CollectContext["isRecordSelected"];
-	/** Message IDs already emitted by earlier detail work in this run. */
+	/** Message record ids (`messageRecordId`) already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
 	/** Run-scoped count of messages emitted without `content` (see OmittedMessageContentTally). */
 	omittedMessageContent?: OmittedMessageContentTally;
-	/** parent_id each message was emitted with this run; the stream is append-only. */
+	/** Source parent node id each message was emitted with this run, by record id; the stream is append-only. */
 	emittedMessageParentsThisRun?: Map<string, string | null>;
+	/** The run's 404/410 detail answers and the obligations it inherited; see detail-not-found.ts. */
+	detailNotFound?: DetailNotFoundTracker;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -2378,6 +2454,22 @@ export interface StreamDeps {
 	runBudget?: ChatGptRunBudget;
 	/** Run-scoped latch so the batch-fallback diagnostic logs once per run, not once per detail pass. */
 	batchFallbackLog?: ChatGptBatchFallbackLog;
+	/**
+	 * Set by `conversationDetailOnlyDeps`: the detail is fetched only to fill the
+	 * `conversations` record (branch message count, model counts). No message
+	 * record, blob or `messages` DETAIL_GAP is produced from it.
+	 */
+	conversationDetailOnly?: boolean;
+	/**
+	 * Set with `conversationDetailOnly`: told, per conversation, whether its
+	 * detail is settled (read, or a definite 404/410) or must be retried by a
+	 * later run (any other failure to read it). A conversation the pass never
+	 * reached (a deferral) is reported as neither.
+	 */
+	reportConversationDetail?: (
+		c: ConversationListItem,
+		outcome: "settled" | "retry",
+	) => Promise<void>;
 }
 
 /** Mutable holder shared by the recovery and forward detail passes of one run. */
@@ -2385,9 +2477,24 @@ export interface ChatGptBatchFallbackLog {
 	logged: boolean;
 }
 
-/** Mutable holder for the run-scoped pre-detail served-429 count. */
+/** Mutable holder for the run-scoped served 429s outside the detail lane. */
 export interface ChatGptPreDetailPressure {
 	rateLimited: number;
+	// When the latest server Retry-After wait among them ends (Date.now() ms).
+	retryAfterUntilMs?: number;
+}
+
+/** Counts one served 429 outside the detail lane and keeps its Retry-After. */
+export function recordChatGptUnlanedRateLimit(
+	pressure: ChatGptPreDetailPressure,
+	retryAfterWaitMs: number | undefined,
+): void {
+	pressure.rateLimited += 1;
+	if (retryAfterWaitMs === undefined) return;
+	pressure.retryAfterUntilMs = Math.max(
+		pressure.retryAfterUntilMs ?? 0,
+		Date.now() + retryAfterWaitMs,
+	);
 }
 
 const MEMORIES_PATH = "/memories?include_memory_entries=true";
@@ -2558,7 +2665,7 @@ const CHATGPT_ACCOUNT_PLAN_STATELESS_ENV =
 
 /**
  * Fetch the accounts/check body the web app loads at startup and emit at most
- * one account_plan record: plan, renewal/expiry/cancellation dates, and any
+ * one account_plan record per usable account: plan, renewal/expiry dates, and any
  * scheduled plan change. 404/403 → SKIP "not_available"; other non-200 →
  * SKIP "http_error".
  *
@@ -2618,13 +2725,16 @@ export async function runAccountPlanStream(
 		});
 		return;
 	}
-	const record = isUnreadableJsonBody(res)
+	const records = isUnreadableJsonBody(res)
 		? null
-		: buildAccountPlanRecord(res.json as RawAccountsCheckBody);
-	// A record the schema would reject (e.g. an over-long id) is dropped by
-	// emitRecord; without this check STATE would still advance past it.
-	const validation = record ? validateRecord("account_plan", record) : null;
-	if (!record || (validation && !validation.ok)) {
+		: buildAccountPlanRecords(res.json as RawAccountsCheckBody);
+	// The only place this stream decides between a complete inventory and a
+	// skip. A record the schema would reject (e.g. an over-long id) is dropped
+	// by emitRecord; without this check STATE and coverage would still claim it.
+	if (
+		!records ||
+		records.some((record) => !validateRecord("account_plan", record).ok)
+	) {
 		deps.emit({
 			type: "SKIP_RESULT",
 			stream: "account_plan",
@@ -2636,22 +2746,23 @@ export async function runAccountPlanStream(
 		return;
 	}
 	if (process.env[CHATGPT_ACCOUNT_PLAN_STATELESS_ENV] === "1") {
-		await deps.emitRecord("account_plan", record);
-		deps.emit(buildFullScanCoverageMessage("account_plan", 1));
+		for (const record of records) await deps.emitRecord("account_plan", record);
+		deps.emit(buildFullScanCoverageMessage("account_plan", records.length));
 		return;
 	}
 	// Same gate as custom_instructions: a stable synthetic id and no run-clock
 	// field, so the fingerprint suppresses a byte-identical re-emit.
 	const fingerprintCursor = openFingerprintCursor(state.account_plan);
-	if (fingerprintCursor.shouldEmit(record)) {
-		await deps.emitRecord("account_plan", record);
+	for (const record of records) {
+		if (fingerprintCursor.shouldEmit(record))
+			await deps.emitRecord("account_plan", record);
 	}
 	deps.emit({
 		type: "STATE",
 		stream: "account_plan",
 		cursor: { fetched_at: nowIso(), fingerprints: fingerprintCursor.toState() },
 	});
-	deps.emit(buildFullScanCoverageMessage("account_plan", 1));
+	deps.emit(buildFullScanCoverageMessage("account_plan", records.length));
 }
 
 /**
@@ -2812,7 +2923,9 @@ export async function processConversationDetail(
 		await emitConversation(c, null);
 		const reason =
 			detail.status === 200 ? "detail_mapping_missing" : "detail_http_error";
-		await deps.emit(makeIncompleteConversationDetailGap(c, reason));
+		if (!deps.conversationDetailOnly) {
+			await deps.emit(makeIncompleteConversationDetailGap(c, reason));
+		}
 		return { complete: false, reason };
 	}
 	const { mapping } = detail.json;
@@ -2841,6 +2954,9 @@ export async function processConversationDetail(
 	let rejectedByShapeAnywhere = 0;
 	const omitted =
 		deps.omittedMessageContent ?? createOmittedMessageContentTally();
+	// A detail fetched only for the conversations stream builds the same branch
+	// counts from the same filters, but selects, spools and emits no message.
+	const emitMessages = deps.conversationDetailOnly !== true;
 	// Messages the source cannot represent: the unknown-shape fallback cut (see
 	// source-unrepresentable.ts).
 	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
@@ -2867,7 +2983,11 @@ export async function processConversationDetail(
 			continue;
 		}
 
-		const messageId = typeof msg.id === "string" ? msg.id : null;
+		// A node id can recur in another conversation (forks copy nodes), so the
+		// run-wide "already emitted" identity is the record id, which is scoped by
+		// conversation.
+		const messageId =
+			typeof msg.id === "string" ? messageRecordId(c.id, msg.id) : null;
 		if (messageId && candidateIds.has(messageId)) {
 			if (onBranch) {
 				filteredBranchCount += 1;
@@ -2876,7 +2996,11 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
-		if (deps.isRecordSelected && !deps.isRecordSelected("messages", msg)) {
+		if (
+			emitMessages &&
+			deps.isRecordSelected &&
+			!deps.isRecordSelected("messages", toMessageRecord(msg, c.id))
+		) {
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredBySelection += 1;
@@ -2893,7 +3017,7 @@ export async function processConversationDetail(
 		// not emitted again, so it is neither measured nor counted again.
 		let blob: { ref: MessageBlobRef; spoolDir: string } | null = null;
 		let omission: keyof OmittedMessageContentTally | null = null;
-		if (extracted.oversize && !alreadyEmitted) {
+		if (emitMessages && extracted.oversize && !alreadyEmitted) {
 			const spoolDir = blobSpoolDir();
 			// The text is measured here and dropped; the spool step re-derives it.
 			const ref =
@@ -2909,7 +3033,7 @@ export async function processConversationDetail(
 					spoolDir === null ? "host_blob_unavailable" : "exceeds_host_blob_cap";
 			}
 		}
-		const validation = validateRecord("messages", msg);
+		const validation = validateRecord("messages", toMessageRecord(msg, c.id));
 		if (validation && !validation.ok) {
 			rejectedByShapeAnywhere += 1;
 			if (onBranch) {
@@ -2952,7 +3076,10 @@ export async function processConversationDetail(
 	// reports the conversation as structurally incomplete instead.
 	let emittedParentConflict = false;
 	for (const candidate of retainedBranch) {
-		const id = typeof candidate.msg.id === "string" ? candidate.msg.id : null;
+		const id =
+			typeof candidate.msg.id === "string"
+				? messageRecordId(c.id, candidate.msg.id)
+				: null;
 		if (!id || !candidate.alreadyEmitted || !emittedParents.has(id)) continue;
 		const emittedParent = emittedParents.get(id) ?? null;
 		if (candidate.msg.parent_id !== emittedParent) {
@@ -2993,10 +3120,11 @@ export async function processConversationDetail(
 				`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
 		);
 	}
-	for (const candidate of candidates) {
+	for (const candidate of emitMessages ? candidates : []) {
 		const { msg } = candidate;
 		if (candidate.alreadyEmitted) continue;
-		const messageId = typeof msg.id === "string" ? msg.id : null;
+		const messageId =
+			typeof msg.id === "string" ? messageRecordId(c.id, msg.id) : null;
 		if (messageId) {
 			alreadyEmittedIds.add(messageId);
 			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
@@ -3008,7 +3136,7 @@ export async function processConversationDetail(
 		// and the text is re-derived here rather than held per candidate.
 		await deps.emitRecord(
 			"messages",
-			msg,
+			toMessageRecord(msg, c.id),
 			blob && messageId && sourceNode
 				? {
 						beforeEmit: () =>
@@ -3038,7 +3166,7 @@ export async function processConversationDetail(
 			: branchStructurallyIncomplete || emittedParentConflict
 				? "branch_structurally_incomplete"
 				: null;
-	if (incompleteReason) {
+	if (incompleteReason && emitMessages) {
 		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
 	}
 	if (candidates.length === 0) {
@@ -3075,6 +3203,8 @@ export async function processConversationDetail(
 
 const PAGINATION_SAFETY_LIMIT = 5000;
 const GIZMO_MAX_PAGES = 50;
+// Bound each search walk for scheduling; a saved boundary resumes the older history next run.
+const CONVERSATION_SEARCH_SLICE = 5000;
 
 /**
  * A 200 whose body failed to parse arrives as `res.json === null` (the api
@@ -3546,6 +3676,8 @@ export async function runSharedConversationsStream(
 interface ConversationListResult {
 	backfill: ConversationBackfill | null;
 	backfillItems?: ConversationListItem[];
+	// Verified resume progress, including the terminal replay anchor while the head is unfinished.
+	verifiedSuffixProgress?: ConversationBackfill;
 	items: ConversationListItem[];
 	truncated: boolean;
 }
@@ -3593,6 +3725,133 @@ function readConversationBackfill(value: unknown): ConversationBackfill | null {
 }
 
 const CONVERSATION_PAGE_SIZE = 30;
+
+const PRIMARY_CONVERSATION_PAGE_SIZE = 100;
+const CONVERSATION_ENUMERATION_VERSION = 1;
+
+/** Independent offset walk. `total` can be offset + count + 1: a lower bound,
+ * never a snapshot size. Only a repeated empty page ends this walk. */
+async function listPrimaryConversations(
+	deps: StreamDeps,
+	resume: ConversationBackfill | null,
+): Promise<ConversationListResult> {
+	const rows = new Map<string, ConversationListItem>();
+	let offset = resume
+		? Math.max(0, resume.position_hint - PRIMARY_CONVERSATION_PAGE_SIZE)
+		: 0;
+	let boundarySeen = resume === null || resume.boundary_ids.length === 0;
+	const recovery = conversationSearchRecovery(
+		deps,
+		(position) => `/conversations?offset=${position}&limit=100&order=updated`,
+	);
+	const incomplete = (): ConversationListResult => ({
+		items: [...rows.values()],
+		truncated: true,
+		backfill:
+			resume && rows.size > 0 && !boundarySeen
+				? { position_hint: 0, oldest_update_time: null, boundary_ids: [] }
+				: rows.size > 0
+					? conversationBackfillAt(rows.values(), offset)
+					: (resume ?? {
+							position_hint: 0,
+							oldest_update_time: null,
+							boundary_ids: [],
+						}),
+	});
+	let emptyReads = 0;
+	let pages = 0;
+	while (pages * PRIMARY_CONVERSATION_PAGE_SIZE < PAGINATION_SAFETY_LIMIT) {
+		let response: ChatGptFetchResult;
+		try {
+			response = await recovery.fetch(offset);
+		} catch (error) {
+			if (!isConversationSearchDeferred(error)) {
+				throw error;
+			}
+			await emitConversationSearchDeferred(deps, error, offset);
+			return incomplete();
+		}
+		const classified = classifyChatGptListPage<unknown>(response, {
+			stream: "conversations",
+			endpointLabel: "conversations primary list",
+			page: pages,
+			listKeys: ["items"],
+		});
+		if (!classified.ok) {
+			for (const stream of ["conversations", "messages"]) {
+				if (deps.requested.has(stream)) {
+					deps.emit({ ...classified.skip, stream });
+				}
+			}
+			return incomplete();
+		}
+		const pageRows: ConversationListItem[] = [];
+		for (const raw of classified.items) {
+			const id = isChatGptJsonObject(raw)
+				? (raw.id ?? raw.conversation_id)
+				: null;
+			if (
+				!isChatGptJsonObject(raw) ||
+				typeof id !== "string" ||
+				id.length === 0
+			) {
+				emitConversationListUnstable(
+					deps,
+					"ChatGPT primary list returned an item without a usable id",
+					{ offset },
+				);
+				return incomplete();
+			}
+			pageRows.push({ ...raw, id } as ConversationListItem);
+		}
+		if (pageRows.length > PRIMARY_CONVERSATION_PAGE_SIZE) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT primary list exceeded its page size",
+				{ offset },
+			);
+			return incomplete();
+		}
+		if (pageRows.length === 0) {
+			emptyReads += 1;
+			if (emptyReads < 2) {
+				// API admission applies provider pacing to the confirmation read too.
+				continue;
+			}
+			if (!boundarySeen) {
+				emitConversationListUnstable(
+					deps,
+					"ChatGPT primary list did not re-observe its backfill boundary",
+					{ offset },
+				);
+				return {
+					...incomplete(),
+					backfill: {
+						position_hint: 0,
+						oldest_update_time: null,
+						boundary_ids: [],
+					},
+				};
+			}
+			return { items: [...rows.values()], truncated: false, backfill: null };
+		}
+		emptyReads = 0;
+		for (const item of pageRows) {
+			rows.set(item.id, item);
+		}
+		if (resume && conversationBackfillBoundarySeen(rows.values(), resume)) {
+			boundarySeen = true;
+		}
+		offset += pageRows.length;
+		pages += 1;
+	}
+	emitConversationListUnstable(
+		deps,
+		"ChatGPT primary list reached the per-run pagination cap",
+		{ offset },
+	);
+	return incomplete();
+}
 
 function logConversationListPageShape(
 	items: readonly unknown[],
@@ -3764,7 +4023,7 @@ async function listConversationsSinceCursor(
 			inOrderConversationSearchPages(recovery),
 		);
 	}
-	const pages = prefetchingConversationSearchPages(deps, width, recovery);
+	const pages = prefetchingConversationSearchPages(deps, width, recovery, startCursor);
 	// Hold this pass's skips until the list is verified, so a discarded pass
 	// never reports a failure that the in-order walk then contradicts.
 	const heldSkips: Parameters<StreamDeps["emit"]>[0][] = [];
@@ -3883,14 +4142,25 @@ async function walkConversationSearch(
 				"ChatGPT conversation search did not re-observe the saved backfill boundary",
 				{ cursor, boundary_ids: resumeBackfill.boundary_ids },
 			);
+			const observedBackfill =
+				conversationsById.size === 0
+					? {
+							position_hint: 0,
+							oldest_update_time: null,
+							boundary_ids: [],
+						}
+					: {
+							...conversationBackfillAt(conversationsById.values(), cursor),
+							// A missing boundary found during a resumed suffix scan does not
+							// establish anything about the skipped prefix. Force the next
+							// attempt to read from the start before accepting this new anchor.
+							position_hint: resumeStartCursor > 0 ? 0 : cursor,
+						};
 			return {
 				items: [...conversationsById.values()],
 				truncated: true,
 				backfillItems: [...conversationsById.values()],
-				backfill: {
-					...resumeBackfill,
-					position_hint: Math.max(0, resumeStartCursor - pageSize),
-				},
+				backfill: observedBackfill,
 			};
 		}
 		return {
@@ -3898,7 +4168,10 @@ async function walkConversationSearch(
 			truncated: false,
 			backfill: null,
 			...(resumeBackfill
-				? { backfillItems: [...backfillTailById.values()] }
+				? {
+						backfillItems: [...backfillTailById.values()],
+						verifiedSuffixProgress: conversationBackfillAt(conversationsById.values(), cursor),
+					}
 				: {}),
 		};
 	};
@@ -3906,6 +4179,9 @@ async function walkConversationSearch(
 	const deferred = (): ConversationListResult => ({
 		items: [...conversationsById.values()],
 		truncated: true,
+		...(resumeBackfill && contiguous && resumeBoundarySeen && conversationsById.size > 0
+			? { verifiedSuffixProgress: conversationBackfillAt(conversationsById.values(), cursor) }
+			: {}),
 		backfill:
 			conversationsById.size > 0
 				? conversationBackfillAt(conversationsById.values(), cursor)
@@ -3950,11 +4226,7 @@ async function walkConversationSearch(
 			page += 1;
 			if (!classified.ok) {
 				deps.emit(classified.skip);
-				return {
-					items: [...conversationsById.values()],
-					truncated: true,
-					backfill: conversationBackfillAt(conversationsById.values(), cursor),
-				};
+				return deferred();
 			}
 			logConversationListPageShape(classified.items, page);
 			const pageItems: ConversationListItem[] = [];
@@ -4114,11 +4386,7 @@ async function walkConversationSearch(
 			page += 1;
 			if (!classified.ok) {
 				deps.emit(classified.skip);
-				return {
-					items: [...conversationsById.values()],
-					truncated: true,
-					backfill: conversationBackfillAt(conversationsById.values(), cursor),
-				};
+				return deferred();
 			}
 			if (
 				classified.items.length === 0 &&
@@ -4177,22 +4445,27 @@ async function walkConversationSearch(
 			contiguous = false;
 		}
 		cursor = nextCursor;
-		if (cursor > PAGINATION_SAFETY_LIMIT) {
+		if (cursor - resumeStartCursor >= CONVERSATION_SEARCH_SLICE) {
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
-				message: `conversations search stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				message: `conversations search reached its ${CONVERSATION_SEARCH_SLICE}-position slice with more items remaining`,
 				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
+					action: "retry_by_runtime",
+					retryable: true,
 				},
-				diagnostics: { cursor, collected: conversationsById.size },
+				diagnostics: { cursor, start_cursor: resumeStartCursor, collected: conversationsById.size },
 			});
 			return {
 				items: [...conversationsById.values()],
 				truncated: true,
-				backfill: conversationBackfillAt(conversationsById.values(), cursor),
+				backfill: contiguous && (!resumeBackfill || resumeBoundarySeen)
+					? conversationBackfillAt(conversationsById.values(), cursor)
+					: (resumeBackfill ?? conversationBackfillAt([], 0)),
+				...(resumeBackfill && contiguous && resumeBoundarySeen
+					? { verifiedSuffixProgress: conversationBackfillAt(conversationsById.values(), cursor) }
+					: {}),
 			};
 		}
 	}
@@ -4202,7 +4475,7 @@ async function walkConversationSearch(
  * Pages pipelined ahead of a full search walk. Six matches the reference
  * connector, which measured no throttling at that width.
  */
-const CONVERSATION_SEARCH_PREFETCH_PAGES = 6;
+export const CONVERSATION_SEARCH_PREFETCH_PAGES = 6;
 
 /**
  * Where the walk gets each search response. `attempt` 0 is the first read of
@@ -4265,7 +4538,10 @@ async function emitConversationSearchDeferred(
 
 /** Only the consumer waits/probes. Speculative reads retain their errors and
  * drain before recovery; they never start independent cooldown loops. */
-function conversationSearchRecovery(deps: StreamDeps) {
+function conversationSearchRecovery(
+	deps: StreamDeps,
+	pathForCursor: (cursor: number) => string = conversationSearchPath,
+) {
 	const runBudget = deps.runBudget ?? new ChatGptRunBudget();
 	let consecutiveWaits = 0;
 	let pressured = false;
@@ -4284,7 +4560,7 @@ function conversationSearchRecovery(deps: StreamDeps) {
 				capReason,
 			);
 		}
-		const response = await deps.api.fetch(conversationSearchPath(cursor));
+		const response = await deps.api.fetch(pathForCursor(cursor));
 		if (response.status === 200) {
 			consecutiveWaits = 0;
 			// Listing owns this response's success observation; detail pacing keeps
@@ -4376,13 +4652,16 @@ type SettledSearchPage =
  * each response to the walk only when the walk asks for that cursor, in walk
  * order. Retries of a short page and the end re-probe are fresh requests sent
  * alone, once no prefetched read is in flight. A failed read is never used:
- * it is requested again alone. Any failure, new rate limiting or a short page
- * with no continuation stops further prefetching for this walk.
+ * it is requested again alone. Any failure or new rate limiting stops further
+ * prefetching for this walk. A short page with no continuation only pauses it:
+ * the provider returns such pages mid-list, and the next page that does not
+ * end the list resumes reading ahead.
  */
 function prefetchingConversationSearchPages(
 	deps: StreamDeps,
 	width: number,
 	recovery: ReturnType<typeof conversationSearchRecovery>,
+	startCursor: number,
 ): ConversationSearchPages & {
 	/** Waits until no prefetched read is still in flight. */
 	settle(): Promise<void>;
@@ -4403,6 +4682,8 @@ function prefetchingConversationSearchPages(
 	let outstanding = 0;
 	const rateLimitedAtStart = deps.preDetailPressure?.rateLimited ?? 0;
 	let enabled = true;
+	// Set while the newest page handed to the walk looked like the last one.
+	let paused = false;
 	let prefetched = false;
 	let overlapped = false;
 	const cursorById = new Map<string, number>();
@@ -4588,14 +4869,15 @@ function prefetchingConversationSearchPages(
 				await settle();
 				const response = await recovery.fetch(cursor);
 				noteRows(cursor, response);
+				paused = conversationSearchPageEnds(response);
 				return handed(cursor, response);
 			}
-			if (enabled) {
+			if (enabled && !paused) {
 				// A read of this cursor that is not prefetched is sent below.
 				const limit = inFlight.has(cursor) ? width : width - 1;
 				for (let ahead = 1; ahead < width; ahead += 1) {
 					const next = cursor + ahead * CONVERSATION_PAGE_SIZE;
-					if (outstanding >= limit || next > PAGINATION_SAFETY_LIMIT) {
+					if (outstanding >= limit || next - startCursor >= CONVERSATION_SEARCH_SLICE) {
 						break;
 					}
 					if (inFlight.has(next)) {
@@ -4632,11 +4914,9 @@ function prefetchingConversationSearchPages(
 				response = await alone(cursor);
 			}
 			noteRows(cursor, response);
-			// A short page with no continuation is usually the last one. Stop
+			// A short page with no continuation may be the last one. Pause
 			// reading ahead, so the end re-probe does not wait on reads past it.
-			if (conversationSearchPageEnds(response)) {
-				enabled = false;
-			}
+			paused = conversationSearchPageEnds(response);
 			return handed(cursor, response);
 		},
 		settle,
@@ -4925,6 +5205,8 @@ async function selectConversationListsForRequestedStreams({
 	// coverage this run.
 	conversationsListTruncated: boolean;
 	messagesListTruncated: boolean;
+	// Rows only a resumed list continuation reached: no run has emitted them.
+	conversationsBackfillIds: ReadonlySet<string>;
 }> {
 	if (wantsConversations && wantsMessages) {
 		const sharedCursor = oldestConversationCursor(
@@ -4949,6 +5231,7 @@ async function selectConversationListsForRequestedStreams({
 			backfill: sharedList.backfill,
 			conversationsListTruncated: sharedList.truncated,
 			messagesListTruncated: sharedList.truncated,
+			conversationsBackfillIds: backfillIds,
 		};
 	}
 	if (wantsConversations) {
@@ -4964,6 +5247,7 @@ async function selectConversationListsForRequestedStreams({
 			backfill: list.backfill,
 			conversationsListTruncated: list.truncated,
 			messagesListTruncated: false,
+			conversationsBackfillIds: backfillIds,
 		};
 	}
 	if (wantsMessages) {
@@ -4979,6 +5263,7 @@ async function selectConversationListsForRequestedStreams({
 			backfill: list.backfill,
 			conversationsListTruncated: false,
 			messagesListTruncated: list.truncated,
+			conversationsBackfillIds: new Set(),
 		};
 	}
 	return {
@@ -4987,6 +5272,7 @@ async function selectConversationListsForRequestedStreams({
 		backfill: null,
 		conversationsListTruncated: false,
 		messagesListTruncated: false,
+		conversationsBackfillIds: new Set(),
 	};
 }
 
@@ -5038,6 +5324,20 @@ const CHATGPT_DETAIL_PAUSE_MAX_MS_ENV =
 // beyond dataconnect's own batch size (5); anything higher is not an A/B, it is
 // a different, untested posture.
 const CHATGPT_DETAIL_PROBE_MAX_CONCURRENCY_CEILING = 5;
+
+/**
+ * Most `/conversations/batch` requests in flight at once. Defaults to 4, the
+ * reference connector's measured width; an override is capped at 8.
+ */
+export function resolveChatGptBatchMaxParallelism(
+	env: NodeJS.ProcessEnv = process.env,
+): number {
+	return resolvePositiveIntOverride(
+		env[CHATGPT_BATCH_MAX_PARALLELISM_ENV],
+		CHATGPT_BATCH_MAX_PARALLELISM,
+		CHATGPT_BATCH_MAX_PARALLELISM_CEILING,
+	);
+}
 
 function resolvePositiveIntOverride(
 	raw: string | undefined,
@@ -5370,6 +5670,9 @@ interface ConversationDetailPacingOptions {
 	// source-pressure deferrals stay per-key (their backlog IS the cooldown signal).
 	tailGapBound?: number;
 	tuning?: ChatGptDetailLaneTuning;
+	// Most batch requests in flight. Defaults to
+	// resolveChatGptBatchMaxParallelism().
+	batchMaxParallelism?: number;
 }
 
 interface ConversationDetailCoverage {
@@ -5380,6 +5683,8 @@ interface ConversationDetailCoverage {
 	// become required when a later run re-lists and materializes them). Absent
 	// (undefined) when the run materialized every tail conversation per-key.
 	backlogGapKey?: string;
+	/** True once a deferral (pressure, circuit, run cap) stopped this pass short. */
+	deferred: boolean;
 	gapKeys: Array<string | number>;
 	hydratedKeys: Array<string | number>;
 	// Conversations the source cannot represent (source-unrepresentable.ts). A
@@ -5387,6 +5692,10 @@ interface ConversationDetailCoverage {
 	// explicitly skipped.
 	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 	sourceUnrepresentableKeys: Array<string | number>;
+	// Listed conversations whose detail answered 404/410 this run (see
+	// `skipNotFoundConversation`), and the ones the messages cursor still owes.
+	// Reported skipped until a run reads their detail (detail-not-found.ts).
+	notFoundKeys: Array<string | number>;
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -5491,7 +5800,49 @@ export type ConversationDetailOutcome =
 	| { complete: false; reason: ConversationDetailIncompleteReason }
 	// The source cannot represent a body (unknown-shape fallback cut): a refetch
 	// returns the same bytes, so no retryable gap is owed.
-	| SourceUnrepresentableOutcome;
+	| SourceUnrepresentableOutcome
+	| ConversationNotFoundOutcome;
+
+/**
+ * A listed conversation whose detail answered 404 or 410. The conversation may
+ * be gone, but ChatGPT also answers 404 transiently or for a session in another
+ * account or workspace context, so one answer does not settle it: the run skips
+ * it, and the messages cursor owes it a read on later runs (detail-not-found.ts).
+ */
+type ConversationNotFoundOutcome = { complete: false; notFound: true };
+
+const CONVERSATION_NOT_FOUND_OUTCOME: ConversationNotFoundOutcome = {
+	complete: false,
+	notFound: true,
+};
+
+function isConversationNotFound(
+	outcome: object,
+): outcome is ConversationNotFoundOutcome {
+	return "notFound" in outcome;
+}
+
+/**
+ * The messages pass's answer to a 404/410 detail. The conversation keeps its
+ * list-only record, no message is emitted, and no DETAIL_GAP is written (a host
+ * that does not serve gaps back would lose it; the cursor carries the retry
+ * instead). The caller declares the key skipped in DETAIL_COVERAGE, so the
+ * stream reads as covered short of it, not complete.
+ */
+async function skipNotFoundConversation(
+	c: ConversationListItem,
+	status: number,
+	emitConversation: (
+		c: ConversationListItem,
+		detail: ConversationDetail | null,
+	) => Promise<void>,
+): Promise<ConversationNotFoundOutcome> {
+	chatGptDiagnostic(
+		`conversation_not_found: a listed conversation's detail returned http ${status}; its messages are skipped this run`,
+	);
+	await emitConversation(c, null);
+	return CONVERSATION_NOT_FOUND_OUTCOME;
+}
 
 /**
  * Retryable gap for a conversation whose detail arrived but whose messages are
@@ -5723,9 +6074,26 @@ function makeConversationDetailCoverage(
 		hydratedKeys: coverage.hydratedKeys,
 		gapKeys: coverage.gapKeys,
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
-		optionalSkipKeys: optionalSkipKeysFor(coverage.sourceUnrepresentableKeys),
+		optionalSkipKeys: [
+			...optionalSkipKeysFor(coverage.sourceUnrepresentableKeys),
+			...coverage.notFoundKeys,
+		],
 		considered: requiredKeys.length,
 		covered: coverage.hydratedKeys.length,
+	});
+}
+
+/**
+ * A scoped receipt for a run with no forward coverage to report: the owed
+ * conversations, required and skipped, with no messages this run.
+ */
+function makeOwedOnlyCoverage(owed: readonly string[]): DetailCoverageMessage {
+	return makeConversationDetailCoverage([...owed], {
+		deferred: false,
+		gapKeys: [],
+		hydratedKeys: [],
+		sourceUnrepresentableKeys: [],
+		notFoundKeys: [...owed],
 	});
 }
 
@@ -5790,10 +6158,12 @@ export async function runMessagesAndConversationsWithDetail(
 		requestedTuning,
 	);
 	const coverage: ConversationDetailCoverage = {
+		deferred: false,
 		gapKeys: [],
 		hydratedKeys: [],
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 		sourceUnrepresentableKeys: [],
+		notFoundKeys: [],
 	};
 	// Cumulative served-429 density signal. Each `rate_limited` cooldown the lane
 	// surfaces (one per served 429, success-after-backoff included) bumps the
@@ -5846,8 +6216,7 @@ export async function runMessagesAndConversationsWithDetail(
 		// the lane takes max(launchDelay, cooldown, hint).
 		...(providerBudget
 			? {
-					launchDelayHint: (): number =>
-						batchDetailCache.size > 0 ? 0 : providerBudget.pacingDelayHint(),
+					launchDelayHint: (): number => providerBudget.pacingDelayHint(),
 				}
 			: {}),
 		pressureMaxDelayMs: CHATGPT_RATE_LIMIT_MAX_DELAY_MS,
@@ -5906,8 +6275,15 @@ export async function runMessagesAndConversationsWithDetail(
 	const conversationIndexById = new Map(
 		convosToSync.map((conversation, index) => [conversation.id, index]),
 	);
+	// Start index of the next batch request; requests cover aligned chunks.
 	let nextBatchStart = 0;
+	const pendingBatches = new Map<number, Promise<void>>();
+	// Index of the conversation the serial lane works on.
+	let laneIndex = 0;
 	let batchEndpointUnavailable = false;
+	let consecutiveBatchFailures = 0;
+	const batchMaxParallelism =
+		pacing.batchMaxParallelism ?? resolveChatGptBatchMaxParallelism();
 	const batchFallbackLog = deps.batchFallbackLog ?? { logged: false };
 	// Once run-cap or source-pressure deferral trips, all later conversation
 	// details are local bookkeeping: emit durable DETAIL_GAP rows for the tail,
@@ -5986,124 +6362,212 @@ export async function runMessagesAndConversationsWithDetail(
 		return cached;
 	}
 
-	let batchParallelism =
+	let batchParallelism = Math.min(
+		batchMaxParallelism,
 		(deps.preDetailPressure?.rateLimited ?? 0) > 0
 			? 1
-			: CHATGPT_BATCH_INITIAL_PARALLELISM;
-	let cleanBatchWaves = 0;
-	let batchPrefetchStart = 0;
-	let batchPrefetchPromise: Promise<void> | null = null;
+			: CHATGPT_BATCH_INITIAL_PARALLELISM,
+	);
+	let cleanBatches = 0;
+	// Batch requests take their pacing turn one after another.
+	let batchPacingTurn: Promise<void> = Promise.resolve();
 
-	async function prefetchConversationDetailBatchWave(
-		start: number,
-	): Promise<void> {
-		const { fetchBatch } = deps.api;
-		if (
-			!fetchBatch ||
-			batchEndpointUnavailable ||
-			start < nextBatchStart ||
-			start >= convosToSync.length ||
+	// Stops queued batch requests when the tail is deferred or the pass ends.
+	const batchStopController = new AbortController();
+	tailStopController.signal.addEventListener(
+		"abort",
+		() => batchStopController.abort(),
+		{ once: true },
+	);
+
+	function batchRequestsStopped(): boolean {
+		return (
+			batchStopController.signal.aborted ||
+			observedRecoverablePressure !== null ||
+			runCapDeferReason !== null ||
 			runBudget.shouldStop()
-		) {
-			return;
-		}
-		const budgetIds = new Set(conversationIdsWithinDetailBudget());
-		const end = Math.min(
-			convosToSync.length,
-			start + batchParallelism * CHATGPT_CONVERSATION_BATCH_MAX_IDS,
 		);
-		const chunks: string[][] = [];
-		for (
-			let offset = start;
-			offset < end;
-			offset += CHATGPT_CONVERSATION_BATCH_MAX_IDS
+	}
+
+	/**
+	 * Stops queued batch requests and waits for those already sent, so no
+	 * batch request outlives the pass.
+	 */
+	async function stopBatchRequests(): Promise<void> {
+		batchStopController.abort();
+		await Promise.allSettled(pendingBatches.values());
+	}
+
+	/** Sleeps `ms`, or until batch requests stop. */
+	async function sleepUntilBatchesStop(ms: number): Promise<void> {
+		const { signal } = batchStopController;
+		if (signal.aborted) return;
+		let onStop: () => void = () => undefined;
+		await Promise.race([
+			sleep(ms),
+			new Promise<void>((resolve) => {
+				onStop = () => resolve();
+				signal.addEventListener("abort", onStop, { once: true });
+			}),
+		]);
+		signal.removeEventListener("abort", onStop);
+	}
+
+	/**
+	 * Waits out the server Retry-After that a batch or list request was
+	 * served, including extensions served during the wait.
+	 */
+	async function waitOutBatchCooldown(): Promise<void> {
+		const untilMs = deps.preDetailPressure?.retryAfterUntilMs ?? 0;
+		if (untilMs <= Date.now() || batchRequestsStopped()) return;
+		await sleepUntilBatchesStop(untilMs - Date.now());
+		// An unchanged deadline has passed. Comparing deadlines rather than the
+		// clock also ends the wait when an injected sleep does not advance time.
+		if ((deps.preDetailPressure?.retryAfterUntilMs ?? 0) !== untilMs) {
+			await waitOutBatchCooldown();
+		}
+	}
+
+	function batchChunkStart(index: number): number {
+		return index - (index % CHATGPT_CONVERSATION_BATCH_MAX_IDS);
+	}
+
+	/**
+	 * Keeps up to `batchParallelism` batch requests in flight ahead of the
+	 * serial lane, so download and processing overlap. A request starts only
+	 * within `batchParallelism + 1` chunks of the lane, which bounds the
+	 * details held in memory.
+	 */
+	function pumpConversationDetailBatches(): void {
+		const { fetchBatch } = deps.api;
+		if (!fetchBatch) return;
+		while (
+			!batchEndpointUnavailable &&
+			!batchRequestsStopped() &&
+			pendingBatches.size < batchParallelism &&
+			nextBatchStart < convosToSync.length &&
+			nextBatchStart <
+				batchChunkStart(laneIndex) +
+					(batchParallelism + 1) * CHATGPT_CONVERSATION_BATCH_MAX_IDS
 		) {
+			const start = nextBatchStart;
+			nextBatchStart = start + CHATGPT_CONVERSATION_BATCH_MAX_IDS;
+			const budgetIds = new Set(conversationIdsWithinDetailBudget());
 			const chunkIds = convosToSync
-				.slice(offset, offset + CHATGPT_CONVERSATION_BATCH_MAX_IDS)
+				.slice(start, nextBatchStart)
 				.map((conversation) => conversation.id)
 				.filter((id) => budgetIds.has(id));
-			if (chunkIds.length > 0) chunks.push(chunkIds);
+			if (chunkIds.length === 0) continue;
+			const request = fetchConversationDetailBatch(
+				fetchBatch,
+				chunkIds,
+			).finally(() => {
+				pendingBatches.delete(start);
+				pumpConversationDetailBatches();
+			});
+			pendingBatches.set(start, request);
 		}
-		batchPrefetchStart = start;
-		nextBatchStart = end;
-		if (chunks.length === 0) return;
+	}
 
-		const rateLimitedBeforeWave = deps.preDetailPressure?.rateLimited ?? 0;
-		let waveWasClean = true;
-		await Promise.all(
-			chunks.map(async (chunkIds) => {
-				const batchStarted = performance.now();
-				const setTimingConversation = (
-					globalThis as typeof globalThis & {
-						__pdppPageshimSetTimingConversation?: (
-							conversationIds: string[] | null,
-						) => void;
-					}
-				).__pdppPageshimSetTimingConversation;
-				setTimingConversation?.(chunkIds);
-				try {
-					const details = await fetchBatch(chunkIds);
-					const elapsedPerDetail =
-						details.length > 0
-							? (performance.now() - batchStarted) / details.length
-							: 0;
-					const recordDetailTiming = (
-						globalThis as typeof globalThis & {
-							__pdppPageshimDetailFetched?: (
-								conversationId: string,
-								detailMs: number,
-								providerFetchMs: number,
-							) => void;
-						}
-					).__pdppPageshimDetailFetched;
-					const chunkIdSet = new Set(chunkIds);
-					for (const detail of details) {
-						const id = cachedBatchDetailId(detail, chunkIdSet);
-						if (id) {
-							recordDetailTiming?.(
-								id,
-								elapsedPerDetail,
-								detail.providerFetchMs ?? elapsedPerDetail,
-							);
-						}
-					}
-					if (
-						cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length
-					)
-						waveWasClean = false;
-					await recordConversationDetailProviderSuccess();
-				} catch (err) {
-					// Batch results are an optimization; the ordered per-id lane retries gaps.
-					// Log a bounded classification once per run: batching stops, and
-					// the slower per-id fetches would otherwise have no visible reason.
-					// Never log the error text; it can carry private page content.
-					if (!batchFallbackLog.logged) {
-						batchFallbackLog.logged = true;
-						chatGptDiagnostic(
-							`batch conversation-detail fetch failed (${classifyChatGptBatchFailure(err)}); fetching the remaining conversation details one at a time`,
-						);
-					}
-					batchEndpointUnavailable = true;
-					waveWasClean = false;
-				} finally {
-					setTimingConversation?.(null);
+	async function fetchConversationDetailBatch(
+		fetchBatch: NonNullable<ChatGptApi["fetchBatch"]>,
+		chunkIds: string[],
+	): Promise<void> {
+		// No batch request starts while a Retry-After wait runs, including one
+		// that starts during this request's pacing delay.
+		const turn = batchPacingTurn.then(async () => {
+			await waitOutBatchCooldown();
+			const delayMs = providerBudget?.pacingDelayHint() ?? 0;
+			if (delayMs > 0) await sleepUntilBatchesStop(delayMs);
+			await waitOutBatchCooldown();
+		});
+		batchPacingTurn = turn.catch(() => undefined);
+		let rateLimitedBefore = deps.preDetailPressure?.rateLimited ?? 0;
+		let clean = true;
+		let batchStarted = performance.now();
+		const setTimingConversation = (
+			globalThis as typeof globalThis & {
+				__pdppPageshimSetTimingConversation?: (
+					conversationIds: string[] | null,
+				) => void;
+			}
+		).__pdppPageshimSetTimingConversation;
+		try {
+			await turn;
+			// The tail may have been deferred, or the budget spent, during the turn.
+			if (batchRequestsStopped()) return;
+			rateLimitedBefore = deps.preDetailPressure?.rateLimited ?? 0;
+			batchStarted = performance.now();
+			setTimingConversation?.(chunkIds);
+			const details = await fetchBatch(chunkIds);
+			const elapsedPerDetail =
+				details.length > 0
+					? (performance.now() - batchStarted) / details.length
+					: 0;
+			const recordDetailTiming = (
+				globalThis as typeof globalThis & {
+					__pdppPageshimDetailFetched?: (
+						conversationId: string,
+						detailMs: number,
+						providerFetchMs: number,
+					) => void;
 				}
-			}),
-		);
-		const rateLimitedDuringWave =
-			(deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedBeforeWave;
-		if (!waveWasClean || rateLimitedDuringWave) {
+			).__pdppPageshimDetailFetched;
+			const chunkIdSet = new Set(chunkIds);
+			for (const detail of details) {
+				const id = cachedBatchDetailId(detail, chunkIdSet);
+				if (id) {
+					recordDetailTiming?.(
+						id,
+						elapsedPerDetail,
+						detail.providerFetchMs ?? elapsedPerDetail,
+					);
+				}
+			}
+			if (cacheBatchConversationDetails(details, chunkIds) !== chunkIds.length)
+				clean = false;
+			consecutiveBatchFailures = 0;
+			await recordConversationDetailProviderSuccess();
+		} catch (err) {
+			// Batch results are an optimization: the lane fetches this request's
+			// conversations one at a time.
+			clean = false;
+			// A planned provider deferral never reached the endpoint, so it says
+			// nothing about whether batch requests work.
+			if (!(err instanceof ChatGptPlannedProviderBudgetDeferredError)) {
+				// Log a bounded classification once per run, never the error text;
+				// it can carry private page content.
+				if (!batchFallbackLog.logged) {
+					batchFallbackLog.logged = true;
+					chatGptDiagnostic(
+						`batch conversation-detail fetch failed (${classifyChatGptBatchFailure(err)}); fetching its conversation details one at a time`,
+					);
+				}
+				consecutiveBatchFailures += 1;
+				if (consecutiveBatchFailures >= CHATGPT_BATCH_FAILURES_TO_DISABLE) {
+					batchEndpointUnavailable = true;
+				}
+			}
+		} finally {
+			setTimingConversation?.(null);
+		}
+		// A short or failed batch, or a 429 served while it was in flight, sends
+		// the next requests one at a time.
+		if (
+			!clean ||
+			(deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedBefore
+		) {
 			batchParallelism = 1;
-			cleanBatchWaves = 0;
+			cleanBatches = 0;
 			return;
 		}
-		cleanBatchWaves += 1;
+		cleanBatches += 1;
 		if (
-			cleanBatchWaves >= CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP &&
-			batchParallelism < CHATGPT_BATCH_MAX_PARALLELISM
+			cleanBatches >= CHATGPT_BATCH_CLEAN_WAVES_TO_RAMP * batchParallelism &&
+			batchParallelism < batchMaxParallelism
 		) {
 			batchParallelism += 1;
-			cleanBatchWaves = 0;
+			cleanBatches = 0;
 		}
 	}
 
@@ -6131,6 +6595,7 @@ export async function runMessagesAndConversationsWithDetail(
 			convosToSync.findIndex((item) => item.id === from.id),
 		);
 		const tail = convosToSync.slice(start);
+		coverage.deferred = true;
 		for (const [index, item] of tail.entries()) {
 			await emitConversationDetailGapOnce(item, makeGap(item, index));
 		}
@@ -6162,6 +6627,7 @@ export async function runMessagesAndConversationsWithDetail(
 			convosToSync.findIndex((item) => item.id === from.id),
 		);
 		const tail = convosToSync.slice(start);
+		coverage.deferred = true;
 		const perKey = Number.isFinite(tailGapBound)
 			? tail.slice(0, tailGapBound)
 			: tail;
@@ -6510,24 +6976,24 @@ export async function runMessagesAndConversationsWithDetail(
 		laneContext: AdaptiveLaneRunContext,
 	): Promise<ChatGptFetchResult> {
 		const conversationIndex = conversationIndexById.get(c.id);
-		if (conversationIndex !== undefined) {
-			if (conversationIndex >= nextBatchStart) {
-				const wave = prefetchConversationDetailBatchWave(conversationIndex);
-				batchPrefetchPromise = wave;
-				await wave;
-			} else if (
-				batchPrefetchPromise &&
-				conversationIndex >= batchPrefetchStart &&
-				conversationIndex < nextBatchStart
-			) {
-				await batchPrefetchPromise;
-			}
-		}
+		const pendingBatch =
+			conversationIndex === undefined
+				? undefined
+				: pendingBatches.get(batchChunkStart(conversationIndex));
+		const coveredByBatch =
+			pendingBatch !== undefined || batchDetailCache.has(c.id);
+		await pendingBatch;
 		const batchDetail = batchDetailCache.get(c.id);
 		if (batchDetail) {
 			batchDetailCache.delete(c.id);
 			batchDetailCacheHits.add(c.id);
 			return batchDetail;
+		}
+		if (coveredByBatch) {
+			// The lane skipped its launch pacing for a conversation the batch did
+			// not return, so this single request takes its own pacing turn.
+			const delayMs = providerBudget?.pacingDelayHint() ?? 0;
+			if (delayMs > 0) await sleep(delayMs);
 		}
 		// Progress-based give-up: the shared consecutiveWaitOutsWithoutSuccess
 		// counter (incremented in handleCircuitOpenForWaitOut, reset on each
@@ -6545,11 +7011,35 @@ export async function runMessagesAndConversationsWithDetail(
 		}
 	}
 
+	// Request batches before the lane's first launch, and again as each
+	// conversation finishes, so the next one finds its batch requested.
+	const pumpingBatches =
+		(
+			task: (
+				c: ConversationListItem,
+				laneContext: AdaptiveLaneRunContext,
+			) => Promise<ChatGptFetchResult>,
+		) =>
+		async (
+			c: ConversationListItem,
+			laneContext: AdaptiveLaneRunContext,
+		): Promise<ChatGptFetchResult> => {
+			try {
+				return await task(c, laneContext);
+			} finally {
+				laneIndex = Math.max(
+					laneIndex,
+					(conversationIndexById.get(c?.id) ?? -1) + 1,
+				);
+				pumpConversationDetailBatches();
+			}
+		};
+	pumpConversationDetailBatches();
 	await runLaneUntilTailStopped(
 		lane,
 		convosToSync,
 		tailStopController.signal,
-		async (c, laneContext) => {
+		pumpingBatches(async (c, laneContext) => {
 			if (!c) {
 				return { status: 404, json: null };
 			}
@@ -6611,7 +7101,23 @@ export async function runMessagesAndConversationsWithDetail(
 					// result from maybeDeferForFetchError — propagate it directly.
 					return detail;
 				}
-				if (detail.status !== 200) {
+				// A detail fetched only for the conversations stream feeds two optional
+				// fields. One conversation's own failure (a 404 for a conversation
+				// deleted mid-run) leaves that record list-only (null fields); it
+				// does not fail the run. The messages path skips a conversation the
+				// source says is gone (404/410) and records it as skipped; any other
+				// failure still throws, since a missing detail there would silently
+				// lose message records.
+				const degradesToListOnly =
+					deps.conversationDetailOnly === true &&
+					isPerConversationDetailFailure(detail.status);
+				const conversationGone =
+					deps.conversationDetailOnly !== true &&
+					isDeletedConversationStatus(detail.status);
+				if (deps.conversationDetailOnly !== true) {
+					deps.detailNotFound?.recordDetail(c.id, detail.status);
+				}
+				if (detail.status !== 200 && !degradesToListOnly && !conversationGone) {
 					providerBudget?.recordFailure();
 					await emitChatGptProviderBudgetTransitions({
 						emit: deps.emit,
@@ -6635,12 +7141,14 @@ export async function runMessagesAndConversationsWithDetail(
 					detailMs,
 					detail.providerFetchMs ?? detailMs,
 				);
-				const detailOutcome = await processConversationDetail(
-					detailDeps,
-					c,
-					detail,
-					emitConversation,
-				);
+				const detailOutcome = conversationGone
+					? await skipNotFoundConversation(c, detail.status, emitConversation)
+					: await processConversationDetail(
+							detailDeps,
+							c,
+							detail,
+							emitConversation,
+						);
 				// §10-D: suppress additive-decrease during the cooldown-exempt recovery
 				// lane so the shared pacer interval is not un-learned. Throttles still
 				// fire (recovery may decelerate, never accelerate the pacer).
@@ -6652,12 +7160,26 @@ export async function runMessagesAndConversationsWithDetail(
 				// Reset the progress-based give-up counter: any successful fetch proves the
 				// account is alive, so N consecutive no-progress waits restarts from 0.
 				consecutiveWaitOutsWithoutSuccess = 0;
+				if (deps.conversationDetailOnly) {
+					await deps.reportConversationDetail?.(
+						c,
+						detailOutcome.complete ||
+							isSourceUnrepresentable(detailOutcome) ||
+							isDeletedConversationStatus(detail.status)
+							? "settled"
+							: "retry",
+					);
+				}
 				if (detailOutcome.complete) {
 					hydratedKeys.add(c.id);
 					coverage.hydratedKeys.push(c.id);
+					deps.detailNotFound?.recordRead(c.id);
 				} else if (isSourceUnrepresentable(detailOutcome)) {
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					coverage.sourceUnrepresentableKeys.push(c.id);
+					deps.detailNotFound?.recordRead(c.id);
+				} else if (isConversationNotFound(detailOutcome)) {
+					coverage.notFoundKeys.push(c.id);
 				} else {
 					// processConversationDetail already emitted the DETAIL_GAP.
 					gapKeys.add(c.id);
@@ -6683,15 +7205,21 @@ export async function runMessagesAndConversationsWithDetail(
 					} as const;
 					deps.emit(progressMsg);
 				}
-				return detail;
+				return { status: detail.status, json: null };
 			} finally {
 				setTimingConversation?.(null);
 			}
+		}),
+		// A conversation covered by a batch request needs no request of its own,
+		// so it skips the per-launch pacing that protects the provider.
+		(c) => {
+			const index = conversationIndexById.get(c.id);
+			return (
+				batchDetailCache.has(c.id) ||
+				(index !== undefined && pendingBatches.has(batchChunkStart(index)))
+			);
 		},
-		// A batch-cached detail needs no provider request, so it skips the
-		// per-launch pacing that protects the provider.
-		(c) => batchDetailCache.has(c.id),
-	);
+	).finally(stopBatchRequests);
 	return coverage;
 }
 
@@ -6720,10 +7248,12 @@ async function runLaneUntilTailStopped(
 	isLocalItem?: (c: ConversationListItem) => boolean,
 ): Promise<void> {
 	try {
-		await lane.runAll(items, task, {
-			signal: tailStopSignal,
-			...(isLocalItem ? { isLocalItem } : {}),
-		});
+		await drainDetailWindows(items, (window) =>
+			lane.runAll(window, task, {
+				signal: tailStopSignal,
+				...(isLocalItem ? { isLocalItem } : {}),
+			}),
+		);
 	} catch (err) {
 		if (tailStopSignal.aborted && err instanceof AdaptiveLaneCancelledError) {
 			return;
@@ -6899,7 +7429,7 @@ async function recoverPendingConversationDetailGapPage(
 	// gap on this page is drained AND the shared run budget still allows fetching,
 	// so the older window is never re-listed while newer per-key gaps remain owed
 	// (which would strand the chunk).
-	const recoveryItems = messagesGaps
+	const servedItems = messagesGaps
 		.map((gap) => ({ gap, conversation: conversationListItemFromGap(gap) }))
 		.filter(
 			(
@@ -6909,6 +7439,15 @@ async function recoverPendingConversationDetailGapPage(
 				conversation: ConversationListItem;
 			} => item.conversation !== null,
 		);
+	// A gap whose detail answered 404/410 earlier in this run stays pending, so a
+	// later page serves it again: do not refetch it.
+	const recoveryItems = servedItems.filter(
+		(item) =>
+			deps.detailNotFound?.answeredNotFound(item.conversation.id) !== true,
+	);
+	if (recoveryItems.length === 0 && servedItems.length > 0) {
+		return { recovered: 0, stoppedWithPending: true };
+	}
 
 	let recovered = 0;
 	let stoppedWithPending = false;
@@ -6927,6 +7466,9 @@ async function recoverPendingConversationDetailGapPage(
 			...hydrated,
 			...coverage.sourceUnrepresentableKeys.map(String),
 		]);
+		// A 404/410 does not settle the gap: it stays pending, and the messages
+		// cursor owes the conversation too (detail-not-found.ts).
+		const notFound = new Set(coverage.notFoundKeys.map(String));
 		for (const { gap, conversation } of recoveryItems) {
 			if (!settled.has(conversation.id)) {
 				continue;
@@ -6946,7 +7488,7 @@ async function recoverPendingConversationDetailGapPage(
 		// per-key gap remains owed OR the recovery run capped (signalled by a fresh
 		// backlog key), so the rewritten backlog is attacked next run.
 		stoppedWithPending =
-			settled.size < recoveryItems.length ||
+			settled.size + notFound.size < recoveryItems.length ||
 			coverage.backlogGapKey !== undefined;
 		if (stoppedWithPending) {
 			return { recovered, stoppedWithPending };
@@ -7031,9 +7573,11 @@ function persistChatGptPacingStateOnly(
 	deps: StreamDeps,
 	priorMessagesCursor: string | null,
 	backfill: ConversationBackfill | null,
+	// The updated 404 obligations, or null when the run changed none.
+	notFoundTable: NotFoundTable | null,
 ): void {
 	const pacingFields = buildChatGptPacingStateFields(deps.providerBudget);
-	if (Object.keys(pacingFields).length === 0) {
+	if (Object.keys(pacingFields).length === 0 && notFoundTable === null) {
 		return;
 	}
 	deps.emit({
@@ -7042,9 +7586,56 @@ function persistChatGptPacingStateOnly(
 		cursor: {
 			last_update_time: priorMessagesCursor,
 			...(backfill === null ? {} : { backfill }),
+			...notFoundCursorFields(notFoundTable),
 			...pacingFields,
 		},
 	});
+}
+
+function notFoundCursorFields(table: NotFoundTable | null | undefined): {
+	detail_not_found?: NotFoundTable;
+} {
+	return table && table.length > 0 ? { detail_not_found: table } : {};
+}
+
+/**
+ * Close this run's 404 obligations (detail-not-found.ts) once every messages
+ * detail pass is done: the table for the cursor, and the owed ids to report
+ * skipped. Throws, before any messages STATE, on a session failure or more
+ * owed conversations than the cursor keeps.
+ */
+function finishDetailNotFound(tracker: DetailNotFoundTracker): {
+	table: NotFoundTable;
+	missing: string[];
+} {
+	const table = tracker.finish();
+	const missing = [...table];
+	if (missing.length > 0) {
+		chatGptDiagnostic(
+			`conversation_not_found_owed: ${missing.length} listed conversation(s) still answer their detail with http 404/410 or were not retried; their messages are owed to a later run`,
+		);
+	}
+	return { table, missing };
+}
+
+/** Add keys this run looked at outside the forward walk to its coverage, as skipped. */
+function addMissingNotFoundKeys(
+	coverage: ConversationDetailCoverage,
+	missing: readonly string[],
+	alreadyRequired: ReadonlySet<string>,
+): string[] {
+	const accounted = new Set([
+		...alreadyRequired,
+		...[
+			...coverage.hydratedKeys,
+			...coverage.gapKeys,
+			...coverage.sourceUnrepresentableKeys,
+			...coverage.notFoundKeys,
+		].map(String),
+	]);
+	const added = missing.filter((id) => !accounted.has(id));
+	coverage.notFoundKeys.push(...added);
+	return added;
 }
 
 /**
@@ -7065,7 +7656,11 @@ function shouldSuppressForwardWalkAfterRecovery(deps: StreamDeps): boolean {
 export async function runConversationsAndMessagesStreams(
 	deps: StreamDeps,
 	state: CollectContext["state"],
-	options: { detailPacing?: ConversationDetailPacingOptions } = {},
+	options: {
+		detailPacing?: ConversationDetailPacingOptions;
+		/** History conversations to read per run; see `CONVERSATION_BACKFILL_PER_RUN`. */
+		detailBackfillLimit?: number;
+	} = {},
 ): Promise<void> {
 	const omittedMessageContent =
 		deps.omittedMessageContent ?? createOmittedMessageContentTally();
@@ -7081,10 +7676,70 @@ export async function runConversationsAndMessagesStreams(
 }
 
 async function walkConversationsAndMessages(
-	deps: StreamDeps,
+	inputDeps: StreamDeps,
 	state: CollectContext["state"],
-	options: { detailPacing?: ConversationDetailPacingOptions } = {},
+	options: {
+		detailPacing?: ConversationDetailPacingOptions;
+		/** History conversations to read per run; see `CONVERSATION_BACKFILL_PER_RUN`. */
+		detailBackfillLimit?: number;
+	} = {},
 ): Promise<void> {
+	let primaryList: ConversationListResult | null = null;
+	const deps: StreamDeps = {
+		...inputDeps,
+		emit: (message) => {
+			if (
+				message.type !== "STATE" ||
+				(message.stream !== "conversations" && message.stream !== "messages") ||
+				!isChatGptJsonObject(message.cursor)
+			) {
+				return inputDeps.emit(message);
+			}
+			const previous = state[message.stream];
+			if (primaryList === null) {
+				// Recovery-only/budget exits did not run enumeration. Keep its
+				// independent continuation when persisting learned detail pacing.
+				const stored = isChatGptJsonObject(previous) ? previous : {};
+				const savedPrimary = readConversationBackfill(stored.primary_backfill);
+				return inputDeps.emit({
+					...message,
+					cursor: {
+						...message.cursor,
+						...(stored.enumeration_version === CONVERSATION_ENUMERATION_VERSION
+							? { enumeration_version: CONVERSATION_ENUMERATION_VERSION }
+							: {}),
+						...(savedPrimary === null
+							? {}
+							: { primary_backfill: savedPrimary }),
+					},
+				});
+			}
+			const previousWatermark = isChatGptJsonObject(previous)
+				? previous.last_update_time
+				: null;
+			const migrationStarted =
+				!primaryList.truncated ||
+				primaryList.items.length > 0 ||
+				(isChatGptJsonObject(previous) &&
+					previous.enumeration_version === CONVERSATION_ENUMERATION_VERSION);
+			return inputDeps.emit({
+				...message,
+				cursor: {
+					...message.cursor,
+					...(migrationStarted
+						? { enumeration_version: CONVERSATION_ENUMERATION_VERSION }
+						: {}),
+					...(primaryList.backfill === null
+						? {}
+						: { primary_backfill: primaryList.backfill }),
+					// A failed primary walk cannot authorize a newer stream watermark.
+					...(primaryList.truncated
+						? { last_update_time: previousWatermark ?? null }
+						: {}),
+				},
+			});
+		},
+	};
 	const listingRecovery =
 		deps.searchRecovery ?? conversationSearchRecovery(deps);
 	const runDeps: StreamDeps = {
@@ -7098,19 +7753,61 @@ async function walkConversationsAndMessages(
 		| {
 				last_update_time?: string | null;
 				backfill?: unknown;
+				primary_backfill?: unknown;
+				enumeration_version?: unknown;
 		  }
 		| undefined;
 	const messagesCursor = state.messages as
 		| {
 				last_update_time?: string | null;
 				backfill?: unknown;
+				primary_backfill?: unknown;
+				enumeration_version?: unknown;
+				detail_not_found?: unknown;
 		  }
 		| undefined;
-	const priorConversationsCursor =
-		conversationsCursor?.last_update_time || null;
-	const priorMessagesCursor = messagesCursor?.last_update_time || null;
 	const wantsConversations = deps.requested.has("conversations");
 	const wantsMessages = deps.requested.has("messages");
+	const detailNotFound = wantsMessages
+		? new DetailNotFoundTracker(messagesCursor?.detail_not_found)
+		: undefined;
+	if (detailNotFound) {
+		runDeps.detailNotFound = detailNotFound;
+	}
+	// What the cursor says has had its detail read (model counts). A cursor in
+	// the published shape keeps its watermark and says no history is read.
+	let priorDetailProgress = readDetailProgress(conversationsCursor);
+	const requestedSince = Date.parse(
+		deps.requested.get("conversations")?.time_range?.since ??
+			deps.requested.get("messages")?.time_range?.since ??
+			"",
+	);
+	// Nothing at or below this is listed, so history that reaches it is complete.
+	const floorMs = Number.isNaN(requestedSince) ? null : requestedSince - 1;
+	// The list is walked strictly after this cursor, one millisecond below the
+	// watermark, so conversations that tie the watermark are listed again.
+	let priorConversationsCursor = detailListCursor(priorDetailProgress, floorMs);
+	const priorMessagesCursor = messagesCursor?.last_update_time || null;
+	const migrateConversations =
+		wantsConversations &&
+		conversationsCursor?.enumeration_version !==
+			CONVERSATION_ENUMERATION_VERSION;
+	const migrateMessages =
+		wantsMessages &&
+		messagesCursor?.enumeration_version !== CONVERSATION_ENUMERATION_VERSION;
+	const primaryBackfills = [
+		wantsConversations
+			? readConversationBackfill(conversationsCursor?.primary_backfill)
+			: null,
+		wantsMessages
+			? readConversationBackfill(messagesCursor?.primary_backfill)
+			: null,
+	].filter((value): value is ConversationBackfill => value !== null);
+	const primaryBackfill =
+		primaryBackfills.sort((a, b) => a.position_hint - b.position_hint)[0] ??
+		null;
+	const primaryCatchup =
+		migrateConversations || migrateMessages || primaryBackfill !== null;
 	const savedBackfills = [
 		wantsConversations
 			? readConversationBackfill(conversationsCursor?.backfill)
@@ -7136,7 +7833,9 @@ async function walkConversationsAndMessages(
 				undefined,
 				listingRecovery,
 			);
-			if (savedBackfill === null) return forward;
+			if (savedBackfill === null) {
+				return forward;
+			}
 			// Collect the incremental frontier first, then resume the incomplete
 			// full-list walk. The update-time watermark and paging continuation are
 			// independent: one finds arrivals; the other drains older unseen pages.
@@ -7148,10 +7847,17 @@ async function walkConversationsAndMessages(
 				listingRecovery,
 			);
 			const merged = new Map<string, ConversationListItem>();
-			for (const item of backfill.items) merged.set(item.id, item);
-			for (const item of forward.items) merged.set(item.id, item);
+			for (const item of backfill.items) {
+				merged.set(item.id, item);
+			}
+			for (const item of forward.items) {
+				merged.set(item.id, item);
+			}
+			const suffixProgress = backfill.verifiedSuffixProgress;
 			const nextBackfill = forward.truncated
-				? savedBackfill
+				? suffixProgress && suffixProgress.position_hint > savedBackfill.position_hint
+					? suffixProgress
+					: savedBackfill
 				: backfill.backfill;
 			return {
 				items: [...merged.values()],
@@ -7159,7 +7865,34 @@ async function walkConversationsAndMessages(
 				backfill: nextBackfill,
 				backfillItems: backfill.backfillItems ?? backfill.items,
 			};
-		})();
+		})().then((search): ConversationListResult => {
+			if (primaryList === null) {
+				return search;
+			}
+			const since =
+				deps.requested.get("conversations")?.time_range?.since ??
+				deps.requested.get("messages")?.time_range?.since;
+			const primaryItems = primaryList.items.filter((item) => {
+				const time = item.update_time ? tsToIso(item.update_time) : null;
+				if (since && (time === null || isOutsideTimeRange({ since }, time))) {
+					return false;
+				}
+				return primaryCatchup || conversationIsAfterCursor(item, cursor);
+			});
+			const merged = new Map(primaryItems.map((item) => [item.id, item]));
+			for (const item of search.items) {
+				merged.set(item.id, item);
+			}
+			return {
+				...search,
+				items: [...merged.values()],
+				truncated: search.truncated || primaryList.truncated,
+				backfillItems: [
+					...(search.backfillItems ?? []),
+					...(primaryCatchup ? primaryItems : []),
+				],
+			};
+		});
 		listedByCursor.set(key, listed);
 		return listed;
 	};
@@ -7183,8 +7916,41 @@ async function walkConversationsAndMessages(
 		// Forward walk suppressed; persist the learned interval so warm-start
 		// survives, then return — deferred work stays durable DETAIL_GAPs for the
 		// next run. (See shouldSuppressForwardWalkAfterRecovery for the two cases.)
-		persistChatGptPacingStateOnly(deps, priorMessagesCursor, savedBackfill);
+		let notFoundTable: NotFoundTable | null = null;
+		if (detailNotFound) {
+			const settlement = finishDetailNotFound(detailNotFound);
+			if (settlement.missing.length > 0) {
+				await deps.emit(makeOwedOnlyCoverage(settlement.missing));
+			}
+			if (detailNotFound.prior.size > 0 || settlement.table.length > 0) {
+				notFoundTable = settlement.table;
+			}
+		}
+		persistChatGptPacingStateOnly(
+			deps,
+			priorMessagesCursor,
+			savedBackfill,
+			notFoundTable,
+		);
 		return;
+	}
+	// Finish search's saved suffix before restarting primary, so primary
+	// cannot consume the request budget and repeatedly starve search.
+	// A skipped primary pass leaves its interval unread: hold the existing
+	// watermark until a real primary pass covers it.
+	primaryList =
+		savedBackfill !== null && !primaryCatchup
+			? { items: [], truncated: true, backfill: null }
+			: await listPrimaryConversations(deps, primaryBackfill);
+	// Existing search-only completed ranges do not establish primary history.
+	// Reopen that range once, then persist ordinary exact-key/detail progress on
+	// every checkpoint. Budgeted runs continue from independent source anchors.
+	if (migrateConversations && primaryList.items.length > 0) {
+		priorDetailProgress = {
+			...priorDetailProgress,
+			frontier: priorDetailProgress.watermark,
+		};
+		priorConversationsCursor = detailListCursor(priorDetailProgress, floorMs);
 	}
 
 	const {
@@ -7193,11 +7959,15 @@ async function walkConversationsAndMessages(
 		backfill,
 		conversationsListTruncated,
 		messagesListTruncated,
+		conversationsBackfillIds,
 	} = await selectConversationListsForRequestedStreams({
 		wantsConversations,
 		wantsMessages,
 		priorConversationsCursor,
-		priorMessagesCursor,
+		priorMessagesCursor:
+			migrateMessages && primaryList.items.length > 0
+				? null
+				: priorMessagesCursor,
 		listForCursor,
 	});
 	if (wantsConversations) {
@@ -7211,6 +7981,7 @@ async function walkConversationsAndMessages(
 		deps.emit(foundProgressMsg);
 	}
 
+	let messageDetailDeferred = false;
 	if (wantsMessages) {
 		const foundMessageDetailProgressMsg = {
 			type: "PROGRESS",
@@ -7226,42 +7997,292 @@ async function walkConversationsAndMessages(
 			emitConversation,
 			options.detailPacing,
 		);
+		const notFound = detailNotFound
+			? await readOwedNotFoundConversations(runDeps, detailNotFound, {
+					coverage,
+					forward: messageDetailConversations,
+					emitConversation,
+					pacing: options.detailPacing,
+				})
+			: null;
+		messageDetailDeferred = coverage.deferred;
 		await emitMessagesCoverageAndState(deps, {
 			messageDetailConversations,
 			coverage,
 			messagesListTruncated,
 			backfill,
 			priorMessagesCursor,
+			extraRequiredKeys: notFound?.extraRequiredKeys ?? [],
+			notFoundTable: notFound?.table ?? null,
 		});
 	}
 
 	if (wantsConversations) {
-		const detailedIds = new Set(messageDetailConversations.map((c) => c.id));
-		// Emit list-only parents for conversation rows not already repaired by
-		// message-detail fetches in this run. These rows were genuinely listed
-		// before any truncation, so emitting them is still lose-nothing even on a
-		// truncated pass — only the coverage CLAIM and cursor advance below are
-		// withheld.
-		for (const c of conversationsToSync) {
-			if (detailedIds.has(c.id)) {
-				continue;
-			}
-			await emitConversation(c, null);
-		}
+		// Rows the message-detail pass already took are done: it read their detail,
+		// or left a durable `messages` DETAIL_GAP that recovery fills in.
+		const takenByMessages = new Set(
+			messageDetailConversations.map((c) => c.id),
+		);
+		const stateInput = {
+			rows: conversationsToSync,
+			backfill,
+			conversationsListTruncated,
+			floorMs,
+			prior: priorDetailProgress,
+		};
+		// Fresh conversations first, then retries, then a bounded slice of history,
+		// newest first. A row already read is neither fetched nor emitted again, so
+		// a retry cannot overwrite its counts with null.
+		const plan = planDetailReads(conversationsToSync, priorDetailProgress, {
+			floorMs,
+			backfillLimit:
+				options.detailBackfillLimit ?? CONVERSATION_BACKFILL_PER_RUN,
+			taken: takenByMessages,
+			newToStream: conversationsBackfillIds,
+		});
+		// The rows get their detail here, so `conversations` carries the branch
+		// message count and model counts even when `messages` is not requested.
+		// A fresh row whose detail could not be fetched is still emitted list-only
+		// (null counts) and a later run reads it again. A history row already has a
+		// record from an earlier run, so it is emitted only when it is read.
+		const outcome = await emitConversationsWithDetail(
+			runDeps,
+			plan,
+			emitConversation,
+			options.detailPacing ?? {},
+			{
+				// A messages pass that deferred shared an account under pressure or a
+				// spent run budget; do not send a second pass into it.
+				fetchDetail: !messageDetailDeferred,
+				checkpoint: (read, failed) =>
+					emitConversationsState(deps, {
+						...stateInput,
+						settled: new Set([...takenByMessages, ...read]),
+						failed,
+					}),
+			},
+		);
+		const { progress, settled } = emitConversationsState(deps, {
+			...stateInput,
+			settled: new Set([...takenByMessages, ...outcome.settled]),
+			failed: outcome.failed,
+		});
 		// A truncated list proved it did not see everything newer than
 		// priorConversationsCursor, so `conversationsToSync.length` is a prefix,
 		// not the true boundary — claiming it as `considered === covered` would
 		// fabricate completion the same way the malformed-200 defect did upstream.
+		// Rows still owed a detail read are considered but not covered.
 		if (!conversationsListTruncated) {
-			await deps.emit(makeConversationListCoverage(conversationsToSync.length));
+			await deps.emit(
+				makeConversationListCoverage(
+					conversationsToSync.length,
+					countRowsRead(conversationsToSync, progress, settled),
+				),
+			);
 		}
-		emitConversationsState(deps, {
-			conversationsToSync,
-			backfill,
-			conversationsListTruncated,
-			priorConversationsCursor,
-		});
 	}
+}
+
+/**
+ * After the forward walk, read the conversations the cursor still owes after a
+ * 404, close the run's obligations, and fold every owed key into its coverage
+ * as skipped. Returns the keys to add to the required set and the table for the
+ * cursor.
+ */
+async function readOwedNotFoundConversations(
+	runDeps: StreamDeps,
+	tracker: DetailNotFoundTracker,
+	{
+		coverage,
+		forward,
+		emitConversation,
+		pacing,
+	}: {
+		coverage: ConversationDetailCoverage;
+		forward: readonly ConversationListItem[];
+		emitConversation: (
+			c: ConversationListItem,
+			detail: ConversationDetail | null,
+		) => Promise<void>;
+		pacing: ConversationDetailPacingOptions | undefined;
+	},
+): Promise<{ extraRequiredKeys: string[]; table: NotFoundTable }> {
+	const forwardIds = new Set(forward.map((c) => c.id));
+	const extraRequiredKeys: string[] = [];
+	// A deferred forward pass met source pressure or a spent budget: do not
+	// send more requests into it. The obligations wait, unchanged.
+	const owed =
+		coverage.deferred || runDeps.runBudget?.shouldStop() === true
+			? []
+			: tracker.owed(forwardIds);
+	if (owed.length > 0) {
+		const owedCoverage = await runMessagesAndConversationsWithDetail(
+			runDeps,
+			owed,
+			// The cursor keeps only the id. A clean read emits the record from its
+			// detail; a failed one emits nothing (the first 404 already emitted the
+			// list-only record).
+			(c, detail) =>
+				detail === null ? Promise.resolve() : emitConversation(c, detail),
+			pacing,
+		);
+		coverage.hydratedKeys.push(...owedCoverage.hydratedKeys);
+		coverage.gapKeys.push(...owedCoverage.gapKeys);
+		coverage.sourceUnrepresentableKeys.push(
+			...owedCoverage.sourceUnrepresentableKeys,
+		);
+		coverage.notFoundKeys.push(...owedCoverage.notFoundKeys);
+		coverage.deferred ||= owedCoverage.deferred;
+		extraRequiredKeys.push(...owed.map((c) => c.id));
+	}
+	const settlement = finishDetailNotFound(tracker);
+	extraRequiredKeys.push(
+		...addMissingNotFoundKeys(
+			coverage,
+			settlement.missing,
+			new Set([...forwardIds, ...extraRequiredKeys]),
+		),
+	);
+	return { extraRequiredKeys, table: settlement.table };
+}
+
+/**
+ * A detail response that says only "this conversation cannot be read": a
+ * non-retryable 4xx. Auth failures (401/403) and pressure (408/429) speak for
+ * the whole account, so they never count. The live client already throws on
+ * 401/403 and on an exhausted retry budget; this guards a client that returns
+ * those statuses instead.
+ */
+function isPerConversationDetailFailure(status: number): boolean {
+	return (
+		status >= 400 &&
+		status < 500 &&
+		status !== 401 &&
+		status !== 403 &&
+		status !== 408 &&
+		status !== 429
+	);
+}
+
+/**
+ * The one answer that proves a conversation is gone: 404 or 410. Its counts stay
+ * null for good. Every other failure to read a detail is retried by a later run.
+ */
+function isDeletedConversationStatus(status: number): boolean {
+	return status === 404 || status === 410;
+}
+
+/**
+ * `deps` for a detail pass that serves only the `conversations` stream. The pass
+ * rides the same lane, pacing, circuit and run budget as the messages path, but
+ * `messages` is not requested here: a `DETAIL_GAP` would name an unrequested
+ * stream, and the lane's progress would be filed under it. Progress moves to
+ * `conversations` and gaps are dropped. What a later run still owes is carried
+ * by the `conversations` cursor instead (see `emitConversationsState`).
+ */
+function conversationDetailOnlyDeps(
+	deps: StreamDeps,
+	reportConversationDetail: NonNullable<StreamDeps["reportConversationDetail"]>,
+): StreamDeps {
+	return {
+		...deps,
+		conversationDetailOnly: true,
+		reportConversationDetail,
+		emit: (message) => {
+			if (message.type === "DETAIL_GAP") return Promise.resolve();
+			if (message.type === "PROGRESS" && message.stream === "messages") {
+				return deps.emit({ ...message, stream: "conversations" });
+			}
+			return deps.emit(message);
+		},
+		progress: (message, extra) =>
+			deps.progress(
+				message,
+				extra?.stream === "messages"
+					? { ...extra, stream: "conversations" }
+					: extra,
+			),
+	};
+}
+
+/** Settled rows between two checkpoints of the `conversations` cursor. */
+const CONVERSATION_CHECKPOINT_EVERY = 25;
+
+/**
+ * Fetch each conversation's detail once and emit the merged `conversations`
+ * record, without emitting messages. A detail that arrives (200) fills the
+ * record. A conversation that is gone (404/410) stays list-only for good. Any
+ * other per-conversation failure (a different 4xx, a 200 with no mapping) also
+ * leaves the row list-only but is reported as failed, and a deferral for
+ * pressure, a circuit or the run budget leaves the rest unreached. Failures that
+ * speak for the whole account (401/403, an exhausted retry budget) still throw.
+ *
+ * `plan.toRead` is read in order. What the pass finished is kept by the caller
+ * (see `conversation-detail-progress.ts`), so a pass that dies or defers keeps
+ * it and the next run asks only for the rest. A row in `plan.listOnly` that was
+ * not read is emitted without detail.
+ */
+async function emitConversationsWithDetail(
+	deps: StreamDeps,
+	plan: { toRead: ConversationListItem[]; listOnly: ConversationListItem[] },
+	emitConversation: (
+		c: ConversationListItem,
+		detail: ConversationDetail | null,
+	) => Promise<void>,
+	pacing: ConversationDetailPacingOptions,
+	{
+		fetchDetail,
+		checkpoint,
+	}: {
+		fetchDetail: boolean;
+		checkpoint: (
+			settled: ReadonlySet<string>,
+			failed: ReadonlySet<string>,
+		) => void;
+	},
+): Promise<{ settled: Set<string>; failed: Set<string> }> {
+	const settled = new Set<string>();
+	const failed = new Set<string>();
+	const listOnly = new Set(plan.listOnly.map((c) => c.id));
+	const emitted = new Set<string>();
+	// A row with no detail is emitted only if it is new to the stream.
+	const emitOnce = async (
+		c: ConversationListItem,
+		detail: ConversationDetail | null,
+	): Promise<void> => {
+		if (detail === null && !listOnly.has(c.id)) return;
+		emitted.add(c.id);
+		await emitConversation(c, detail);
+	};
+	if (fetchDetail && plan.toRead.length > 0) {
+		let settledAtCheckpoint = 0;
+		await runMessagesAndConversationsWithDetail(
+			conversationDetailOnlyDeps(deps, (c, outcome) => {
+				if (outcome === "retry") {
+					failed.add(c.id);
+					return Promise.resolve();
+				}
+				settled.add(c.id);
+				if (
+					settled.size - settledAtCheckpoint >=
+					CONVERSATION_CHECKPOINT_EVERY
+				) {
+					settledAtCheckpoint = settled.size;
+					checkpoint(settled, failed);
+				}
+				return Promise.resolve();
+			}),
+			plan.toRead,
+			emitOnce,
+			pacing,
+		);
+	}
+	for (const c of plan.listOnly) {
+		if (!emitted.has(c.id)) {
+			await emitOnce(c, null);
+		}
+	}
+	return { settled, failed };
 }
 
 /**
@@ -7277,12 +8298,18 @@ async function emitMessagesCoverageAndState(
 		messagesListTruncated,
 		backfill,
 		priorMessagesCursor,
+		extraRequiredKeys,
+		notFoundTable,
 	}: {
 		messageDetailConversations: ConversationListItem[];
 		coverage: ConversationDetailCoverage;
 		messagesListTruncated: boolean;
 		backfill: ConversationBackfill | null;
 		priorMessagesCursor: string | null;
+		// Keys read outside the forward walk this run (owed 404s, recovery 404s).
+		extraRequiredKeys: readonly string[];
+		// The messages cursor's 404 obligations after this run.
+		notFoundTable: NotFoundTable | null;
 	},
 ): Promise<void> {
 	if (!messagesListTruncated) {
@@ -7301,10 +8328,15 @@ async function emitMessagesCoverageAndState(
 					...coverage.gapKeys,
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					...coverage.sourceUnrepresentableKeys,
+					...coverage.notFoundKeys,
 					coverage.backlogGapKey,
 				]
-			: messageDetailConversations.map((c) => c.id);
+			: [...messageDetailConversations.map((c) => c.id), ...extraRequiredKeys];
 		await deps.emit(makeConversationDetailCoverage(requiredKeys, coverage));
+	} else if (notFoundTable && notFoundTable.length > 0) {
+		// A truncated walk saw a prefix, so it claims no forward coverage, but
+		// the owed conversations are still reported missing.
+		await deps.emit(makeOwedOnlyCoverage(notFoundTable));
 	}
 	const maxMessagesUpdate = messagesListTruncated
 		? oldestAvailableConversationCursor(
@@ -7325,45 +8357,65 @@ async function emitMessagesCoverageAndState(
 		cursor: {
 			last_update_time: maxMessagesUpdate,
 			...(backfill === null ? {} : { backfill }),
+			...notFoundCursorFields(notFoundTable),
 			...buildChatGptPacingStateFields(deps.providerBudget),
 		},
 	});
 }
 
 /**
- * Emit the safe update-time watermark and the remaining list continuation.
+ * Emit the `conversations` cursor: the watermark, the history frontier, the
+ * exact ids done at the boundaries, the retry table and the list continuation
+ * (see `conversation-detail-progress.ts`). `settled` is every listed row whose
+ * detail needs no further read this run; `failed` the rows asked for and not
+ * read. Also called mid-pass as a checkpoint, so a run that dies keeps what it
+ * finished. Returns the progress it stored and the rows now settled, including
+ * those left list-only after the retry limit.
  */
 function emitConversationsState(
 	deps: StreamDeps,
 	{
-		conversationsToSync,
+		rows,
+		settled,
+		failed,
+		prior,
 		backfill,
 		conversationsListTruncated,
-		priorConversationsCursor,
+		floorMs,
 	}: {
-		conversationsToSync: ConversationListItem[];
+		rows: ConversationListItem[];
+		settled: ReadonlySet<string>;
+		failed: ReadonlySet<string>;
+		prior: DetailProgress;
 		backfill: ConversationBackfill | null;
 		conversationsListTruncated: boolean;
-		priorConversationsCursor: string | null;
+		floorMs: number | null;
 	},
-): void {
-	const maxUpdate = conversationsListTruncated
-		? oldestAvailableConversationCursor(
-				minUpdateTimeIso(conversationsToSync),
-				priorConversationsCursor,
-			)
-		: newestConversationCursor(
-				maxUpdateTimeIso(conversationsToSync),
-				priorConversationsCursor,
-			);
+): { progress: DetailProgress; settled: Set<string> } {
+	const { progress, released } = advanceDetailProgress({
+		prior,
+		rows,
+		settled,
+		failed,
+		// A list that is truncated, or still has older pages to drain, proved
+		// nothing about the rows between the ones it saw.
+		listComplete: !conversationsListTruncated && backfill === null,
+		floorMs,
+	});
+	if (released.size > 0) {
+		chatGptDiagnostic(
+			"conversation_detail_unavailable: a conversation detail could not be read in several runs; its counts stay null",
+		);
+	}
 	deps.emit({
 		type: "STATE",
 		stream: "conversations",
 		cursor: {
-			last_update_time: maxUpdate,
+			...encodeDetailProgress(progress),
 			...(backfill === null ? {} : { backfill }),
 		},
 	});
+	return { progress, settled: new Set([...settled, ...released]) };
 }
 
 /**
@@ -7405,6 +8457,15 @@ export async function collectChatGpt(
 		capture,
 	} = ctx;
 	const { page } = ctx as BrowserCollectContext;
+	const messageResources = requested.get("messages")?.resources;
+	if (
+		Array.isArray(messageResources) &&
+		messageResources.some((resource) => !String(resource).includes(":"))
+	) {
+		throw new Error(
+			"Unsupported unscoped ChatGPT message resource selector; message resources must use conversation_id:node_id",
+		);
+	}
 
 	// Run-scoped accumulator for served 429s seen outside the detail lane
 	// (list pagination + the non-detail streams). createChatGptApi bumps it
@@ -7434,9 +8495,8 @@ export async function collectChatGpt(
 		page,
 		capture,
 		emit,
-		onUnlanedRateLimited: () => {
-			preDetailPressure.rateLimited += 1;
-		},
+		onUnlanedRateLimited: (retryAfterWaitMs) =>
+			recordChatGptUnlanedRateLimit(preDetailPressure, retryAfterWaitMs),
 		providerBudget,
 	});
 	const emitRecord = makeEmitRecord(baseEmitRecord);
@@ -7493,7 +8553,26 @@ export async function collectChatGpt(
 	if (requested.has("conversations") || requested.has("messages")) {
 		await runConversationsAndMessagesStreams(deps, state);
 	}
+	if (requested.has("account_profile") || requested.has("usage_summary")) {
+		await runUsageStreams(deps, state, chatGptUsageHooks);
+	}
 }
+
+/** Wires the usage streams (usage-stream.ts) to this file's error classes. */
+export const chatGptUsageHooks: UsageStreamHooks = {
+	classifyError: (err) => {
+		if (
+			err instanceof ChatGptPlannedProviderBudgetDeferredError ||
+			err instanceof ChatGptRecoverableRetryExhaustedError
+		)
+			return "deferred";
+		const message = err instanceof Error ? err.message : "";
+		if (/^apiFetch got 401 /.test(message)) return "auth";
+		if (/^apiFetch got 403 /.test(message)) return "forbidden";
+		return "other";
+	},
+	accountsCheckPath: ACCOUNTS_CHECK_PATH,
+};
 
 // ─── Entry ─────────────────────────────────────────────────────────────
 
@@ -7524,11 +8603,7 @@ if (isMainModule(import.meta.url)) {
 		// unaffected: it arrives via the child env and never prompts at all.
 		authOptional: true,
 		normalizeTerminalError: normalizeChatGptTerminalError,
-		// Page-preservation flags come from the shared browser-surface policy so the
-		// page-level (child) and process-level (reference lease caller) retention
-		// facts stay a single source of truth. `profileName` stays connector-local.
 		browser: {
-			...browserConfigPreservationFor("chatgpt"),
 			profileName: "chatgpt",
 		},
 		async ensureSession({

@@ -15,10 +15,8 @@
  * it opened are closed, and a recording run leaves a usable HAR and storage
  * state behind.
  *
- * A connector that declares page preservation (ChatGPT keeps its session in
- * the live page) is the one exception to "never reuse a tab": consecutive runs
- * share one preserved run page instead of piling up new ones, and the owner's
- * tabs stay untouched.
+ * Consecutive runs create fresh pages instead of reusing existing tabs.
+ * Page-local counters reset while owner tabs and recorded downloads survive.
  */
 
 import assert from "node:assert/strict";
@@ -169,7 +167,7 @@ test("connector runs attached to an external browser close only their own pages"
 				"set-cookie": "fixture_session=run-cookie; Path=/",
 			})
 			.end(
-				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'/provider\', \'provider\')">Sign in</button></body></html>',
+				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'about:blank\', \'provider\')">Sign in</button></body></html>',
 			);
 	});
 	await new Promise<void>((resolve) => {
@@ -252,6 +250,8 @@ test("connector runs attached to an external browser close only their own pages"
 		);
 
 		if (run.record) {
+			// Attached CDP HAR can miss a popup's first navigation; see README.md's "Attached CDP HAR recording" section (#523).
+			// Direct window.open(providerUrl) under attached-CDP HAR recording is not covered here; #523 owns its regression test.
 			const har = JSON.parse(await readFile(harPath, "utf8")) as {
 				log: { entries: { request: { url: string } }[] };
 			};
@@ -298,8 +298,8 @@ test("connector runs attached to an external browser close only their own pages"
 	}
 });
 
-test("a preserve-page connector attached to an external browser reuses its one run page", async (t) => {
-	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-preserve-"));
+test("consecutive runs in an external browser use fresh pages and leave owner tabs untouched", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-fresh-"));
 	const site = createHttpServer((req, res) => {
 		const path = new URL(req.url ?? "/", "http://localhost").pathname;
 		if (path === "/provider") {
@@ -311,7 +311,7 @@ test("a preserve-page connector attached to an external browser reuses its one r
 		res
 			.writeHead(200, { "content-type": "text/html" })
 			.end(
-				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'/provider\', \'provider\')">Sign in</button></body></html>',
+				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'about:blank\', \'provider\')">Sign in</button></body></html>',
 			);
 	});
 	await new Promise<void>((resolve) => {
@@ -344,7 +344,7 @@ test("a preserve-page connector attached to an external browser reuses its one r
 	const env = {
 		[REMOTE_CDP_ENV]: `http://127.0.0.1:${String(cdpPort)}`,
 		PDPP_OWNERSHIP_FIXTURE_BASE_URL: baseUrl,
-		PDPP_OWNERSHIP_FIXTURE_PRESERVE_PAGE: "1",
+		PDPP_OWNERSHIP_FIXTURE_COUNT_RUNS: "1",
 	};
 
 	const first = await runFixture(env);
@@ -354,14 +354,14 @@ test("a preserve-page connector attached to an external browser reuses its one r
 
 	assert.deepEqual(
 		[first.recordKeys, second.recordKeys],
-		[["1"], ["2"]],
-		"the second run served the page the first run preserved",
+		[["1"], ["1"]],
+		"each run has its own page-local state",
 	);
 	const urls = pageUrls(browserContext);
 	assert.deepEqual(
 		urls.filter((url) => url.startsWith(baseUrl)),
-		[`${baseUrl}/run`],
-		`exactly one run page remains and the provider popups are closed (open: ${urls.join(", ")})`,
+		[],
+		`both run pages and provider popups are closed (open: ${urls.join(", ")})`,
 	);
 	assert.deepEqual(
 		ownerTabs.map((page) => [page.isClosed(), page.url()]),
@@ -373,8 +373,8 @@ test("a preserve-page connector attached to an external browser reuses its one r
 	);
 });
 
-test("a download on a reused preserve-page run page is recorded into the HAR, and the page stays open", async (t) => {
-	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-preserve-download-"));
+test("a download on a fresh run page is recorded into the HAR before recording release", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-fresh-download-"));
 	const site = createHttpServer((req, res) => {
 		const path = new URL(req.url ?? "/", "http://localhost").pathname;
 		if (path === "/export.zip") {
@@ -383,7 +383,7 @@ test("a download on a reused preserve-page run page is recorded into the HAR, an
 					"content-type": "application/zip",
 					"content-disposition": "attachment; filename=export.zip",
 				})
-				.end("reused-page-export");
+				.end("fresh-page-export");
 			return;
 		}
 		if (path === "/provider") {
@@ -393,7 +393,7 @@ test("a download on a reused preserve-page run page is recorded into the HAR, an
 		res
 			.writeHead(200, { "content-type": "text/html" })
 			.end(
-				"<html><body><button id=\"provider\" onclick=\"window.open('/provider', 'provider')\">Sign in</button></body></html>",
+				"<html><body><button id=\"provider\" onclick=\"window.open('about:blank', 'provider')\">Sign in</button></body></html>",
 			);
 	});
 	await new Promise<void>((resolve) => {
@@ -417,12 +417,12 @@ test("a download on a reused preserve-page run page is recorded into the HAR, an
 	const env = {
 		[REMOTE_CDP_ENV]: `http://127.0.0.1:${String(cdpPort)}`,
 		PDPP_OWNERSHIP_FIXTURE_BASE_URL: baseUrl,
-		PDPP_OWNERSHIP_FIXTURE_PRESERVE_PAGE: "1",
+		PDPP_OWNERSHIP_FIXTURE_COUNT_RUNS: "1",
 	};
-	// Run 1 opens and preserves the run page.
+	// Run 1 creates and closes its own page.
 	const first = await runFixture(env);
 	assert.equal(first.done?.status, "succeeded", first.output);
-	// Run 2 reuses it, records, and downloads on it.
+	// Run 2 creates a fresh page, records, and downloads on it.
 	const harPath = join(dir, "run2.har");
 	const second = await runFixture({
 		...env,
@@ -431,7 +431,11 @@ test("a download on a reused preserve-page run page is recorded into the HAR, an
 		PDPP_SCENARIO_STORAGE_STATE_RECORD_PATH: join(dir, "run2.storage.json"),
 	});
 	assert.equal(second.done?.status, "succeeded", second.output);
-	assert.deepEqual(second.recordKeys, ["2"], "run 2 reused the preserved page");
+	assert.deepEqual(
+		second.recordKeys,
+		["1"],
+		"the recording run has fresh page-local state",
+	);
 
 	const har = JSON.parse(await readFile(harPath, "utf8")) as {
 		log: {
@@ -449,12 +453,12 @@ test("a download on a reused preserve-page run page is recorded into the HAR, an
 			entry.response.content.text
 			? Buffer.from(entry.response.content.text, "base64").toString("utf8")
 			: undefined,
-		"reused-page-export",
-		"the download on the reused run page is the run's",
+		"fresh-page-export",
+		"the download on the fresh run page is the run's",
 	);
 	assert.equal(
 		pageUrls(browserContext).filter((url) => url.startsWith(baseUrl)).length,
-		1,
-		"the reused run page is still open after the recording run",
+		0,
+		"the recording run closes its owned page after recording release",
 	);
 });

@@ -110,6 +110,10 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 		credentialKind: "personal_access_token",
 		secretEnvVars: ["OURA_PERSONAL_ACCESS_TOKEN"],
 	},
+	readwise: {
+		credentialKind: "personal_access_token",
+		secretEnvVars: ["READWISE_ACCESS_TOKEN"],
+	},
 	reddit: {
 		credentialKind: "username_password",
 		secretFieldEnvVars: {
@@ -145,10 +149,6 @@ export const GENERATED_STATIC_SECRET_REGISTRY: Readonly<
 			password: ["VENMO_PASSWORD"],
 			username: ["VENMO_USERNAME"],
 		},
-	},
-	wholefoods: {
-		credentialKind: "api_key",
-		secretEnvVars: ["USDA_API_KEY"],
 	},
 	ynab: {
 		credentialKind: "personal_access_token",

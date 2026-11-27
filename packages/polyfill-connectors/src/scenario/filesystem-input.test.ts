@@ -33,6 +33,7 @@ import {
 	requiredFilesystemBinds,
 	spawnWithNetworkIsolation,
 } from "./isolation.ts";
+import { namespaceSkip } from "./namespace-skip.ts";
 
 const STRAVA_LIKE = {
 	envVar: "STRAVA_EXPORT_DIR",
@@ -253,7 +254,9 @@ test("bwrap argv binds the extra path with --ro-bind, never --bind", () => {
 const isolation = isNamespaceIsolationAvailable();
 
 test("[bwrap] an isolated child can READ the extra path but cannot WRITE to it", {
-	skip: !(isolation.available && isolation.mechanism === "bwrap"),
+	skip: namespaceSkip(
+		!(isolation.available && isolation.mechanism === "bwrap"),
+	),
 }, async () => {
 	// Directories created and removed by hand: the child runs asynchronously,
 	// so the synchronous withDir() helper would delete them before it starts.

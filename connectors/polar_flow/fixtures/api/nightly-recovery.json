@@ -1,0 +1,27 @@
+[
+	{
+		"date": "2026-11-03",
+		"recoveryIndicator": 4,
+		"ansStatus": 2.7,
+		"ansRate": 3,
+		"rri": 1034.6,
+		"rri28dayAverage": 1012.1,
+		"rmssd": 48.2,
+		"rmssd28dayAverage": 44.9,
+		"respirationInterval": 3820.5,
+		"respirationInterval28dayAverage": 3755.0,
+		"sleepScore": 78.4213
+	},
+	{
+		"date": "2026-11-04",
+		"recoveryIndicator": 2,
+		"ansStatus": -6.1,
+		"ansRate": 0,
+		"rri": 951.3,
+		"rri28dayAverage": 1010.4,
+		"rmssd": 31.7,
+		"rmssd28dayAverage": 44.6,
+		"respirationInterval": 3612.0,
+		"respirationInterval28dayAverage": 3751.2
+	}
+]

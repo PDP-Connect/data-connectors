@@ -13,6 +13,7 @@ export interface TweetEntities {
 export interface TweetShape {
 	created_at?: string;
 	entities?: TweetEntities;
+	extended_entities?: TweetEntities;
 	favorite_count?: string | number;
 	full_text?: string | null;
 	id?: string;

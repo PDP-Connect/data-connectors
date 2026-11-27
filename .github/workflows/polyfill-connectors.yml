@@ -16,9 +16,16 @@ on:
     branches: [main]
     paths:
       - "packages/polyfill-connectors/**"
+      - "package.json"
+      - "scripts/groupme-mutation/**"
+      - ".github/scripts/groupme-mutation-admission.mjs"
       - "connectors/**"
+      - "scripts/test-sandbox/**"
       - ".github/workflows/polyfill-connectors.yml"
-  pull_request: {}
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
+  pull_request:
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:
@@ -36,6 +43,12 @@ jobs:
       contents: read
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
+      harness: ${{ steps.filter.outputs.harness }}
+      groupme: ${{ steps.filter.outputs.groupme }}
+      mutation_required: ${{ steps.filter.outputs.mutation_required }}
+      base_sha: ${{ steps.filter.outputs.base_sha }}
+      head_sha: ${{ steps.filter.outputs.head_sha }}
+      merge_base_sha: ${{ steps.filter.outputs.merge_base_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,26 +58,14 @@ jobs:
       - name: Determine whether relevant paths changed
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ -n "$BASE_SHA" ]; then
-            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-            CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")"
-          else
-            CHANGED="$(git diff --name-only HEAD~1 HEAD)"
-          fi
-
-          echo "$CHANGED"
-
-          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-          fi
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/scripts/groupme-mutation-admission.mjs
 
   verify:
-    name: verify + test
+    name: verify
     needs: changes
     if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -77,38 +78,32 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Node 24: this package's node:test usage (--test-concurrency,
           # --test-timeout) and node:fs/promises glob() need it; the rest of
           # this repo's workflows run Node 20 for unrelated npm-only scripts.
           node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/polyfill-connectors/test-tools/package-lock.json
 
       - name: Install workspace dependencies
         # Root connector files resolve dependencies from the root workspace.
-        # --ignore-scripts skips patchright's
-        # postinstall browser download; the browser the tests DO need is
-        # installed explicitly in the next step, so the skip stays deliberate
-        # rather than accidental.
+        # --ignore-scripts skips patchright's postinstall browser download.
+        # Test shards install the Chromium browser they need explicitly.
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts
 
-      - name: Install Chromium for the capture-redaction proofs
-        # `src/capture-trace-redaction.test.ts` launches a real browser: the
-        # thing under test is what Playwright WRITES to disk (trace zips,
-        # screenshots, DOM snapshots), so a stub cannot prove the redaction.
-        # `--with-deps` because the runner image carries no shared libs for it.
-        # The root workspace install provides `playwright` to the package.
-        #
-        # Ported from PDP-Connect/pdpp's own polyfill-connectors workflow,
-        # which already installs exactly this for exactly this suite. Move A
-        # brought that suite into this repo but not the browser step, so the
-        # install comment above ("verify + test don't launch a browser") became
-        # false and six tests failed on a missing chrome-headless-shell.
-        working-directory: packages/polyfill-connectors
-        run: npx playwright install --with-deps chromium
+      - name: Install isolated Vitest test tools
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+
+      - name: Test GroupMe mutation helpers
+        # Root helper tests fall outside the package's scripts/**/*.test.mjs glob.
+        run: node --test scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs scripts/groupme-mutation/changes.test.mjs scripts/groupme-mutation/evidence.test.mjs scripts/groupme-mutation/admission.test.mjs
 
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
@@ -118,13 +113,6 @@ jobs:
         # This scan targets connectors/ at the repository root, outside the
         # package-local verification scope.
         run: npm run connector-stdout-console:check
-
-      - name: Test
-        working-directory: packages/polyfill-connectors
-        # Excludes the @pdpp/reference-contract-dependent suites; see
-        # scripts/run-tests.mjs and tsconfig.json for the file list and the
-        # reinstatement note (that package isn't part of Move A's scope).
-        run: npm run test
 
       - name: Pack, install, and run (proves a real npm install of the published tarball works)
         # This step's own dependency install above used --ignore-scripts, so
@@ -137,6 +125,156 @@ jobs:
         # any of that consumer's own code ran — see scripts/pack-install-run.mjs.
         working-directory: packages/polyfill-connectors
         run: npm run pack-install-run
+
+  test:
+    name: Test shard ${{ matrix.shard }}
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/polyfill-connectors/test-tools/package-lock.json
+
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Install isolated Vitest test tools
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+
+      - name: Install Chromium for the capture-redaction proofs
+        working-directory: packages/polyfill-connectors
+        run: npx playwright install --with-deps chromium
+
+      - name: Allow unprivileged user namespaces for the isolation tests
+        run: |
+          key=kernel.apparmor_restrict_unprivileged_userns
+          if sysctl -n "$key" >/dev/null 2>&1; then
+            sudo sysctl -w "$key=0"
+          else
+            echo "$key is not present on this runner; nothing to lift"
+          fi
+          command -v bwrap >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q bubblewrap; }
+          if unshare --user --map-root-user --net true; then
+            echo "unprivileged user and network namespaces: available"
+          else
+            echo "::error::unprivileged namespaces are unavailable; the scenario-isolation tests would skip"
+            exit 1
+          fi
+
+      - name: Test assigned file shard
+        working-directory: packages/polyfill-connectors
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/6
+        # Excludes the @pdpp/reference-contract-dependent suites; see
+        # scripts/run-tests.mjs and tsconfig.json for the file list and the
+        # reinstatement note (that package isn't part of Move A's scope).
+        run: npm test
+
+  macos-browser:
+    name: macOS browser safety
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true' || github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+      - name: Install current stable Chrome
+        run: node node_modules/patchright/cli.js install --force chrome
+      - name: Exercise sandboxed Chrome and missing-browser admission
+        run: |
+          node -e 'require("node:assert/strict").equal(process.platform, "darwin")'
+          scripts/test-sandbox/test-sandbox --net host -- node --import tsx --test --test-name-pattern='macOS local connector browser|macOS missing Chrome|local launch diagnostic|checkChromiumRevision|macOS dependency installation' packages/polyfill-connectors/src/browser-launch.test.ts packages/polyfill-connectors/bin/connector-doctor.test.ts packages/polyfill-connectors/scripts/install-patchright-browser.test.mjs
+
+  groupme-mutation:
+    # INITIAL EVIDENCE, NOT REQUIRED. Visible as its own check and red when the canary or
+    # the reconciled population fails; the gate below records it as optional. Promotion to
+    # required is a root decision after hosted CI reproduces the local evidence.
+    name: GroupMe mutation evidence
+    needs: [changes, verify]
+    if: always() && needs.changes.outputs.mutation_required == 'true' && (needs.verify.result == 'success' || needs.verify.result == 'skipped') && (github.event_name == 'pull_request' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Mutated ranges name checked-out lines, so HEAD must be the PR head commit,
+          # not the default merge commit.
+          ref: ${{ needs.changes.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          set -o pipefail
+          npm ci --ignore-scripts 2>&1 | tee "$RUNNER_TEMP/groupme-mutation-install.log"
+
+      - name: Install isolated test tools
+        # The runner refuses to start without the pinned Stryker and Vitest tree.
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
+
+      - name: Run the official GroupMe mutation invocation
+        # One Stryker run: changed production ranges plus the canary, native Vitest only.
+        # The report directory must not exist; the artifact glob below includes it and its log.
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
+          MERGE_BASE: ${{ needs.changes.outputs.merge_base_sha }}
+          REPORT: ${{ runner.temp }}/groupme-mutation-evidence
+        run: |
+          set -o pipefail
+          npm run groupme-mutation -- --mode diff --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT" 2>&1 | tee "$REPORT.log"
+
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: groupme-mutation-${{ github.run_id }}
+          path: ${{ runner.temp }}/groupme-mutation-*
+          if-no-files-found: warn
+          retention-days: 14
+
 
   connector-evidence:
     name: Connector evidence summary
@@ -178,7 +316,7 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.connectors.outputs.list != ''
         with:
           node-version: "24"
@@ -198,6 +336,28 @@ jobs:
           CONNECTOR_EVIDENCE_LABELS_FILE: ${{ runner.temp }}/connector-evidence-labels.txt
         working-directory: packages/polyfill-connectors
         run: node --import tsx scripts/connector-evidence-summary.ts $CHANGED_CONNECTORS
+
+      # The static `conformance` steps for each touched connector, in the job
+      # summary, so a reviewer sees the same gaps the author was shown. It
+      # skips the steps that run connector code. Informational, like the rest
+      # of this job: it never fails the check.
+      - name: Summarize connector readiness (conformance --static)
+        if: steps.connectors.outputs.list != ''
+        env:
+          CHANGED_CONNECTORS: ${{ steps.connectors.outputs.list }}
+          CONFORMANCE_BASE_REF: ${{ github.event.pull_request.base.sha }}
+        working-directory: packages/polyfill-connectors
+        run: |
+          {
+            echo "## Connector readiness"
+            echo "Output of \`npm run conformance -- <key> --static\`. Advisory steps are decisions for the author; see AUTHORING.md."
+            for connector in $CHANGED_CONNECTORS; do
+              [ -f "../../connectors/$connector/manifest.json" ] || continue
+              echo '```text'
+              node --import tsx scripts/conformance.ts "$connector" --static 2>&1 || echo "(conformance exited non-zero for $connector)"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Labels need a WRITE token. On a pull_request from a FORK, GitHub
       # downgrades GITHUB_TOKEN to read-only no matter what this job's
@@ -258,17 +418,30 @@ jobs:
 
   gate:
     name: Polyfill Connectors Gate
-    needs: [changes, verify]
+    needs: [changes, verify, test, macos-browser, groupme-mutation]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
       - name: Evaluate all job results
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          MACOS_BROWSER_RESULT: ${{ needs.macos-browser.result }}
+          MUTATION_RESULT: ${{ needs.groupme-mutation.result }}
+          MUTATION_REQUIRED: ${{ needs.changes.outputs.mutation_required }}
+          MUTATION_ENFORCEMENT: optional
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           echo "changes: $CHANGES_RESULT"
           echo "verify:  $VERIFY_RESULT"
+          echo "tests:   $TEST_RESULT"
+          echo "mutation: $MUTATION_RESULT"
 
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
@@ -283,4 +456,22 @@ jobs:
               ;;
           esac
 
-          echo "Polyfill Connectors Gate: verify succeeded or was correctly skipped as irrelevant."
+          case "$TEST_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::test shards reported '$TEST_RESULT' — expected all shards to succeed or be skipped"
+              exit 1
+              ;;
+          esac
+
+          case "$MACOS_BROWSER_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::macOS browser safety reported '$MACOS_BROWSER_RESULT'"
+              exit 1
+              ;;
+          esac
+
+          node .github/scripts/groupme-mutation-admission.mjs --gate
+
+          echo "Polyfill Connectors Gate: verification and every test shard succeeded or were correctly skipped as irrelevant."

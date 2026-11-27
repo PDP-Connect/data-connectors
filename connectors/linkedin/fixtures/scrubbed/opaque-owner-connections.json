@@ -1,0 +1,56 @@
+{
+	"me": {
+		"plainId": 42,
+		"miniProfile": {
+			"entityUrn": "urn:li:fs_miniProfile:synthetic-owner",
+			"dashEntityUrn": "urn:li:fsd_profile:synthetic-owner",
+			"objectUrn": "urn:li:member:42",
+			"publicIdentifier": "synthetic-owner"
+		}
+	},
+	"summary": {
+		"entityUrn": "urn:li:fs_relConnectionsSummary:synthetic-owner",
+		"numConnections": 2
+	},
+	"listing": {
+		"elements": [
+			{
+				"connectedMember": "urn:li:fsd_profile:synthetic-connection-1",
+				"createdAt": 1700000000000
+			},
+			{
+				"connectedMember": "urn:li:fsd_profile:synthetic-connection-2",
+				"createdAt": 1700000000000
+			}
+		],
+		"paging": {
+			"count": 40,
+			"start": 0,
+			"links": []
+		}
+	},
+	"terminal": {
+		"elements": [],
+		"paging": {
+			"count": 40,
+			"start": 2,
+			"links": []
+		}
+	},
+	"profiles": {
+		"results": {
+			"urn:li:fsd_profile:synthetic-connection-1": {
+				"firstName": "Synthetic",
+				"lastName": "Member 1",
+				"headline": null,
+				"publicIdentifier": null
+			},
+			"urn:li:fsd_profile:synthetic-connection-2": {
+				"firstName": "Synthetic",
+				"lastName": "Member 2",
+				"headline": null,
+				"publicIdentifier": null
+			}
+		}
+	}
+}

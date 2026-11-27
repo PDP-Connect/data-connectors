@@ -20,9 +20,9 @@ const playlist = JSON.parse(
 	),
 ) as SpotifyPlaylist;
 
-test("Spotify playlist records preserve the current items.total response field", () => {
-	const record = spotifyPlaylistRecord(playlist);
-	assert.equal(record.track_count, 7);
+test("Spotify playlist records use collected Track count, not provider item total", () => {
+	const record = spotifyPlaylistRecord(playlist, 3);
+	assert.equal(record.track_count, 3);
 	assert.equal(playlistsSchema.safeParse(record).success, true);
 });
 

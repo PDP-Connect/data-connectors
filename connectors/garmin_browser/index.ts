@@ -26,11 +26,13 @@ import {
 import {
 	type Built,
 	type DayStream,
+	dailySummary,
 	dayRecord,
 	isDay,
 	type RangeStream,
 	rowRecord,
 	siteTimeZone,
+	summaryRangeDays,
 	type Window,
 	windowRows,
 } from "./parsers.ts";
@@ -122,6 +124,11 @@ export function dayPath(stream: DayStream, day: string): string {
 	return stream === "daily_summaries"
 		? `/gc-api/usersummary-service/usersummary/daily?calendarDate=${day}`
 		: `/gc-api/metrics-service/metrics/trainingstatus/daily/${day}`;
+}
+
+/** Many days' summaries in one request, as Garmin's Personal API documents it. */
+export function summaryRangePath(window: Window): string {
+	return `/gc-api/usersummary-service/v2/dailysummaries?startDate=${window.from}&endDate=${window.to}`;
 }
 
 /** One request per window or piece of one: activities always from the first row, never an offset. */
@@ -295,7 +302,7 @@ export function makeEnsureSession(
 			sendInteraction,
 			isProbeSuccessful: (ok) => ok === true,
 			message:
-				"Sign in to Garmin Connect in the secure browser. PDPP continues on its own once you are signed in.",
+				"Sign in to Garmin Connect in the secure browser. The import continues on its own once you are signed in.",
 			probe: async () => isLive(await readOnOrigin(page, PROBE_PATH)),
 			readinessProbe: probeOnPage,
 			// The fifth of five streamed options; without all five the owner gets a Continue button.
@@ -1125,20 +1132,218 @@ interface StreamRun {
 	run: Run;
 	range: Range | undefined;
 	plan: ReturnType<typeof planDays>;
+	/** The owner's day at the run's start, in the site's time zone. */
+	today: string;
+}
+
+/**
+ * The days a range may stand in for, in the walk's order: forward and backfill days before the
+ * owner's today, at most maxDaysPerRun. Kept days, whose own reads did not read cleanly, and today,
+ * which Garmin is still filling, are always read on their own.
+ */
+function rangeCandidates(s: StreamRun): string[] {
+	const days = new Set<string>();
+	let read = 0;
+	for (const segment of s.plan.segments) {
+		for (let day = segment.from; day <= segment.to; day = addDays(day, 1)) {
+			if (read >= s.p.maxDaysPerRun) return [...days];
+			read += 1;
+			if (segment.kind !== "retry" && day < s.today) days.add(day);
+		}
+	}
+	return [...days];
+}
+
+/** The fewest windows of at most WINDOW_DAYS that hold every day, each from a day held to the last held day it reaches. */
+function rangeWindows(days: readonly string[]): Window[] {
+	const windows: Window[] = [];
+	for (const day of [...days].sort()) {
+		const last = windows.at(-1);
+		if (last && day <= addDays(last.from, WINDOW_DAYS - 1)) last.to = day;
+		else windows.push({ from: day, to: day });
+	}
+	return windows;
+}
+
+/** A daily summary's six metrics. */
+const METRICS = [
+	"steps",
+	"resting_heart_rate_bpm",
+	"min_heart_rate_bpm",
+	"average_stress_level",
+	"body_battery_high",
+	"body_battery_low",
+] as const;
+const holds = (built: Built, metric: (typeof METRICS)[number]): boolean =>
+	built.kind === "record" && built.record[metric] !== null;
+/** How many of a record's six metrics hold a value. */
+const filled = (built: Built): number =>
+	METRICS.filter((metric) => holds(built, metric)).length;
+
+/**
+ * The days that check a range, each read on its own: for each metric, the newest day the range
+ * holds it for, so every metric the range stands in for is seen equal once; in each window, its
+ * newest day; of all the days, the oldest with the fewest metrics, so a range that holds a value
+ * where the day's own summary holds none shows too; the oldest day; and per metric the oldest day
+ * the range holds without it, so a range that stops carrying a metric before some day shows.
+ * Chosen from the range alone, they cannot find a day the range answers wrongly while it answers
+ * the checked days right.
+ */
+function checkDays(
+	windows: readonly Window[],
+	fromRange: ReadonlyMap<string, { built: Built }>,
+): string[] {
+	const days = [...fromRange.keys()].sort();
+	const score = (day: string): number =>
+		filled(fromRange.get(day)?.built ?? { kind: "empty" });
+	const checks = METRICS.flatMap((metric) =>
+		days
+			.filter((day) =>
+				holds(fromRange.get(day)?.built ?? { kind: "empty" }, metric),
+			)
+			.slice(-1),
+	);
+	checks.push(
+		...windows.flatMap((window) =>
+			days.filter((day) => day >= window.from && day <= window.to).slice(-1),
+		),
+	);
+	const fewest = Math.min(...days.map(score));
+	checks.push(...days.filter((day) => score(day) === fewest).slice(0, 1));
+	// A range that stops carrying a metric before some day shows on its oldest day, and on the
+	// oldest day it holds without each metric.
+	checks.push(...days.slice(0, 1));
+	checks.push(
+		...METRICS.flatMap((metric) =>
+			days
+				.filter(
+					(day) =>
+						!holds(fromRange.get(day)?.built ?? { kind: "empty" }, metric),
+				)
+				.slice(0, 1),
+		),
+	);
+	return [...new Set(checks)];
+}
+
+const sameBuilt = (a: Built, b: Built): boolean =>
+	a.kind === b.kind &&
+	(a.kind !== "record" ||
+		(b.kind === "record" &&
+			JSON.stringify(a.record) === JSON.stringify(b.record)));
+
+/** A window's range read pays for itself, and for its check, only when it stands in for more days than that. */
+const RANGE_PAYS = 3;
+
+/**
+ * Daily summaries the walk need not ask for one by one, by day: the JSON a day's own read would
+ * answer, for days the range holds a record for. Read from `v2/dailysummaries` in windows, newest
+ * first. Garmin documents that path for its Personal API; the web app was not seen to load it, so:
+ *
+ * - The range only ever stands in for a day it holds a record for (summaryRangeDays): every other
+ *   day is read on its own, so a range that answers too little loses nothing.
+ * - The range is trusted only once every day of checkDays builds from its own read exactly what it
+ *   builds from the range.
+ * - A refusal, a 429 (without waiting it out), an answer in another shape, a day that differs, or a
+ *   check read that fails drops the range, and every day is read on its own, as without it.
+ * - The newest window must hold each of the six metrics on some day: a metric the range never
+ *   carries, because it names it otherwise or the watch does not measure it, is a metric no check
+ *   can prove, so the range is dropped and every day is read on its own.
+ * - The windows stop at the first that stands in for fewer than RANGE_PAYS days, so an owner who
+ *   seldom wears the watch pays a few reads more than day by day: the windows read before the
+ *   stop. A watch that never measures one of the six metrics pays one read more on every run.
+ *
+ * A range read never reloads the app and never stops the stream: what a day's own read meets is
+ * the walk's to handle.
+ */
+async function summaryDays(s: StreamRun): Promise<Map<string, unknown>> {
+	const { ctx, p, run } = s;
+	const none = new Map<string, unknown>();
+	const days = rangeCandidates(s);
+	const windows = rangeWindows(days).reverse();
+	if (days.length < windows.length * RANGE_PAYS + 1) return none;
+	const wanted = new Set(days);
+	const fromRange = new Map<string, { json: unknown; built: Built }>();
+	const read: Window[] = [];
+	// A 429 drops the range at once: the walk's own reads wait it out.
+	const once: Pacing = { ...p, maxRetryAfterMs: -1 };
+	for (const window of windows) {
+		await p.sleep(p.requestDelayMs);
+		const outcome = await fetchJson(ctx.page, summaryRangePath(window), once, {
+			refreshed: true,
+		});
+		if (!outcome.ok) return none;
+		const answer = summaryRangeDays(outcome.json, window);
+		if (!answer) return none;
+		read.push(window);
+		let standsIn = 0;
+		for (const [day, json] of answer) {
+			const built = dailySummary(day, json);
+			// A day that does not build a record from the range is read on its own.
+			if (wanted.has(day) && built.kind === "record") {
+				fromRange.set(day, { json, built });
+				standsIn += 1;
+			}
+		}
+		if (
+			read.length === 1 &&
+			!METRICS.every((metric) =>
+				[...fromRange.values()].some(({ built }) => holds(built, metric)),
+			)
+		) {
+			return none;
+		}
+		if (standsIn < RANGE_PAYS) break;
+	}
+	const checks = checkDays(read, fromRange);
+	const known = new Map<string, unknown>();
+	for (const day of checks) {
+		await p.sleep(p.requestDelayMs);
+		const outcome = await fetchJson(
+			ctx.page,
+			dayPath("daily_summaries", day),
+			p,
+			run,
+		);
+		// What the checks read so far stays read; the walk reads every other day on its own.
+		if (!outcome.ok) return known;
+		known.set(day, outcome.json);
+		const own: Built =
+			outcome.json === null
+				? { kind: "empty" }
+				: dailySummary(day, outcome.json);
+		const range = fromRange.get(day);
+		if (!range || !sameBuilt(own, range.built)) return known;
+	}
+	for (const [day, { json }] of fromRange) {
+		if (!known.has(day)) known.set(day, json);
+	}
+	return known;
 }
 
 /** One request per day, each segment oldest first, at most maxDaysPerRun; kept days until maxRetryDaysPerRun of them still do not read. */
 async function walkDays(s: StreamRun, stream: DayStream): Promise<Walk> {
 	const { ctx, p, run, plan } = s;
 	const walk = walkFrom();
+	const known =
+		stream === "daily_summaries"
+			? await summaryDays(s)
+			: new Map<string, unknown>();
 	for (const segment of plan.segments) {
 		for (let day = segment.from; day <= segment.to; day = addDays(day, 1)) {
 			if (spent(walk, segment, p.maxDaysPerRun, p.maxRetryDaysPerRun)) {
 				return walk;
 			}
-			// Before each request, never after a stream's last.
-			await p.sleep(p.requestDelayMs);
-			const outcome = await fetchJson(ctx.page, dayPath(stream, day), p, run);
+			let outcome: Outcome;
+			if (known.has(day)) {
+				// Read already, by the range or a check.
+				outcome = { ok: true, json: known.get(day) };
+				known.delete(day);
+			} else {
+				// Before each request, never after a stream's last.
+				await p.sleep(p.requestDelayMs);
+				outcome = await fetchJson(ctx.page, dayPath(stream, day), p, run);
+			}
 			if (!outcome.ok) {
 				walk.failure = outcome;
 				return walk;
@@ -1310,7 +1515,7 @@ export async function collectGarminBrowser(
 			ctx.collectionMode === "full_refresh",
 			OVERLAP[stream],
 		);
-		const s: StreamRun = { ctx, p, run, range, plan };
+		const s: StreamRun = { ctx, p, run, range, plan, today };
 		const walk: Walk = stop
 			? walkFrom(stop)
 			: isDayStream(stream)

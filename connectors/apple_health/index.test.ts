@@ -109,6 +109,7 @@ interface RunOpts {
 	peakRssPollIntervalMs?: number;
 	/** Restrict every health-area stream to specific record ids, as a host may. */
 	resources?: string[];
+	retainRawStdout?: boolean;
 	state?: Record<string, unknown>;
 	/** The streams to request. Defaults to every data stream and the receipts. */
 	streams?: readonly string[];
@@ -155,6 +156,9 @@ async function run(dir: string, opts: RunOpts = {}) {
 			? {}
 			: { peakRssPollIntervalMs: opts.peakRssPollIntervalMs }),
 		...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+		...(opts.retainRawStdout === undefined
+			? {}
+			: { retainRawStdout: opts.retainRawStdout }),
 		start: {
 			...(opts.fullRefresh ? { collection_mode: "full_refresh" } : {}),
 			scope: { streams: streams.map((name) => scopeFor(name, opts)) },
@@ -3286,8 +3290,10 @@ test("with both identity budgets spent, memory stays within the streaming bound 
 		`<?xml version="1.0" encoding="UTF-8"?>\n<HealthData locale="en_US">\n <ExportDate value="2026-09-01 12:00:00 -0500"/>\n` +
 		`${parts.join("\n")}\n</HealthData>\n`;
 	await withImportDir({ "export.xml": xml }, async (dir) => {
+		// Only parsed messages are read here, and there are ~500k of them.
 		const result = await run(dir, {
 			peakRssPollIntervalMs: 200,
+			retainRawStdout: false,
 			timeoutMs: 540_000,
 		});
 		assert.ok(result.peakRssBytes !== null, "expected a sampled peak RSS");

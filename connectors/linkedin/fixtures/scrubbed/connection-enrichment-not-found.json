@@ -1,0 +1,19 @@
+{
+	"listing": {
+		"elements": [
+			{
+				"connectedMember": "urn:li:fsd_profile:synthetic-member-001",
+				"createdAt": 1700000000000,
+				"entityUrn": "urn:li:fsd_connection:synthetic-edge-001"
+			}
+		],
+		"paging": { "count": 40, "start": 0, "links": [] }
+	},
+	"profileLookup": {
+		"statuses": {},
+		"results": {},
+		"errors": {
+			"urn:li:fsd_profile:synthetic-member-001": { "status": 404 }
+		}
+	}
+}

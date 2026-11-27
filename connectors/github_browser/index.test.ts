@@ -3,16 +3,22 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseHTML } from "linkedom";
 import { openContributionPage } from "./index.ts";
+import { collectGitHubBrowser } from "./collector.ts";
+import { parseContributionHtml } from "./parsers.ts";
 
 function delayedPage(readyHtml: string) {
 	let html = "<main>Loading contribution calendar</main>";
+	let currentUrl = "";
 	const calls: string[] = [];
 	const page = {
-		goto: async (_url: string, options: { waitUntil: string }) => {
+		goto: async (url: string, options: { waitUntil: string }) => {
 			assert.equal(options.waitUntil, "domcontentloaded");
+			currentUrl = url;
 			calls.push("goto");
 		},
+		evaluate: async () => currentUrl,
 		waitForFunction: async (
 			predicate: unknown,
 			argument: { minimumDays: number; selector: string },
@@ -21,8 +27,7 @@ function delayedPage(readyHtml: string) {
 			assert.equal(typeof predicate, "function");
 			assert.deepEqual(argument, {
 				minimumDays: 365,
-				selector:
-					"td.ContributionCalendar-day[data-date], rect.day[data-date]",
+				selector: "td.ContributionCalendar-day[data-date], rect.day[data-date]",
 			});
 			assert.equal(options.timeout, 8_000);
 			calls.push("waitForCalendar");
@@ -47,7 +52,9 @@ test("contribution page waits for late calendar cells before reading HTML", asyn
 		"https://github.com/sample-user",
 	);
 
-	assert.equal(html, readyHtml);
+	assert.equal(html.html, readyHtml);
+	assert.equal(html.requestedUrl, "https://github.com/sample-user");
+	assert.equal(html.currentUrl, html.requestedUrl);
 	assert.deepEqual(fixture.calls, [
 		"goto",
 		"waitForCalendar",
@@ -59,8 +66,13 @@ test("contribution page waits for late calendar cells before reading HTML", asyn
 test("contribution wait timeout returns HTML for the collector to reject as incomplete", async () => {
 	const partialHtml = "<main>Calendar did not render</main>";
 	const calls: string[] = [];
+	let currentUrl = "";
 	const page = {
-		goto: async () => calls.push("goto"),
+		goto: async (url: string) => {
+			currentUrl = url;
+			calls.push("goto");
+		},
+		evaluate: async () => currentUrl,
 		waitForFunction: async () => {
 			calls.push("waitForCalendar");
 			throw new Error("timeout");
@@ -76,6 +88,123 @@ test("contribution wait timeout returns HTML for the collector to reject as inco
 		"https://github.com/sample-user",
 	);
 
-	assert.equal(html, partialHtml);
+	assert.equal(html.html, partialHtml);
 	assert.deepEqual(calls, ["goto", "waitForCalendar", "content"]);
+});
+
+function contributionReadinessFixtures(): readonly [string, string, boolean][] {
+	const cells = Array.from({ length: 365 }, (_, index) =>
+		`<td class="ContributionCalendar-day" data-date="${new Date(Date.UTC(2025, 0, index + 1)).toISOString().slice(0, 10)}" data-count="0"></td>`).join("");
+	const html = `<main><section class="js-yearly-contributions"><h2 id="js-contribution-activity-description">0 contributions</h2><table class="ContributionCalendar-grid"><tbody><tr>${cells}</tr></tbody></table></section></main>`;
+	return [
+		["fully rendered graph", html, true],
+		["busy graph", html.replace("<section ", '<section aria-busy="true" '), false],
+		["busy heading", html.replace("<h2 ", '<h2 aria-busy="true" '), false],
+		["busy cell", html.replace("<td ", '<td aria-busy="true" '), false],
+		["loading graph", html.replace('class="ContributionCalendar-grid"', 'class="ContributionCalendar-grid loading"'), false],
+		["deferred graph", html.replace("</table>", '<include-fragment src="/calendar"></include-fragment></table>'), false],
+	];
+}
+
+for (const [name, html, expected] of contributionReadinessFixtures()) {
+	test(`contribution readiness checks retained cells: ${name}`, async () => {
+		let observed: unknown;
+		const page = {
+			goto: async () => undefined,
+			evaluate: async () => "https://github.com/sample-user",
+			content: async () => html,
+			waitForFunction: async (
+				predicate: (argument: unknown) => unknown,
+				argument: unknown,
+			) => {
+				const previous = Object.getOwnPropertyDescriptor(globalThis, "document");
+				Object.defineProperty(globalThis, "document", {
+					configurable: true,
+					value: parseHTML(html).document,
+				});
+				try {
+					observed = predicate(argument);
+				} finally {
+					if (previous) Object.defineProperty(globalThis, "document", previous);
+					else Reflect.deleteProperty(globalThis, "document");
+				}
+				return { dispose: async () => undefined };
+			},
+		};
+		await openContributionPage(page as never, "https://github.com/sample-user");
+		assert.equal(observed, expected);
+	});
+}
+
+const owner = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>';
+function fullContributionWindow(url: string): string {
+ const from = new URL(url).searchParams.get("from") ?? "2025-01-02";
+ const to = new URL(url).searchParams.get("to") ?? "2026-01-01";
+ const cells: string[] = [];
+ for (const date = new Date(from); date.toISOString().slice(0, 10) <= to; date.setUTCDate(date.getUTCDate() + 1)) {
+  cells.push(`<td class="ContributionCalendar-day" data-date="${date.toISOString().slice(0, 10)}" data-count="0" data-level="0"></td>`);
+ }
+ return owner + `<section class="js-yearly-contributions"><h2 id="js-contribution-activity-description">0 contributions</h2><table class="ContributionCalendar-grid"><tbody><tr>${cells.join("")}</tr></tbody></table></section>`;
+}
+
+const pendingContributionComponents: Array<[string, (html: string) => string]> = [
+ ["busy calendar", html => html.replace("<table ", '<table aria-busy="true" ')],
+ ["deferred calendar", html => html.replace("</table>", '<include-fragment src="/calendar"></include-fragment></table>')],
+ ["data-loading calendar", html => html.replace("<table ", '<table data-loading="true" ')],
+ ["placeholder calendar", html => html.replace('class="ContributionCalendar-grid"', 'class="ContributionCalendar-grid placeholder"')],
+ ["busy heading", html => html.replace("<h2 ", '<h2 aria-busy="true" ')],
+ ["deferred heading", html => html.replace("</h2>", '<include-fragment></include-fragment></h2>')],
+ ["ellipsis heading", html => html.replace("<h2 ", '<h2 class="AnimatedEllipsis" ')],
+ ["pending second calendar", html => html + '<div class="ContributionCalendar" aria-busy="true"></div>'],
+];
+for (const [name, mutate] of pendingContributionComponents) {
+ test(`contribution timeout retains prior snapshot despite full dates and matching totals: ${name}`, async () => {
+  const prior = { fetched_at: "2020-01-01" };
+  const state: Record<string, unknown> = { contributions: prior };
+  const priorSnapshot = { id: "sample-user:contributions", totalContributionsLastYear: 100 };
+  let snapshot: unknown = priorSnapshot;
+  const messages: Array<{ type: string }> = [];
+  let currentUrl = "";
+  let timeouts = 0;
+  const browser = {
+   goto: async (url: string) => { currentUrl = url; },
+   evaluate: async () => currentUrl,
+   waitForFunction: async () => { timeouts += 1; throw new Error("timeout"); },
+   content: async () => mutate(fullContributionWindow(currentUrl)),
+  };
+  await collectGitHubBrowser({
+   requested: new Set(["contributions"]), state, progress: async () => {},
+   emitRecord: async (_stream, record) => { snapshot = record; },
+   emit: async message => { messages.push(message); },
+  }, {
+   openPage: async url => ({ requestedUrl: url, currentUrl: url, html: owner }),
+   openContributionPage: async url => openContributionPage(browser as never, url),
+   fetchPublicJson: async () => { throw new Error("Unexpected REST fallback"); },
+   now: () => new Date("2026-01-01T00:00:00Z"), sleep: async () => {},
+  });
+  assert.equal(timeouts, 4);
+  assert.equal(snapshot, priorSnapshot);
+  assert.equal(state.contributions, prior);
+  assert.equal(messages.some(message => ["RECORD", "STATE", "DETAIL_COVERAGE"].includes(message.type)), false);
+  assert.ok(messages.some(message => message.type === "SKIP_RESULT"));
+  assert.equal(parseContributionHtml(mutate(fullContributionWindow("https://github.com/sample-user"))).complete, false);
+ });
+}
+test("ready contribution windows remain complete with loading overlay calendars and headings", async () => {
+ const overlay = '<dialog><h2 id="js-contribution-activity-description" aria-busy="true">999 contributions</h2><table class="ContributionCalendar" aria-busy="true"><tr><td class="ContributionCalendar-day" data-date="2026-01-01"></td></tr><include-fragment></include-fragment></table></dialog>';
+ const records: unknown[] = [];
+ const messages: Array<{ type: string }> = [];
+ await collectGitHubBrowser({
+  requested: new Set(["contributions"]), state: {}, progress: async () => {},
+  emitRecord: async (_stream, record) => { records.push(record); },
+  emit: async message => { messages.push(message); },
+ }, {
+  openPage: async url => ({ requestedUrl: url, currentUrl: url, html: owner }),
+  openContributionPage: async url => ({ requestedUrl: url, currentUrl: url, html: overlay + fullContributionWindow(url) }),
+  fetchPublicJson: async () => { throw new Error("Unexpected REST fallback"); },
+  now: () => new Date("2026-01-01T00:00:00Z"), sleep: async () => {},
+ });
+ assert.equal(records.length, 1);
+ assert.ok(messages.some(message => message.type === "STATE"));
+ assert.ok(messages.some(message => message.type === "DETAIL_COVERAGE"));
 });

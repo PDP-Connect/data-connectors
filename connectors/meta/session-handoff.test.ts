@@ -5,21 +5,43 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BrowserContext, Page } from "playwright";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
-import { ensureMetaSession } from "./index.ts";
+import { ensureMetaSession, probeMetaSession } from "./index.ts";
+
+test("probeMetaSession requires authenticated web_info identity after cookie readiness", async () => {
+	let authenticated = false;
+	const context = Object.assign({} as BrowserContext, {
+		cookies: async () => [{ name: "sessionid", value: "synthetic-cookie" }],
+	});
+	const page = Object.assign({} as Page, {
+		evaluate: async () =>
+			authenticated ? { id: "fixture-id", username: "fixture-user" } : null,
+		url: () => "https://www.instagram.com/",
+	});
+
+	assert.equal(await probeMetaSession({ context, page }), false);
+	authenticated = true;
+	assert.equal(await probeMetaSession({ context, page }), true);
+});
 
 test("ensureMetaSession: read-only readiness probe stays in the sign-in tab", async () => {
 	const gotoUrls: string[] = [];
 	const assistanceStatuses: string[] = [];
 	let liveSession = false;
+	let readinessReads = 0;
 	const context = Object.assign({} as BrowserContext, {
-		cookies: async () =>
-			liveSession ? [{ name: "sessionid", value: "token" }] : [],
+		cookies: async () => [{ name: "sessionid", value: "stale-until-assistance" }],
 		newPage: async () => {
 			throw new Error("Meta readiness must stay in the sign-in tab");
 		},
 	});
 	const page = Object.assign({} as Page, {
 		context: () => context,
+		url: () => "https://www.instagram.com/",
+		evaluate: async (fn: unknown) => {
+			if (!String(fn).includes("PolarisViewer")) return null;
+			readinessReads += 1;
+			return liveSession ? { id: "u1", username: "fixture-user" } : null;
+		},
 		goto: async (url: string) => {
 			gotoUrls.push(url);
 			return null;
@@ -47,6 +69,7 @@ test("ensureMetaSession: read-only readiness probe stays in the sign-in tab", as
 
 	await ensureMetaSession(args);
 
+	assert.ok(readinessReads >= 2, "stale-cookie readiness is re-probed after assistance");
 	assert.deepEqual(assistanceStatuses, ["resolved"]);
 	assert.deepEqual(gotoUrls, ["https://www.instagram.com/accounts/login/"]);
 });

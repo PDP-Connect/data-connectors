@@ -134,10 +134,9 @@ export const DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY =
 /**
  * Reference → trusted identity, fail-closed.
  *
- * The OCI analogue of the tarball path's URL→identity resolver. It returns a
- * string for a reference this consumer trusts and `null` for everything else,
- * and `null` is a hard refusal at the call site — never a downgrade to
- * unsigned, and never a fallback to a default (C3.2).
+ * It returns a string for a reference this consumer trusts and `null` for
+ * everything else, and `null` is a hard refusal at the call site — never a
+ * downgrade to unsigned, and never a fallback to a default (C3.2).
  *
  * Note what it is a function OF: the registry and repository — the coordinates
  * the LOCK named. It is not passed the artifact, and that is the point (C3.5):

@@ -35,6 +35,50 @@ import type {
 	TransactionsStateShape,
 } from "./types.ts";
 
+test("calendar dates: statement delivery is host-zone independent", () => {
+	const previous = process.env.TZ;
+	try {
+		for (const zone of ["Pacific/Auckland", "America/Los_Angeles"]) {
+			process.env.TZ = zone;
+			for (const raw of ["Apr 13, 2026", "April 13, 2026", "04/13/2026", "2026-04-13"]) {
+				assert.equal(parseDateDelivered(raw), "2026-04-13", zone + ": " + raw);
+			}
+		}
+	} finally {
+		if (previous === undefined) delete process.env.TZ;
+		else process.env.TZ = previous;
+	}
+});
+
+test("calendar dates: statement delivery rejects rollover days", () => {
+	assert.equal(parseDateDelivered("Feb 29, 2025"), null);
+	assert.equal(parseDateDelivered("Apr 31, 2026"), null);
+	assert.equal(parseDateDelivered("2026-02-30"), null);
+	assert.equal(parseDateDelivered("Feb 29, 2024"), "2024-02-29");
+});
+
+test("calendar dates: recent activity resolves yearless dates before the scrape day", () => {
+	const rowsFor = (date: string, reference = "2027-01-02") =>
+		parseCurrentActivityDom(
+			`<table><tr data-transaction-id="txn_synthetic_01"><td>${date} Posted Synthetic merchant $12.34</td></tr></table>`,
+			reference,
+		);
+	for (const date of ["Dec 31", "12/31"]) {
+		const [row] = rowsFor(date);
+		assert.ok(row);
+		assert.equal(row.activity_date, "2026-12-31");
+		assert.equal(row.posted_date, "2026-12-31");
+		assert.equal(currentActivityId("SYNTHETIC", row), "SYNTHETIC|txn_synthetic_01");
+	}
+	for (const date of ["Jan 1", "1/1", "Jan 2", "1/2"]) {
+		assert.equal(rowsFor(date)[0]?.activity_date, date.includes("2") ? "2027-01-02" : "2027-01-01");
+	}
+	assert.equal(rowsFor("Dec 31, 2025")[0]?.activity_date, "2025-12-31");
+	assert.equal(rowsFor("12/31/25")[0]?.activity_date, "2025-12-31");
+	assert.deepEqual(rowsFor("Feb 30", "2027-03-02"), []);
+	assert.equal(rowsFor("Feb 29", "2024-03-02")[0]?.activity_date, "2024-02-29");
+});
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
 const LOCAL_RAW_DIR = join(__dirname, "..", "..", "fixtures", "chase", "raw");
@@ -369,15 +413,27 @@ test("extractFromQfx: skips transactions missing FITID or DTPOSTED", () => {
 	const out = extractFromQfx(parsed);
 	assert.equal(out.transactions.length, 1);
 	assert.equal(out.transactions[0]?.fitid, "OK");
+	assert.deepEqual(out.integrity, {
+		rawCandidateCount: 3,
+		extractedCount: 1,
+		malformedCount: 2,
+		sourceShapeValid: true,
+	});
 });
 
-test("extractFromQfx: empty / unrecognized shape returns empty", () => {
-	assert.deepEqual(extractFromQfx(null), { transactions: [], balance: null });
-	assert.deepEqual(extractFromQfx({}), { transactions: [], balance: null });
-	assert.deepEqual(extractFromQfx({ OFX: { NOTHING: {} } }), {
-		transactions: [],
-		balance: null,
-	});
+test("extractFromQfx: unrecognized shape retains explicit incomplete evidence", () => {
+	for (const input of [null, {}, { OFX: { NOTHING: {} } }]) {
+		assert.deepEqual(extractFromQfx(input), {
+			transactions: [],
+			balance: null,
+			integrity: {
+				rawCandidateCount: 0,
+				extractedCount: 0,
+				malformedCount: 0,
+				sourceShapeValid: false,
+			},
+		});
+	}
 });
 
 // ─── parseDashboardAccountsDom ───────────────────────────────────────────
@@ -632,6 +688,116 @@ test("parseCurrentActivityDom: extracts Chase MDS dashboard rows from data-value
 	assert.deepEqual(
 		rows.map((r) => r.amount_cents),
 		[15_804, 3908, 9884],
+	);
+});
+
+test("parseCurrentActivityDom: MDS grouped amounts retain their complete cents and clean description", () => {
+	for (const [amount, expected] of [
+		["$1,234.56", 123456],
+		["-$1,234.56", -123456],
+		["−$1,234.56", -123456],
+		["($12.00)", -1200],
+	] as const) {
+		const rows = parseCurrentActivityDom(
+			`<table><tr class="mds-activity-table__row" data-values="Apr 13, 2026, SYNTHETIC LANDLORD, ${amount}, Posted"></tr></table>`,
+			"2026-05-15",
+		);
+		assert.deepEqual(rows, [
+			{
+				activity_date: "2026-04-13",
+				amount_cents: expected,
+				description: "SYNTHETIC LANDLORD",
+				memo: null,
+				posted_date: "2026-04-13",
+				status: "posted",
+				ui_transaction_id: null,
+			},
+		]);
+		assert.ok(!rows[0]?.description.includes("234.56"));
+	}
+});
+
+test("parseCurrentActivityDom: merchant punctuation is not a debit sign", () => {
+	for (const [description, amount, expected] of [
+		["WIDGET-MART REFUND", "$50.00", 5000],
+		["WIDGET-MART PURCHASE", "$50.00", -5000],
+		["WIDGET (TEST) REFUND", "$50.00", 5000],
+		["SYNTHETIC WITHDRAWAL", "$50.00", -5000],
+		["SYNTHETIC DEBIT", "$50.00", -5000],
+		["SYNTHETIC REFUND", "($12.00)", -1200],
+		["SYNTHETIC PAYMENT", "-$1,234.56", -123456],
+		["SYNTHETIC PAYMENT", "−$1,234.56", -123456],
+	] as const) {
+		for (const html of [
+			`<table><tr><td>Apr 13, 2026</td> <td>${description}</td> <td>${amount}</td> <td>Posted</td></tr></table>`,
+			`<table><tr class="mds-activity-table__row" data-values="Apr 13, 2026, ${description}, ${amount}, Posted"></tr></table>`,
+		]) {
+			const rows = parseCurrentActivityDom(html, "2026-05-15");
+			assert.equal(rows.length, 1, html);
+			assert.equal(rows[0]?.amount_cents, expected, html);
+			assert.equal(rows[0]?.description, description, html);
+		}
+	}
+});
+
+test("parseCurrentActivityDom: explicit signs beat debit wording in both row layouts", () => {
+	for (const [description, amount, expected] of [
+		["Debit card refund", "+$12.34", 1234],
+		["Debit card refund", "+ $12.34", 1234],
+		["Synthetic refund", "-$12.34", -1234],
+		["Synthetic refund", "($12.34)", -1234],
+		["Synthetic debit", "$12.34", -1234],
+		["Synthetic refund", "$12.34", 1234],
+	] as const) {
+		for (const html of [
+			`<table><tr><td>Apr 13, 2026</td> <td>${description}</td> <td>${amount}</td> <td>Posted</td></tr></table>`,
+			`<table><tr class="mds-activity-table__row" data-values="Apr 13, 2026, ${description}, ${amount}, Posted"></tr></table>`,
+		]) {
+			const rows = parseCurrentActivityDom(html, "2026-05-15");
+			assert.equal(rows.length, 1, html);
+			assert.equal(rows[0]?.amount_cents, expected, html);
+			assert.equal(rows[0]?.description, description, html);
+		}
+	}
+});
+
+test("parseCurrentActivityDom: pending counts are not amounts or debit signs", () => {
+	assert.deepEqual(
+		parseCurrentActivityDom(
+			'<table><tr class="mds-activity-table__row" data-values="Pending (2),SYNTHETIC MERCHANT,$158.04,"></tr></table>',
+			"2026-05-15",
+		),
+		[
+			{
+				activity_date: "2026-05-15",
+				amount_cents: 15804,
+				description: "SYNTHETIC MERCHANT",
+				memo: null,
+				posted_date: null,
+				status: "pending",
+				ui_transaction_id: null,
+			},
+		],
+	);
+});
+
+test("parseCurrentActivityDom: no-comma MDS amount preserves all existing row fields", () => {
+	assert.deepEqual(
+		parseCurrentActivityDom(
+			'<table><tr class="mds-activity-table__row" data-transaction-id="synthetic_123" data-values="May 14, 2026,COMMA, MERCHANT,$98.84,"></tr></table>',
+			"2026-05-15",
+		),
+		[
+			{
+				activity_date: "2026-05-14",
+				amount_cents: 9884,
+				description: "COMMA, MERCHANT",
+				memo: null,
+				posted_date: "2026-05-14",
+				status: "posted",
+				ui_transaction_id: "synthetic_123",
+			},
+		],
 	);
 });
 

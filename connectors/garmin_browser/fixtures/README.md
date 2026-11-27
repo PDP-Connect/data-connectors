@@ -27,6 +27,16 @@ first night in `sleep-stats.json` has no `spO2`).
 | `hrv-daily.json` | `/gc-api/hrv-service/hrv/daily/{from}/{to}` |
 | `training-status.json`, `training-status-empty.json` | `/gc-api/metrics-service/metrics/trainingstatus/daily/{day}` |
 | `activities.json` | `/gc-api/activitylist-service/activities/search/activities?startDate=…&endDate=…&start=…&limit=100` |
+| `daily-summaries-range.json` | `/gc-api/usersummary-service/v2/dailysummaries?startDate=…&endDate=…` |
+
+`daily-summaries-range.json` was not observed on a live account, nor seen loaded by the web app.
+Its envelope and groups follow Garmin's own Personal API client (`garmin/connect-personal-api-python`,
+`src/garmin_personal_api/client.py`, `get_daily_summaries`) and two readers of that API, which name
+the fields read here: GoldenCheetah (`src/Cloud/GarminPersonalAPI.cpp`: `heartRate.minValue`,
+`restingValue`, `bodyBattery.minValue`, `maxValue`, `movement.steps`) and HealthLog
+(`MBombeck/HealthLog`, `src/lib/garmin/wire-types.ts`: `stress.avgLevel`, a day without data as an
+entry whose fields are all null, up to 365 days per request). Its first day carries the values of
+`daily-summary.json`, so both build the same record.
 
 The owner's account never recorded HRV Status, so its HRV window always answered 204 and the shape
 of `hrv-daily.json` was not observed on a live account. It follows the recorded responses in

@@ -37,15 +37,20 @@
  *   - claude.ai records the model on the conversation, not on a message.
  *     `messages.model` is the conversation's model when the message was
  *     collected (`model_source: "conversation"`); see parsers.ts.
- *   - One organization per run: the first with the `chat` capability, the
- *     export connector's rule. An account that also belongs to a Team
- *     organization has that organization's conversations left out.
+ *   - Conversations and usage come from one organization per run: the first
+ *     with the `chat` capability, the export connector's rule. An account
+ *     that also belongs to a Team organization has that organization's
+ *     conversations left out. account_plan covers every chat organization.
  *   - A conversation deleted on claude.ai is not retracted. Temporary chats
  *     are not listed by claude.ai and are not collected.
- *   - At most MAX_CONVERSATIONS_PER_RUN conversations are read per run; a
- *     first run on a large account finishes over several runs. A list longer
- *     than MAX_LIST_PAGES pages fails the run instead of skipping its oldest
- *     conversations.
+ *   - A run reads changed conversations until it has spent a budget, then
+ *     stops between conversations and the next run resumes from the
+ *     checkpoint. The budget is 15 minutes of reading and 40 MB of emitted
+ *     records, because the collection service fails a whole run, losing
+ *     everything, at 30 minutes (sign-in included) or 64 MB of emitted JSON.
+ *     There is no count cap by default, so a typical account is read in one
+ *     run. A list longer than MAX_LIST_PAGES pages fails the run instead of
+ *     skipping its oldest conversations.
  *   - The list is paged by offset. A list of more than one page is read
  *     again until two reads agree, at most LIST_PASSES reads; then the run
  *     fails, retryable, with no checkpoint (see listConversations). An owner
@@ -69,6 +74,7 @@ import {
 	runConnector,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { RunBudget } from "../../packages/polyfill-connectors/src/run-budget.ts";
 import {
 	isOutsideTimeRange,
 	parseIsoInstant,
@@ -78,7 +84,9 @@ import {
 	buildConversationRecord,
 	buildMessageRecord,
 	buildUsageLimitRecords,
+	hasReadablePlanOrganizationInventory,
 	omissionsOf,
+	usablePlanOrganizations,
 } from "./parsers.ts";
 import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 import { validateRecord } from "./schemas.ts";
@@ -93,7 +101,7 @@ const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
 const CLAUDE_LOGIN_URL = `${CLAUDE_ORIGIN}/login`;
 export const ANTHROPIC_LIVE_LOGIN_MESSAGE =
-	"Sign in to Claude in the secure browser. PDPP continues automatically when Claude confirms the session.";
+	"Sign in to Claude in the secure browser. The import continues automatically once Claude confirms you're signed in.";
 
 const CONVERSATIONS_STREAM = "conversations";
 const MESSAGES_STREAM = "messages";
@@ -104,12 +112,62 @@ const LIST_PAGE_SIZE = 50;
 const MAX_LIST_PAGES = 400;
 /** Reads of the whole list per run before a changing list fails the run. */
 const LIST_PASSES = 4;
-export const MAX_CONVERSATIONS_PER_RUN = 200;
+// Per-run budget (see the header). Read per call so tests can shorten them
+// (the repo's timeout-override convention; see connectors/anthropic/index.ts).
+const positiveEnv = (name: string, fallback: number): number => {
+	const value = Number(process.env[name]);
+	return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+const DEFAULT_MAX_RUN_WALL_CLOCK_MS = 15 * 60 * 1000;
+const DEFAULT_MAX_RUN_BYTES = 40 * 1024 * 1024;
+const maxRunWallClockMs = () =>
+	positiveEnv(
+		"PDPP_ANTHROPIC_LIVE_MAX_RUN_WALL_CLOCK_MS",
+		DEFAULT_MAX_RUN_WALL_CLOCK_MS,
+	);
+const maxRunBytes = () =>
+	positiveEnv("PDPP_ANTHROPIC_LIVE_MAX_RUN_BYTES", DEFAULT_MAX_RUN_BYTES);
+/** Opt-in; unset means no count cap. */
+const maxConversationsPerRun = () =>
+	positiveEnv(
+		"PDPP_ANTHROPIC_LIVE_MAX_CONVERSATIONS_PER_RUN",
+		Number.POSITIVE_INFINITY,
+	);
 // Read per call so tests can shorten it (the repo's timeout-override
 // convention; see connectors/anthropic/index.ts).
 const detailDelayMs = () =>
 	Number(process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS) || 400;
+const detailRetryDelayMs = () =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_DETAIL_RETRY_DELAY_MS) || 3000;
+/** Light-rendering tries after the full rendering failed. */
+const LIGHT_ATTEMPTS = 2;
+/** How long one full-rendering read may run in the page. */
+const fullReadDeadlineMs = () =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_FULL_READ_DEADLINE_MS) || 90_000;
+/** One wait on a running read; under the PageShim bridge's 30 s per call. */
+const pollSliceMs = () =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_POLL_SLICE_MS) || 20_000;
+/** PageShim's limit on one bridge call. */
+const BRIDGE_CALL_LIMIT_MS = 30_000;
+/**
+ * How long a settled read stays in the page for a poll to take. Any poll
+ * after it settles takes it at once, so the one at risk is the first poll:
+ * it can come one start call (under the bridge limit) after the read
+ * settled, plus any gap the host leaves. The deadline and two slices on
+ * top leave the host a gap of more than two minutes for a full read.
+ */
+const readExpiryMs = (deadlineMs: number) =>
+	Number(process.env.PDPP_ANTHROPIC_LIVE_READ_EXPIRY_MS) ||
+	BRIDGE_CALL_LIMIT_MS + deadlineMs + 2 * pollSliceMs();
+/**
+ * The in-page fetch gives up before the PageShim bridge's 30 s per-call
+ * limit, so a slow answer is a status 0 this connector can retry instead of
+ * a bridge timeout that fails the whole run (see strava_browser).
+ */
+const API_FETCH_TIMEOUT_MS = 25_000;
 const DETAIL_QUERY = "tree=True&rendering_mode=messages&render_all_tools=true";
+/** Without render_all_tools, tool calls come back as text blocks, not payloads. */
+const LIGHT_DETAIL_QUERY = "tree=True&rendering_mode=messages";
 const TRAILING_ZEROS_RE = /0+$/;
 
 type Page = BrowserCollectContext["page"];
@@ -224,31 +282,221 @@ export async function ensureAnthropicLiveSession({
  * decides whether that means "signed out" or "not available on this plan".
  */
 async function apiGet(page: Page, path: string): Promise<ApiResult> {
-	return await page.evaluate(async (apiPath) => {
-		if (location.origin !== "https://claude.ai") {
-			return { status: 0, json: null };
-		}
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 60_000);
-		try {
-			const res = await fetch(apiPath, {
-				credentials: "include",
-				headers: { accept: "application/json" },
-				signal: controller.signal,
-			});
-			let json: unknown = null;
-			try {
-				json = await res.json();
-			} catch {
-				json = null;
+	try {
+		return await evaluateGet(page, path);
+	} catch {
+		// A throw from the evaluate itself (a host bridge timeout, a page that
+		// navigated away mid-call) is a network error, not the end of the run.
+		return { status: 0, json: null };
+	}
+}
+
+async function evaluateGet(page: Page, path: string): Promise<ApiResult> {
+	return await page.evaluate(
+		async ({ apiPath, timeoutMs }) => {
+			if (location.origin !== "https://claude.ai") {
+				return { status: 0, json: null };
 			}
-			return { status: res.status, json };
-		} catch {
-			return { status: 0, json: null };
-		} finally {
-			clearTimeout(timeout);
-		}
-	}, path);
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), timeoutMs);
+			try {
+				const res = await fetch(apiPath, {
+					credentials: "include",
+					headers: { accept: "application/json" },
+					signal: controller.signal,
+				});
+				let json: unknown = null;
+				try {
+					json = await res.json();
+				} catch {
+					json = null;
+				}
+				return { status: res.status, json };
+			} catch {
+				return { status: 0, json: null };
+			} finally {
+				clearTimeout(timeout);
+			}
+		},
+		{ apiPath: path, timeoutMs: API_FETCH_TIMEOUT_MS },
+	);
+}
+
+/** The page-global map that holds detail reads between bridge calls. */
+const PENDING_READS = "__pdppAnthropicLiveReads";
+
+/**
+ * Starts a conversation detail read in the page and returns its key. The
+ * fetch runs on in the page after this bridge call returns, for up to
+ * `deadlineMs`. Each message keeps only its text blocks before the body can
+ * leave the page: the records use the text blocks alone (flattenMessageText),
+ * and one tool result can carry tens of MB of `structured_content`.
+ */
+async function startDetailRead(
+	page: Page,
+	path: string,
+	deadlineMs: number,
+): Promise<string> {
+	return await page.evaluate(
+		({ apiPath, timeoutMs, slot, expiryMs }) => {
+			const store = globalThis as unknown as Record<
+				string,
+				Map<string, Promise<{ status: number; json: unknown }>> | undefined
+			>;
+			const reads = store[slot] ?? new Map();
+			store[slot] = reads;
+			const key = `${Date.now()}-${Math.random()}`;
+			const read = (async () => {
+				if (location.origin !== "https://claude.ai") {
+					return { status: 0, json: null };
+				}
+				const controller = new AbortController();
+				const timeout = setTimeout(() => controller.abort(), timeoutMs);
+				try {
+					const res = await fetch(apiPath, {
+						credentials: "include",
+						headers: { accept: "application/json" },
+						signal: controller.signal,
+					});
+					let json: unknown = null;
+					try {
+						json = await res.json();
+					} catch {
+						json = null;
+					}
+					const messages = (json as { chat_messages?: unknown } | null)
+						?.chat_messages;
+					if (Array.isArray(messages)) {
+						for (const message of messages) {
+							if (message && Array.isArray(message.content)) {
+								message.content = message.content.filter(
+									(block: { type?: unknown } | null) => block?.type === "text",
+								);
+							}
+						}
+					}
+					return { status: res.status, json };
+				} catch {
+					return { status: 0, json: null };
+				} finally {
+					clearTimeout(timeout);
+				}
+			})();
+			reads.set(key, read);
+			// A read the host stops polling (a bridge call failed, or it gave up)
+			// must not stay in the page: drop it once no poll can still come
+			// (readExpiryMs). unref keeps a Node test host from waiting.
+			void read.then(() => {
+				const timer = setTimeout(() => reads.delete(key), expiryMs);
+				(timer as { unref?: () => void }).unref?.();
+			});
+			return key;
+		},
+		{
+			apiPath: path,
+			timeoutMs: deadlineMs,
+			slot: PENDING_READS,
+			expiryMs: readExpiryMs(deadlineMs),
+		},
+	);
+}
+
+/**
+ * Waits up to `sliceMs` (under the bridge's per-call limit) for a started
+ * read. Null means it is still running.
+ */
+async function pollDetailRead(
+	page: Page,
+	key: string,
+	sliceMs: number,
+): Promise<ApiResult | null> {
+	return await page.evaluate(
+		async ({ readKey, waitMs, slot }) => {
+			const store = globalThis as unknown as Record<
+				string,
+				Map<string, Promise<{ status: number; json: unknown }>> | undefined
+			>;
+			const read = store[slot]?.get(readKey);
+			if (!read) return { status: 0, json: null };
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const pending = new Promise<null>((resolve) => {
+				timer = setTimeout(() => resolve(null), waitMs);
+			});
+			const result = await Promise.race([read, pending]);
+			clearTimeout(timer);
+			if (result !== null) store[slot]?.delete(readKey);
+			return result;
+		},
+		{ readKey: key, waitMs: sliceMs, slot: PENDING_READS },
+	);
+}
+
+async function awaitDetailRead(
+	page: Page,
+	key: string,
+	until: number,
+): Promise<ApiResult> {
+	const result = await pollDetailRead(page, key, pollSliceMs());
+	if (result !== null) return result;
+	// The in-page fetch aborts itself at the deadline; one more slice lets
+	// that abort land before this gives up.
+	if (Date.now() > until + pollSliceMs()) return { status: 0, json: null };
+	return await awaitDetailRead(page, key, until);
+}
+
+/**
+ * A detail read that can outlast one bridge call: a large conversation over
+ * a slow proxy takes longer than the bridge allows a single evaluate.
+ */
+async function steppedDetailRead(
+	page: Page,
+	path: string,
+	deadlineMs: number,
+): Promise<ApiResult> {
+	try {
+		const key = await startDetailRead(page, path, deadlineMs);
+		return await awaitDetailRead(page, key, Date.now() + deadlineMs);
+	} catch {
+		return { status: 0, json: null };
+	}
+}
+
+/** A detail read, and whether it fell back to the light rendering. */
+interface DetailRead extends ApiResult {
+	light: boolean;
+}
+
+/**
+ * Reads one conversation. The full rendering is read in steps, so it may take
+ * longer than one bridge call. If it still fails with a network error or
+ * timeout (status 0), the light rendering is read instead, retried a few
+ * times with a growing pause. The light rendering turns tool calls into text
+ * blocks, so that conversation's message text differs; the caller reports
+ * it. One conversation that cannot be read in full no longer stops the
+ * conversations changed after it.
+ */
+async function readConversation(page: Page, path: string): Promise<DetailRead> {
+	const full = await steppedDetailRead(
+		page,
+		`${path}?${DETAIL_QUERY}`,
+		fullReadDeadlineMs(),
+	);
+	if (full.status !== 0) return { ...full, light: false };
+	return {
+		...(await readLight(page, `${path}?${LIGHT_DETAIL_QUERY}`)),
+		light: true,
+	};
+}
+
+async function readLight(
+	page: Page,
+	path: string,
+	attempt = 1,
+): Promise<ApiResult> {
+	const res = await steppedDetailRead(page, path, API_FETCH_TIMEOUT_MS);
+	if (res.status !== 0 || attempt >= LIGHT_ATTEMPTS) return res;
+	await politeDelay(detailRetryDelayMs() * attempt);
+	return await readLight(page, path, attempt + 1);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -286,7 +534,29 @@ type Ctx = Pick<
 	| "reportStreamFailure"
 	| "requested"
 	| "state"
->;
+> & {
+	/** UTF-8 JSON bytes of the records this run has emitted so far. */
+	emittedBytes?: () => number;
+};
+
+/**
+ * Counts the JSON bytes of every record the run emits, the measure the
+ * collection service limits. Counted before the runtime's scope gate, so a
+ * record the gate withholds still counts: the budget errs on the safe side.
+ */
+function meterEmits(ctx: Ctx): Ctx {
+	// TextEncoder, not Buffer: PageShim runs this bundle in a page, which has no Buffer.
+	const utf8 = new TextEncoder();
+	let bytes = 0;
+	return {
+		...ctx,
+		emitRecord: (stream, data) => {
+			bytes += utf8.encode(JSON.stringify(data)).length;
+			return ctx.emitRecord(stream, data);
+		},
+		emittedBytes: () => bytes,
+	};
+}
 
 async function skip(
 	ctx: Ctx,
@@ -307,72 +577,118 @@ async function skip(
 }
 
 /**
- * Emit at most one account_plan record. An unreadable subscription_details
- * on a retryable status emits nothing, so a transient failure never
- * overwrites the last real plan dates with nulls. 403/404 there means the
- * organization has no readable subscription (free plan, or a Team member
- * without billing access): the record is emitted with null dates.
+ * Emit one account_plan record per chat organization. The run's organization
+ * keeps the id account_plan; the others use account_plan:<organization id>.
+ * Every subscription_details read must succeed before anything is emitted, so
+ * a transient failure never replaces the last real inventory with a partial
+ * one. 403/404 there means the organization has no readable subscription
+ * (free plan, or a Team member without billing access): its record has null
+ * dates.
  */
 export async function runAccountPlanStream(
 	ctx: Ctx,
 	org: RawOrganization,
-	orgPath: string,
+	organizations: RawOrganization[],
 ): Promise<void> {
-	await ctx.progress("Fetching account plan", { stream: ACCOUNT_PLAN_STREAM });
-	const res = await apiGet(ctx.page, `${orgPath}/subscription_details`);
-	if (res.status === 401) throw new AuthError(res.status);
-	const unavailable = res.status === 403 || res.status === 404;
-	if (res.status !== 200 && !unavailable) {
-		await skip(
-			ctx,
-			ACCOUNT_PLAN_STREAM,
-			"http_error",
-			`subscription_details http ${res.status}`,
-			isRetryableStatus(res.status),
-		);
-		return;
-	}
-	if (res.status === 200 && !isRecord(res.json)) {
+	await ctx.progress("Fetching account plans", { stream: ACCOUNT_PLAN_STREAM });
+	if (!hasReadablePlanOrganizationInventory(organizations)) {
 		await skip(
 			ctx,
 			ACCOUNT_PLAN_STREAM,
 			"parse_error",
-			"subscription_details http 200 with no readable body",
+			"The organization list contains an unreadable entry.",
 			true,
 		);
 		return;
 	}
-	const record = buildAccountPlanRecord(
-		org,
-		unavailable ? null : (res.json as RawSubscriptionDetails),
-	);
-	if (!(record && validateRecord(ACCOUNT_PLAN_STREAM, record).ok)) {
+	const usable = usablePlanOrganizations(organizations);
+	// As in the export connector: the run's organization holds the id
+	// account_plan, so an inventory without it is not the full inventory.
+	if (!usable.some((candidate) => candidate.uuid === org.uuid)) {
 		await skip(
 			ctx,
 			ACCOUNT_PLAN_STREAM,
-			"parse_error",
-			"organization has no readable plan",
+			"organization_unavailable",
+			"The selected organization has no readable chat plan.",
 			true,
 		);
 		return;
 	}
-	// Stable synthetic id and no run-clock field: an unchanged plan is not
-	// re-emitted. The last emitted record is kept in STATE (it holds no
+	const records: RecordData[] = [];
+	for (const candidate of usable) {
+		const res = await apiGet(
+			ctx.page,
+			`/api/organizations/${encodeURIComponent(String(candidate.uuid))}/subscription_details`,
+		);
+		if (res.status === 401) throw new AuthError(res.status);
+		const unavailable = res.status === 403 || res.status === 404;
+		if (res.status !== 200 && !unavailable) {
+			await skip(
+				ctx,
+				ACCOUNT_PLAN_STREAM,
+				"http_error",
+				`subscription_details http ${res.status}`,
+				isRetryableStatus(res.status),
+			);
+			return;
+		}
+		if (res.status === 200 && !isRecord(res.json)) {
+			await skip(
+				ctx,
+				ACCOUNT_PLAN_STREAM,
+				"parse_error",
+				"subscription_details http 200 with no readable body",
+				true,
+			);
+			return;
+		}
+		const record = buildAccountPlanRecord(
+			candidate,
+			unavailable ? null : (res.json as RawSubscriptionDetails),
+			candidate.uuid === org.uuid,
+		);
+		if (!record || !validateRecord(ACCOUNT_PLAN_STREAM, record).ok) {
+			await skip(
+				ctx,
+				ACCOUNT_PLAN_STREAM,
+				"parse_error",
+				"organization has no readable plan",
+				true,
+			);
+			return;
+		}
+		records.push(record);
+	}
+	if (!records.length) {
+		await skip(
+			ctx,
+			ACCOUNT_PLAN_STREAM,
+			"no_chat_organization",
+			"No usable chat account plan was found.",
+			false,
+		);
+		return;
+	}
+	records.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+	// Stable synthetic ids and no run-clock field: an unchanged inventory is
+	// not re-emitted. The last emitted inventory is kept in STATE (it holds no
 	// secret) because the fingerprint cursor needs node:crypto, which the
-	// PageShim host does not provide.
+	// PageShim host does not provide. Sorting keeps API order from causing churn.
 	const prior = ctx.state[ACCOUNT_PLAN_STREAM] as
 		| { emitted?: unknown }
 		| undefined;
-	const serialized = JSON.stringify(record);
-	if (prior?.emitted !== serialized) {
-		await ctx.emitRecord(ACCOUNT_PLAN_STREAM, record);
-	}
+	const serialized = JSON.stringify(records);
+	if (prior?.emitted !== serialized)
+		for (const record of records)
+			await ctx.emitRecord(ACCOUNT_PLAN_STREAM, record);
 	await ctx.emit({
 		type: "STATE",
 		stream: ACCOUNT_PLAN_STREAM,
 		cursor: { fetched_at: nowIso(), emitted: serialized },
 	});
-	await ctx.emit(buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, 1));
+	await ctx.emit(
+		buildFullScanCoverageMessage(ACCOUNT_PLAN_STREAM, records.length),
+	);
 }
 
 /** Emit one usage_limits record per limit claude.ai reports. */
@@ -906,11 +1222,13 @@ function readDetail(
 
 /**
  * conversations + messages, each with its own cursor (see ChatCursor). One
- * list read serves both. Conversations are read oldest change first, at most
- * MAX_CONVERSATIONS_PER_RUN per run, and each stream's cursor moves past a
- * conversation only after it was read. A changed conversation emits only the
- * messages changed after `emitted_through`, so a message keeps the model it
- * was first collected with unless a selection change makes the run reread it.
+ * list read serves both. Conversations are read oldest change first until the
+ * run budget is spent (checked between conversations, so each is emitted
+ * whole; the first is always read, so a run makes progress), and each
+ * stream's cursor moves past a conversation only after it was read. A changed
+ * conversation emits only the messages changed after `emitted_through`, so a
+ * message keeps the model it was first collected with unless a selection
+ * change makes the run reread it.
  */
 export async function runConversationStreams(
 	ctx: Ctx,
@@ -937,6 +1255,11 @@ export async function runConversationStreams(
 	});
 	let changed: ListedConversation[] = [];
 	let batch: ListedConversation[] = [];
+	let readCount = 0;
+	// Anchored before the list read: the budget covers the conversation phase.
+	const budget = new RunBudget({ maxWallClockMs: maxRunWallClockMs() });
+	budget.tripReason();
+	const byteLimit = maxRunBytes();
 	// Text fields left absent for passing the inline cap, counted for one
 	// aggregate disclosure (no ids, no titles).
 	const omitted = {
@@ -948,14 +1271,19 @@ export async function runConversationStreams(
 		changed = listedItems
 			.filter((item) => plans.some((plan) => needs(plan, item)))
 			.sort(compareKeys);
-		// A full refresh ignores the cursor, so a cap would re-read the same
-		// oldest conversations on every run.
-		batch =
-			ctx.collectionMode === "full_refresh"
-				? changed
-				: changed.slice(0, MAX_CONVERSATIONS_PER_RUN);
+		// A full refresh ignores the cursor, so a cap or budget would re-read
+		// the same oldest conversations on every run.
+		const bounded = ctx.collectionMode !== "full_refresh";
+		batch = bounded ? changed.slice(0, maxConversationsPerRun()) : changed;
 
 		for (const [index, item] of batch.entries()) {
+			if (
+				bounded &&
+				index > 0 &&
+				(budget.shouldStop() || (ctx.emittedBytes?.() ?? 0) >= byteLimit)
+			) {
+				break;
+			}
 			let detail: ConversationDetail | null = null;
 			if (messages) {
 				if (index > 0) await politeDelay(detailDelayMs());
@@ -963,10 +1291,16 @@ export async function runConversationStreams(
 					`Reading conversation ${index + 1} of ${batch.length}`,
 					{ stream: MESSAGES_STREAM },
 				);
-				const res = await apiGet(
+				const res = await readConversation(
 					ctx.page,
-					`${orgPath}/chat_conversations/${item.id}?${DETAIL_QUERY}`,
+					`${orgPath}/chat_conversations/${item.id}`,
 				);
+				if (res.status === 200 && res.light) {
+					await ctx.progress(
+						`Conversation ${index + 1} of ${batch.length} was read without tool details: the full read did not finish`,
+						{ stream: MESSAGES_STREAM },
+					);
+				}
 				if (res.status === 401 || res.status === 403) {
 					throw new AuthError(res.status);
 				}
@@ -1027,6 +1361,7 @@ export async function runConversationStreams(
 					plan.readThrough = { update_time: item.update_time, id: item.id };
 				}
 			}
+			readCount = index + 1;
 			await saveState();
 		}
 	} catch (error) {
@@ -1066,13 +1401,13 @@ export async function runConversationStreams(
 		}
 	}
 
-	if (changed.length > batch.length) {
+	if (changed.length > readCount) {
 		for (const plan of plans) {
 			await skip(
 				ctx,
 				plan.stream,
 				"anthropic_live_backlog_deferred",
-				`Read ${batch.length} of ${changed.length} changed conversations; the rest remain for the next run.`,
+				`Read ${readCount} of ${changed.length} changed conversations; the rest remain for the next run.`,
 				true,
 			);
 		}
@@ -1088,6 +1423,7 @@ export async function runConversationStreams(
 export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
 	const { page, requested } = ctx;
 	if (requested.size === 0) return;
+	const meter = meterEmits(ctx);
 	if (!(await isOnClaude(page))) {
 		await page.goto(CLAUDE_HOME_URL, {
 			waitUntil: "domcontentloaded",
@@ -1116,13 +1452,17 @@ export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
 	}
 	const orgPath = `/api/organizations/${String(org.uuid)}`;
 	if (requested.has(ACCOUNT_PLAN_STREAM)) {
-		await runAccountPlanStream(ctx, org, orgPath);
+		await runAccountPlanStream(
+			meter,
+			org,
+			Array.isArray(orgs.json) ? orgs.json : [org],
+		);
 	}
 	if (requested.has(USAGE_LIMITS_STREAM)) {
-		await runUsageLimitsStream(ctx, orgPath);
+		await runUsageLimitsStream(meter, orgPath);
 	}
 	if (requested.has(CONVERSATIONS_STREAM) || requested.has(MESSAGES_STREAM)) {
-		await runConversationStreams(ctx, String(org.uuid), orgPath);
+		await runConversationStreams(meter, String(org.uuid), orgPath);
 	}
 }
 

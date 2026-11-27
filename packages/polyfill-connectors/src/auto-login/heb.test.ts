@@ -2578,7 +2578,7 @@ test("the email-first login form classifies as login_form, not as an unknown sur
 	// "did not render the expected login form", which was false on this page.
 	assert.match(message, /did not finish signing in automatically/);
 	assert.doesNotMatch(message, /did not render the expected login form/);
-	assert.doesNotMatch(message, /could not identify/);
+	assert.doesNotMatch(message, /could not identify/i);
 });
 
 test("an OTP-only login form (no password input at all) classifies as login_form, not as an unknown surface", async () => {
@@ -2616,7 +2616,7 @@ test("an OTP-only login form (no password input at all) classifies as login_form
 	);
 	// The exact copy the owner of cin_8997c...b36a8 was shown for 30 minutes,
 	// twice, on a page that is plainly H-E-B's login form.
-	assert.doesNotMatch(message, /could not identify/);
+	assert.doesNotMatch(message, /could not identify/i);
 	assert.ok(
 		!checkpoints.includes("heb-unclassified-surface"),
 		"an ordinary login form must never be recorded as an unclassified surface",
@@ -2658,7 +2658,7 @@ test("a passwordless page on a sibling interaction route is not treated as a log
 	// Signing in on the account-creation page is not a thing PDPP may attempt, so
 	// this must NOT claim an incomplete sign-in the way a login form does.
 	assert.doesNotMatch(message, /did not finish signing in automatically/);
-	assert.match(message, /could not identify/);
+	assert.match(message, /could not identify/i);
 });
 
 test("a code-entry page served on the login route stays a verification-code surface, not a login form", async () => {
@@ -2717,7 +2717,7 @@ test("a genuinely unrecognized surface reports what was observed instead of asse
 	);
 	// Honest unknown: it names the page and admits it cannot classify it, rather
 	// than asserting a login problem it has no evidence for.
-	assert.match(message, /could not identify what H-E-B is showing/);
+	assert.match(message, /could not identify what H-E-B is showing/i);
 	// The URL the classifier actually looked at — the probe navigates to the
 	// orders page before inspecting, so that is the page being described.
 	assert.match(message, /https:\/\/www\.heb\.com\/my-account\/your-orders/);

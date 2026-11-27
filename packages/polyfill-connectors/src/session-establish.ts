@@ -341,7 +341,7 @@ export async function establishSession(
 	try {
 		assistanceRequestId = await assist({
 			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
-			message: `${name} session expired. Sign in in the secure browser; PDPP will continue when it verifies the session.`,
+			message: `${name} session expired. Sign in in the secure browser; collection continues once the session is verified.`,
 			owner_action: "operate_attachment",
 			progress_posture: "blocked",
 			response_contract: "none",

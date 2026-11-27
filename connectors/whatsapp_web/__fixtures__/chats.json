@@ -1,0 +1,41 @@
+[
+  {
+    "id": "Synthetic id 1 lorem lorem",
+    "server": "lid",
+    "title": "Synthetic title 2 lorem lorem",
+    "t": 1791953029,
+    "archive": false,
+    "pin": null,
+    "mute_expiration": 0,
+    "unread_count": 0,
+    "read_only": false,
+    "history_state": "Synthetic history_state 3 lorem lorem lorem lorem lorem lorem",
+    "msgs_in_memory": 1
+  },
+  {
+    "id": "user4@example.com",
+    "server": "c.us",
+    "title": "Synthetic title 5",
+    "t": 1791847040,
+    "archive": false,
+    "pin": null,
+    "mute_expiration": 0,
+    "unread_count": 1,
+    "read_only": false,
+    "history_state": "Synthetic history_state 6 lorem lorem lorem lorem lorem lorem lorem",
+    "msgs_in_memory": 1
+  },
+  {
+    "id": "Synthetic id 7 lorem lorem",
+    "server": "lid",
+    "title": "Synthetic title 8 lorem",
+    "t": 1791660081,
+    "archive": false,
+    "pin": null,
+    "mute_expiration": 0,
+    "unread_count": 1,
+    "read_only": false,
+    "history_state": "Synthetic history_state 9 lorem lorem lorem lorem lorem",
+    "msgs_in_memory": 1
+  }
+]

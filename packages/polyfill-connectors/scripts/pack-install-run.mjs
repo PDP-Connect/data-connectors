@@ -16,18 +16,16 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import {
-	mkdir,
-	mkdtemp,
-	readdir,
-	readFile,
-	rm,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+	installArguments,
+	packEnvironment,
+	packPackage,
+} from "./pack-test-support.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -55,24 +53,7 @@ async function run(command, args, options = {}) {
 	}
 }
 
-async function packPackage(cwd) {
-	const preExisting = (await readdir(cwd)).filter((name) =>
-		name.endsWith(".tgz"),
-	);
-	await Promise.all(
-		preExisting.map((name) => rm(path.join(cwd, name), { force: true })),
-	);
-	await run("npm", ["pack", "--foreground-scripts=false"], { cwd });
-	const produced = (await readdir(cwd)).filter((name) => name.endsWith(".tgz"));
-	assert.equal(
-		produced.length,
-		1,
-		`expected exactly one .tgz in ${cwd}, found ${produced.length}`,
-	);
-	return path.join(cwd, produced[0]);
-}
-
-async function typecheckEveryExport(projectDir, installedPackage) {
+async function typecheckEveryExport(projectDir, installedPackage, env) {
 	const installedPackageJson = JSON.parse(
 		await readFile(path.join(installedPackage, "package.json"), "utf8"),
 	);
@@ -111,7 +92,7 @@ async function typecheckEveryExport(projectDir, installedPackage) {
 			await run(
 				path.join(projectDir, "node_modules", ".bin", "tsc"),
 				["--project", configPath, "--noEmit"],
-				{ cwd: projectDir },
+				{ cwd: projectDir, env },
 			);
 			log(
 				`PASS TypeScript ${label}: all ${Object.keys(installedPackageJson.exports).length} export subpaths resolve.`,
@@ -122,26 +103,21 @@ async function typecheckEveryExport(projectDir, installedPackage) {
 
 async function main() {
 	log("Packing @pdpp/polyfill-connectors...");
-	const tarball = await packPackage(packageRoot);
-
 	const tempRoot = await mkdtemp(
 		path.join(tmpdir(), "pdpp-polyfill-connectors-pack-"),
 	);
 	const projectDir = path.join(tempRoot, "project");
-	const env = {
-		...process.env,
-		HOME: path.join(tempRoot, "home"),
-		npm_config_cache: path.join(tempRoot, "npm-cache"),
-		// Deliberately UNSET, not "1": this is the exact condition a real
-		// consumer's plain `npm ci` runs under, and the condition that
-		// crashed before this file existed as .mjs. Setting the skip
-		// var here would only prove the fast-exit branch loads, not that
-		// the whole postinstall script is a loadable, executable .mjs file.
-		PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "",
-		PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "",
-	};
+	const env = packEnvironment(tempRoot);
 
 	try {
+		await Promise.all(
+			["home", "tmp"].map((name) => mkdir(path.join(tempRoot, name))),
+		);
+		const tarball = await packPackage(
+			packageRoot,
+			path.join(tempRoot, "pack"),
+			(command, args, options) => run(command, args, { ...options, env }),
+		);
 		await mkdir(projectDir, { recursive: true });
 		await run("npm", ["init", "-y"], { cwd: projectDir, env });
 
@@ -157,17 +133,10 @@ async function main() {
 		log(
 			"Installing the packed tarball with a plain `npm install` (postinstall forced to run)...",
 		);
-		const install = await run(
-			"npm",
-			[
-				"install",
-				"--no-audit",
-				"--no-fund",
-				"--dangerously-allow-all-scripts",
-				tarball,
-			],
-			{ cwd: projectDir, env },
-		);
+		const install = await run("npm", installArguments(tarball), {
+			cwd: projectDir,
+			env,
+		});
 
 		assert.doesNotMatch(
 			`${install.stdout}\n${install.stderr}`,
@@ -193,7 +162,7 @@ async function main() {
 			],
 			{ cwd: projectDir, env },
 		);
-		await typecheckEveryExport(projectDir, installedPackage);
+		await typecheckEveryExport(projectDir, installedPackage, env);
 		const installedMetadata = JSON.parse(
 			await readFile(path.join(installedPackage, "package.json"), "utf8"),
 		);
@@ -238,7 +207,6 @@ async function main() {
 			"PASS pack-install-run: plain npm install and every public consumer entrypoint succeeded.",
 		);
 	} finally {
-		await rm(tarball, { force: true });
 		await rm(tempRoot, { recursive: true, force: true });
 	}
 }

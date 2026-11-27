@@ -48,6 +48,10 @@ const DELIBERATELY_TIMELESS: Record<string, string> = {
 		"an account is a standing entity; its only timestamp is the run-clock fetched_at",
 	"chatgpt/account_plan":
 		"standing subscription terms; renews_at/expires_at/cancels_at are scheduled future dates, not a moment the owner lived",
+	"chatgpt/account_profile":
+		"a snapshot of standing account settings and counts, rebuilt each run; account_created_at is one attribute, not the moment the record describes",
+	"chatgpt/usage_summary":
+		"an aggregate over the whole account history, rebuilt each run; its first/last activity bounds describe the history, not one moment",
 	"gmail/labels":
 		"a label is a folder, not an event; Gmail exposes no created/applied time",
 	"spotify/playlists":
@@ -55,6 +59,8 @@ const DELIBERATELY_TIMELESS: Record<string, string> = {
 	"spotify/profile":
 		"a standing account snapshot (id, display name, follower count), not an event",
 	"spotify/top_artists":
+		"a computed ranking over a window, not a moment the owner lived",
+	"spotify/top_tracks":
 		"a computed ranking over a window, not a moment the owner lived",
 	"steam/profile": "a standing profile snapshot",
 	"steam/steam_level": "a standing scalar with no timestamp",

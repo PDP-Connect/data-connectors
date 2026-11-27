@@ -296,7 +296,7 @@ export async function ensureDiscordSession(
 		completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
-			"Sign in to Discord in the secure browser, then continue. PDPP will verify the session before collecting.",
+			"Sign in to Discord in the secure browser, then continue. Collection starts once the session is verified.",
 		page,
 		probe: () => hasDiscordSession(page),
 		readinessProbe: probeDiscordBrowserSession,
@@ -477,7 +477,7 @@ type ServerOutcome =
 	/** The run's message limit was reached part way through. */
 	| { kind: "limit" }
 	/** This server could not be fully read now; the run goes on. */
-	| { kind: "skipped"; refused: boolean }
+	| { kind: "skipped"; refused: boolean; offsetLimited?: true }
 	| { kind: "stop"; stop: RunStop };
 
 interface ServerWalk {
@@ -630,8 +630,11 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 				};
 
 	for (;;) {
-		// The site's own result-offset ceiling is accepted as the range's end.
-		if (offset > MAX_SEARCH_OFFSET) return finish();
+		// We only advance the offset when the prior page reports an unread tail.
+		// Reaching the ceiling requires a raised request budget.
+		if (offset > MAX_SEARCH_OFFSET) {
+			return { kind: "skipped", refused: false, offsetLimited: true };
+		}
 		const query = `author_id=${ownerId}&sort_by=timestamp&sort_order=desc&offset=${offset}`;
 		const path = `/guilds/${server.id}/messages/search?${query}`;
 		let outcome = await api.get(path);
@@ -1013,6 +1016,7 @@ export async function collectDiscordBrowser(
 	const searched: string[] = [];
 	let saved = 0;
 	let skippedServers = 0;
+	const offsetLimitedServers = new Set<string>();
 	let refusals = 0;
 	let limitReached = false;
 	let stop: RunStop | null = null;
@@ -1058,6 +1062,7 @@ export async function collectDiscordBrowser(
 		}
 		if (outcome.kind === "skipped") {
 			skippedServers += 1;
+			if (outcome.offsetLimited) offsetLimitedServers.add(serverId);
 			refusals = outcome.refused ? refusals + 1 : 0;
 			if (refusals >= MAX_CONSECUTIVE_SERVER_REFUSALS) {
 				stop = "verification_required";
@@ -1075,7 +1080,9 @@ export async function collectDiscordBrowser(
 		...queue.filter((id) => !searchedSet.has(id)),
 		...searched,
 	];
-	const waiting = queue.filter((id) => cursors[id] === undefined).length;
+	const waiting = queue.filter(
+		(id) => cursors[id] === undefined && !offsetLimitedServers.has(id),
+	).length;
 
 	if (stop) {
 		await stopRun(stop);
@@ -1085,7 +1092,10 @@ export async function collectDiscordBrowser(
 				ctx,
 				options,
 				"servers_skipped",
-				`${plural(skippedServers, "server", "servers")} could not be searched this time. A later run tries again.`,
+				`${plural(skippedServers, "server", "servers")} could not be searched this time. A later run tries again.` +
+					(offsetLimitedServers.size > 0
+						? ` Discord’s ${MAX_SEARCH_OFFSET.toLocaleString("en-US")}-offset search limit left results unread in ${plural(offsetLimitedServers.size, "server", "servers")}.`
+						: ""),
 			);
 		}
 		if (limitReached || waiting > 0) {

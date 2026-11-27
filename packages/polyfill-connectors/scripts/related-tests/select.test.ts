@@ -12,7 +12,13 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -109,6 +115,92 @@ describe("selectRelatedTests: root connector layout", () => {
 		} finally {
 			rmSync(repoRoot, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("selectRelatedTests: connector directory affinity", () => {
+	let packageRoot: string;
+
+	before(() => {
+		packageRoot = mkdtempSync(join(tmpdir(), "related-tests-affinity-"));
+		writeFixtureTree(packageRoot, join(FIXTURES_ROOT, "direct-edit"));
+		for (const path of [...allPaths, "src/shared-runtime.ts"]) {
+			const fullPath = join(packageRoot, path);
+			if (!existsSync(fullPath)) {
+				mkdirSync(dirname(fullPath), { recursive: true });
+				writeFileSync(fullPath, "export const x = 1;\n");
+			}
+		}
+	});
+
+	after(() => {
+		rmSync(packageRoot, { recursive: true, force: true });
+	});
+
+	const allPaths = [
+		"connectors/alpha/index.ts",
+		"connectors/alpha/index.test.ts",
+		"connectors/alpha/sub/integration.test.ts",
+		"connectors/beta/index.ts",
+		"connectors/beta/index.test.ts",
+		"connectors/_shared/helper.ts",
+		"connectors/_shared/helper.test.ts",
+	];
+
+	async function select(
+		overrides: Partial<Parameters<typeof selectRelatedTests>[0]>,
+	) {
+		return selectRelatedTests({
+			packageRoot,
+			graph: await buildDependencyGraph(packageRoot),
+			allRelativePaths: allPaths,
+			changedRelativePaths: [],
+			deletedRelativePaths: [],
+			unmergedRelativePaths: [],
+			...overrides,
+		});
+	}
+
+	test("a connector change also selects sibling tests with no import edge, recursively", async () => {
+		const result = await select({
+			changedRelativePaths: ["connectors/alpha/index.ts"],
+		});
+		assert.equal(result.kind, "related");
+		assert.deepEqual(result.testFiles, [
+			"connectors/alpha/index.test.ts",
+			"connectors/alpha/sub/integration.test.ts",
+		]);
+		assert.match(result.reason, /directory affinity added 1 more/);
+	});
+
+	test("a change outside connectors/ gets no affinity", async () => {
+		const result = await select({
+			changedRelativePaths: ["src/shared-runtime.ts"],
+			allRelativePaths: [...allPaths, "src/shared-runtime.ts"],
+		});
+		assert.equal(result.kind, "related");
+		assert.deepEqual(result.testFiles, []);
+		assert.match(result.reason, /directory affinity added 0 more/);
+	});
+
+	test("a deleted file still yields FULL_SUITE", async () => {
+		const result = await select({
+			deletedRelativePaths: ["connectors/alpha/old.ts"],
+			changedRelativePaths: ["connectors/alpha/index.ts"],
+		});
+		assert.equal(result.kind, FULL_SUITE);
+	});
+
+	test("a change under an underscore-prefixed shared dir gets no affinity", async () => {
+		const result = await select({
+			changedRelativePaths: ["connectors/_shared/helper.ts"],
+			allRelativePaths: allPaths,
+		});
+		assert.equal(result.kind, "related");
+		assert.ok(
+			!(result.testFiles ?? []).some((f) => f.startsWith("connectors/alpha/")),
+		);
+		assert.match(result.reason, /directory affinity added 0 more/);
 	});
 });
 

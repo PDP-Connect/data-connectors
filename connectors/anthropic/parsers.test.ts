@@ -20,10 +20,14 @@ import {
 	type ZipReadPolicy,
 	zipBasename,
 } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
+import { buildAccountPlanRecord as buildLiveAccountPlanRecord } from "../anthropic_live/parsers.ts";
 import {
+	buildAccountPlanRecord,
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	flattenMessageText,
+	INLINE_TEXT_MAX_UNITS,
+	isoOrNull,
 	omittedFieldCountOf,
 	oversizeTextOf,
 	parseClassifiedExport,
@@ -34,6 +38,7 @@ import {
 	parseMessage,
 	parseProject,
 	parseProjectDocument,
+	type RawOrganization,
 	resolveExportedProfile,
 } from "./parsers.ts";
 import { decodeEscapedText } from "./safe-escape.ts";
@@ -1018,4 +1023,150 @@ test("parseConversationHeader: a title or identity field reported over the cap i
 	assert.equal(parseConversationHeader({ id: "i" }, 0, over("uuid")), null);
 	assert.equal(parseConversationHeader({ uuid: "c" }, 0, over("id"))?.id, "c");
 	assert.equal(parseConversationHeader({}, 0, over("id")), null);
+});
+
+const PLAN_ORGS: Array<[string, Record<string, unknown>, string | null]> = [
+	["max", { uuid: "o", capabilities: ["chat", "claude_max"] }, "max"],
+	["pro", { uuid: "o", capabilities: ["chat", "claude_pro"] }, "pro"],
+	[
+		"team",
+		{ uuid: "o", capabilities: ["raven"], raven_type: "enterprise" },
+		"enterprise",
+	],
+	["raven without a type", { uuid: "o", capabilities: ["raven"] }, "team"],
+	["free", { uuid: "o", capabilities: ["chat"], billing_type: null }, "free"],
+	[
+		"free, billing none",
+		{ uuid: "o", capabilities: ["chat"], billing_type: "none" },
+		"free",
+	],
+	[
+		"unknown",
+		{ uuid: "o", capabilities: ["chat"], billing_type: "stripe" },
+		null,
+	],
+	["no capabilities", { uuid: "o" }, null],
+];
+
+for (const [label, org, expected] of PLAN_ORGS) {
+	test(`buildAccountPlanRecord: ${label} organization gives plan_type ${expected}, the same value anthropic_live gives`, () => {
+		const record = buildAccountPlanRecord(org);
+		assert.equal(record?.plan_type, expected);
+		assert.equal(
+			record?.plan_type,
+			buildLiveAccountPlanRecord(org, null)?.plan_type,
+		);
+		assert.equal(validateRecord("account_plan", record).ok, true);
+		// One record per connection: both Claude connectors key it the same way.
+		assert.equal(record?.id, "account_plan");
+		assert.equal(record?.id, buildLiveAccountPlanRecord(org, null)?.id);
+	});
+}
+
+test("buildAccountPlanRecord: carries only the organization id, creation time and plan; every other field is null", () => {
+	// The cast stands for the real API entry, which has fields this parser never reads.
+	const entry = {
+		uuid: "org-1",
+		name: "Fictional Owner's Organization",
+		capabilities: ["chat", "claude_pro"],
+		created_at: "2025-03-01T12:00:00.123456Z",
+		billing_type: "stripe",
+		rate_limit_tier: "default_claude_ai",
+		plan_display_name: "Claude Pro",
+		email: "someone@example.invalid",
+	} as RawOrganization;
+	const record = buildAccountPlanRecord(entry);
+	assert.deepEqual(record, {
+		id: "account_plan",
+		is_default: true,
+		account_id: "org-1",
+		account_structure: null,
+		account_created_at: "2025-03-01T12:00:00.123456Z",
+		plan_type: "pro",
+		plan_display_name: null,
+		subscription_plan: null,
+		has_active_subscription: null,
+		billing_period: null,
+		will_renew: null,
+		renews_at: null,
+		expires_at: null,
+		cancels_at: null,
+		scheduled_plan_change: null,
+	});
+	const live = buildLiveAccountPlanRecord(
+		{ uuid: "org-1", created_at: "2025-03-01T12:00:00.123456Z" },
+		null,
+	);
+	assert.equal(record?.account_created_at, live?.account_created_at);
+});
+
+test("buildAccountPlanRecord: an entry without an id gives no record; a bad creation time gives null", () => {
+	assert.equal(buildAccountPlanRecord({ capabilities: ["claude_pro"] }), null);
+	assert.equal(buildAccountPlanRecord({ uuid: "" }), null);
+	for (const created_at of ["yesterday", "", 1740830400, null])
+		assert.equal(
+			buildAccountPlanRecord({ uuid: "o", created_at })?.account_created_at,
+			null,
+		);
+});
+
+test("ISO timestamps require a complete valid datetime and preserve valid input", () => {
+	for (const value of [
+		"2026-99-99T99:99:99garbage",
+		"2026-02-29T00:00:00Z",
+		"1900-02-29T00:00:00Z",
+		"2026-04-31T00:00:00Z",
+		"2026-00-01T00:00:00Z",
+		"2026-01-00T00:00:00Z",
+		"2026-01-01T24:00:00Z",
+		"2026-01-01T00:60:00Z",
+		"2026-01-01T00:00:60Z",
+		"2026-01-01T00:00:00+24:00",
+		"2026-01-01T00:00:00+05:60",
+		"2026-01-01T00:00:00",
+		"2026-01-01T00:00:00Zgarbage",
+		"2026-01-01T00:00:00Z\n",
+	]) {
+		assert.equal(isoOrNull(value), null, value);
+	}
+	for (const value of [
+		"2026-01-02T03:04:05.123456Z",
+		"2026-01-02T03:04:05+05:30",
+		"2026-01-02T03:04:05.123-04:00",
+		"2000-02-29T23:59:59Z",
+	]) {
+		assert.equal(isoOrNull(value), value);
+	}
+});
+
+test("unidentified oversized raw doc counts its omission without double-counting identified docs", () => {
+	const content = "x".repeat(INLINE_TEXT_MAX_UNITS + 1);
+	const unidentified = parseProject({
+		uuid: "synthetic-project",
+		name: "Synthetic",
+		docs: [{ filename: "synthetic.txt", content }],
+	});
+	assert.ok(unidentified);
+	assert.equal(unidentified.documents.length, 0);
+	assert.equal("content" in (unidentified.project.raw_docs?.[0] ?? {}), false);
+	assert.equal(omittedFieldCountOf(unidentified.project), 1);
+	for (const identity of [{ uuid: "synthetic-doc" }, { id: "synthetic-doc" }]) {
+		const identified = parseProject({
+			uuid: "synthetic-project",
+			name: "Synthetic",
+			docs: [{ ...identity, filename: "synthetic.txt", content }],
+		});
+		assert.ok(identified);
+		assert.equal(identified.documents.length, 1);
+		assert.equal(omittedFieldCountOf(identified.project), 0);
+		assert.equal(omittedFieldCountOf(identified.documents[0] ?? {}), 0);
+		assert.equal(oversizeTextOf(identified.documents[0] ?? {}), content);
+	}
+});
+
+test("empty archived_at is not an archived project", () => {
+	const parsed = parseProject({ uuid: "synthetic-project", archived_at: "" });
+	assert.ok(parsed);
+	assert.equal(parsed.project.is_archived, false);
+	assert.equal(parsed.project.archived_at, null);
 });

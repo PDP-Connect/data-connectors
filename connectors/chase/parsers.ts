@@ -29,6 +29,7 @@ import type {
 
 const HASH_SLUG_LEN = 32;
 const CENTS_MULTIPLIER = 100;
+const QFX_TRANSACTION_AMOUNT_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 
 // ─── Shared module-scope regexes (Biome useTopLevelRegex) ────────────────
 // These were hoisted from page.evaluate() callbacks when we moved DOM
@@ -57,7 +58,7 @@ const AMOUNT_RE =
 const DATE_NUMERIC_RE = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/;
 const DATE_MONTH_RE =
 	/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})(?:,\s*(\d{4}))?\b/i;
-const ACTIVITY_DEBIT_RE = /-|\(|\bwithdrawal\b|\bpurchase\b|\bdebit\b/i;
+const ACTIVITY_DEBIT_WORD_RE = /\bwithdrawal\b|\bpurchase\b|\bdebit\b/i;
 const PENDING_RE = /\bpending\b/i;
 const POSTED_RE = /\bposted\b|\bcompleted\b/i;
 const MONTH_DOT_RE = /\.$/;
@@ -191,21 +192,34 @@ export function isoToPacked(iso: string): string | null {
 	return `${m}${d}${y}`;
 }
 
-/**
- * Chase's Statements page renders dates like "Apr 13, 2026". v8's Date
- * parser handles that reliably; we lower-cap into YYYY-MM-DD.
- */
+/** Format a validated calendar date without a host-zone conversion. */
+function calendarDate(year: number, month: number, day: number): string | null {
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+	if (
+		!Number.isInteger(year) || year < 1 || year > 9999 ||
+		!Number.isInteger(month) || month < 1 || month > 12 ||
+		!Number.isInteger(day) || day < 1 || day > (days[month - 1] ?? 0)
+	) return null;
+	return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+const CALENDAR_ISO_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
+const CALENDAR_US_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+
+/** Chase statement dates are calendar dates, not instants. */
 export function parseDateDelivered(
 	raw: string | null | undefined,
 ): string | null {
-	if (!raw) {
-		return null;
-	}
-	const d = new Date(raw);
-	if (Number.isNaN(d.getTime())) {
-		return null;
-	}
-	return d.toISOString().slice(0, 10);
+	if (!raw) return null;
+	const value = raw.trim();
+	const iso = CALENDAR_ISO_RE.exec(value);
+	if (iso) return calendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+	const numeric = CALENDAR_US_RE.exec(value);
+	if (numeric) return calendarDate(Number(numeric[3]), Number(numeric[1]), Number(numeric[2]));
+	const month = DATE_MONTH_RE.exec(value);
+	if (month?.[0] !== value || !month?.[1] || !month[2] || !month[3]) return null;
+	return calendarDate(Number(month[3]), Number(MONTH_INDEX[month[1].toLowerCase()]), Number(month[2]));
 }
 
 export function yearMonthFromIso(iso: string | null): string {
@@ -364,8 +378,14 @@ function parseVisibleAmount(text: string): number | null {
 		return null;
 	}
 	const [raw] = match;
-	const sign = ACTIVITY_DEBIT_RE.test(text) ? -1 : 1;
-	const normalized = raw.replace(/[$,\s+-]/g, "");
+	const leading = raw.trimStart()[0];
+	const sign =
+		leading === "-" ||
+		leading === "(" ||
+		(leading !== "+" && ACTIVITY_DEBIT_WORD_RE.test(text))
+			? -1
+			: 1;
+	const normalized = raw.replace(/[$,\s+()\-]/g, "");
 	const n = Number(normalized);
 	return Number.isFinite(n) ? Math.round(n * CENTS_MULTIPLIER) * sign : null;
 }
@@ -380,24 +400,37 @@ function inferActivityStatus(text: string): CurrentActivityStatus {
 	return "unknown";
 }
 
+function activityCalendarDate(
+	month: number,
+	day: number,
+	yearRaw: string | undefined,
+	referenceDateIso: string,
+): string | null {
+	if (yearRaw) {
+		const year = yearRaw.length === 2 ? Number(`20${yearRaw}`) : Number(yearRaw);
+		return calendarDate(year, month, day);
+	}
+	const reference = CALENDAR_ISO_RE.exec(referenceDateIso);
+	if (!reference || !calendarDate(Number(reference[1]), Number(reference[2]), Number(reference[3]))) return null;
+	let year = Number(reference[1]);
+	// The most recent occurrence not after the scrape day (at most one year
+	// back). Do not normalize an impossible day or search older leap years.
+	if (month > Number(reference[2]) || (month === Number(reference[2]) && day > Number(reference[3]))) year -= 1;
+	return calendarDate(year, month, day);
+}
+
 function parseVisibleDate(
 	text: string,
 	referenceDateIso: string,
 ): string | null {
 	const month = DATE_MONTH_RE.exec(text);
 	if (month?.[1] && month[2]) {
-		const monthNum =
-			MONTH_INDEX[month[1].toLowerCase().replace(MONTH_DOT_RE, "")];
-		const year = month[3] ?? referenceDateIso.slice(0, 4);
-		if (monthNum) {
-			return `${year.padStart(4, "20")}-${monthNum}-${month[2].padStart(2, "0")}`;
-		}
+		const monthNum = MONTH_INDEX[month[1].toLowerCase().replace(MONTH_DOT_RE, "")];
+		if (monthNum) return activityCalendarDate(Number(monthNum), Number(month[2]), month[3], referenceDateIso);
 	}
 	const numeric = DATE_NUMERIC_RE.exec(text);
 	if (numeric?.[1] && numeric[2]) {
-		const yearRaw = numeric[3] ?? referenceDateIso.slice(0, 4);
-		const year = yearRaw.length === 2 ? `20${yearRaw}` : yearRaw;
-		return `${year}-${numeric[1].padStart(2, "0")}-${numeric[2].padStart(2, "0")}`;
+		return activityCalendarDate(Number(numeric[1]), Number(numeric[2]), numeric[3], referenceDateIso);
 	}
 	return null;
 }
@@ -419,6 +452,7 @@ function extractUiTransactionId(el: Element): string | null {
 function normalizeDescription(text: string): string {
 	return normWhitespace(
 		text
+			.replace(/\u2212/g, "-")
 			.replace(AMOUNT_RE, " ")
 			.replace(DATE_MONTH_RE, " ")
 			.replace(DATE_NUMERIC_RE, " ")
@@ -426,31 +460,37 @@ function normalizeDescription(text: string): string {
 	);
 }
 
-function firstVisibleAmountIndex(parts: readonly string[]): number {
-	for (let i = parts.length - 1; i >= 0; i -= 1) {
-		if (AMOUNT_RE.test(parts[i] ?? "")) {
-			return i;
-		}
-	}
-	return -1;
-}
-
 function parseMdsActivityDataValues(
 	raw: string,
 	referenceDateIso: string,
 ): Omit<CurrentActivityRow, "ui_transaction_id"> | null {
-	const parts = raw
+	const normalizedRaw = raw.replace(/\u2212/g, "-");
+	// A pending Date column can contain "Pending (N)", which is not money.
+	const firstComma = normalizedRaw.indexOf(",");
+	const searchStart =
+		firstComma >= 0 && PENDING_RE.test(normalizedRaw.slice(0, firstComma))
+			? firstComma + 1
+			: 0;
+	const amountMatch = AMOUNT_RE.exec(normalizedRaw.slice(searchStart));
+	if (!amountMatch) return null;
+	const amountOffset = searchStart + amountMatch.index;
+	// Extract before splitting: commas inside a dollar amount are not columns.
+	const beforeAmount = normalizedRaw.slice(0, amountOffset);
+	const withoutAmount =
+		beforeAmount + normalizedRaw.slice(amountOffset + amountMatch[0].length);
+	const parts = withoutAmount
 		.split(",")
 		.map((part) => normWhitespace(part))
 		.filter(Boolean);
-	if (parts.length < 3) {
+	if (parts.length < 2) {
 		return null;
 	}
 
-	const amountIndex = firstVisibleAmountIndex(parts);
-	if (amountIndex < 0) {
-		return null;
-	}
+	// Keep the existing description boundary, ignoring columns after the amount.
+	const amountIndex = beforeAmount
+		.split(",")
+		.map((part) => normWhitespace(part))
+		.filter(Boolean).length;
 
 	let activityDate: string | null = null;
 	let descriptionStart = 1;
@@ -476,7 +516,7 @@ function parseMdsActivityDataValues(
 		return null;
 	}
 
-	const amountCents = parseVisibleAmount(parts[amountIndex] ?? "");
+	const amountCents = parseVisibleAmount(normalizedRaw.slice(searchStart));
 	if (amountCents === null) {
 		return null;
 	}
@@ -771,27 +811,47 @@ export function resolveAccountIdForRow(
 
 // ─── QFX structural extraction ───────────────────────────────────────────
 
+export interface QfxExtractionIntegrity {
+	rawCandidateCount: number;
+	extractedCount: number;
+	malformedCount: number;
+	sourceShapeValid: boolean;
+}
+
 function extractTransactions(
 	stmt: OfxValue,
 	currency: string,
-): QfxTransaction[] {
+): { transactions: QfxTransaction[]; integrity: QfxExtractionIntegrity } {
 	const trList = ofxGet(stmt, "BANKTRANLIST");
 	const rawTxns = ofxGet(trList, "STMTTRN");
 	let txnArray: OfxValue[];
 	if (Array.isArray(rawTxns)) {
 		txnArray = rawTxns;
-	} else if (rawTxns) {
+	} else if (rawTxns !== undefined) {
 		txnArray = [rawTxns];
 	} else {
 		txnArray = [];
 	}
+	// Count source candidates before any identity/date filtering.
+	const rawCandidateCount = txnArray.length;
 	const transactions: QfxTransaction[] = [];
 	for (const t of txnArray) {
-		const amtStr = (ofxString(ofxGet(t, "TRNAMT")) ?? "0").trim();
+		const amtStr = (ofxString(ofxGet(t, "TRNAMT")) ?? "").trim();
 		const amountCents = Math.round(Number(amtStr) * CENTS_MULTIPLIER);
 		const fitid = ofxString(ofxGet(t, "FITID")) ?? "";
 		const date = ofxDateToIso(ofxGet(t, "DTPOSTED"));
-		if (!(fitid && date)) {
+		const parsedDate = date ? Date.parse(`${date}T00:00:00.000Z`) : Number.NaN;
+		if (
+			!(
+				QFX_TRANSACTION_AMOUNT_RE.test(amtStr) &&
+				Number.isFinite(Number(amtStr)) &&
+				Number.isSafeInteger(amountCents) &&
+				fitid.trim() &&
+				date &&
+				Number.isFinite(parsedDate) &&
+				new Date(parsedDate).toISOString().slice(0, 10) === date
+			)
+		) {
 			continue;
 		}
 		transactions.push({
@@ -806,7 +866,15 @@ function extractTransactions(
 			reference_number: ofxString(ofxGet(t, "REFNUM")),
 		});
 	}
-	return transactions;
+	return {
+		transactions,
+		integrity: {
+			rawCandidateCount,
+			extractedCount: transactions.length,
+			malformedCount: rawCandidateCount - transactions.length,
+			sourceShapeValid: isOfxRecord(trList) || trList === "",
+		},
+	};
 }
 
 function extractBalance(stmt: OfxValue): QfxBalance | null {
@@ -838,10 +906,21 @@ function extractBalance(stmt: OfxValue): QfxBalance | null {
  * checking/savings under BANKMSGSRSV1 > STMTTRNRS > STMTRS. Structures
  * are otherwise parallel.
  */
-export function extractFromQfx(parsed: unknown): QfxExtracted {
+export function extractFromQfx(
+	parsed: unknown,
+): QfxExtracted & { integrity: QfxExtractionIntegrity } {
 	const root: OfxValue = ofxGet(parsed, "OFX") ?? parsed;
 	if (!isOfxRecord(root)) {
-		return { transactions: [], balance: null };
+		return {
+			transactions: [],
+			balance: null,
+			integrity: {
+				rawCandidateCount: 0,
+				extractedCount: 0,
+				malformedCount: 0,
+				sourceShapeValid: false,
+			},
+		};
 	}
 
 	const cc = ofxGet(
@@ -859,13 +938,22 @@ export function extractFromQfx(parsed: unknown): QfxExtracted {
 		stmt = bank;
 	}
 	if (!stmt) {
-		return { transactions: [], balance: null };
+		return {
+			transactions: [],
+			balance: null,
+			integrity: {
+				rawCandidateCount: 0,
+				extractedCount: 0,
+				malformedCount: 0,
+				sourceShapeValid: false,
+			},
+		};
 	}
 
 	const currency = ofxString(ofxGet(stmt, "CURDEF")) ?? "USD";
-	const transactions = extractTransactions(stmt, currency);
+	const { transactions, integrity } = extractTransactions(stmt, currency);
 	const balance = extractBalance(stmt);
-	return { transactions, balance };
+	return { transactions, balance, integrity };
 }
 
 // ─── Activity choice (cursor + scope → ActivityKind) ─────────────────────
