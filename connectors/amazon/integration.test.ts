@@ -591,6 +591,21 @@ test("collect path withholds orders and order_items coverage after an early stop
 		/yearSweepFinished = false;\s*\/\/ Not frozen and no STATE for this year/,
 		"a recognized mid-walk stop must clear the flag",
 	);
+	// This pins a source call site, not the behavior of the executable callback.
+	const recognizedStopMarksYear =
+		/AMAZON_MID_WALK_STOP_RE\.test\([^\n]+\)[\s\S]*?markYearIncomplete\(newYearsState,\s*year,\s*prior\);\s*yearSweepFinished = false;\s*\/\/ Not frozen and no STATE for this year/;
+	assert.match(src, recognizedStopMarksYear);
+	const withoutMarkCall = src.replace(recognizedStopMarksYear, (branch) =>
+		branch.replace(/markYearIncomplete\(newYearsState,\s*year,\s*prior\);/, ""),
+	);
+	assert.notEqual(
+		withoutMarkCall,
+		src,
+		"in-memory mutation must remove the recognized stop call",
+	);
+	assert.throws(() => assert.match(withoutMarkCall, recognizedStopMarksYear), {
+		name: "AssertionError",
+	});
 	assert.match(src, /if \(truncated\) yearSweepFinished = false;/);
 	assert.match(src, /if \(yearSweepFinished && orderItemsCoverage\)/);
 	assert.match(src, /if \(yearSweepFinished && ordersCoverage\)/);
