@@ -1369,6 +1369,9 @@ test("isIncapsulaBlocked bounds the incident-report shape by bytes, not characte
 test("isIncapsulaBlocked returns false for a plain text body", () => {
 	assert.equal(isIncapsulaBlocked("gateway unavailable"), false);
 });
+test("isIncapsulaBlocked does not classify plain text containing an iframe as a block", () => {
+	assert.equal(isIncapsulaBlocked("text <iframe></iframe>"), false);
+});
 test("isIncapsulaBlocked returns false for raw JSON", () => {
 	assert.equal(isIncapsulaBlocked('{"incidentId":"1","hostName":"fixture"}'), false);
 });
