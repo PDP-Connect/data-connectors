@@ -4,7 +4,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
-import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type {
+	CollectContext,
+	EmittedMessage,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { ynabPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import {
 	type EmittedRecord,
@@ -14,6 +17,8 @@ import {
 	type BudgetCtx,
 	collectCategoriesAndGroups,
 	createYnabRequest,
+	ynabCollect,
+	type YnabRequest,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -216,5 +221,70 @@ test("collectCategoriesAndGroups: omitted nested categories fail before coverage
 		);
 	} finally {
 		restore();
+	}
+});
+
+function scopedFixture(streams: readonly string[], state: Record<string, unknown>) {
+	const { ctx, emitted, messages } = makeCtx(streams);
+	const categoryQueries: Parameters<YnabRequest>[2][] = [];
+	const request: YnabRequest = <T>(
+		path: Parameters<YnabRequest>[0],
+		_token: Parameters<YnabRequest>[1],
+		query: Parameters<YnabRequest>[2],
+	) => {
+		if (path === "/budgets") {
+			return Promise.resolve({ data: { budgets: [{ id: BUDGET_ID }] } } as T);
+		}
+		assert.equal(path, `/budgets/${BUDGET_ID}/categories`);
+		categoryQueries.push(query);
+		return Promise.resolve({
+			data: { ...CATEGORIES_RESPONSE.data, server_knowledge: 9 },
+		} as T);
+	};
+	const collect = () => ynabCollect({
+		credentials: { YNAB_PERSONAL_ACCESS_TOKEN: "test-token" },
+		emit: ctx.emit,
+		emitRecord: ctx.trackAndEmit,
+		progress: ctx.progress,
+		requested: ctx.requested,
+		state,
+	} as CollectContext, request);
+	return { collect, emitted, messages, categoryQueries };
+}
+
+test("a category_groups-only run neither reads nor stages the categories frontier", async () => {
+	const state = { categories: { [BUDGET_ID]: { server_knowledge: 7 } } };
+	const { collect, emitted, messages, categoryQueries } = scopedFixture(
+		["category_groups"],
+		state,
+	);
+	await collect();
+	assert.deepEqual(categoryQueries, [{}]);
+	assert.equal(emitted.some((record) => record.stream === "category_groups"), true);
+	assert.equal(emitted.some((record) => record.stream === "categories"), false);
+	assert.equal(stateMessagesFor(messages, "categories").length, 0);
+	assert.deepEqual(
+		stateMessagesFor(messages, "category_groups").map((frame) => frame.cursor),
+		[{ [BUDGET_ID]: { server_knowledge: 9 } }],
+	);
+	assert.deepEqual(state.categories, { [BUDGET_ID]: { server_knowledge: 7 } });
+});
+
+test("co-fetched category streams use the least advanced requested knowledge", async () => {
+	const state = {
+		categories: { [BUDGET_ID]: { server_knowledge: 8 } },
+		category_groups: { [BUDGET_ID]: { server_knowledge: 3 } },
+	};
+	const { collect, categoryQueries, messages } = scopedFixture(
+		["categories", "category_groups"],
+		state,
+	);
+	await collect();
+	assert.deepEqual(categoryQueries, [{ knowledge: 3 }]);
+	for (const stream of ["categories", "category_groups"]) {
+		assert.deepEqual(
+			stateMessagesFor(messages, stream).map((frame) => frame.cursor),
+			[{ [BUDGET_ID]: { server_knowledge: 9 } }],
+		);
 	}
 });

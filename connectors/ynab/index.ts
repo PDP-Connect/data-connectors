@@ -1239,7 +1239,19 @@ export async function collectCategoriesAndGroups(ctx: BudgetCtx): Promise<{
 		trackAndEmit,
 		progress,
 	} = ctx;
-	const knowledge = priorKnowledge(state, "categories", budgetId);
+	const streams = (["categories", "category_groups"] as const).filter((stream) =>
+		requested.has(stream),
+	);
+	const frontiers = streams.map((stream) => priorKnowledge(state, stream, budgetId));
+	// Both streams share one request, but each must have collected its own prefix.
+	const observed = frontiers.filter(
+		(value): value is number =>
+			typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
+	);
+	const knowledge =
+		observed.length > 0 && observed.length === frontiers.length
+			? Math.min(...observed)
+			: undefined;
 	await progress("Fetching YNAB categories window", {
 		stream: "categories",
 		phase: "fetch",
@@ -1305,33 +1317,18 @@ export async function collectCategoriesAndGroups(ctx: BudgetCtx): Promise<{
 			}
 		}
 	}
-	const cats =
-		(newState.categories as
-			| Record<string, { server_knowledge: number }>
-			| undefined) ?? {};
-	cats[budgetId] = { server_knowledge: res.data.server_knowledge };
-	newState.categories = cats;
-	await emit({
-		type: "STATE",
-		stream: "categories",
-		cursor: newState.categories,
-	});
-	// `category_groups` is co-fetched from the same `/categories` response and
-	// advances on the identical durable receipt. Stage its own STATE checkpoint
-	// so the runtime records a committed checkpoint for the stream.
-	if (requested.has("category_groups")) {
-		const groups =
-			(newState.category_groups as
-				| Record<string, { server_knowledge: number }>
-				| undefined) ?? {};
-		groups[budgetId] = { server_knowledge: res.data.server_knowledge };
-		newState.category_groups = groups;
-		await emit({
-			type: "STATE",
-			stream: "category_groups",
-			cursor: newState.category_groups,
-		});
-	}
+	// The response supplies one receipt; only the streams that actually read it can advance.
+	const stageKnowledge = async (stream: (typeof streams)[number]) => {
+		if (!requested.has(stream)) return;
+		const streamState = {
+			...(newState[stream] as Record<string, { server_knowledge: number }> | undefined),
+			[budgetId]: { server_knowledge: res.data.server_knowledge },
+		};
+		newState[stream] = streamState;
+		await emit({ type: "STATE", stream, cursor: streamState });
+	};
+	await stageKnowledge("categories");
+	await stageKnowledge("category_groups");
 	return {
 		categoryGroups: coverageForRecords(
 			"category_groups",
