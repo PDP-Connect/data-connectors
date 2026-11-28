@@ -101,6 +101,31 @@ test("buildMessageRecord falls back to receivedAtMs when sentAt is unusable", ()
 	assert.equal(built.record.sender, null);
 });
 
+test("buildMessageRecord keeps the ISO value and cursor aligned at the Date boundary", () => {
+	const maxDateMs = 8_640_000_000_000_000;
+	const row = {
+		body: null,
+		conversationId: "11111111-1111-1111-1111-111111111111",
+		id: "22222222-2222-2222-2222-222222222222",
+		json: null,
+		receivedAtMs: 1_717_594_930_000,
+		sentAt: maxDateMs + 1,
+		sourceServiceId: null,
+		type: null,
+	};
+	const fallback = buildMessageRecord(row);
+	assert.equal(fallback.record.sent_at, "2024-06-05T13:42:10.000Z");
+	assert.equal(fallback.sentAtMs, row.receivedAtMs);
+
+	const skipped = buildMessageRecord({ ...row, receivedAtMs: maxDateMs + 2 });
+	assert.equal(skipped.record.sent_at, null);
+	assert.equal(skipped.sentAtMs, null);
+
+	const valid = buildMessageRecord({ ...row, sentAt: maxDateMs });
+	assert.equal(valid.record.sent_at, "+275760-09-13T00:00:00.000Z");
+	assert.equal(valid.sentAtMs, maxDateMs);
+});
+
 test("buildMessageRecord reports sentAtMs=null and sent_at=null when neither timestamp is usable (skip signal for index.ts)", () => {
 	const built = buildMessageRecord({
 		body: "no usable date",

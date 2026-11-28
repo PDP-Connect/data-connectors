@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { join, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import {
 	hasZipLocalFileSignature,
 	readZipEntries,
@@ -179,6 +180,7 @@ async function readFileBounded(filePath: string): Promise<string | null> {
 	const fd = await open(filePath, "r");
 	try {
 		const buffer = Buffer.alloc(64 * 1024);
+		const decoder = new StringDecoder("utf8");
 		let content = "";
 		let totalBytes = 0;
 
@@ -189,7 +191,7 @@ async function readFileBounded(filePath: string): Promise<string | null> {
 				break;
 			}
 
-			content += buffer.toString("utf8", 0, bytesRead);
+			content += decoder.write(buffer.subarray(0, bytesRead));
 			totalBytes += bytesRead;
 		}
 
@@ -205,7 +207,7 @@ async function readFileBounded(filePath: string): Promise<string | null> {
 			return null;
 		}
 
-		return content;
+		return content + decoder.end();
 	} catch {
 		return null;
 	} finally {
@@ -337,7 +339,7 @@ function parseCSVContent(content: string): {
 }
 
 function parseHeaders(line: string): string[] {
-	return line.split(",").map((h) => h.trim().toLowerCase());
+	return splitCSVFields(line).map((header) => header.toLowerCase());
 }
 
 function isValidRow(): boolean {

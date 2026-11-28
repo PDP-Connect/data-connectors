@@ -385,7 +385,12 @@ export function flattenContributionDays(
 	for (const week of weeks) {
 		for (const day of week.contributionDays ?? []) {
 			if (typeof day.date === "string" && day.date) {
-				out.push({ date: day.date, count: day.contributionCount ?? 0 });
+				const count = day.contributionCount;
+				if (count === undefined || count === null) {
+					// Do not return a partial dated inventory as measured coverage.
+					throw new Error("github_contribution_count_missing");
+				}
+				out.push({ date: day.date, count });
 			}
 		}
 	}

@@ -732,15 +732,23 @@ test("flattenContributionDays: flattens weeks into a flat day list", () => {
 	]);
 });
 
-test("flattenContributionDays: missing contributionCount defaults to 0", () => {
+test("flattenContributionDays: rejects an incomplete dated count before coverage", () => {
 	const collection: GitHubContributionsCollection = {
 		contributionCalendar: {
-			weeks: [{ contributionDays: [{ date: "2026-06-01" }] }],
+			weeks: [
+				{
+					contributionDays: [
+						{ date: "2026-06-01" },
+						{ date: "2026-06-02", contributionCount: 0 },
+					],
+				},
+			],
 		},
 	};
-	assert.deepEqual(flattenContributionDays(collection), [
-		{ date: "2026-06-01", count: 0 },
-	]);
+	assert.throws(
+		() => flattenContributionDays(collection),
+		/github_contribution_count_missing/,
+	);
 });
 
 test("flattenContributionDays: drops days missing a date rather than guessing one", () => {

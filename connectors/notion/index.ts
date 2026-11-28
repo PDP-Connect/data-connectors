@@ -215,12 +215,19 @@ async function searchAll(
 		};
 		await progress("Fetching Notion search page", pageExtra);
 		const json = await ntn("/search", token, body, progress, pageExtra);
-		results.push(...(json.results || []));
+		if (
+			!json ||
+			!Array.isArray(json.results) ||
+			typeof json.has_more !== "boolean"
+		) {
+			throw new Error("notion_search_page_invalid");
+		}
+		results.push(...json.results);
 		await progress("Fetched Notion search page", {
 			stream: streamName,
 			phase: "page",
 			page_index: pageIndex,
-			item_count: json.results?.length ?? 0,
+			item_count: json.results.length,
 			total_seen: results.length,
 			cursor_present: Boolean(json.has_more && json.next_cursor),
 		});

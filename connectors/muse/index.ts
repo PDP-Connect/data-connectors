@@ -1681,9 +1681,12 @@ export async function runActivities(
 			if (items.length === 0) break;
 			// A page with nothing new is expected after an inclusive request (see
 			// nextActivityCursor), which decides whether the walk can go on.
-			const fresh = items.filter((a) => !seen.has(activityId(a)));
-			for (const a of fresh) {
-				seen.add(activityId(a));
+			let freshCount = 0;
+			for (const a of items) {
+				const id = activityId(a);
+				if (seen.has(id)) continue;
+				seen.add(id);
+				freshCount += 1;
 				await emitBuilt(ctx, tally, ACTIVITIES, buildActivityRecord(a));
 			}
 			// The oldest activity across all days of the page.
@@ -1709,7 +1712,7 @@ export async function runActivities(
 			const next = nextActivityCursor({
 				oldestRaw,
 				oldestIso,
-				freshCount: fresh.length,
+				freshCount,
 				tiedFullPage,
 				previous: before,
 				ceiling,

@@ -10,13 +10,19 @@ import {
 	buildOrderRecord,
 	collectOrders,
 } from "./index.ts";
-import { acceptNutrition } from "./nutrition-acceptance.ts";
+import {
+	acceptNutrition,
+	noMatch,
+	pageEvidence,
+	selectNutrition,
+} from "./nutrition-acceptance.ts";
 import {
 	parseAmazonProductNutritionDom,
 	parseOrderDetailDom,
 } from "./parsers.ts";
 import { nutritionSchema, validateRecord } from "./schemas.ts";
 import { parseWholeFoodsProductPageDom } from "./test-support.ts";
+import type { NutritionFacts } from "./types.ts";
 
 const AMAZON_PANEL = `<html><body><div id="nic-nutrition-facts">Calories 150 Total Fat 8g Total Carbohydrate 37g Protein 3g</div></body></html>`;
 
@@ -244,4 +250,75 @@ test("nutrition key must agree with its source product identity", () => {
 		nutritionSchema.safeParse({ ...record, id: "B087654321" }).success,
 		false,
 	);
+});
+
+test("failed nutrition evidence cannot become absence or partial panel", () => {
+	const absent = {
+		kind: "proven_absent",
+		proof: "page_without_panel",
+	} as const;
+	const panel = { kind: "panel" } as const;
+	const failed = {
+		kind: "unknown",
+		failure: { status: "error", cause: "navigation_failed" },
+	} as const;
+
+	assert.equal(pageEvidence([absent]), "none");
+	assert.deepEqual(noMatch([absent]), {
+		status: "not_found",
+		cause: "no_match",
+	});
+	assert.equal(pageEvidence([absent, panel]), "partial");
+	assert.deepEqual(noMatch([absent, panel]), {
+		status: "error",
+		cause: "panel_partial",
+	});
+	for (const answers of [
+		[absent, panel, failed],
+		[failed, panel, absent],
+	]) {
+		assert.equal(pageEvidence(answers), "unknown");
+		assert.deepEqual(noMatch(answers), failed.failure);
+	}
+});
+
+test("panel selection skips an incomplete first panel and retains a stated upper bound", () => {
+	const complete = {
+		addedSugarG: null,
+		allergens: null,
+		calciumMg: null,
+		calories: 120,
+		carbsG: 11,
+		category: [],
+		cholesterolMg: null,
+		confidence: "high",
+		coreStated: ["calories", "carbs", "fat", "protein"],
+		fatG: 3,
+		fiberG: null,
+		highlights: [],
+		ingredients: null,
+		ironMg: null,
+		proteinG: null,
+		potassiumMg: null,
+		rawNutritionText: "Protein <1 g",
+		servingSize: null,
+		servingsPerContainer: null,
+		saturatedFatG: null,
+		sodiumMg: null,
+		source: "amazon_product_page",
+		sugarG: null,
+		transFatG: null,
+		vitaminDMcg: null,
+		upc: null,
+	} satisfies NutritionFacts;
+	const partial = {
+		...complete,
+		calories: 140,
+		coreStated: ["calories", "carbs", "fat"],
+	} satisfies NutritionFacts;
+	assert.equal(selectNutrition([partial]), null);
+	assert.deepEqual(selectNutrition([partial, complete]), {
+		...complete,
+		accepted: true,
+	});
 });

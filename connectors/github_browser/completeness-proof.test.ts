@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 import { type Continuation, InventoryEvidence } from "./inventory-evidence.ts";
+import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import { collectGitHubBrowser } from "./collector.ts";
 import { inspectInventoryPage, parseProfilePage } from "./parsers.ts";
 
@@ -419,3 +420,38 @@ for (const stream of ["events", "starred"] as const) {
 		});
 	}
 }
+
+test("an empty GitHub inventory is measured only when enumeration proves it complete", () => {
+	const empty = { kind: "enumerated", considered: 0, covered: 0 } as const;
+	assert.deepEqual(fullInventoryCoverage("starred", { ...empty, complete: true }), {
+		type: "DETAIL_COVERAGE",
+		reference_only: true,
+		stream: "starred",
+		state_stream: "starred",
+		required_keys: [],
+		hydrated_keys: [],
+		considered: 0,
+		covered: 0,
+	});
+	const unproven = { ...empty, complete: false };
+	assert.deepEqual(fullInventoryCoverage("starred", unproven), {
+		type: "SKIP_RESULT",
+		stream: "starred",
+		reason: "inventory_not_proven_complete",
+		message: "Source enumeration did not prove the inventory complete.",
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		diagnostics: { enumeration: unproven },
+	});
+});
+
+test("an enumerated GitHub inventory with short or invalid counts remains retryable", () => {
+	for (const [considered, covered] of [[3, 2], [-1, -1], [1.5, 1.5], [Infinity, Infinity]] as const) {
+		const enumeration = { kind: "enumerated", complete: true, considered, covered } as const;
+		const result = fullInventoryCoverage("repositories", enumeration, "test_count_evidence");
+		assert.ok(result.type === "SKIP_RESULT", "unproven inventory emitted coverage");
+		assert.equal(result.stream, "repositories");
+		assert.equal(result.reason, "inventory_not_proven_complete");
+		assert.deepEqual(result.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.deepEqual(result.diagnostics, { enumeration, reason: "test_count_evidence" });
+	}
+});

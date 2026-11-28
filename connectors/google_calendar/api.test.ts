@@ -135,6 +135,36 @@ test("listEventsPage surfaces cancelled events for deletion tombstones", async (
 	assert.equal(page.events[0]?.status, "cancelled");
 });
 
+test("listEventsPage rejects malformed JSON instead of returning an empty event page", async () => {
+	const transport = makeFetch([new Response("not json", { status: 200 })]);
+	const client = new GoogleCalendarClient({
+		accessToken: "synthetic-calendar-test",
+		fetch: transport.fetch,
+	});
+	await assert.rejects(
+		() => client.listEventsPage("synthetic-calendar"),
+		SyntaxError,
+	);
+	assert.equal(transport.calls.length, 1);
+});
+
+test("listEventsPage propagates a rejected transport without retrying", async () => {
+	const reason = new Error("synthetic transport failure");
+	let attempts = 0;
+	const client = new GoogleCalendarClient({
+		accessToken: "synthetic-calendar-test",
+		fetch: async () => {
+			attempts += 1;
+			throw reason;
+		},
+	});
+	await assert.rejects(
+		() => client.listEventsPage("synthetic-calendar"),
+		(error: unknown) => error === reason,
+	);
+	assert.equal(attempts, 1);
+});
+
 test("listEventsPage throws CalendarSyncTokenExpiredError on HTTP 410", async () => {
 	const transport = makeFetch([
 		jsonResponse(
@@ -167,6 +197,58 @@ test("listEventsPage throws CalendarApiError on other non-2xx statuses", async (
 	);
 });
 
+test("listEventsPage preserves an all-day date and exclusive end as date-only values", async () => {
+	const transport = makeFetch([
+		jsonResponse({
+			items: [
+				{
+					id: "synthetic-all-day",
+					start: { date: "2026-07-10" },
+					end: { date: "2026-07-11" },
+				},
+			],
+		}),
+	]);
+	const client = new GoogleCalendarClient({
+		accessToken: "synthetic-calendar-test",
+		fetch: transport.fetch,
+	});
+	const { events } = await client.listEventsPage("synthetic-calendar");
+	assert.equal(events.length, 1);
+	assert.deepEqual(events[0]?.start, {
+		date: "2026-07-10",
+		dateTime: null,
+		timeZone: null,
+	});
+	assert.deepEqual(events[0]?.end, {
+		date: "2026-07-11",
+		dateTime: null,
+		timeZone: null,
+	});
+});
+
+test("listEventsPage preserves source order when filtering non-string recurrence entries", async () => {
+	const transport = makeFetch([
+		jsonResponse({
+			items: [
+				{
+					id: "synthetic-recurring",
+					recurrence: ["RRULE:FREQ=WEEKLY", 23, "EXDATE:20260717", null],
+				},
+			],
+		}),
+	]);
+	const client = new GoogleCalendarClient({
+		accessToken: "synthetic-calendar-test",
+		fetch: transport.fetch,
+	});
+	const { events } = await client.listEventsPage("synthetic-calendar");
+	assert.equal(events.length, 1);
+	assert.deepEqual(events[0]?.recurrence, [
+		"RRULE:FREQ=WEEKLY",
+		"EXDATE:20260717",
+	]);
+});
 test("constructor rejects an empty access token", () => {
 	assert.throws(
 		() => new GoogleCalendarClient({ accessToken: "  " }),

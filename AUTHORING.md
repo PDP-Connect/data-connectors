@@ -173,6 +173,11 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
    3. Add the connector to `REAL_UNLISTED_CONNECTORS` in `packages/polyfill-connectors/src/connector-conformance-roster.ts`, with the test file that runs its collection.
    4. Add a coverage driver to `CONNECTOR_DRIVERS` in `connectors/_conformance/coverage-conformance-drivers.ts`. A driver runs the connector against a fake local server and lists the streams it covers; `driveJellyfin` is an example.
    5. Run `npm run connector-implementation-index:generate` and commit `connector-implementation-index.json`.
+   6. Regenerate the consent-time fields with [the generator](packages/polyfill-connectors/scripts/generate-consent-time-fields.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-consent-time-fields.ts)` and commit the generated files.
+   7. For a connector with saved credentials, regenerate the static-secret registry with [the generator](packages/polyfill-connectors/scripts/generate-static-secret-registry.ts) by running `(cd packages/polyfill-connectors && node --experimental-strip-types scripts/generate-static-secret-registry.ts)` and commit the generated file.
+   8. Run `npm run polyfill-library-metadata:generate` and commit `packages/polyfill-connectors/src/manifest-library-metadata.json`.
+   9. Raise the manifest count by one in the "every shipped manifest declares exactly one typed public lifecycle tier" test in `packages/polyfill-connectors/src/public-listing-manifest-honesty.test.ts`.
+   10. If `(cd packages/polyfill-connectors && npm run check:noAwaitInLoops-conformance)` reports a new finding, remove the sequential await or add a reviewed allowlist entry with the reason.
 
    Then run `npm test`. It fails until each of these is done, and each failing test names the file to change.
 

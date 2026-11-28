@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { META_RECORD_KEY_FIELDS } from "./index.ts";
+import { followingRecord, postRecord } from "./parsers.ts";
 
 const manifest = JSON.parse(
 	readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
@@ -24,4 +25,24 @@ test("the runtime key fields are the manifest primary keys that are not id alone
 			.map((stream) => [stream.name, stream.primary_key]),
 	);
 	assert.deepEqual(META_RECORD_KEY_FIELDS, expected);
+});
+
+test("post rows without any identity do not produce a record key", () => {
+	assert.equal(
+		postRecord({ node: { caption: { text: "Synthetic caption" } } }),
+		null,
+	);
+	assert.equal(
+		postRecord({ node: { pk: "fixture-post" } })?.id,
+		"fixture-post",
+	);
+});
+
+test("following rows need both an identity and a visible username", () => {
+	assert.equal(followingRecord({ username: "fixture-user" }), null);
+	assert.equal(followingRecord({ id: "fixture-id" }), null);
+	assert.equal(
+		followingRecord({ id: "fixture-id", username: "fixture-user" })?.id,
+		"fixture-id",
+	);
 });
