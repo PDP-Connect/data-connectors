@@ -380,7 +380,11 @@ export function contributionDayRecord(
 export function flattenContributionDays(
 	collection: GitHubContributionsCollection | null | undefined,
 ): Array<{ count: number; date: string }> {
-	const weeks = collection?.contributionCalendar?.weeks ?? [];
+	const weeks = collection?.contributionCalendar?.weeks;
+	if (!Array.isArray(weeks)) {
+		// No calendar was observed; only an explicit array can prove an empty window.
+		throw new Error("github_contribution_calendar_unavailable");
+	}
 	const out: Array<{ count: number; date: string }> = [];
 	for (const week of weeks) {
 		for (const day of week.contributionDays ?? []) {
