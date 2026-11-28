@@ -1448,12 +1448,17 @@ test("rollout cursor lookup skips a malformed stream envelope before falling bac
 		line_count: 2,
 		guard_bytes: 8,
 		head_sha256: "a".repeat(64),
+		first_ts: null,
+		last_ts: null,
+		message_count: 0,
+		function_call_count: 0,
+		session_id: null,
 	};
 	const result = readPriorFileCursors({
 		type: "START",
 		scope: { streams: [{ name: "function_calls" }] },
 		state: {
-			messages: { file_cursors: [] },
+			messages: { file_cursors: [] as unknown as Record<string, typeof cursor> },
 			function_calls: { file_cursors: { [session]: cursor } },
 			sessions: { file_cursors: { unused: cursor } },
 		},

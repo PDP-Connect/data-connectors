@@ -7394,7 +7394,7 @@
 				},
 				"connector_key": "codex",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-				"version": "0.3.16",
+				"version": "0.3.17",
 				"display_name": "OpenAI Codex CLI",
 				"brand": {
 					"icon": "icon.svg",
@@ -23249,7 +23249,7 @@
 				},
 				"connector_key": "signal",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/signal",
-				"version": "0.1.4",
+				"version": "0.1.5",
 				"display_name": "Signal Desktop",
 				"brand": {
 					"icon": "icon.svg",
@@ -29464,7 +29464,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.34",
+				"version": "0.2.35",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
