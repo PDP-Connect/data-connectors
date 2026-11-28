@@ -2,6 +2,9 @@
 
 Status: Normative draft. This is the canonical PDPP Collection Profile.
 
+The text for the 0.1.0 and 0.2.0 manifests that ship today is kept frozen in
+[`collection-profile-0.2.0.md`](collection-profile-0.2.0.md).
+
 Date: 2026-10-22
 
 ## 1. Scope
