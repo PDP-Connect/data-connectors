@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -807,7 +807,7 @@ test("Netflix direct_history replays the day of a full_export instant cursor", a
 	}
 });
 
-test("Netflix full_export still excludes an exact timestamp equal to its emitted cursor", async () => {
+test("Netflix full_export imports a distinct row sharing the exact stored timestamp", async () => {
 	const importRoot = await mkdtemp(
 		join(tmpdir(), "pdpp-netflix-exact-cursor-"),
 	);
@@ -822,9 +822,19 @@ test("Netflix full_export still excludes an exact timestamp equal to its emitted
 		assertImportSucceeded(first.messages, 1);
 		assert.equal(records(first.messages, "viewing_activity").length, 1);
 		const state = viewingActivityState(first.messages);
+		const file = join(importRoot, "ViewingActivity.csv");
+		const original = await readFile(file, "utf8");
+		await writeFile(
+			file,
+			original +
+				"Invented Profile,2024-06-05 10:30:00,0:10:00,,Invented Sun,,TV,0:10:00,0:10:00,US\n",
+		);
 		const second = await runNetflixImport(importRoot, state);
-		assertImportSucceeded(second.messages, 0);
-		assert.deepEqual(records(second.messages, "viewing_activity"), []);
+		assertImportSucceeded(second.messages, 2);
+		const emitted = records(second.messages, "viewing_activity");
+		const oldId = records(first.messages, "viewing_activity")[0]?.id;
+		assert.ok(emitted.some((entry) => entry.id === oldId));
+		assert.equal(new Set(emitted.map((entry) => entry.id)).size, 2);
 		assert.deepEqual(viewingActivityState(second.messages), state);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
