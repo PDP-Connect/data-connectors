@@ -4,7 +4,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { isYnabRetryableError, ynabCollect } from "./index.ts";
+import {
+	createYnabRequest,
+	isYnabRetryableError,
+	ynabCollect,
+} from "./index.ts";
 
 test("YNAB request-budget enrichment failures preserve retryable classification", () => {
 	assert.equal(isYnabRetryableError(new Error("ynab_rate_limited")), true);
@@ -51,4 +55,40 @@ test("YNAB transaction collection does not hide a rate-limited account-type enri
 
 	await assert.rejects(() => ynabCollect(ctx, request), /ynab_rate_limited/);
 	assert.deepEqual(paths, ["/budgets", `/budgets/${budgetId}/accounts`]);
+});
+
+test("YNAB attributes an interrupted success body to its endpoint", async () => {
+	const interrupted = new TypeError("fixture body interrupted");
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async () =>
+		new Response(
+			new ReadableStream({
+				start(controller) {
+					controller.error(interrupted);
+				},
+			}),
+			{ status: 200 },
+		);
+	try {
+		const request = createYnabRequest({
+			request: async (operation, classify) => {
+				const raw = await operation();
+				return { ...classify(raw), attempts: 1, waitMs: 0 };
+			},
+		});
+		await assert.rejects(
+			() => request("/budgets/fake-id/categories", "fixture-token"),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.equal(error.cause, interrupted);
+				assert.equal(
+					error.message,
+					"fixture body interrupted [endpoint /budgets/{budget_id}/categories]",
+				);
+				return true;
+			},
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
 });
