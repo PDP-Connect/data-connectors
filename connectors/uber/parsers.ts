@@ -49,7 +49,7 @@ export function parseCurrencyCents(
 	if (!raw) {
 		return null;
 	}
-	const s = String(raw);
+	const s = String(raw).trim();
 	const negative = CURRENCY_NEGATIVE_SIGN_RE.test(s);
 	const stripped = s.replace(CURRENCY_THOUSANDS_RE, "");
 	const m = stripped.match(CURRENCY_NUMBER_RE);

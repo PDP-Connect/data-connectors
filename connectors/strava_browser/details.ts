@@ -41,12 +41,16 @@ export function parseHeartRateStream(body: string): {
 		return null;
 	}
 	if (!isRecord(payload)) return null;
+	if (!Object.hasOwn(payload, "heartrate")) {
+		return { average: null, maximum: null };
+	}
 	const stream = payload.heartrate;
 	const samples = Array.isArray(stream)
 		? stream
 		: isRecord(stream) && Array.isArray(stream.data)
 			? stream.data
-			: [];
+			: null;
+	if (samples === null) return null;
 	const values = samples
 		.map((sample) =>
 			isRecord(sample) ? finiteNumber(sample.value) : finiteNumber(sample),

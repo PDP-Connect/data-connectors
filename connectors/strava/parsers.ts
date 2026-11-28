@@ -153,6 +153,7 @@ class CsvRowParser {
 	private field = "";
 	private inQuotes = false;
 	private pendingQuote = false;
+	private skipLfAfterCr = false;
 	private row: string[] = [];
 	private sawAnyChar = false;
 
@@ -164,6 +165,12 @@ class CsvRowParser {
 				continue;
 			}
 			this.sawAnyChar = true;
+
+			// CR already emitted the row. Swallow the optional LF, even across chunks.
+			if (this.skipLfAfterCr) {
+				this.skipLfAfterCr = false;
+				if (ch === "\n") continue;
+			}
 
 			// A quote at the end of a chunk may be either an escaped quote or the
 			// closing quote. Defer that decision until the next chunk arrives.
@@ -197,12 +204,13 @@ class CsvRowParser {
 			} else if (ch === ",") {
 				this.row.push(this.field);
 				this.field = "";
-			} else if (ch === "\n") {
+			} else if (ch === "\n" || ch === "\r") {
 				this.row.push(this.field);
 				rows.push(this.row);
 				this.row = [];
 				this.field = "";
-			} else if (ch !== "\r") {
+				this.skipLfAfterCr = ch === "\r";
+			} else {
 				this.field += ch;
 			}
 		}
@@ -329,6 +337,8 @@ export function resolveColumns(
 	};
 }
 
+const DECIMAL_CELL_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+
 /**
  * An empty cell means the reading was never taken — a ride with no strap, a
  * manually entered activity with no calories. It becomes null and never 0,
@@ -340,7 +350,7 @@ export function numberOrNull(cell: string | undefined): number | null {
 		return null;
 	}
 	const trimmed = cell.trim();
-	if (trimmed === "") {
+	if (!DECIMAL_CELL_RE.test(trimmed)) {
 		return null;
 	}
 	const value = Number(trimmed);
@@ -357,6 +367,19 @@ export interface ParsedStart {
 	readonly iso: string;
 	/** What the source actually told us about the clock — never a guess. */
 	readonly basis: "utc" | "local" | "unknown";
+}
+
+function validActivityDay(day: string): boolean {
+	const midnight = new Date(day + "T00:00:00Z");
+	return (
+		Number.isFinite(midnight.getTime()) &&
+		midnight.toISOString().slice(0, 10) === day
+	);
+}
+
+function validClock(time: string): boolean {
+	const [hour, minute, second] = time.split(":");
+	return Number(hour) <= 23 && Number(minute) <= 59 && Number(second) <= 59;
 }
 
 /**
@@ -377,7 +400,13 @@ export function parseActivityDate(raw: string | undefined): ParsedStart | null {
 
 	const zoned = ISO_WITH_ZONE_RE.exec(value);
 	if (zoned) {
-		const [, date, time, zone] = zoned;
+		const [, date = "", time = "", zone = ""] = zoned;
+		if (!validActivityDay(date) || !validClock(time)) return null;
+		if (zone !== "Z") {
+			const offset = zone.slice(1).replace(":", "");
+			if (Number(offset.slice(0, 2)) > 23 || Number(offset.slice(2)) > 59)
+				return null;
+		}
 		return {
 			iso: zone === "Z" ? `${date}T${time}Z` : `${date}T${time}${zone}`,
 			basis: "utc",
@@ -386,7 +415,8 @@ export function parseActivityDate(raw: string | undefined): ParsedStart | null {
 
 	const naked = ISO_NAKED_RE.exec(value);
 	if (naked) {
-		const [, date, time] = naked;
+		const [, date = "", time = ""] = naked;
+		if (!validActivityDay(date) || !validClock(time)) return null;
 		return { iso: `${date}T${time}`, basis: "unknown" };
 	}
 
@@ -394,7 +424,7 @@ export function parseActivityDate(raw: string | undefined): ParsedStart | null {
 	if (us) {
 		const [, mon, day, year, hour12, minute, second, meridiem] = us;
 		const month = MONTHS[mon as string];
-		if (month === undefined) {
+		if (month === undefined || Number(hour12) < 1 || Number(hour12) > 12) {
 			return null;
 		}
 		let hour = Number(hour12) % 12;
@@ -402,8 +432,11 @@ export function parseActivityDate(raw: string | undefined): ParsedStart | null {
 			hour += 12;
 		}
 		const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+		const date = `${year}-${pad(month)}-${pad(Number(day))}`;
+		const time = `${pad(hour)}:${minute}:${second}`;
+		if (!validActivityDay(date) || !validClock(time)) return null;
 		return {
-			iso: `${year}-${pad(month)}-${pad(Number(day))}T${pad(hour)}:${minute}:${second}`,
+			iso: `${date}T${time}`,
 			basis: "unknown",
 		};
 	}

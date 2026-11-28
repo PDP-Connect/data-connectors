@@ -32,6 +32,7 @@ import {
 	type WhoopCollectContext,
 	WINDOW_DAYS,
 } from "./index.ts";
+import { parseRange, toInstant } from "./parsers.ts";
 import { type Stream, validateRecord } from "./schemas.ts";
 
 const DAY = 86_400_000;
@@ -2823,4 +2824,17 @@ test("collect: a cycle outside a window is dropped there without a count, and on
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
+});
+
+test("parseRange rejects extra bounds but preserves an explicitly unbounded end", () => {
+	assert.equal(parseRange("[sample,extra,unexpected)"), null);
+	assert.deepEqual(parseRange("[sample,infinity)"), {
+		lower: "sample",
+		upper: null,
+	});
+});
+
+test("toInstant rejects impossible calendar days instead of rolling them forward", () => {
+	assert.equal(toInstant("2025-02-29T12:00:00Z"), null);
+	assert.equal(toInstant("2024-02-29T12:00:00Z"), "2024-02-29T12:00:00.000Z");
 });

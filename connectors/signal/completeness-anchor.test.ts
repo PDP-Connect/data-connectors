@@ -23,10 +23,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	DEFAULT_MAX_ATTACHMENT_BYTES,
 	mergeEmittedIds,
+	parseCursorMs,
 	parseEmittedIds,
+	resolveMaxAttachmentBytes,
 	validateSourceTotal,
 } from "./index.ts";
+import { buildMessageRecord } from "./parsers.ts";
 
 // ─── validateSourceTotal: fail closed ────────────────────────────────────
 
@@ -208,4 +212,51 @@ test("an id present in holdings but deleted upstream produces no finding", () =>
 		[],
 		"an upstream deletion must never be reported as a gap",
 	);
+});
+
+test("signal preserves send time and only falls back to receive time when needed", () => {
+	const sentAt = Date.parse("2024-06-05T13:00:00.000Z");
+	const receivedAtMs = sentAt + 60_000;
+	const row = {
+		body: "synthetic",
+		conversationId: "fixture-conversation",
+		id: "fixture-message",
+		json: "{invalid",
+		receivedAtMs,
+		sentAt,
+		sourceServiceId: null,
+		type: "incoming",
+	};
+
+	const sent = buildMessageRecord(row);
+	assert.equal(sent.record.sent_at, "2024-06-05T13:00:00.000Z");
+	assert.equal(sent.sentAtMs, sentAt);
+	assert.equal(sent.record.body, "synthetic");
+	assert.equal(sent.record.has_attachments, false);
+	assert.equal(sent.record.is_edited, false);
+
+	const received = buildMessageRecord({ ...row, sentAt: null });
+	assert.equal(received.record.sent_at, "2024-06-05T13:01:00.000Z");
+	assert.equal(received.sentAtMs, receivedAtMs);
+});
+
+test("signal normalizes serialized and unusable incremental cursors", () => {
+	assert.equal(parseCursorMs("1717592400000"), 1717592400000);
+	assert.equal(parseCursorMs(1717592400000.75), 1717592400000);
+	for (const value of [undefined, "invalid", -1, Infinity]) {
+		assert.equal(parseCursorMs(value), 0);
+	}
+});
+
+test("signal requires a positive whole-byte attachment limit override", () => {
+	assert.equal(
+		resolveMaxAttachmentBytes({ PDPP_SIGNAL_MAX_ATTACHMENT_BYTES: "4096" }),
+		4096,
+	);
+	for (const value of ["0", "-1", "1.5", "4096bytes"]) {
+		assert.equal(
+			resolveMaxAttachmentBytes({ PDPP_SIGNAL_MAX_ATTACHMENT_BYTES: value }),
+			DEFAULT_MAX_ATTACHMENT_BYTES,
+		);
+	}
 });

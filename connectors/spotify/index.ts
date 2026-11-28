@@ -35,7 +35,7 @@ const SPOTIFY_WEB_HOME = "https://open.spotify.com/";
 // Only 429 and 5xx are worth a retry. A 4xx (the recently-played 404 Spotify
 // began returning on 6 Nov 2026) fails the same way on every attempt.
 export const spotifyRetryablePattern =
-	/rate_limited|ECONN|fetch failed|retryable status (?:429|5\d\d)\b|spotify_retryable_status_(?:429|5\d\d|unknown)\b|spotify_retryable_network\b/i;
+	/rate_limited|ECONN|fetch failed|retryable status (?:429|5\d\d)\b|spotify_retryable_status_(?:429|5\d\d|unknown)\b|spotify_retryable_network\b|spotify_session_check_inconclusive\b/i;
 
 /**
  * Streams that read one source surface each. A failure on that surface fails
@@ -628,9 +628,16 @@ export function spotifyTotp(timestampMs: number): string {
 	return String(code).padStart(6, "0");
 }
 
-export async function hasSpotifySession(
+/**
+ * What Spotify's token endpoint says about the stored cookies. `anonymous` is
+ * its own answer that nobody is signed in. A timeout, a 429 or 5xx, or a body
+ * that does not parse says nothing about the cookies, so it is `inconclusive`.
+ */
+export type SpotifySessionState = "signed_in" | "anonymous" | "inconclusive";
+
+export async function probeSpotifySession(
 	page: BrowserCollectContext["page"],
-): Promise<boolean> {
+): Promise<SpotifySessionState> {
 	const request = page.context().request;
 	const headers = {
 		Origin: "https://open.spotify.com",
@@ -669,40 +676,96 @@ export async function hasSpotifySession(
 			{ headers, timeout: 10_000 },
 		);
 		try {
+			if (!tokenResponse.ok()) return "inconclusive";
 			const tokenData = (await tokenResponse.json()) as {
 				accessToken?: unknown;
 				isAnonymous?: unknown;
 			};
-			return Boolean(
-				tokenResponse.ok() && tokenData.accessToken && !tokenData.isAnonymous,
-			);
+			if (
+				typeof tokenData.accessToken === "string" &&
+				tokenData.accessToken.trim().length > 0 &&
+				tokenData.isAnonymous === false
+			) return "signed_in";
+			return tokenData.isAnonymous === true ? "anonymous" : "inconclusive";
 		} finally {
 			await tokenResponse.dispose();
 		}
 	} catch {
-		return false;
+		return "inconclusive";
 	}
 }
 
-async function ensureSpotifySession({
-	assist,
-	capture,
-	completeAssistance,
-	page,
-	sendInteraction,
-}: EnsureSessionArgs): Promise<void> {
-	if (await hasSpotifySession(page)) return;
+export async function hasSpotifySession(
+	page: BrowserCollectContext["page"],
+): Promise<boolean> {
+	return (await probeSpotifySession(page)) === "signed_in";
+}
+
+/**
+ * Only an owner signing in at the secure browser repairs a dead Spotify
+ * session; there is no stored credential to replay. A run the host did not
+ * start by hand (`scheduled`, `retry`, `webhook`) has no owner there, so it
+ * must fail instead of holding a browser lane through the 30-minute handoff.
+ * Absent trigger metadata is a local or test run and keeps the handoff, as in
+ * whoop, heb and chatgpt.
+ */
+export function spotifyAllowsInteractiveSignIn(
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	const trigger = env.PDPP_RUN_TRIGGER_KIND?.trim();
+	return !trigger || trigger === "manual";
+}
+
+export async function ensureSpotifySession(
+	{
+		assist,
+		autoProbeIntervalMs,
+		autoProbeWindowMs,
+		capture,
+		completeAssistance,
+		now,
+		page,
+		progress,
+		sendInteraction,
+	}: EnsureSessionArgs & {
+		readonly autoProbeIntervalMs?: number;
+		readonly autoProbeWindowMs?: number;
+		readonly now?: () => number;
+	},
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+	const session = await probeSpotifySession(page);
+	if (session === "signed_in") return;
+	if (!spotifyAllowsInteractiveSignIn(env)) {
+		// Only the endpoint's own "anonymous" answer proves the cookies are dead. A
+		// timeout or 429 says nothing about them, so that run may retry instead of
+		// asking the owner to sign in again.
+		if (session === "inconclusive") {
+			await progress(
+				"Spotify could not be checked just now. PDPP will try again.",
+			);
+			throw new Error("spotify_session_check_inconclusive");
+		}
+		await progress(
+			"Spotify needs you to sign in. Start a manual run to open the secure browser.",
+		);
+		throw new Error("spotify_session_required");
+	}
 	await page.goto(
 		"https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F",
 		{ waitUntil: "domcontentloaded" },
 	);
+	await progress("Waiting for you to sign in to Spotify");
 	const ready = await manualBrowserLogin({
 		assist,
+		...(autoProbeIntervalMs === undefined ? {} : { autoProbeIntervalMs }),
+		...(autoProbeWindowMs === undefined ? {} : { autoProbeWindowMs }),
 		capture,
 		completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
 			"Sign in to Spotify in the secure browser, then continue. Collection starts once the session is verified.",
+		...(now ? { now } : {}),
 		page,
 		probe: () => hasSpotifySession(page),
 		readinessProbe: hasSpotifySession,

@@ -113,9 +113,12 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
   });
 }
 
+type CoverageFailure = "sign_in_required" | "access_denied" | "incomplete";
+
 interface CollectionResult<T> {
   rows: T[];
   complete: boolean;
+  failure?: CoverageFailure;
 }
 
 async function fetchCollection<T extends { id: string; day: string }>(page: BrowserCollectContext["page"], token: string,
@@ -136,7 +139,9 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       return { rows, complete: false };
     }
     try {
-      if (response.status() === 401 || response.status() === 403) return { rows, complete: false };
+      const status = response.status();
+      if (status === 401) return { rows, complete: false, failure: "sign_in_required" };
+      if (status === 403) return { rows, complete: false, failure: "access_denied" };
       if (!response.ok()) return { rows, complete: false };
       const value: unknown = await response.json().catch(() => null);
       if (!value || typeof value !== "object" || Array.isArray(value)) return { rows, complete: false };
@@ -205,9 +210,9 @@ function isUtcDay(value: unknown): value is string {
 async function fetchWindow(
   ctx: BrowserCollectContext, token: string, stream: string,
   startDate: string, endDate: string
-): Promise<{ data: OuraDailyData; failedWindows: Array<{ start: string; end: string }> }> {
+): Promise<{ data: OuraDailyData; failedWindows: Array<{ start: string; end: string; failures: CoverageFailure[] }> }> {
   const data: OuraDailyData = {};
-  const failedWindows: Array<{ start: string; end: string }> = [];
+  const failedWindows: Array<{ start: string; end: string; failures: CoverageFailure[] }> = [];
   let start = day(startDate);
   const end = day(endDate);
   const endpoints = stream === "sleep" ? ["daily_sleep", "sleep"] :
@@ -219,33 +224,33 @@ async function fetchWindow(
     const from = start.toISOString().slice(0, 10);
     const to = chunkEnd.toISOString().slice(0, 10);
     await ctx.progress(`Fetching ${stream}: ${from} to ${to}`, { stream });
-    let complete = true;
+    const failures = new Set<CoverageFailure>();
     for (const endpoint of endpoints) {
       try {
         if (endpoint === "daily_sleep") {
           const result = await fetchCollection<DailySleep>(ctx.page, token, endpoint, from, to);
-          complete &&= result.complete;
+          if (!result.complete) failures.add(result.failure ?? "incomplete");
           data.daily_sleeps = [...(data.daily_sleeps ?? []), ...result.rows];
         } else if (endpoint === "sleep") {
           const result = await fetchCollection<SleepSession>(ctx.page, token, endpoint, from, to);
-          complete &&= result.complete;
+          if (!result.complete) failures.add(result.failure ?? "incomplete");
           data.sleeps = [...(data.sleeps ?? []), ...result.rows];
         } else if (endpoint === "daily_readiness") {
           const result = await fetchCollection<DailyReadiness>(ctx.page, token, endpoint, from, to);
-          complete &&= result.complete;
+          if (!result.complete) failures.add(result.failure ?? "incomplete");
           data.daily_readinesses = [...(data.daily_readinesses ?? []), ...result.rows];
         } else {
           const result = await fetchCollection<DailyActivity>(ctx.page, token, endpoint, from, to);
-          complete &&= result.complete;
+          if (!result.complete) failures.add(result.failure ?? "incomplete");
           data.daily_activities = [...(data.daily_activities ?? []), ...result.rows];
         }
       } catch (error) {
-        complete = false;
+        failures.add("incomplete");
         connectorDiagnostic("oura_browser", "collection_failed", { stream, endpoint, from, to,
           detail: error instanceof Error ? error.message : String(error) });
       }
     }
-    if (!complete) failedWindows.push({ start: from, end: to });
+    if (failures.size) failedWindows.push({ start: from, end: to, failures: [...failures] });
     start = new Date(chunkEnd);
     start.setUTCDate(start.getUTCDate() + 1);
   }
@@ -426,15 +431,24 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAcces
       await ctx.emitRecord(stream, record);
     }
     if (result.failedWindows.length > 0) {
-      const message = `Oura ${stream} did not prove complete coverage of ${startDate} to ${endDate}.`;
+      const failures = new Set(result.failedWindows.flatMap(window => window.failures));
+      const onlySignIn = failures.size === 1 && failures.has("sign_in_required");
+      const onlyAccess = failures.size === 1 && failures.has("access_denied");
+      const recoveryHint = () => onlySignIn ? { action: "refresh_credentials" as const, retryable: false }
+        : onlyAccess ? { action: "not_retriable" as const, retryable: false }
+        : { action: "retry_by_runtime" as const, retryable: true };
+      const base = `Oura ${stream} did not prove complete coverage of ${startDate} to ${endDate}.`;
+      const message = base + (onlySignIn ? " Sign in to Oura again."
+        : onlyAccess ? " Oura denied access. Check the account's permissions."
+        : failures.has("sign_in_required") || failures.has("access_denied") ? " Some requests also returned sign-in or access refusals." : "");
       await ctx.emit({
         type: "SKIP_RESULT", stream, reason: "inventory_not_proven_complete",
         message,
-        recovery_hint: { action: "retry_by_runtime", retryable: true },
+        recovery_hint: recoveryHint(),
       });
       // Desktop needs its runtime failure latch set before DONE; PageShim
       // derives Partial directly from the inventory skip above.
-      if (ctx.browserSurface) await ctx.reportStreamFailure?.(stream, message, { retryable: true });
+      if (ctx.browserSurface) await ctx.reportStreamFailure?.(stream, message, { retryable: recoveryHint().retryable, recoveryHint: recoveryHint() });
       continue;
     }
     await ctx.emit({

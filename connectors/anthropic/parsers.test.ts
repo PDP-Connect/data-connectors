@@ -26,6 +26,7 @@ import {
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	flattenMessageText,
+	messageOmissionTimestamp,
 	INLINE_TEXT_MAX_UNITS,
 	isoOrNull,
 	omittedFieldCountOf,
@@ -213,6 +214,29 @@ test("profile metadata distinguishes absent, malformed, and ambiguous rosters", 
 		),
 		{ fullName: null, nameSource: "none", metadataStatus: "valid" },
 	);
+});
+
+test("duplicate wrapped roster files stay ambiguous even when both names match", () => {
+	const first = { users: [{ full_name: "Fictional Owner" }] };
+	const second = { users: [{ full_name: "Fictional Owner" }] };
+	assert.deepEqual(
+		resolveExportedProfile([first, second], "Fictional Owner", true),
+		{ fullName: null, nameSource: "none", metadataStatus: "ambiguous" },
+	);
+});
+
+test("a blank wrapped roster permits fallback only for the current export", () => {
+	const files = [{ users: [{ full_name: "  " }] }];
+	assert.deepEqual(resolveExportedProfile(files, "Fictional Owner", true), {
+		fullName: "Fictional Owner",
+		nameSource: "browser_menu",
+		metadataStatus: "malformed",
+	});
+	assert.deepEqual(resolveExportedProfile(files, "Fictional Owner", false), {
+		fullName: null,
+		nameSource: "none",
+		metadataStatus: "malformed",
+	});
 });
 
 // ─── flattenMessageText ─────────────────────────────────────────────────
@@ -1108,6 +1132,40 @@ test("buildAccountPlanRecord: an entry without an id gives no record; a bad crea
 			buildAccountPlanRecord({ uuid: "o", created_at })?.account_created_at,
 			null,
 		);
+});
+
+test("omission accounting can place a message without an identity, using creation before update", () => {
+	const created_at = "2026-01-01T12:00:00Z";
+	const updated_at = "2026-01-03T12:00:00Z";
+	assert.equal(
+		messageOmissionTimestamp({ created_at, updated_at }),
+		Date.parse(created_at),
+	);
+	assert.equal(
+		messageOmissionTimestamp({ created_at: "invalid", updated_at }),
+		Date.parse(updated_at),
+	);
+	assert.equal(
+		messageOmissionTimestamp({ created_at: 123, updated_at: "invalid" }),
+		null,
+	);
+});
+
+test("mixed legacy content blocks keep readable strings in source order", () => {
+	assert.equal(
+		flattenMessageText({
+			text: "",
+			content: [
+				"plain",
+				null,
+				{ content: "legacy content" },
+				{ text: "" },
+				{ unreadable: 1 },
+				{ text: "modern text" },
+			],
+		}),
+		"plain\nlegacy content\nmodern text",
+	);
 });
 
 test("ISO timestamps require a complete valid datetime and preserve valid input", () => {

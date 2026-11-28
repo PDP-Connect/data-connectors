@@ -88,3 +88,26 @@ test("connectors demoted for unproven freeze-era reliability stay unlisted or Pr
 		);
 	}
 });
+
+import {
+	PRODUCTION_READY_CONNECTORS,
+	REAL_UNLISTED_CONNECTORS,
+} from "./connector-conformance-roster.ts";
+
+test("conformance oracle names are unique across visible and development collectors", () => {
+	const files = [
+		...Object.values(PRODUCTION_READY_CONNECTORS),
+		...Object.values(REAL_UNLISTED_CONNECTORS),
+	].map(({ testFile }) => testFile);
+	assert.equal(new Set(files).size, files.length);
+});
+
+test("a conformance oracle is a test file owned by the connector it represents", () => {
+	for (const [key, { testFile }] of [
+		...Object.entries(PRODUCTION_READY_CONNECTORS),
+		...Object.entries(REAL_UNLISTED_CONNECTORS),
+	]) {
+		assert.ok(testFile.startsWith(`connectors/${key}/`), key);
+		assert.ok(testFile.endsWith(".test.ts"), key);
+	}
+});

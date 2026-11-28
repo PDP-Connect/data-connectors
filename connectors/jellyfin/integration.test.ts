@@ -14,7 +14,7 @@ import type {
 	RecordData,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { collect } from "./index.ts";
+import { collect, itemRecord } from "./index.ts";
 
 /** Build a real CollectContext — same protocol shape runConnector() builds. */
 function makeContext({
@@ -765,3 +765,29 @@ test("e2e: subpath-hosted server (base URL with a path segment) is reachable", a
 
 // Note: max-page guard test deferred (would require 1000+ paced requests = 100+ seconds)
 // Guard is present in code, validates pageCount >= MAX_PAGES_PER_STREAM (1000)
+
+test("item projection preserves string provider IDs without coercing other values", () => {
+	const item = {
+		Id: "fixture-item",
+		Name: "Synthetic Movie",
+		ProviderIds: { Imdb: "tt0000001", Tmdb: 42, Other: null },
+	};
+	assert.deepEqual(itemRecord(item, "fixture-library").provider_ids, {
+		Imdb: "tt0000001",
+	});
+	assert.equal(
+		itemRecord({ ...item, ProviderIds: { Tmdb: 42 } }, "fixture-library")
+			.provider_ids,
+		null,
+	);
+});
+
+test("item projection emits an image path only when a primary tag exists", () => {
+	const item = { Id: "fixture-item", Name: "Synthetic Movie" };
+	assert.equal(itemRecord(item, "fixture-library").image_url, null);
+	assert.equal(
+		itemRecord({ ...item, PrimaryImageTag: "fixture-tag" }, "fixture-library")
+			.image_url,
+		"/Items/fixture-item/Images/Primary?tag=fixture-tag",
+	);
+});

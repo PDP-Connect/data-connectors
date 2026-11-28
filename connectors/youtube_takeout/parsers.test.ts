@@ -188,3 +188,17 @@ test("buildWatchHistoryRecordFromEntry derives video_id via extractVideoId and d
 test("buildWatchHistoryRecordFromEntry returns null when the shared builder does (no timestamp)", () => {
 	assert.equal(buildWatchHistoryRecordFromEntry({ title: "no time" }), null);
 });
+
+test("parseCsvRows omits a leading BOM and separates CRLF records", () => {
+	assert.deepEqual(parseCsvRows("\uFEFFName,Label\r\nkite,blue\r\n"), [
+		["Name", "Label"],
+		["kite", "blue"],
+	]);
+});
+
+test("parseCsvRows preserves the newline inside a quoted title", () => {
+	assert.deepEqual(parseCsvRows('Name,Label\n"paper\nkite",blue\n'), [
+		["Name", "Label"],
+		["paper\nkite", "blue"],
+	]);
+});

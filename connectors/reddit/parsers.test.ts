@@ -48,6 +48,11 @@ test("isoFromUnix: null / undefined / empty / non-numeric → null", () => {
 	assert.equal(isoFromUnix(-1), null);
 });
 
+test("isoFromUnix: finite timestamps outside the Date range return null", () => {
+	assert.equal(isoFromUnix(8_640_000_000_001), null);
+	assert.equal(isoFromUnix("8640000000001"), null);
+});
+
 test("isoFromUnix: out-of-range positive seconds return null", () => {
 	assert.equal(isoFromUnix(1e20), null);
 	assert.equal(isoFromUnix("1e20"), null);
@@ -310,6 +315,31 @@ test("voteStatsRecord: score and num_comments, valid for all three vote-shaped s
 	for (const stream of ["upvoted_stats", "downvoted_stats", "hidden_stats"]) {
 		assert.ok(validateRecord(stream, r).ok, stream);
 	}
+});
+
+test("submitted stats retain explicit zero measurements", () => {
+	const record = submittedStatsRecord({
+		name: "t3_synthetic",
+		created_utc: 1_700_000_000,
+		score: 0,
+		num_comments: 0,
+		upvote_ratio: 0,
+		gilded: 0,
+	});
+	assert.deepEqual(record, {
+		id: "t3_synthetic",
+		created_utc: "2023-11-14T22:13:20.000Z",
+		score: 0,
+		num_comments: 0,
+		upvote_ratio: 0,
+		gilded: 0,
+	});
+});
+
+test("deduplication keeps a post and comment with the same suffix", () => {
+	const post = { kind: "t3" as const, data: { name: "t3_synthetic" } };
+	const comment = { kind: "t1" as const, data: { name: "t1_synthetic" } };
+	assert.deepEqual(dedupeByFullname([post, comment, post]), [post, comment]);
 });
 
 test("stats schemas reject a content-stream fullname kind mismatch", () => {
@@ -648,4 +678,41 @@ test("validateRecord: rejects comment with non-reddit permalink", () => {
 test("validateRecord: unknown stream returns ok:true pass-through", () => {
 	const v = validateRecord("not_a_stream", { id: "x" });
 	assert.ok(v.ok);
+});
+
+test("saved and vote records keep an explicit empty body instead of post fallback text", () => {
+	const child = {
+		kind: "t1",
+		data: {
+			name: "t1_fixture",
+			body: "",
+			selftext: "fallback",
+			link_title: "Parent title",
+		},
+	};
+	for (const build of [savedRecord, voteRecord]) {
+		const row = build(child, FETCHED_AT);
+		assert.equal(row.body, "");
+		assert.equal(row.body_len, 0);
+		assert.equal(row.title, "Parent title");
+		assert.equal(row.is_post, false);
+	}
+});
+
+test("current stats preserve explicit zero counters rather than emitting null", () => {
+	const data = {
+		name: "t3_fixture",
+		score: 0,
+		num_comments: 0,
+		upvote_ratio: 0,
+		gilded: 0,
+	};
+	const submitted = submittedStatsRecord(data);
+	const voted = voteStatsRecord({ kind: "t3", data });
+	assert.equal(submitted.score, 0);
+	assert.equal(submitted.num_comments, 0);
+	assert.equal(submitted.upvote_ratio, 0);
+	assert.equal(submitted.gilded, 0);
+	assert.equal(voted.score, 0);
+	assert.equal(voted.num_comments, 0);
 });
