@@ -1664,6 +1664,36 @@ test("collectAllStreams: never calls globalThis.fetch — every read goes throug
 	}
 });
 
+test("Venmo page fetch distinguishes an interrupted successful body from an empty one", async (t) => {
+	const { makePageFetch } = await import("./index.ts");
+	const page = {
+		evaluate: async (callback: (fetchUrl: string) => unknown, url: string) =>
+			callback(url),
+	} as unknown as Page;
+	let status = 200;
+	let interrupted = true;
+	t.mock.method(globalThis, "fetch", async () => {
+		const response = new Response(null, { status });
+		response.text = async () => {
+			if (interrupted) {
+				throw new Error("fixture read interrupted");
+			}
+			return "";
+		};
+		return response;
+	});
+	const fetchPath = makePageFetch(page);
+	await assert.rejects(
+		fetchPath("/account"),
+		/^Error: venmo_transport_error \[endpoint \/account\]: response_body_unreadable$/,
+	);
+	interrupted = false;
+	assert.deepEqual(await fetchPath("/account"), { status: 200, body: "" });
+	status = 503;
+	interrupted = true;
+	assert.deepEqual(await fetchPath("/account"), { status: 503, body: "" });
+});
+
 // ─── establishVenmoCollectOrigin: collect()'s own origin guard ─────────────
 //
 // `ensureSession` may leave the page wherever sign-in redirected it (e.g.
