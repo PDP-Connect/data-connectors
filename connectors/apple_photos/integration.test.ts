@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { opendir, rm } from "node:fs/promises";
+import { opendir, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -372,9 +372,8 @@ test("apple_photos does not repeat an unsupported skip at or before its returned
 			(s) => s.stream === "photos",
 		);
 		assert.ok(checkpoint);
-		assert.deepEqual(checkpoint.cursor, {
-			last_modified: cursorTime.toISOString(),
-		});
+		assert.equal((checkpoint.cursor as { last_modified?: string }).last_modified,
+			cursorTime.toISOString());
 		const second = await runApplePhotos(dir, ["photos"], {
 			photos: checkpoint.cursor,
 		});
@@ -465,7 +464,28 @@ test("apple_photos groups ordinary extensionless and unusual files without expos
 	}
 });
 
-test("apple_photos cursor carries forward: a second run with prior STATE only emits newer files", async () => {
+test("apple_photos emits a newly added file with an older preserved mtime", async () => {
+	const t1 = new Date("2024-06-01T00:00:00.000Z");
+	const t2 = new Date("2024-06-10T00:00:00.000Z");
+	const dir = buildExportDirFixture([
+		{ relPath: "a.jpg", contents: Buffer.from("known a"), mtime: t2 },
+	]);
+	try {
+		const first = await runApplePhotos(dir, ["photos"]);
+		assert.deepEqual(records(first.messages, "photos").map((r) => r.filename), ["a.jpg"]);
+		const checkpoint = states(first.messages).find((s) => s.stream === "photos");
+		assert.ok(checkpoint);
+		const path = join(dir, "b.jpg");
+		await writeFile(path, "newly exported b");
+		await utimes(path, t1, t1);
+		const second = await runApplePhotos(dir, ["photos"], { photos: checkpoint.cursor });
+		assert.deepEqual(records(second.messages, "photos").map((r) => r.filename), ["b.jpg"]);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("apple_photos migrates a legacy watermark by replaying files once", async () => {
 	const older = new Date("2024-06-01T00:00:00.000Z");
 	const newer = new Date("2024-06-10T00:00:00.000Z");
 	const dir = buildExportDirFixture([
@@ -485,14 +505,17 @@ test("apple_photos cursor carries forward: a second run with prior STATE only em
 			newer.toISOString(),
 		);
 
-		// Second run seeded with a cursor between old and new mtimes should
-		// only re-emit the newer file.
+		// The legacy watermark has no membership evidence, so neither file may
+		// be discarded on migration. The resulting state suppresses both next time.
 		const second = await runApplePhotos(dir, ["photos"], {
-			photos: { last_modified: older.toISOString() },
+			photos: { last_modified: newer.toISOString() },
 		});
-		const secondPhotos = records(second.messages, "photos");
-		assert.equal(secondPhotos.length, 1);
-		assert.equal(secondPhotos[0]?.filename, "new.jpg");
+		assert.deepEqual(records(second.messages, "photos").map((r) => r.filename).sort(),
+			["new.jpg", "old.jpg"]);
+		const secondState = states(second.messages).find((s) => s.stream === "photos");
+		assert.ok(secondState);
+		const third = await runApplePhotos(dir, ["photos"], { photos: secondState.cursor });
+		assert.deepEqual(records(third.messages, "photos"), []);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}

@@ -66,10 +66,11 @@
  * being duplicated.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -77,7 +78,7 @@ import {
 	hydrateMediaBytes,
 	resolveMaxMediaBytes,
 } from "../../packages/polyfill-connectors/src/local-media-blob-hydration.ts";
-import { advanceCursor, buildPhotoRecord, isBeforeCursor } from "./parsers.ts";
+import { advanceCursor, buildPhotoRecord } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApplePhotosState } from "./types.ts";
 import { walkDir } from "./walk.ts";
@@ -198,8 +199,18 @@ runConnector({
 			return;
 		}
 
-		const photosState = (state.photos ?? {}) as ApplePhotosState;
+		const photosState = (state.photos ?? {}) as ApplePhotosState & {
+			photo_fingerprints?: unknown;
+		};
+		// Keep the watermark for unsupported-extension diagnostics only. A legacy
+		// saved watermark has no file identity, so replay once to build the index.
 		const since = photosState.last_modified;
+		const seen = new Set<unknown>(
+			Array.isArray(photosState.photo_fingerprints)
+				? photosState.photo_fingerprints
+				: [],
+		);
+		const fingerprints = new Set<string>();
 		let latest = since;
 		let fileCount = 0;
 		const unsupported = new Map<string, number>();
@@ -213,9 +224,14 @@ runConnector({
 
 		for await (const file of walkDir(dir, unsupported, since)) {
 			fileCount += 1;
-			if (isBeforeCursor(file.mtimeIso, since)) {
-				continue;
-			}
+			const fingerprint = createHash("sha256")
+				.update(
+					JSON.stringify([resolve(file.path), file.sizeBytes, file.mtimeIso]),
+				)
+				.digest("hex");
+			fingerprints.add(fingerprint);
+			latest = advanceCursor(latest, file.mtimeIso);
+			if (seen.has(fingerprint)) continue;
 			const filename = basename(file.path);
 			const hydration = await hydrateMediaBytes({
 				connectorId: CONNECTOR_ID,
@@ -225,7 +241,6 @@ runConnector({
 				stream: "photos",
 			});
 			const record = buildPhotoRecord(file, filename, hydration);
-			latest = advanceCursor(latest, file.mtimeIso);
 			await emitRecord("photos", { ...record });
 
 			if (fileCount % PROGRESS_INTERVAL_FILES === 0) {
@@ -267,7 +282,10 @@ runConnector({
 		await emit({
 			type: "STATE",
 			stream: "photos",
-			cursor: { last_modified: latest },
+			cursor: {
+				last_modified: latest,
+				photo_fingerprints: [...fingerprints].sort(),
+			},
 		});
 	},
 });

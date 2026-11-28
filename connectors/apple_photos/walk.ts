@@ -64,6 +64,7 @@ async function* walkOpened(
 		if (NON_MEDIA_MACOS_METADATA.has(entry.name)) {
 			continue;
 		}
+		// Directory mtime is not proof that its media children were collected.
 		if (entry.isDirectory()) {
 			let child: Dir;
 			try {
