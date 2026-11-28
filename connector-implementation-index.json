@@ -9261,7 +9261,7 @@
 				},
 				"connector_key": "doordash",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/doordash",
-				"version": "0.2.31",
+				"version": "0.2.32",
 				"display_name": "DoorDash",
 				"brand": {
 					"icon": "icon.svg",
@@ -9307,7 +9307,7 @@
 					}
 				},
 				"capabilities": {
-					"human_interaction": ["manual_action", "otp"],
+					"human_interaction": ["manual_action"],
 					"refresh_policy": {
 						"recommended_mode": "manual",
 						"minimum_interval_seconds": 3600,
@@ -21992,7 +21992,7 @@
 				},
 				"connector_key": "readwise",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/readwise",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Readwise",
 				"brand": {
 					"icon": "icon.svg",
@@ -22036,6 +22036,7 @@
 						"recommended_mode": "automatic",
 						"recommended_interval_seconds": 86400,
 						"minimum_interval_seconds": 3600,
+						"maximum_staleness_seconds": 604800,
 						"interaction_posture": "none",
 						"rate_limit_sensitivity": "medium",
 						"bot_detection_sensitivity": "low",
@@ -26356,7 +26357,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.59",
+				"version": "0.1.60",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
