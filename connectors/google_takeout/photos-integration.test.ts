@@ -580,7 +580,7 @@ test("Takeout location resumes distinct observations at the same timestamp", asy
 		assert.equal(typeof additions[0]?.id, "string");
 		assert.notEqual(additions[0]?.id, initial[0]?.id);
 		const secondCursor = cursorOf(second.messages);
-		assert.equal(secondCursor?.last_timestamp, timestamp);
+		assert.equal(Reflect.get(secondCursor ?? {}, "last_timestamp"), timestamp);
 		const third = await runTakeoutImport(root, [stream], {}, { [stream]: secondCursor });
 		assert.deepEqual(records(third.messages, stream), []);
 	} finally {

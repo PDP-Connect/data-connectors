@@ -248,7 +248,7 @@ function scopedFixture(streams: readonly string[], state: Record<string, unknown
 		progress: ctx.progress,
 		requested: ctx.requested,
 		state,
-	} as CollectContext, request);
+	} as unknown as CollectContext, request);
 	return { collect, emitted, messages, categoryQueries };
 }
 

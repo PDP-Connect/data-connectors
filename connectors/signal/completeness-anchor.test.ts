@@ -285,7 +285,7 @@ test("a capped Signal history cursor does not claim the older row was never emit
 	assert.notEqual(tail, injected.slice(collect));
 	const source = stripTypeScriptTypes(
 		injected.slice(0, collect) + tail + "\nexport { collectMessagesConversationsReactions };",
-		{ mode: "transform" },
+		{ mode: "transform" } as unknown as Parameters<typeof stripTypeScriptTypes>[1],
 	);
 	const hooks = registerHooks({
 		load(url, context, nextLoad) {
@@ -325,5 +325,5 @@ test("a capped Signal history cursor does not claim the older row was never emit
 	);
 	assert.equal(frames.some((frame) => frame.type === "DETAIL_COVERAGE"), false);
 	assert.equal(frames.some((frame) =>
-		frame.type === "STATE" && Reflect.get(frame.cursor, "emitted_ids_complete") === false), true);
+		frame.type === "STATE" && Reflect.get(frame.cursor as object, "emitted_ids_complete") === false), true);
 });
