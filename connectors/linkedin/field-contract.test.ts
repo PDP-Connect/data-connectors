@@ -1073,6 +1073,44 @@ test("r1: a repeated connections page withholds coverage independently of profil
 	assert.equal(profile.records[0]?.connection_count, 1);
 });
 
+test("r1: a next link continues at the numeric offset without following the supplied URL", async () => {
+	const members = Array.from({ length: 21 }, (_, index) => ({
+		connectedMember: `urn:li:fsd_profile:fixture-${index}`,
+		createdAt: 1_700_000_000_000,
+	}));
+	const offsets: number[] = [];
+	const recording = await collect({
+		...routesFor(baseFixture()),
+		summary: { entityUrn: "urn:li:fsd_connectionsSummary:12", numConnections: 21 },
+		connections: (start) => {
+			offsets.push(start);
+			return {
+				elements: start === 0 ? members.slice(0, 20) : start === 20 ? members.slice(20) : [],
+				paging: {
+					count: 40,
+					start,
+					total: 21,
+					...(start === 0 ? { links: [{ rel: "next", href: "https://example.invalid/not-followed" }] } : {}),
+				},
+			};
+		},
+		resolve: (path) => ({
+			results: Object.fromEntries(
+				members
+					.filter((member) => path.includes(encodeURIComponent(member.connectedMember)))
+					.map((member, index) => [
+						member.connectedMember,
+						{ firstName: "A", headline: "H", lastName: "B", occupation: "O", publicIdentifier: `p${index}` },
+					]),
+			),
+		}),
+	}, ["connections"]);
+	const outcome = outcomeOf(recording, "connections");
+	assert.ok(offsets.includes(20), JSON.stringify(offsets));
+	assert.ok(outcome.records.some((record) => record.id === members[20]?.connectedMember));
+	assert.equal(outcome.complete, true, JSON.stringify(outcome));
+});
+
 test("r1: a basic-fallback {} profile is never complete, and its sections are unavailable", async () => {
 	const recording = await collect({
 		...routesFor(baseFixture()),

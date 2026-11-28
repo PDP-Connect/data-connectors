@@ -538,9 +538,9 @@ async function fetchConnections(
 			stream: "connections",
 			...(total === null ? {} : { total }),
 		});
-		if (continuationAdvertised) return finish("continuation_advertised");
-		// Summaries and totals are proof inputs, never reasons to discard later rows.
-		// Advance by observed rows so short pages also reach the source's empty end.
+		if (continuationAdvertised && !hasUnambiguousNextLink(paging?.links)) {
+			return finish("continuation_advertised");
+		}
 		start += page_elements.length;
 		await politeDelay(PAGE_DELAY_MS);
 	}
@@ -1271,4 +1271,20 @@ if (isMainModule(import.meta.url)) {
 			await collectLinkedIn(ctx);
 		},
 	});
+}
+
+/** A recognized next relation permits an offset step; never request its href. */
+function hasUnambiguousNextLink(links: unknown): boolean {
+	return (
+		Array.isArray(links) &&
+		links.length <= 2 &&
+		links.every(
+			(link) =>
+				isRecord(link) &&
+				(link.rel === "next" || link.rel === "prev") &&
+				typeof link.href === "string" &&
+				link.href.trim().length > 0,
+		) &&
+		links.filter((link) => link.rel === "next").length === 1
+	);
 }
