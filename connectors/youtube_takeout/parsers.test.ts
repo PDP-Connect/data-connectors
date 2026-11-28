@@ -122,6 +122,24 @@ test("profile schema keeps a real-shaped channel id and refuses missing or blank
 	assert.equal(profileSchema.safeParse(withoutId).success, false);
 	assert.equal(profileSchema.safeParse({ ...row, id: null }).success, false);
 	assert.equal(profileSchema.safeParse({ ...row, id: "" }).success, false);
+	assert.equal(profileSchema.safeParse({ ...row, id: "   " }).success, false);
+	assert.equal(
+		buildProfileRecordFromChannelCsvRow(
+			["   ", "https://www.youtube.com/channel/UC123"],
+			columns,
+			null,
+		),
+		null,
+	);
+	assert.equal(
+		buildProfileRecordFromChannelCsvRow(
+			[" UC123 ", "https://www.youtube.com/channel/UC123"],
+			columns,
+			null,
+		)?.id,
+		"UC123",
+	);
+	assert.equal(profileSchema.parse({ ...row, id: " UC123 " }).id, " UC123 ");
 });
 
 test("parseSubscriptionsCsv maps rows and skips blank trailing lines", () => {
