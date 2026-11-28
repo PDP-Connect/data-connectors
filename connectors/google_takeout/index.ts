@@ -156,10 +156,12 @@ function resolveLocationFile(importDir: string): string | null {
 	return null;
 }
 
+type LocationTimestampState = StreamTimestampState & { last_timestamp_ids?: unknown };
+
 async function collectLocationHistory(
 	ctx: CollectContext,
 	importDir: string,
-	streamState: StreamTimestampState | undefined,
+	streamState: LocationTimestampState | undefined,
 ): Promise<void> {
 	const { emit, emitRecord } = ctx;
 	const stream = "location_history";
@@ -200,7 +202,15 @@ async function collectLocationHistory(
 		stream,
 	});
 	const since = streamState?.last_timestamp;
+	const storedIds = streamState?.last_timestamp_ids;
+	// Without boundary IDs (legacy state), replay rows at the boundary once.
+	const knownAtSince = new Set<string>(
+		since && Array.isArray(storedIds)
+			? storedIds.filter((id): id is string => typeof id === "string")
+			: [],
+	);
 	let latest: string | undefined = since;
+	let latestIds = new Set(knownAtSince);
 	diagnoseEmitStart(stream, json.locations.length);
 	let itemOrdinal = 0;
 	for (const loc of json.locations) {
@@ -210,18 +220,35 @@ async function collectLocationHistory(
 			continue;
 		}
 		const ts = new Date(tsUnixMs).toISOString();
-		if (since && ts <= since) {
+		if (since && ts < since) {
 			continue;
 		}
-		await emitRecord(stream, { ...buildLocationRecord(loc, ts) });
+		const record = buildLocationRecord(loc, ts);
+		if (
+			(ts === since && knownAtSince.has(record.id)) ||
+			(ts === latest && latestIds.has(record.id))
+		) {
+			continue;
+		}
+		await emitRecord(stream, { ...record });
 		if (itemOrdinal % 10_000 === 0) {
 			await emitImportStep(emit, stream, itemOrdinal, json.locations.length);
 		}
+		if (ts === since) knownAtSince.add(record.id);
 		if (!latest || ts > latest) {
 			latest = ts;
+			latestIds = new Set();
 		}
+		if (ts === latest) latestIds.add(record.id);
 	}
-	await emit({ type: "STATE", stream, cursor: { last_timestamp: latest } });
+	await emit({
+		type: "STATE",
+		stream,
+		cursor: {
+			last_timestamp: latest,
+			...(latest ? { last_timestamp_ids: [...latestIds].sort() } : {}),
+		},
+	});
 }
 
 async function collectYoutubeWatchHistory(

@@ -68,6 +68,7 @@ async function runTakeoutImport(
 	importRoot: string,
 	streams: readonly string[],
 	env: Record<string, string> = {},
+	state: Record<string, unknown> = {},
 ): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	return await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
@@ -81,6 +82,7 @@ async function runTakeoutImport(
 		},
 		start: {
 			scope: { streams: streams.map((name) => ({ name })) },
+			state,
 			type: "START",
 		},
 	});
@@ -543,5 +545,45 @@ test("photos stream marks hydration failed (not fabricated deletion) when blob u
 		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Takeout location resumes distinct observations at the same timestamp", async () => {
+	const root = await mkdtemp(join(tmpdir(), "takeout-location-boundary-"));
+	try {
+		const dir = join(root, "Location History (Timeline)");
+		await mkdir(dir, { recursive: true });
+		const file = join(dir, "Records.json");
+		const stream = "location_history";
+		const timestamp = "2024-01-02T03:04:05.000Z";
+		const a = { timestamp, latitudeE7: 10_000_001, longitudeE7: 20_000_001 };
+		const b = { timestamp, latitudeE7: 10_000_002, longitudeE7: 20_000_002 };
+		const cursorOf = (frames: EmittedMessage[]) => {
+			const chosen = frames.find(
+				(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
+					message.type === "STATE" && message.stream === stream,
+			);
+			assert.ok(chosen);
+			return chosen.cursor;
+		};
+
+		await writeFile(file, JSON.stringify({ locations: [a] }));
+		const first = await runTakeoutImport(root, [stream]);
+		const initial = records(first.messages, stream);
+		assert.equal(initial.length, 1);
+		const firstCursor = cursorOf(first.messages);
+
+		await writeFile(file, JSON.stringify({ locations: [a, b] }));
+		const second = await runTakeoutImport(root, [stream], {}, { [stream]: firstCursor });
+		const additions = records(second.messages, stream);
+		assert.equal(additions.length, 1, "only the new equal-time identity must be offered");
+		assert.equal(typeof additions[0]?.id, "string");
+		assert.notEqual(additions[0]?.id, initial[0]?.id);
+		const secondCursor = cursorOf(second.messages);
+		assert.equal(secondCursor?.last_timestamp, timestamp);
+		const third = await runTakeoutImport(root, [stream], {}, { [stream]: secondCursor });
+		assert.deepEqual(records(third.messages, stream), []);
+	} finally {
+		await rm(root, { recursive: true, force: true });
 	}
 });
