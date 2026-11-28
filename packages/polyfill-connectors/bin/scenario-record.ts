@@ -6,9 +6,10 @@
  * scenario-record — the live-capture half of the developer capture→verify
  * loop for the connector-verification scenario harness (src/scenario/*.ts).
  *
- * Runs a connector's own entrypoint as a real subprocess, exactly the way
- * `bin/connector-dev.ts` does (`node --import tsx connectors/<name>/index.ts`,
- * START on stdin, JSONL RECORD/STATE/DONE on stdout), but with the
+ * Runs a connector's own entrypoint as a real subprocess
+ * (`node --import tsx connectors/<name>/index.ts`, START on stdin, JSONL
+ * RECORD/STATE/DONE on stdout), like `bin/connector-dev.ts` except that
+ * connector-dev strips types natively instead of loading tsx, and with the
  * subprocess's `globalThis.fetch` patched via a `NODE_OPTIONS --import
  * <preload>` module (src/scenario/subprocess-fetch-preloads.ts's
  * `writeRecordPreload`) so every HTTP interaction it makes is captured. The
