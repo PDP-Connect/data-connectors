@@ -239,22 +239,6 @@ export async function scanLocalJsonl({
 	let scanFailed = false;
 	try {
 		const snapshot = await sourceIo(path, "stat", () => handle.stat());
-		if (
-			prior &&
-			isLocalJsonlPhysicalCursorV1(prior) &&
-			prior.observed_size_bytes === snapshot.size &&
-			prior.observed_mtime_ms === snapshot.mtimeMs &&
-			(!onIncompleteLine || prior.committed_offset_bytes === snapshot.size)
-		) {
-			return {
-				cursor: prior,
-				decision: { kind: "fast_skip" },
-				lines_delivered: 0,
-				prefix_bytes_hashed: 0,
-				tail_bytes_parsed: 0,
-			};
-		}
-
 		let decision: LocalJsonlDecision;
 		let startOffset = 0;
 		let prefixBytesHashed = 0;
@@ -274,6 +258,22 @@ export async function scanLocalJsonl({
 			);
 			prefixBytesHashed += prior.committed_offset_bytes;
 			if (actualPrefix.copy().digest("hex") === prior.committed_prefix_sha256) {
+				// Same-size rewrites can preserve mtime. Skip parsing only when
+				// the saved hash covers every byte in this snapshot.
+				if (
+					prior.committed_offset_bytes === snapshot.size &&
+					prior.observed_size_bytes === snapshot.size &&
+					prior.observed_mtime_ms === snapshot.mtimeMs
+				) {
+					await verifyStablePath(path, handle, snapshot);
+					return {
+						cursor: prior,
+						decision: { kind: "fast_skip" },
+						lines_delivered: 0,
+						prefix_bytes_hashed: prefixBytesHashed,
+						tail_bytes_parsed: 0,
+					};
+				}
 				startOffset = prior.committed_offset_bytes;
 				// Continue the decision-time hash. Its bytes are exactly those that
 				// were compared with the saved cursor; never seed this from a second

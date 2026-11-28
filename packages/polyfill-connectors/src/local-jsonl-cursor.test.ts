@@ -34,11 +34,19 @@ async function scan(
 	return { lines, result };
 }
 
-test("local JSONL cursor skips an mtime-only touch and tails one complete append", async () => {
+test("local JSONL cursor skips a verified unchanged prefix and tails one complete append", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "pdpp-local-jsonl-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
 	const path = join(root, "events.jsonl");
 	await writeFile(path, '{"id":"one"}\n');
 	const first = await scan(path);
+	const unchanged = await scan(path, first.result.cursor);
+	assert.deepEqual(unchanged.lines, []);
+	assert.equal(
+		unchanged.result.prefix_bytes_hashed,
+		Buffer.byteLength('{"id":"one"}\n'),
+	);
+	assert.equal(unchanged.result.tail_bytes_parsed, 0);
 	const date = new Date(Date.now() + 10_000);
 	await utimes(path, date, date);
 	const touched = await scan(path, first.result.cursor);
@@ -159,28 +167,36 @@ test("local JSONL cursor detects a changed committed byte beyond 64 KiB", async 
 	});
 });
 
-test("local JSONL cursor retains an unterminated line until it gains LF", async () => {
+test("local JSONL cursor delivers a pending line completed without changing size or mtime", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "pdpp-local-jsonl-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
 	const path = join(root, "events.jsonl");
-	await writeFile(path, '{"id":"partial');
+	const date = new Date("2026-01-01T00:00:00Z");
+	await writeFile(path, '{"id":"partial"} ');
+	await utimes(path, date, date);
 	const first = await scan(path);
 	assert.equal(first.result.cursor.committed_offset_bytes, 0);
 	assert.deepEqual(first.lines, []);
 	await writeFile(path, '{"id":"partial"}\n');
+	await utimes(path, date, date);
 	const second = await scan(path, first.result.cursor);
 	assert.deepEqual(second.lines, ['{"id":"partial"}']);
 });
 
-test("local JSONL cursor rebuilds after a replacement or truncation", async () => {
+test("local JSONL cursor delivers same-size same-mtime rewrites and tails a matching replacement", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "pdpp-local-jsonl-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
 	const path = join(root, "events.jsonl");
+	const date = new Date("2026-01-01T00:00:00Z");
 	await writeFile(path, '{"id":"one"}\n');
+	await utimes(path, date, date);
 	const first = await scan(path);
 	await truncate(path, 0);
 	await writeFile(path, '{"id":"new"}\n');
+	await utimes(path, date, date);
 	const truncated = await scan(path, first.result.cursor);
-	assert.equal(truncated.result.decision.kind, "rebuild");
 	assert.deepEqual(truncated.lines, ['{"id":"new"}']);
+	assert.equal(truncated.result.decision.kind, "rebuild");
 	const replacement = join(root, "replacement.jsonl");
 	await writeFile(replacement, '{"id":"new"}\n{"id":"later"}\n');
 	await rename(replacement, path);
