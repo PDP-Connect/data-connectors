@@ -472,6 +472,7 @@ test("buildExperienceRows: group with sub-positions expands 1:1", () => {
 			profilePositionInPositionGroup: {
 				elements: [
 					{
+						entityUrn: "urn:li:fsd_profilePosition:1",
 						companyName: "Acme",
 						dateRange: { end: { year: 2022 }, start: { year: 2019 } },
 						description: "Led backend team.",
@@ -480,6 +481,7 @@ test("buildExperienceRows: group with sub-positions expands 1:1", () => {
 					},
 					{
 						dateRange: { start: { year: 2022 } },
+						entityUrn: "urn:li:fsd_profilePosition:2",
 						title: "Staff Engineer",
 					},
 				],
@@ -549,6 +551,7 @@ test("buildEducationRows: maps school/degree/field/dates/grade/logo", () => {
 	const rows = buildEducationRows([
 		{
 			dateRange: { end: { year: 2017 }, start: { year: 2013 } },
+			entityUrn: "urn:li:fsd_profileEducation:1",
 			degreeName: "B.S.",
 			fieldOfStudy: "Computer Science",
 			grade: "3.9 GPA",
@@ -569,7 +572,7 @@ test("buildEducationRows: maps school/degree/field/dates/grade/logo", () => {
 		end_date: "2017",
 		field_of_study: "Computer Science",
 		grade: "3.9 GPA",
-		id: "edu-0",
+		id: "urn:li:fsd_profileEducation:1",
 		logo_url: "https://media.example/school/logo.png",
 		school: "State University",
 		start_date: "2013",
@@ -578,7 +581,12 @@ test("buildEducationRows: maps school/degree/field/dates/grade/logo", () => {
 });
 
 test("buildEducationRows: absent grade and logo are empty (never guessed)", () => {
-	const rows = buildEducationRows([{ schoolName: "State University" }]);
+	const rows = buildEducationRows([
+		{
+			entityUrn: "urn:li:fsd_profileEducation:2",
+			schoolName: "State University",
+		},
+	]);
 	assert.equal(rows.covered, 1);
 	assert.equal(rows.records[0]?.grade, null);
 	assert.equal(rows.records[0]?.logo_url, null);
@@ -586,7 +594,13 @@ test("buildEducationRows: absent grade and logo are empty (never guessed)", () =
 
 test("buildEducationRows: logo falls back through the typed VectorImage key, then schoolLogo", () => {
 	const logo = (row: Record<string, unknown>) =>
-		buildEducationRows([{ schoolName: "School", ...row }]).records[0]?.logo_url;
+		buildEducationRows([
+			{
+				entityUrn: "urn:li:fsd_profileEducation:3",
+				schoolName: "School",
+				...row,
+			},
+		]).records[0]?.logo_url;
 	assert.equal(
 		logo({
 			school: {
@@ -615,7 +629,9 @@ test("buildEducationRows: logo falls back through the typed VectorImage key, the
 
 test("buildEducationRows: a row with no readable content is omitted, not an all-null row", () => {
 	for (const row of [{ schoolLogo: 42 }, { school: {} }, {}]) {
-		const rows = buildEducationRows([row]);
+		const rows = buildEducationRows([
+			{ entityUrn: "urn:li:fsd_profileEducation:4", ...row },
+		]);
 		assert.equal(rows.considered, 1, JSON.stringify(row));
 		assert.equal(rows.covered, 0, JSON.stringify(row));
 		assert.deepEqual(rows.records, [], JSON.stringify(row));
@@ -765,7 +781,12 @@ test("buildExperienceRows: bare start is readable and a malformed bare end withh
 
 test("buildEducationRows: a malformed bare end withholds the whole row", () => {
 	const rows = buildEducationRows([
-		{ schoolName: "School", start: { year: 2010 }, end: { year: "string" } },
+		{
+			entityUrn: "urn:li:fsd_profileEducation:5",
+			schoolName: "School",
+			start: { year: 2010 },
+			end: { year: "string" },
+		},
 	]);
 	assert.deepEqual(rows.records, []);
 	assert.equal(rows.considered, 1);
@@ -844,4 +865,85 @@ test("buildConnectionRows: a row without a member URN cannot be keyed and is omi
 	const rows = buildConnectionRows([{}], () => undefined);
 	assert.deepEqual(rows.records, []);
 	assert.deepEqual(rows.omittedRows, { id_absent: 1 });
+});
+
+for (const identity of [undefined, "", 123]) {
+	test(`source identity: position without a source ID is uncovered (${String(identity)})`, () => {
+		const position = {
+			title: "Engineer",
+			...(identity === undefined ? {} : { entityUrn: identity }),
+		};
+		const rows = buildExperienceRows([
+			{
+				profilePositionInPositionGroup: {
+					elements: [position],
+					paging: { start: 0, total: 1 },
+				},
+			},
+		]);
+		assert.deepEqual(rows.records, []);
+		assert.equal(rows.considered, 1);
+		assert.equal(rows.covered, 0);
+	});
+	test(`source identity: education without a source ID is uncovered (${String(identity)})`, () => {
+		const rows = buildEducationRows([
+			{
+				schoolName: "School",
+				...(identity === undefined ? {} : { entityUrn: identity }),
+			},
+		]);
+		assert.deepEqual(rows.records, []);
+		assert.equal(rows.considered, 1);
+		assert.equal(rows.covered, 0);
+	});
+}
+
+test("source identity: explicit IDs survive reordering and descriptive edits", () => {
+	const positions = [
+		{ entityUrn: "urn:li:position:a", title: "A" },
+		{ entityUrn: "urn:li:position:b", title: "B" },
+	];
+	const group = (elements: unknown[]) => [
+		{
+			profilePositionInPositionGroup: {
+				elements,
+				paging: { start: 0, total: elements.length },
+			},
+		},
+	];
+	assert.deepEqual(
+		buildExperienceRows(group(positions)).records.map((row) => row.id),
+		positions.map((row) => row.entityUrn),
+	);
+	assert.deepEqual(
+		buildExperienceRows(
+			group(
+				[...positions]
+					.reverse()
+					.map((row) => ({ ...row, title: row.title + " changed" })),
+			),
+		).records.map((row) => row.id),
+		[...positions].reverse().map((row) => row.entityUrn),
+	);
+	const schools = [
+		{ entityUrn: "urn:li:education:a", schoolName: "A" },
+		{ entityUrn: "urn:li:education:b", schoolName: "B" },
+	];
+	assert.deepEqual(
+		buildEducationRows(
+			[...schools]
+				.reverse()
+				.map((row) => ({ ...row, schoolName: row.schoolName + " changed" })),
+		).records.map((row) => row.id),
+		[...schools].reverse().map((row) => row.entityUrn),
+	);
+	const firstSchool = schools[0];
+	assert.ok(firstSchool);
+	const mixed = buildEducationRows([firstSchool, { schoolName: "Unknown" }]);
+	assert.deepEqual(
+		mixed.records.map((row) => row.id),
+		[firstSchool.entityUrn],
+	);
+	assert.equal(mixed.considered, 2);
+	assert.equal(mixed.covered, 1);
 });
