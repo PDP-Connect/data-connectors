@@ -127,6 +127,18 @@ test("collectProfile emits a legacy-compatible profile from the authenticated gr
 	assert.equal(harness.emitted[0]?.data.email, null);
 });
 
+test("a failed optional profile read is reported without throwing", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = fakePage("");
+	page.content = async () => { throw new Error("synthetic detached page"); };
+	const failures: string[] = [];
+	await collectProfile(page, harness.emitRecord, async (stream, _message, options) => {
+		if (options?.retryable) failures.push(stream);
+	});
+	assert.deepEqual(failures, ["profile"]);
+	assert.equal(harness.emitted.length, 0);
+});
+
 test("collectProfile reports a retryable stream failure when the account page has no authenticated identity evidence", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const failures: Array<{
@@ -3390,6 +3402,24 @@ const tenItemDetail = (orderId: string) =>
 				`<div data-component="purchasedItemsRightGrid"><a href="/dp/${asinN(i)}">Item ${i}</a><span>Qty: 1</span></div>`,
 		).join(""),
 	);
+
+test("an unreadable second search page retains the first page's order stubs", async () => {
+	const first = searchPage(1, [[ORDER_A, asinN(0)]], true);
+	const page = redirectingOrdersSite([first, first], (orderId) => ({html: tenItemDetail(orderId), finalOrderId: orderId}));
+	const content = page.content.bind(page);
+	let reads = 0;
+	page.content = async () => {
+		if (++reads === 2) throw new Error("synthetic disconnected page");
+		return content();
+	};
+	await assert.rejects(discoverOrderStubs(page, async () => {}), (error) => {
+		assert.ok(error instanceof Error);
+		assert.match(error.message, /could not read/i);
+		const partial = (error as Error & { partialStubs?: OrderStub[] }).partialStubs;
+		assert.equal(partial?.[0]?.orderId, ORDER_A);
+		return true;
+	});
+});
 
 test("N6: a repeated search page changes no partial order count", async () => {
 	const page1 = searchPage(

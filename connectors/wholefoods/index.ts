@@ -223,8 +223,24 @@ async function collectProfile(
 	emitRecord: BrowserCollectContext["emitRecord"],
 	reportStreamFailure: BrowserCollectContext["reportStreamFailure"],
 ): Promise<void> {
-	await navigateAndSettle(page, AMAZON_ORDER_HISTORY_URL);
-	const html = await page.content();
+	let html: string;
+	try {
+		await navigateAndSettle(page, AMAZON_ORDER_HISTORY_URL);
+		html = await page.content();
+	} catch (error) {
+		if (
+			!reportStreamFailure ||
+			(error instanceof NavigationHttpError &&
+				(error.status === 401 || error.status === 403))
+		)
+			throw error;
+		await reportStreamFailure(
+			"profile",
+			"Whole Foods could not read the optional account profile this run.",
+			{ retryable: true },
+		);
+		return;
+	}
 	const { customerId, name } = parseAmazonProfileDom(html);
 	// Live evidence (2026-09-22, see the connector's report
 	// CONTRACT-CHANGE-REQUEST) showed the capability map's assumed `email`
@@ -280,7 +296,15 @@ async function walkSearchPages(
 			wholeFoodsSearchUrl(pageNum),
 			ORDERS_PAGE_READY_SELECTOR,
 		);
-		const html = await page.content();
+		let html: string;
+		try {
+			html = await page.content();
+		} catch (error) {
+			throw new OrderEnumerationUnprovenError(
+				"Whole Foods could not read the order search page",
+				{ cause: error },
+			);
+		}
 		if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
 			throw new Error("Whole Foods order search was blocked or signed out");
 		}
