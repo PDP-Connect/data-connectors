@@ -545,6 +545,8 @@ interface GmcliFetchOutcome {
 	 */
 	readonly message?: string;
 	readonly parsed?: ParsedGmcliMessage[];
+	/** A per-chat read failed after the chat inventory was accepted. */
+	readonly partial?: true;
 	readonly reason?: string;
 	readonly truncated?: readonly string[];
 }
@@ -698,39 +700,34 @@ export async function fetchAndParseGmcliMessages(
 
 	const parsed: ParsedGmcliMessage[] = [];
 	const truncatedChatIds: string[] = [];
+	const chatLimitFacts = (scannedCount: number) =>
+		chatsTruncated
+			? { chatsTruncated: { atLeastTotalCount: orderedChats.length, scannedCount } }
+			: {};
+	let scannedCount = 0;
 	for (const chat of boundedChats) {
 		let outcome: { messages: ParsedGmcliMessage[]; possiblyTruncated: boolean };
 		try {
 			outcome = await fetchChatMessages(invoke, chat, perChatLimit);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
+		} catch {
 			return {
+				...chatLimitFacts(scannedCount),
 				reason: "gmcli_query_failed",
-				message,
+				message: "Google Messages could not read one conversation. Readable messages were kept; the rest will be retried.",
+				parsed,
+				partial: true,
+				truncated: truncatedChatIds,
 			};
 		}
+		scannedCount++;
 		parsed.push(...outcome.messages);
 		if (outcome.possiblyTruncated) {
 			truncatedChatIds.push(chat.id);
 		}
 	}
 
-	// `orderedChats.length` here is exactly `chatsListProbeLimit`
-	// (`maxChats + 1`) whenever truncated — it is a LOWER BOUND on the real
-	// total, not the true count (see GmcliFetchOutcome's chatsTruncated doc).
-
-	return {
-		...(chatsTruncated
-			? {
-					chatsTruncated: {
-						atLeastTotalCount: orderedChats.length,
-						scannedCount: boundedChats.length,
-					},
-				}
-			: {}),
-		parsed,
-		truncated: truncatedChatIds,
-	};
+	// The bounded probe count is a lower bound when some chats were not scanned.
+	return { ...chatLimitFacts(scannedCount), parsed, truncated: truncatedChatIds };
 }
 
 // ─── Connector ─────────────────────────────────────────────────────────
@@ -746,7 +743,7 @@ export async function collect({
 }: CollectContext): Promise<void> {
 	const outcome = await fetchAndParseGmcliMessages();
 
-	if (outcome.reason) {
+	if (outcome.reason && !outcome.partial) {
 		// outcome.reason/outcome.message are flat fields on GmcliFetchOutcome
 		// (not a nested `skip: { reason, message }` object, and not spread from
 		// one) specifically so this is a literal `reason:` property whose
@@ -850,6 +847,18 @@ export async function collect({
 			? "No new or changed Google Messages to save"
 			: `Saved ${String(emitted)} new or changed ${emitted === 1 ? "message" : "messages"} from Google Messages`,
 	);
+
+	// Prefix upserts are useful, but cannot certify an inventory or advance it.
+	if (outcome.partial && outcome.reason) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "messages",
+			reason: outcome.reason,
+			message: outcome.message ?? outcome.reason,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+		return;
+	}
 
 	// STATE is written only after every fetched message has passed
 	// through the cursor and any resulting RECORD has been handed to

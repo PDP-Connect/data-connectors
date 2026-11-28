@@ -11,6 +11,8 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -224,4 +226,47 @@ test("non-JSON gmcli output produces a typed error", async () => {
 	const skip = skips(result.messages).find((s) => s.stream === "messages");
 	assert.ok(skip, "expected a messages SKIP_RESULT for non-JSON gmcli output");
 	assert.equal(skip?.reason, "gmcli_schema_drift");
+});
+
+test("a later gmcli query failure keeps the readable prefix without checkpointing", async () => {
+	const home = await mkdtemp(join(tmpdir(), "gmcli-prefix-fixture-"));
+	try {
+		const gmcli = join(home, "fake-gmcli.cjs");
+		const prefix = {
+			message_id: "fixture-prefix-message",
+			conversation_id: "fixture-first",
+			body: "readable fixture",
+			timestamp_ms: 1_717_600_000_000,
+			is_from_me: false,
+		};
+		await writeFile(gmcli, `#!${process.execPath}
+const args = process.argv.slice(2);
+if (args.includes("chats")) {
+  console.log(JSON.stringify([
+    { conversation_id: "fixture-first", name: "Fixture A", last_message_time_ms: 2000 },
+    { conversation_id: "fixture-second", name: "Fixture B", last_message_time_ms: 1000 },
+  ]));
+} else if (args[args.indexOf("--conv") + 1] === "fixture-first") {
+  console.log(JSON.stringify([${JSON.stringify(prefix)}]));
+} else {
+  console.error("fixture-private-diagnostic-canary");
+  process.exitCode = 1;
+}
+`, { mode: 0o755 });
+		const result = await runGoogleMessages(["messages"], {
+			GMCLI_BIN: gmcli,
+			GMCLI_MAX_CHATS: "10",
+			GMCLI_MESSAGES_PER_CHAT_LIMIT: "10",
+		});
+		assert.deepEqual(records(result.messages, "messages").map((row) => row.id), [prefix.message_id]);
+		const failures = skips(result.messages).filter((frame) => frame.stream === "messages");
+		assert.equal(failures.length, 1);
+		assert.equal(failures[0]?.reason, "gmcli_query_failed");
+		assert.deepEqual(failures[0]?.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.ok(!JSON.stringify(result.messages).includes("fixture-private-diagnostic-canary"));
+		assert.equal(detailCoverage(result.messages, "messages"), undefined);
+		assert.equal(result.messages.some((frame) => frame.type === "STATE" && frame.stream === "messages"), false);
+	} finally {
+		await rm(home, { force: true, recursive: true });
+	}
 });
