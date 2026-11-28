@@ -64,7 +64,8 @@ export function toIso(value: unknown): string | null {
 		return null;
 	}
 	const date = new Date(millis);
-	return Number.isNaN(date.getTime()) ? null : date.toISOString();
+	const iso = Number.isNaN(date.getTime()) ? null : date.toISOString();
+	return iso !== null && /^\d{4}-/.test(iso) ? iso : null;
 }
 
 /** Empty and whitespace-only strings are "not set", not a value. */
