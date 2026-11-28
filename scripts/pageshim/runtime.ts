@@ -368,6 +368,8 @@ export interface PageshimConnector {
 	toScope: (stream: string, records: Rec[]) => unknown;
 	/** Generic collectors use successful STATE to acknowledge empty covered ranges. */
 	emptyScopeFromCheckpoint?: boolean;
+	/** Forward structured progress for this connector's explicitly phased messages. */
+	structuredProgress?: boolean;
 	/** Optional incremental form for connectors whose scope value is one record array. */
 	streamScopeRecords?: {
 		/** Large streams first; the connector's other streams follow in scope order. Later streams remain buffered until the active scope closes. */
@@ -786,6 +788,28 @@ export async function runOnPageShim(
 	};
 	const isHighSurrogate = (unit: number): boolean =>
 		unit >= 0xd800 && unit <= 0xdbff;
+	const sendProgress = (
+		message: string,
+		extra: Readonly<Record<string, unknown>> = {},
+		fallbackPhase = "collect",
+		legacyProtocolMessage = false,
+	): Promise<void> => {
+		const text = message.slice(0, ERROR_TEXT_MAX_UNITS);
+		if (!connector.structuredProgress || typeof extra.phase !== "string") {
+			return shim.setProgress({
+				phase: { label: fallbackPhase },
+				message: text,
+				...(legacyProtocolMessage ? { count: extra.count } : {}),
+			});
+		}
+		return shim.setProgress({
+			phase: { label: extra.phase },
+			message: text,
+			...(typeof extra.stream === "string" ? { stream: extra.stream } : {}),
+			...(typeof extra.count === "number" ? { count: extra.count } : {}),
+			...(typeof extra.total === "number" ? { total: extra.total } : {}),
+		});
+	};
 	const emitMessage = async (msg: Msg): Promise<void> => {
 		if (streamFailure) throw streamFailure;
 		switch (msg.type) {
@@ -828,11 +852,12 @@ export async function runOnPageShim(
 				outcome.detailGap(String(msg.stream));
 				return;
 			case "PROGRESS":
-				await shim.setProgress({
-					phase: { label: String(msg.stream ?? "collect") },
-					message: String(msg.message ?? "").slice(0, ERROR_TEXT_MAX_UNITS),
-					count: msg.count,
-				});
+				await sendProgress(
+					String(msg.message ?? ""),
+					msg,
+					String(msg.stream ?? "collect"),
+					true,
+				);
 				return;
 			default:
 				console.log(`pageshim: PDPP message ${msg.type} ignored`);
@@ -922,11 +947,7 @@ export async function runOnPageShim(
 			emitRecord: emitRecord.emit,
 			isRecordSelected: emitRecord.isSelected,
 			page,
-			progress: (message: string) =>
-				shim.setProgress({
-					phase: { label: "collect" },
-					message: message.slice(0, ERROR_TEXT_MAX_UNITS),
-				}),
+			progress: sendProgress,
 			requested,
 			// Same message as the desktop runtime's reportStreamFailure. PageShim
 			// has no failed DONE, so the SKIP_RESULT marks the result partial.

@@ -4432,8 +4432,14 @@ test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", {
  await t.test("complete six-stream inventory and bounded page calls", async () => {
   const fixtures = createLinkedInFixtures();
   const calls = [];
+  const listingProgress = [];
   const r = await run(fixtures, { initialState: { "linkedin.profile": { prior: true } },
-   observeBridge: (method, args) => { if (method === "evaluate") calls.push(String(args[0])); } });
+   observeBridge: (method, args) => {
+    if (method === "evaluate") calls.push(String(args[0]));
+    if (method === "setProgress" && args[0].message === "Fetched LinkedIn connections page") listingProgress.push(args[0]);
+   } });
+  assert.deepEqual(listingProgress, [{ phase: { label: "connections" }, message: "Fetched LinkedIn connections page", stream: "connections", count: 1, total: 1 }]);
+
   assertCleanRun(r);
   assert.deepEqual(r.result.errors, []);
   assert.deepEqual(r.result.exportSummary, c.exportSummary);
