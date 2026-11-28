@@ -140,10 +140,9 @@ export interface BuiltMessage {
  */
 export function buildMessageRecord(row: SignalMessageRow): BuiltMessage {
 	const json = parseMessageJson(row.json);
-	const sentAtMs =
-		row.sentAt && row.sentAt > 0 ? row.sentAt : (row.receivedAtMs ?? null);
-	const sentAtIso =
-		signalEpochMsToIso(row.sentAt) ?? signalEpochMsToIso(row.receivedAtMs);
+	const sentAt = signalEpochMsToIso(row.sentAt);
+	const sentAtIso = sentAt ?? signalEpochMsToIso(row.receivedAtMs);
+	const sentAtMs = sentAt === null ? row.receivedAtMs : row.sentAt;
 	return {
 		record: {
 			id: row.id,

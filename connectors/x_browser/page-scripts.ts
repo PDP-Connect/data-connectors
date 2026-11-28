@@ -179,7 +179,7 @@ export function installObserverScript(config: ObserverConfig): string {
 									: "",
 						);
 					} catch (error) {}
-				});
+				}, { once: true });
 			}
 		} catch (error) {}
 		return xhrSend.apply(this, arguments);

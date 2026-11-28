@@ -16,7 +16,12 @@ import {
 	instinctAllowsInteractiveAuthRepair,
 	resolveConnectionGates,
 } from "./index.ts";
-import { nullableText, toIso } from "./parsers.ts";
+import {
+	chatReadPlan,
+	nextCheckpoint,
+	nullableText,
+	toIso,
+} from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { GraphqlFetchResult, InstinctGraphql } from "./types.ts";
 
@@ -1713,4 +1718,67 @@ test("the profile carries no picture link", async () => {
 	const record = harness.emitted.find((entry) => entry.stream === "profile");
 	assert.ok(record);
 	assert.equal("profile_picture_url" in record.data, false);
+});
+
+test("resource-filtered history never moves the full-chat checkpoint", () => {
+	const checkpoint = {
+		covered_since: null,
+		newest_created_at: 1_700_000_100,
+		newest_ids: ["old"],
+	};
+	const seen = [{ id: "fresh", type: "message", createdAt: 1_700_000_101 }];
+
+	const restricted = chatReadPlan({ resources: ["selected-chat"] });
+	assert.deepEqual(
+		nextCheckpoint(checkpoint, seen, restricted, true),
+		checkpoint,
+	);
+	assert.deepEqual(
+		nextCheckpoint(checkpoint, seen, chatReadPlan(undefined), true),
+		{
+			covered_since: null,
+			newest_created_at: 1_700_000_101,
+			newest_ids: ["fresh"],
+		},
+	);
+});
+
+test("a history checkpoint honors both exact and fractional exclusive until bounds", () => {
+	const seen = [{ id: "edge", type: "message", createdAt: 1_700_000_100 }];
+	const exact = chatReadPlan({ time_range: { until: "2023-11-14T22:15:00Z" } });
+	const fractional = chatReadPlan({
+		time_range: { until: "2023-11-14T22:15:00.1Z" },
+	});
+
+	assert.equal(nextCheckpoint(null, seen, exact, true), null);
+	assert.deepEqual(nextCheckpoint(null, seen, fractional, true), {
+		covered_since: null,
+		newest_created_at: 1_700_000_100,
+		newest_ids: ["edge"],
+	});
+});
+
+test("an unreadable timestamp prevents a bounded checkpoint from moving", () => {
+	const checkpoint = {
+		covered_since: null,
+		newest_created_at: 1_700_000_100,
+		newest_ids: ["old"],
+	};
+	const seen = [
+		{ id: "unknown", type: "message", createdAt: "bad-time" },
+		{ id: "fresh", type: "message", createdAt: 1_700_000_101 },
+	];
+
+	const bounded = chatReadPlan({
+		time_range: { since: "2023-11-14T22:00:00Z" },
+	});
+	assert.deepEqual(nextCheckpoint(checkpoint, seen, bounded, true), checkpoint);
+	assert.deepEqual(
+		nextCheckpoint(checkpoint, seen, chatReadPlan(undefined), true),
+		{
+			covered_since: null,
+			newest_created_at: 1_700_000_101,
+			newest_ids: ["fresh"],
+		},
+	);
 });

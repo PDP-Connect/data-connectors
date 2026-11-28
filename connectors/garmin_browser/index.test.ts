@@ -44,6 +44,7 @@ import {
 	SIGN_IN_ORIGIN,
 	SIGN_IN_SETTLE,
 } from "./index.ts";
+import { activityRow, sleepRow } from "./parsers.ts";
 
 const NOW = new Date("2026-09-20T13:30:00.000Z");
 const APP = "https://connect.garmin.com/app/";
@@ -1492,4 +1493,34 @@ test("a goto to the app that times out fails ensureSession before the owner is a
 		/Timeout/,
 	);
 	assert.deepEqual(requests, []);
+});
+
+test("activity record drift keeps a known start for range accounting without emitting a row", () => {
+	const window = { from: "2026-01-15", to: "2026-01-15" };
+	assert.deepEqual(
+		activityRow(
+			{
+				activityId: 42,
+				startTimeGMT: "2026-01-15 09:00:00",
+				startTimeLocal: "2026-01-15 10:00:00",
+				distance: "not a numeric measurement",
+			},
+			window,
+		),
+		{ kind: "unreadable", startAt: "2026-01-15T09:00:00.000Z" },
+	);
+});
+
+test("a synthetic sleep row with an invalid start does not infer an instant from its day", () => {
+	const window = { from: "2026-01-15", to: "2026-01-15" };
+	assert.deepEqual(
+		sleepRow(
+			{
+				calendarDate: "2026-01-15",
+				values: { gmtSleepStartTimeInMillis: "invalid" },
+			},
+			window,
+		),
+		{ kind: "unreadable" },
+	);
 });

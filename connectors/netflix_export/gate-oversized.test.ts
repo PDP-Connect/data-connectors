@@ -2,7 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { closeSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
+import {
+	closeSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	rmSync,
+	writeFileSync,
+	writeSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseCSVFile } from "./parsers.ts";
@@ -33,4 +42,31 @@ test("parseCSVFile rejects file exceeding 50 MiB limit", async () => {
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
+});
+
+test("parseCSVFile handles a missing synthetic export without inventing rows", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "netflix-missing-csv-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+	assert.deepEqual(await parseCSVFile(join(dir, "missing.csv")), {
+		headers: [],
+		rows: [],
+		malformedCount: 0,
+	});
+});
+
+test("parseCSVFile keeps a complete synthetic row and counts a truncated quoted tail", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "netflix-malformed-csv-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const csvPath = join(dir, "viewing-activity.csv");
+	writeFileSync(
+		csvPath,
+		'Title,Date\nInvented Title,2026-01-15\n"Unterminated title,2026-01-16\n',
+	);
+
+	assert.deepEqual(await parseCSVFile(csvPath), {
+		headers: ["title", "date"],
+		rows: [{ title: "Invented Title", date: "2026-01-15" }],
+		malformedCount: 1,
+	});
 });

@@ -33,8 +33,20 @@ import {
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
+import { partialDate } from "./field-read.ts";
 import { collectLinkedIn, collectLinkedInPageShim, ensureLinkedInSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+test("LinkedIn partial dates retain year-only precision and zero-pad reported months", () => {
+	assert.deepEqual(partialDate({ year: 44 }), { kind: "read", value: "0044" });
+	assert.deepEqual(partialDate({ year: 44, month: 2 }), { kind: "read", value: "0044-02" });
+});
+
+test("LinkedIn partial dates reject malformed month values instead of dropping precision", () => {
+	for (const month of [0, 13, 2.5, "2"]) {
+		assert.deepEqual(partialDate({ year: 2026, month }), { kind: "unavailable", reason: "malformed" });
+	}
+});
 
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
 // they fire on the next tick instead of sleeping.

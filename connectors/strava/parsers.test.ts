@@ -125,6 +125,19 @@ test("an empty cell is null, never zero", () => {
 	assert.equal(numberOrNull("0"), 0);
 });
 
+test("synthetic activities keep decimal readings but do not turn hex cells into measurements", () => {
+	const cols = columns();
+	const row = new Array<string>(HEADER.length).fill("");
+	row[cols.id] = "123";
+	row[cols.activityDate] = "2026-01-15T12:00:00Z";
+	row[cols.distanceM] = "0x20";
+	row[cols.elapsedTimeS] = "1.25e2";
+	const record = buildActivityRecord(row, cols, null);
+	assert.ok(record);
+	assert.equal(record.distance_m, null);
+	assert.equal(record.elapsed_time_s, 125);
+});
+
 test("a ride with no heart-rate strap yields null heart rates, not zeros", () => {
 	const cols = columns();
 	const row = new Array<string>(HEADER.length).fill("");
@@ -182,6 +195,43 @@ test("an unparseable or empty date yields null so the row is counted, not guesse
 	assert.equal(parseActivityDate(""), null);
 	assert.equal(parseActivityDate(undefined), null);
 	assert.equal(parseActivityDate("last Tuesday"), null);
+});
+
+test("rejects invalid written calendar, clock, and offset values", () => {
+	for (const value of [
+		"2024-02-30T10:00:00Z", "2023-02-29T10:00:00Z",
+		"2024-13-45T99:99:99Z", "2024-02-29T10:00:00+25:99",
+		"2024-02-29T10:00:00+0199", "2024-02-29 24:00:00",
+		"2024-02-29T10:60:00", "2024-02-29T10:00:60Z",
+		"Aug 32, 2020, 7:30:00 AM", "Apr 31, 2020, 7:30:00 AM",
+		"Aug 12, 2020, 0:30:00 AM", "Aug 12, 2020, 13:30:00 PM",
+	]) assert.equal(parseActivityDate(value), null, value);
+	assert.deepEqual(parseActivityDate("2024-02-29T10:00:00Z"), {
+		iso: "2024-02-29T10:00:00Z", basis: "utc",
+	});
+	assert.deepEqual(parseActivityDate("2024-02-29T23:30:00-0800"), {
+		iso: "2024-02-29T23:30:00-0800", basis: "utc",
+	});
+});
+
+test("CSV splits bare CR and CRLF without changing quoted carriage returns", () => {
+	const rows = [["a", "b"], ["1", "2"], ["3", "4"]];
+	assert.deepEqual(parseCsvRows("a,b\r1,2\r3,4\r"), { rows });
+	assert.deepEqual(parseCsvRows("a,b\r\n1,2\r\n3,4\r\n"), { rows });
+	assert.deepEqual(parseCsvRows('a,b\r"x\ry",2\r'), { rows: [["a", "b"], ["x\ry", "2"]] });
+});
+
+test("streamed CSV treats a split CRLF as one break and preserves quoted CRLF", async () => {
+	async function* chunks() {
+		yield "a,b\r";
+		yield "";
+		yield '\n"x\r';
+		yield '\ny",2\r';
+		yield "\n3,4\r";
+	}
+	const rows: string[][] = [];
+	assert.deepEqual(await streamCsvRows(chunks(), row => { rows.push(row); }), { rowCount: 3 });
+	assert.deepEqual(rows, [["a", "b"], ["x\r\ny", "2"], ["3", "4"]]);
 });
 
 test("a row with no usable id is rejected rather than emitted with a fake one", () => {
@@ -530,4 +580,36 @@ test("export dates preserve the stated clock and distinguish known local offsets
 			assert.equal(record.start_date_local, record.start_date, source);
 		}
 	}
+});
+
+test("streamCsvRows waits for the row consumer before pulling another chunk", async () => {
+	const events: string[] = [];
+	let release!: () => void;
+	let started!: () => void;
+	const held = new Promise<void>((resolve) => { release = resolve; });
+	const entered = new Promise<void>((resolve) => { started = resolve; });
+	const parsing = streamCsvRows((async function* () {
+		events.push("first chunk"); yield "one\ntwo\n";
+		events.push("second chunk"); yield "three";
+	})(), async (row) => {
+		events.push(row[0] ?? "");
+		if (row[0] === "one") { started(); await held; }
+	});
+	await entered;
+	try {
+		assert.deepEqual(events, ["first chunk", "one"]);
+	} finally {
+		release();
+	}
+	assert.deepEqual(await parsing, { rowCount: 3 });
+	assert.deepEqual(events, ["first chunk", "one", "two", "second chunk", "three"]);
+});
+
+test("streamCsvRows reports a truncated final row without losing complete rows", async () => {
+	const rows: string[][] = [];
+	const result = await streamCsvRows((async function* () {
+		yield "\uFEFFa,b\r"; yield '\n1,ready\r\n2,"unclosed'; yield "";
+	})(), (row) => { rows.push(row); });
+	assert.deepEqual(rows, [["a", "b"], ["1", "ready"]]);
+	assert.deepEqual(result, { rowCount: 2, error: "CSV ended inside a quoted field" });
 });

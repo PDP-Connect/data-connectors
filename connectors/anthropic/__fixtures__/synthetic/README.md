@@ -22,8 +22,7 @@ Regenerate it with:
 node --import tsx connectors/anthropic/__fixtures__/synthetic/build-fixture.ts
 ```
 
-Real-fixture proof is PENDING: `$PRIV/exports/anthropic/` does not exist
-yet (confirmed via `ls` at task start — Tim's real export has not landed).
-Once a real export lands, scrub it per `docs/connector-authoring-guide.md`
-§9.1 and commit it under
-`fixtures/anthropic/scrubbed/pilot-real-shape/` — NOT this directory.
+This archive is not proof from a real export. If a reviewed capture is needed,
+follow the [connector authoring guide](../../../../packages/polyfill-connectors/docs/connector-authoring-guide.md#91-capturing-fixtures-from-a-live-run)
+and keep that fixture under `fixtures/anthropic/scrubbed/pilot-real-shape/`,
+not in this synthetic directory.

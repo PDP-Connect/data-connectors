@@ -355,3 +355,65 @@ test("the wait a response asks for comes from its body, then its header", () => 
 	assert.equal(isGlobalRateLimit(fixture("rate-limited.json")), false);
 	assert.equal(isGlobalRateLimit({ retry_after: 1, global: true }), true);
 });
+
+test("connection IDs preserve service identity when linked account IDs collide", () => {
+	const parsed = buildConnectionRecords([
+		{ type: "github", id: "fixture-42", name: "sample-a" },
+		{ type: "spotify", id: "fixture-42", name: "sample-b" },
+	]);
+	assert.ok(parsed.ok);
+	assert.equal(parsed.unreadable, 0);
+	assert.deepEqual(
+		parsed.records.map(({ id, type, account_id }) => [id, type, account_id]),
+		[
+			["github:fixture-42", "github", "fixture-42"],
+			["spotify:fixture-42", "spotify", "fixture-42"],
+		],
+	);
+});
+
+test("search retains raw group indices across an unreadable group", () => {
+	const first = {
+		id: "1551201258700800013",
+		author: { id: OWNER },
+	};
+	const last = { ...first, id: "1550431687802880011" };
+	const parsed = parseSearchPage(
+		{ total_results: 8, messages: [[first], [], [last]] },
+		SEARCHED,
+	);
+	assert.ok(parsed.ok);
+	assert.equal(parsed.total, 8);
+	assert.equal(parsed.groups, 3);
+	assert.equal(parsed.unreadable, 1);
+	assert.deepEqual(parsed.unreadablePositions, [1]);
+	assert.deepEqual(
+		parsed.hits.map(({ id, position }) => [id, position]),
+		[
+			[first.id, 0],
+			[last.id, 2],
+		],
+	);
+});
+
+test("search inventory counts must be representable nonnegative integers", () => {
+	for (const total_results of ["0", -1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		assert.deepEqual(
+			parseSearchPage({ total_results, messages: [] }, SEARCHED),
+			{
+				ok: false,
+			},
+		);
+	}
+	assert.deepEqual(
+		parseSearchPage({ total_results: 0, messages: [] }, SEARCHED),
+		{
+			ok: true,
+			total: 0,
+			groups: 0,
+			hits: [],
+			unreadable: 0,
+			unreadablePositions: [],
+		},
+	);
+});

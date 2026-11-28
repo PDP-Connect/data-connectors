@@ -269,3 +269,90 @@ test("budgets considered: covered tracks the enumerated boundary, not the emitte
 		"covered === 1 (suppressed-unchanged), not the collected count of 0",
 	);
 });
+
+test("budgets considered: an invalid summary is considered but not covered", async () => {
+	const good = makeBudget();
+	const bad = makeBudget({
+		id: "11111111-1111-4111-8111-111111111111",
+		first_month: "not-a-date",
+	});
+	const h = makeHarness();
+	await emitBudgetsStream({
+		budgets: [good, bad],
+		state: {},
+		newState: {},
+		emit: h.emit,
+		trackAndEmit: h.trackAndEmit,
+	});
+
+	assert.deepEqual(
+		h.emitted.map(({ data }) => (data as { id: string }).id),
+		[good.id],
+	);
+	const cov = budgetsSelfCoverage(h.messages);
+	assert.equal(cov?.considered, 2);
+	assert.equal(cov?.covered, 1);
+});
+
+test("budgets considered: an empty inventory clears fingerprints for a later reappearance", async () => {
+	const budget = makeBudget();
+	const run = async (budgets: YnabBudget[], state = {}) => {
+		const h = makeHarness();
+		await emitBudgetsStream({
+			budgets,
+			state,
+			newState: {},
+			emit: h.emit,
+			trackAndEmit: h.trackAndEmit,
+		});
+		return h;
+	};
+
+	const first = await run([budget]);
+	assert.equal(first.emitted.length, 1);
+	const empty = await run([], nextStateFrom(first.messages));
+	assert.equal(empty.emitted.length, 0);
+	const cov = budgetsSelfCoverage(empty.messages);
+	assert.equal(cov?.considered, 0);
+	assert.equal(cov?.covered, 0);
+	assert.deepEqual(
+		(nextStateFrom(empty.messages).budgets as { fingerprints: object })
+			.fingerprints,
+		{},
+	);
+	const returned = await run([budget], nextStateFrom(empty.messages));
+	assert.equal(returned.emitted.length, 1);
+});
+
+test("budgets considered: a currency locale edit produces a new summary", async () => {
+	const budget = makeBudget();
+	const first = makeHarness();
+	await emitBudgetsStream({
+		budgets: [budget],
+		state: {},
+		newState: {},
+		emit: first.emit,
+		trackAndEmit: first.trackAndEmit,
+	});
+
+	const edited = makeHarness();
+	await emitBudgetsStream({
+		budgets: [
+			makeBudget({
+				currency_format: { ...budget.currency_format, iso_code: "CAD" },
+			}),
+		],
+		state: nextStateFrom(first.messages),
+		newState: {},
+		emit: edited.emit,
+		trackAndEmit: edited.trackAndEmit,
+	});
+
+	assert.deepEqual(
+		edited.emitted.map(
+			({ data }) => (data as { currency_iso_code: string }).currency_iso_code,
+		),
+		["CAD"],
+	);
+	assert.equal(budgetsSelfCoverage(edited.messages)?.covered, 1);
+});
