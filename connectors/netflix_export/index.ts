@@ -385,12 +385,12 @@ async function collectViewingActivity(
 		}
 
 		// Replay the cursor day for day-precision history; occurrence ids upsert it.
-		// Full exports retain the exclusive exact-timestamp cursor.
+		// Full exports replay the exact boundary: a later distinct row can share it.
 		if (
 			since &&
 			(schema === "direct_history"
 				? rec.watched_at.slice(0, 10) < since.slice(0, 10)
-				: rec.watched_at <= since)
+				: rec.watched_at < since)
 		) {
 			skippedCount += 1;
 			continue;
