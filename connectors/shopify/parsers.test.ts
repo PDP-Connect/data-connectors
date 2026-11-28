@@ -65,6 +65,70 @@ function synthCache(overrides: Partial<ApolloCache> = {}): ApolloCache {
 	};
 }
 
+// Synthetic markup: inline fragments must not become separate money tokens.
+for (const [label, price] of [
+	["split integer", "<span>$1</span><span>9.99</span>"],
+	["split currency and fraction", "<span>$</span><span>19</span><span>.99</span>"],
+]) {
+	test(`parseDomOrderCards preserves ${label} price fragments`, () => {
+		const orders = parseDomOrderCards(
+			`<div class="order-card"><a href="/orders/split-price">Acme Goods</a><div>${price}</div><div>Shipped</div></div>`,
+		);
+		assert.equal(orders.length, 1);
+		assert.equal(orders[0]?.totalCents, 1999);
+		assert.equal(orders[0]?.currency, "USD");
+		assert.equal(orders[0]?.status, "Shipped");
+	});
+}
+
+test("parseDomOrderCards reads status after a nested order summary", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><a href="/orders/nested-summary">Acme Goods</a><div><span>$5.00</span> <span>2 items</span></div><div>Delivered</div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.status, "Delivered");
+	assert.equal(orders[0]?.totalCents, 500);
+	assert.equal(orders[0]?.itemCount, 2);
+});
+
+// Synthetic adjacent inline fields must not merge into currency codes or counts.
+for (const { label, fields, totalCents, currency, itemCount } of [
+	{ label: "currency code and status", fields: '<span>19.99 EUR</span><span>Shipped</span>', totalCents: 1999, currency: "EUR", itemCount: null },
+	{ label: "complete price and item count", fields: '<span>$19.99</span><span>2 items</span>', totalCents: 1999, currency: "USD", itemCount: 2 },
+	{ label: "order number and item count", fields: '<span>Order #1001</span><span>2 items</span><span>$5.00</span>', totalCents: 500, currency: "USD", itemCount: 2 },
+	{ label: "complete price and status", fields: '<span>$19.99</span><span>Shipped</span>', totalCents: 1999, currency: "USD", itemCount: null },
+]) {
+	test(`parseDomOrderCards separates inline ${label}`, () => {
+		const orders = parseDomOrderCards(
+			`<div class="order-card"><a href="/orders/inline-fields">Acme Goods</a>${fields}</div>`,
+		);
+		assert.equal(orders.length, 1);
+		assert.equal(orders[0]?.totalCents, totalCents);
+		assert.equal(orders[0]?.currency, currency);
+		assert.equal(orders[0]?.itemCount, itemCount);
+	});
+}
+
+test("parseDomOrderCards separates adjacent price and status blocks", () => {
+	const orders = parseDomOrderCards(
+		'<div class="order-card"><a href="/orders/blocks">Acme Goods</a><div>$19.99</div><div>Shipped</div></div>',
+	);
+	assert.equal(orders.length, 1);
+	assert.equal(orders[0]?.totalCents, 1999);
+	assert.equal(orders[0]?.status, "Shipped");
+});
+
+for (const tag of ["script", "style", "template", "noscript"]) {
+	test(`parseDomOrderCards ignores prices and statuses inside ${tag}`, () => {
+		const orders = parseDomOrderCards(
+			`<div class="order-card"><a href="/orders/hidden">Acme Goods</a><${tag}>$999.99 Cancelled</${tag}><div>$19.99</div><div>Shipped</div></div>`,
+		);
+		assert.equal(orders.length, 1);
+		assert.equal(orders[0]?.totalCents, 1999);
+		assert.equal(orders[0]?.status, "Shipped");
+	});
+}
+
 test("parseDomOrderCards maps legacy-shaped order cards to Shop records when Apollo is unavailable", () => {
 	const fixture = `
 		<div class="order-card">
@@ -466,4 +530,42 @@ test("Shop DOM links canonicalize both origins and reject lookalikes", () => {
 	}
 	const mixed = '<div class="order-card"><a href="https://shop.com/merchant/acme">Acme Goods</a><div>2 items · $19.99</div><a href="https://shop.app/orders/same-order">View order</a></div>';
 	assert.equal(parseDomOrderCards(mixed)[0]?.id, "https://shop.app/orders/same-order");
+});
+test("Shop DOM status retains qualifiers instead of matching positive substrings", () => {
+	for (const [phrase, expected] of [
+		["Not shipped", null],
+		["Partially fulfilled", "Partially fulfilled"],
+		["Delivered tomorrow", null],
+	] as const) {
+		const [order] = parseDomOrderCards(`<div class="order-card">
+			<a href="https://shop.app/orders/status-test">Acme Goods</a>
+			<div>1 item · $8.50</div><div>${phrase}</div>
+		</div>`);
+		assert.ok(order);
+		assert.equal(order.status, expected, phrase);
+	}
+});
+
+test("Shop DOM product and merchant names do not supply order status", () => {
+	for (const [merchant, product] of [
+		["Acme Goods", "Delivered Dreams T-shirt"],
+		["Acme Goods", "Delivered"],
+		["Shipped", "Everyday T-shirt"],
+	] as const) {
+		const [order] = parseDomOrderCards(`<div class="order-card">
+			<a href="https://shop.app/orders/name-test">${merchant}</a>
+			<div>${product}</div><div>1 item · $8.50</div>
+		</div>`);
+		assert.ok(order);
+		assert.equal(order.status, null);
+	}
+});
+
+test("Shop DOM conflicting full status phrases remain unknown", () => {
+	const [order] = parseDomOrderCards(`<div class="order-card">
+		<a href="https://shop.app/orders/conflict">Acme Goods</a>
+		<div>1 item · $8.50</div><div>Shipped</div><div>Delivered</div>
+	</div>`);
+	assert.ok(order);
+	assert.equal(order.status, null);
 });

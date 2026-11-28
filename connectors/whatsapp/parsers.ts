@@ -261,6 +261,17 @@ export function messageContentFingerprint(
 		.slice(0, MESSAGE_ID_HASH_LENGTH);
 }
 
+/** Fixed-size occurrence-map key; preserve the legacy concatenation exactly. */
+export function occurrenceKey(
+	author: string,
+	sent_at: string,
+	content: string,
+): string {
+	return createHash("sha256")
+		.update(`${author}${sent_at}${content}`)
+		.digest("hex");
+}
+
 function deriveMessageId(
 	chatId: string,
 	message: Pick<ParsedWhatsAppMessage, "author" | "content" | "sent_at">,
@@ -375,25 +386,27 @@ export function parseWhatsAppDateTime(
 	if (!(dateParts && timeParts)) {
 		return null;
 	}
-	const date = new Date(
+	// Validate the calendar independently of local DST gaps. Time components
+	// are already range-checked by parseWhatsAppTimeParts.
+	const calendar = new Date(
+		Date.UTC(dateParts.year, dateParts.month - 1, dateParts.day),
+	);
+	if (
+		calendar.getUTCFullYear() !== dateParts.year ||
+		calendar.getUTCMonth() !== dateParts.month - 1 ||
+		calendar.getUTCDate() !== dateParts.day
+	) {
+		return null;
+	}
+	// Preserve local-time interpretation, including Date's gap/repeat handling.
+	return new Date(
 		dateParts.year,
 		dateParts.month - 1,
 		dateParts.day,
 		timeParts.hour,
 		timeParts.minute,
 		timeParts.second,
-	);
-	if (
-		date.getFullYear() === dateParts.year &&
-		date.getMonth() === dateParts.month - 1 &&
-		date.getDate() === dateParts.day &&
-		date.getHours() === timeParts.hour &&
-		date.getMinutes() === timeParts.minute &&
-		date.getSeconds() === timeParts.second
-	) {
-		return date.toISOString();
-	}
-	return null;
+	).toISOString();
 }
 
 /** Splits an already-in-memory chat-text string (e.g. a zip's bounded
@@ -761,7 +774,11 @@ class ChatIdentityAccumulator {
 		if (this.lastSentAt === null || message.sent_at > this.lastSentAt) {
 			this.lastSentAt = message.sent_at;
 		}
-		const dedupeKey = `${message.author}${message.sent_at}${message.content}`;
+		const dedupeKey = occurrenceKey(
+			message.author,
+			message.sent_at,
+			message.content,
+		);
 		const occurrenceIndex = this.occurrenceSeen.get(dedupeKey) ?? 0;
 		this.occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
 		this.fingerprintSampler.push(
@@ -870,7 +887,7 @@ export function streamWhatsAppChatMessages(
 			);
 		}
 		const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
-		const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
+		const dedupeKey = occurrenceKey(raw.author, raw.sent_at, raw.content);
 		const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
 		occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
 		onMessage({
@@ -921,7 +938,7 @@ export async function streamWhatsAppChatMessagesAsync(
 			);
 		}
 		const hasAttachment = WHATSAPP_ATTACHMENT_RE.test(raw.content);
-		const dedupeKey = `${raw.author}${raw.sent_at}${raw.content}`;
+		const dedupeKey = occurrenceKey(raw.author, raw.sent_at, raw.content);
 		const occurrenceIndex = occurrenceSeen.get(dedupeKey) ?? 0;
 		occurrenceSeen.set(dedupeKey, occurrenceIndex + 1);
 		pending = onMessage({

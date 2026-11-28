@@ -1,0 +1,121 @@
+{
+	"id": 8349588454,
+	"periodDataUuid": null,
+	"exercises": {
+		"8379162593": {
+			"id": 8379162593,
+			"sport": { "id": 1 },
+			"startTime": "2026-11-03T07:12:09",
+			"stopTime": "2026-11-03T07:57:44",
+			"duration": "PT45M35S",
+			"distance": 7012.4,
+			"calories": 498,
+			"trainingStatistic": {
+				"HEART_RATE": { "max": 176, "avg": 151, "min": 98 }
+			},
+			"sportParent": "RUNNING",
+			"defaultSpeedViewSettings": "PACE"
+		}
+	},
+	"samples": {
+		"8379162593": {
+			"HEART_RATE": {
+				"samples": {
+					"interval": "PT1S",
+					"values": [
+						null,
+						0,
+						98,
+						101,
+						104,
+						108,
+						112,
+						117,
+						121,
+						124,
+						128,
+						131,
+						133,
+						136,
+						139,
+						141,
+						144,
+						146,
+						149,
+						151,
+						153,
+						155,
+						158,
+						160,
+						163,
+						166,
+						169,
+						172,
+						174,
+						176,
+						171,
+						165,
+						null,
+						null
+					]
+				}
+			},
+			"SPEED": {
+				"samples": {
+					"interval": "PT1S",
+					"values": [0, 3.2, 6.1, 8.4, 9.7, 10.2, 10.4, 10.5, 10.5, 10.4]
+				}
+			},
+			"DISTANCE": {
+				"samples": {
+					"interval": "PT1S",
+					"values": [0, 0.9, 2.6, 4.9, 7.6, 10.4, 13.3, 16.2, 19.1, 22.0]
+				}
+			},
+			"ALTITUDE": null,
+			"POWER": null,
+			"CADENCE": null,
+			"TEMPERATURE": null,
+			"FAT_KCAL_PER_MIN": {
+				"samples": { "interval": "PT30S", "values": [2.67, 2.92] }
+			},
+			"COORDINATE": {
+				"samples": [
+					{
+						"latitude": 60.1699,
+						"longitude": 24.9384,
+						"altitude": 12.1,
+						"time": "PT1.013S"
+					},
+					{
+						"latitude": 60.16995,
+						"longitude": 24.93851,
+						"altitude": 12.2,
+						"time": "PT2.011S"
+					}
+				]
+			}
+		}
+	},
+	"zones": {
+		"8379162593": {
+			"HEART_RATE": [
+				{
+					"lowerLimit": 143,
+					"higherLimit": 162,
+					"inZone": "PT1533S",
+					"distance": null,
+					"zoneIndex": 3,
+					"created": null
+				}
+			]
+		}
+	},
+	"laps": { "8379162593": { "automaticLaps": [], "manualLaps": [] } },
+	"periodData": null,
+	"swimDatas": {},
+	"pauseTimeData": { "8379162593": [] },
+	"defaultHrZones": { "8379162593": [] },
+	"errors": {},
+	"exerciseResultTargetData": {}
+}

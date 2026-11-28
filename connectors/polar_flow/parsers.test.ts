@@ -12,17 +12,25 @@ import { fixtureData } from "./fake-polar.ts";
 import {
 	type Built,
 	dailyActivityRecord,
+	durationSeconds,
+	heartRateSamples,
 	localTime,
 	nightlyRechargeRecord,
 	parseTrainingRow,
 	parseTrainingSummary,
 	profileRecord,
+	rowDate,
 	sleepRecord,
+	sleepRows,
 	trainingSessionRecord,
 	userId,
 	utcOffset,
 } from "./parsers.ts";
-import { type Stream, validateRecord } from "./schemas.ts";
+import {
+	MAX_HEART_RATE_SAMPLES,
+	type Stream,
+	validateRecord,
+} from "./schemas.ts";
 
 function valid(stream: Stream, built: Built): Record<string, unknown> {
 	assert.equal(built.kind, "record");
@@ -41,6 +49,35 @@ test("localTime normalises Polar's zoneless times and refuses anything else", ()
 	assert.equal(localTime("2026-02-30 07:12:09.000"), null);
 	assert.equal(localTime("2026-11-03 24:00:00"), null);
 	assert.equal(localTime(1793776329000), null);
+});
+
+test("localTime keeps leap days and refuses the same date in a non-leap year", () => {
+	assert.equal(localTime("2024-02-29 23:59:59"), "2024-02-29T23:59:59");
+	assert.equal(localTime("2025-02-29 23:59:59"), null);
+});
+
+test("localTime accepts up to nine fractional digits and emits whole seconds", () => {
+	assert.equal(
+		localTime("2026-01-01T00:00:00.123456789"),
+		"2026-01-01T00:00:00",
+	);
+	assert.equal(localTime("2026-01-01T00:00:00.1234567890"), null);
+});
+
+test("profile: Polar's sleep goal is in seconds", () => {
+	const user = fixtureData().user as Record<string, unknown> & {
+		physicalInfo: Record<string, unknown>;
+	};
+	const { physicalInfo } = user;
+	const at = (sleepGoal: unknown) =>
+		valid(
+			"profile",
+			profileRecord({ ...user, physicalInfo: { ...physicalInfo, sleepGoal } }),
+		).sleep_goal_hours;
+	assert.equal(at(28800), 8);
+	assert.equal(at(27000), 7.5);
+	assert.equal(at(0), null);
+	assert.equal(at(null), null);
 });
 
 test("profile: identity, body and zone settings, never the e-mail", () => {
@@ -142,7 +179,133 @@ test("training session: list fields plus the analysis summary's", () => {
 		note: null,
 		is_test: false,
 		has_training_target: false,
+		heart_rate_samples: null,
 	});
+});
+
+test("heart rate samples: every second Polar recorded, gaps kept, trailing gaps dropped", () => {
+	const data = fixtureData();
+	const row = parseTrainingRow(data.training[0]);
+	assert.ok(row);
+	const samples = heartRateSamples(data.details["8349588454"], 8349588454);
+	assert.ok(Array.isArray(samples));
+	assert.equal(samples.length, 1);
+	const [series] = samples;
+	assert.equal(series?.exercise_id, "8379162593");
+	assert.equal(series?.start_time_local, "2026-11-03T07:12:09");
+	assert.equal(series?.interval_s, 1);
+	// Polar's leading null and its 0 (no reading) are gaps; the two trailing nulls are dropped.
+	assert.deepEqual(series?.bpm.slice(0, 4), [null, null, 98, 101]);
+	assert.equal(series?.bpm.length, 32);
+	assert.equal(series?.bpm.at(-1), 165);
+	const record = valid(
+		"training_sessions",
+		trainingSessionRecord(
+			row,
+			parseTrainingSummary(data.summaries["8349588454"]),
+			samples,
+		),
+	);
+	assert.deepEqual(record.heart_rate_samples, samples);
+	// Nothing but heart rate reaches the record: no GPS fix, no speed.
+	const text = JSON.stringify(record);
+	assert.equal(text.includes("60.1699"), false);
+	assert.equal(text.includes("latitude"), false);
+});
+
+test("heart rate samples: a manual entry's all-null series is none", () => {
+	const data = fixtureData();
+	assert.equal(heartRateSamples(data.details["8351200017"], 8351200017), null);
+	assert.equal(
+		heartRateSamples(
+			{
+				id: 5,
+				samples: {
+					"6": {
+						HEART_RATE: { samples: { interval: "PT1S", values: [0, null] } },
+					},
+				},
+			},
+			5,
+		),
+		null,
+	);
+});
+
+test("heart rate samples: an answer about another session, a bad interval or shape is unreadable", () => {
+	const data = fixtureData();
+	assert.equal(
+		heartRateSamples(data.details["8349588454"], 8351200017),
+		"unreadable",
+	);
+	const series = (interval: unknown, values: unknown) => ({
+		id: 5,
+		samples: { "6": { HEART_RATE: { samples: { interval, values } } } },
+	});
+	assert.equal(heartRateSamples(series("1s", [120]), 5), "unreadable");
+	assert.equal(heartRateSamples(series("PT0S", [120]), 5), "unreadable");
+	assert.equal(heartRateSamples(series("PT1S", ["120"]), 5), "unreadable");
+	assert.equal(heartRateSamples({ id: 5, samples: [] }, 5), "unreadable");
+	assert.deepEqual(heartRateSamples(series("PT1M", [120.4, 400]), 5), [
+		{ exercise_id: "6", start_time_local: null, interval_s: 60, bpm: [120] },
+	]);
+	// Past an hour between samples, or more series than a record holds: unreadable, not dropped.
+	assert.equal(heartRateSamples(series("PT2H", [120]), 5), "unreadable");
+	const many = Object.fromEntries(
+		Array.from({ length: 101 }, (_, i) => [
+			String(i + 1),
+			{ HEART_RATE: { samples: { interval: "PT1S", values: [120] } } },
+		]),
+	);
+	assert.equal(heartRateSamples({ id: 5, samples: many }, 5), "unreadable");
+	assert.equal(durationSeconds("PT1H2M3.5S"), 3723.5);
+	assert.equal(durationSeconds("PT"), null);
+});
+
+test("heart rate samples: exercises in start order; a long session is thinned evenly to the cap", () => {
+	const block = (n: number) => ({
+		HEART_RATE: {
+			samples: {
+				interval: "PT1S",
+				values: Array.from({ length: n }, (_, i) => 100 + (i % 50)),
+			},
+		},
+	});
+	const multisport = heartRateSamples(
+		{
+			id: 5,
+			exercises: {
+				"20": { startTime: "2026-11-03T08:00:00" },
+				"9": { startTime: "2026-11-03T09:00:00" },
+			},
+			samples: { "9": block(3), "20": block(2) },
+		},
+		5,
+	);
+	assert.ok(Array.isArray(multisport));
+	assert.deepEqual(
+		multisport.map((s) => s.exercise_id),
+		["20", "9"],
+	);
+
+	// Thirteen hours at 1 Hz is over the cap: every second sample, at 2 s, still spans it.
+	const long = heartRateSamples(
+		{ id: 5, samples: { "6": block(13 * 3600) } },
+		5,
+	);
+	assert.ok(Array.isArray(long));
+	assert.equal(long[0]?.interval_s, 2);
+	assert.equal(long[0]?.bpm.length, (13 * 3600) / 2);
+	assert.ok((long[0]?.bpm.length ?? 0) <= MAX_HEART_RATE_SAMPLES);
+	assert.deepEqual(long[0]?.bpm.slice(0, 3), [100, 102, 104]);
+	const data = fixtureData();
+	const row = parseTrainingRow({ ...data.training[0], id: 5 });
+	assert.ok(row);
+	const record = valid(
+		"training_sessions",
+		trainingSessionRecord(row, null, long),
+	);
+	assert.ok(JSON.stringify(record).length < 200_000);
 });
 
 test("training session: a manual entry's zero heart rate and empty device read as null", () => {
@@ -254,6 +417,48 @@ test("daily activity: a recorded day, a day nothing recorded and a day past the 
 	});
 });
 
+test("daily activity: a valid sync alone keeps the day but invalid sync times do not", () => {
+	const day = "2026-11-03";
+	const sync = 1_700_000_000_000;
+	const activity = (lastSync: number, stepCount = 0) => ({
+		dataPanelData: { stepCount },
+		activityGraphData: { lastSync },
+	});
+	assert.equal(
+		valid("daily_activity", dailyActivityRecord(day, activity(sync)))
+			.last_sync_at,
+		"2023-11-14T22:13:20.000Z",
+	);
+	for (const bad of [0, -1, 1.25, 253_402_300_800_000]) {
+		assert.deepEqual(dailyActivityRecord(day, activity(bad)), {
+			kind: "empty",
+		});
+		const kept = valid(
+			"daily_activity",
+			dailyActivityRecord(day, activity(bad, 7)),
+		);
+		assert.equal(kept.steps, 7);
+		assert.equal(kept.last_sync_at, null);
+	}
+});
+
+test("Nightly Recharge: fractional ratings are unknown but zero measured HRV is retained", () => {
+	const row = valid(
+		"nightly_recharge",
+		nightlyRechargeRecord({
+			date: "2026-11-03",
+			recoveryIndicator: 2.5,
+			ansRate: 1.5,
+			ansStatus: 3,
+			rmssd: 0,
+		}),
+	);
+	assert.equal(row.nightly_recharge_status, null);
+	assert.equal(row.ans_charge_status, null);
+	assert.equal(row.ans_charge, null);
+	assert.equal(row.hrv_rmssd_ms, 0);
+});
+
 test("sleep: a scored night and an unscored one, dated by the wake-up day", () => {
 	const { sleep } = fixtureData();
 	const scored = valid("sleep", sleepRecord(sleep[0]));
@@ -325,4 +530,16 @@ test("Nightly Recharge: a night with no value is empty, a status out of range is
 	assert.deepEqual(nightlyRechargeRecord({ date: "05.11.2026", rmssd: 40 }), {
 		kind: "unreadable",
 	});
+});
+
+test("rowDate reads only a calendar-day string and rejects timestamp-shaped metadata", () => {
+	assert.equal(rowDate({ date: "2026-09-30" }), "2026-09-30");
+	assert.equal(rowDate({ date: "2026-09-30T00:00:00Z" }), null);
+	assert.equal(rowDate({}), null);
+});
+
+test("sleepRows keeps an empty list distinct from a malformed aggregate shape", () => {
+	assert.deepEqual(sleepRows([]), []);
+	assert.equal(sleepRows({ rows: [] }), null);
+	assert.equal(sleepRows(null), null);
 });

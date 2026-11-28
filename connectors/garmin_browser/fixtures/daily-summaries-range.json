@@ -1,0 +1,24 @@
+{
+	"data": [
+		{
+			"calendarDate": "2026-09-16",
+			"includesWellnessData": true,
+			"movement": {
+				"steps": { "value": 8432, "distanceInMeters": 6120 },
+				"floorsAscended": { "value": 7 }
+			},
+			"calories": { "burnedActive": 512, "burnedResting": 1650 },
+			"heartRate": { "minValue": 47, "maxValue": 151, "restingValue": 52 },
+			"stress": { "avgLevel": 31, "maxLevel": 92 },
+			"bodyBattery": { "minValue": 24, "maxValue": 88 }
+		},
+		{
+			"calendarDate": "2026-09-17",
+			"includesWellnessData": false,
+			"movement": { "steps": { "value": null } },
+			"heartRate": { "minValue": null, "maxValue": null, "restingValue": null },
+			"stress": { "avgLevel": null },
+			"bodyBattery": { "minValue": null, "maxValue": null }
+		}
+	]
+}

@@ -54,6 +54,7 @@ import {
 	computeDeclarationDigest,
 	computeSourceDigest,
 } from "../src/scenario/validate.ts";
+import { checkSubmissionBehavior } from "../src/submission-pilot/check.ts";
 import {
 	checkCoverageProof,
 	checkEvidence,
@@ -416,7 +417,10 @@ function readinessStepsOrThrow(connector: string): Step[] {
  */
 export function runConformance(
 	connector: string,
-	{ staticOnly = false }: { staticOnly?: boolean } = {},
+	{
+		staticOnly = false,
+		submissionPilot = false,
+	}: { staticOnly?: boolean; submissionPilot?: boolean } = {},
 ): Step[] {
 	const manifest = checkManifest(connector);
 	if (manifest.verdict === "FAIL") {
@@ -428,6 +432,9 @@ export function runConformance(
 		checkPilotFixture(connector),
 		...readinessSteps(connector),
 		...(staticOnly ? [] : [checkMockMutation(connector)]),
+		...(submissionPilot
+			? checkSubmissionBehavior(repoRoot, connector, staticOnly)
+			: []),
 	];
 }
 
@@ -483,7 +490,7 @@ function reportSubject(connector: string) {
 	};
 }
 
-function jsonReport(
+export function jsonReport(
 	connector: string,
 	staticOnly: boolean,
 	subject: ReturnType<typeof reportSubject>,
@@ -515,7 +522,9 @@ function jsonReport(
 		: undefined;
 	const findings = steps.map((step) => ({
 		...step,
-		...(step.name === "mock mutation" && noHttpReason
+		...(step.name === "mock mutation" &&
+		noHttpReason &&
+		(step.verdict === "UNKNOWN" || step.verdict === "PASS")
 			? {
 					detail: `${step.detail}; author declares no HTTP requests: ${noHttpReason}`,
 				}
@@ -544,14 +553,17 @@ function main(): void {
 	const args = process.argv.slice(2);
 	const jsonOut = args.includes("--json");
 	const staticOnly = args.includes("--static");
+	const submissionPilot = args.includes("--submission-pilot");
 	const connector = args.find((a) => !a.startsWith("--"));
 	if (!connector) {
-		console.error("usage: conformance <connector> [--json] [--static]");
+		console.error(
+			"usage: conformance <connector> [--json] [--static] [--submission-pilot]",
+		);
 		process.exit(2);
 	}
 
 	const before = reportSubject(connector);
-	const steps = runConformance(connector, { staticOnly });
+	const steps = runConformance(connector, { staticOnly, submissionPilot });
 	const subject = reportSubject(connector);
 	if (JSON.stringify(before) !== JSON.stringify(subject)) {
 		subject.clean = false;

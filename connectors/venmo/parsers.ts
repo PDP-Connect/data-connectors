@@ -6,20 +6,46 @@
 // client, login handshake, and pagination loops live in index.ts.
 
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import type { VenmoStory, VenmoUser } from "./types.ts";
+import type { VenmoStory, VenmoStoryResult, VenmoUser } from "./types.ts";
 
 export const API_BASE = "https://api.venmo.com/v1";
 
 const ZONELESS_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
 
-/** Venmo's zone-less API timestamps are treated as UTC; preserve their fractional precision. */
+const OFFSET_DATETIME_RE =
+	/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?([+-]\d{2}:\d{2})$/;
+
+/**
+ * A Venmo timestamp in the stored form: UTC ending in Z, with the source's
+ * fractional digits. Zone-less values are already UTC. A value with an
+ * explicit offset is shifted on whole seconds, because Date keeps only
+ * milliseconds, and its fraction is kept as written. Anything else, including
+ * an impossible wall time that Date would roll over (February 30), is
+ * returned unchanged.
+ */
 export function normalizeVenmoDate(
 	value: string | null | undefined,
 ): string | null {
 	if (value == null) {
 		return null;
 	}
-	return ZONELESS_DATETIME_RE.test(value) ? `${value}Z` : value;
+	if (ZONELESS_DATETIME_RE.test(value)) {
+		return `${value}Z`;
+	}
+	const match = OFFSET_DATETIME_RE.exec(value);
+	if (!match) {
+		return value;
+	}
+	const [, wallClock, fraction = "", offset] = match;
+	const wall = Date.parse(`${wallClock}Z`);
+	if (
+		Number.isNaN(wall) ||
+		new Date(wall).toISOString().slice(0, 19) !== wallClock
+	) {
+		return value;
+	}
+	const utc = new Date(Date.parse(`${wallClock}${offset}`));
+	return `${utc.toISOString().slice(0, 19)}${fraction}Z`;
 }
 
 /** Venmo's `amount` is a float in major units (dollars); PDPP records integer cents. */
@@ -102,32 +128,37 @@ function counterpartyRecord(
 export function parseTransactionStory(
 	story: VenmoStory,
 	ownerId: string,
-):
-	| { kind: "record"; record: RecordData }
-	| { kind: "unsupported" }
-	| {
-			kind: "invalid";
-			reason: "missing_id" | "missing_date_created" | "missing_action";
-	  } {
+): VenmoStoryResult {
+	if (!story || typeof story !== "object" || Array.isArray(story)) {
+		return { kind: "ambiguous", reason: "malformed_story" };
+	}
 	const { payment } = story;
-	if (!payment) {
-		return { kind: "unsupported" };
+	// Only observed, named exclusions are safe to skip. Unknown shapes are
+	// unfinished inventory, not evidence of an empty transaction history.
+	const knownUnsupported = new Set(["transfer", "refund"]);
+	if (payment == null) {
+		return typeof story.type === "string" && knownUnsupported.has(story.type)
+			? { kind: "unsupported" }
+			: { kind: "ambiguous", reason: "missing_payment" };
+	}
+	if (typeof payment !== "object" || Array.isArray(payment)) {
+		return { kind: "ambiguous", reason: "malformed_payment" };
 	}
 	const actionRaw = payment.action;
-	// A payment without an action is a partial payload, not a story type this
-	// connector skips by design, so it must stay unfinished and be read again.
 	if (actionRaw === undefined || actionRaw === null || actionRaw === "") {
-		return { kind: "invalid", reason: "missing_action" };
+		return { kind: "ambiguous", reason: "missing_action" };
 	}
 	if (actionRaw !== "pay" && actionRaw !== "charge") {
-		return { kind: "unsupported" };
+		return typeof actionRaw === "string" && knownUnsupported.has(actionRaw)
+			? { kind: "unsupported" }
+			: { kind: "ambiguous", reason: "unknown_action" };
 	}
 	if (typeof story.id !== "string" || story.id.length === 0) {
-		return { kind: "invalid", reason: "missing_id" };
+		return { kind: "ambiguous", reason: "missing_id" };
 	}
 	const { date_created: dateCreated } = story;
-	if (!dateCreated) {
-		return { kind: "invalid", reason: "missing_date_created" };
+	if (typeof dateCreated !== "string" || !dateCreated) {
+		return { kind: "ambiguous", reason: "missing_date_created" };
 	}
 	return {
 		kind: "record",

@@ -82,6 +82,47 @@ test("tsToIso: zero/unparseable ts is absence, never 1970 and never a throw", ()
 	assert.equal(tsToIso("-1.000000"), null);
 });
 
+test("time helpers: out-of-range dates are null and the inclusive maximum is valid", () => {
+	assert.equal(tsToIso("99999999999999999.000000"), null);
+	assert.equal(epochToIso(1e18), null);
+	assert.equal(tsToIso("8640000000000"), "+275760-09-13T00:00:00.000Z");
+	assert.equal(epochToIso(8.64e12), "+275760-09-13T00:00:00.000Z");
+	assert.equal(tsToIso("8640000000001"), null);
+	assert.equal(epochToIso(8.64e12 + 1), null);
+});
+
+test("parseMessageRow: out-of-range ts uses the sent_at fallback without throwing", () => {
+	const row: MessageRow = {
+		CHANNEL_ID: "Csynthetic",
+		TS: "99999999999999999.000000",
+		THREAD_TS: null,
+		IS_PARENT: 0,
+		TXT: "synthetic",
+		NUM_FILES: null,
+		DATA: "{}",
+	};
+	const fallback = "2026-04-22T00:00:00.000Z";
+	assert.doesNotThrow(() => parseMessageRow(row, fallback));
+	const parsed = parseMessageRow(row, fallback);
+	assert.equal(parsed.sentAt, fallback);
+	assert.equal(buildMessageRecord(parsed).sent_at, fallback);
+});
+
+test("buildMessageRecord: null reaction entries do not abort reaction counts", () => {
+	const row: MessageRow = {
+		CHANNEL_ID: "Csynthetic",
+		TS: "1714000000.000100",
+		THREAD_TS: null,
+		IS_PARENT: 0,
+		TXT: "synthetic",
+		NUM_FILES: null,
+		DATA: JSON.stringify({ reactions: [null, { name: "eyes", count: 2 }] }),
+	};
+	const parsed = parseMessageRow(row, "2026-04-22T00:00:00.000Z");
+	assert.doesNotThrow(() => buildMessageRecord(parsed));
+	assert.equal(buildMessageRecord(parsed).reaction_count, 2);
+});
+
 test("epochToIso: only finite seconds produce an ISO string", () => {
 	assert.equal(
 		epochToIso(1_700_000_000),
@@ -268,6 +309,59 @@ test("buildMessageRecord: pulls counts + thread + reactions from blob", () => {
 	assert.deepEqual(rec.pinned_to, ["C1"]);
 	assert.equal(rec.metadata_event_type, "app_posted");
 	assert.equal(rec.edited_ts, "1713999991.000000");
+});
+
+function messageRecordWithReactions(reactions: unknown) {
+	const row: MessageRow = {
+		CHANNEL_ID: "C-invented",
+		TS: "1714000000.000100",
+		THREAD_TS: null,
+		IS_PARENT: 0,
+		TXT: "synthetic reaction test",
+		NUM_FILES: null,
+		DATA: JSON.stringify({ reactions }),
+	};
+	return buildMessageRecord(parseMessageRow(row, "2026-04-22T00:00:00.000Z"));
+}
+
+test("buildMessageRecord: null reactions do not discard the message", () => {
+	const rec = messageRecordWithReactions([
+		null,
+		{ count: 2 },
+		{ users: ["invented-a", "invented-b"] },
+	]);
+	assert.equal(rec.id, "C-invented:1714000000.000100");
+	assert.equal(rec.text, "synthetic reaction test");
+	assert.equal(rec.reaction_count, 4);
+});
+
+test("buildMessageRecord: ignores non-object reaction entries", () => {
+	const rec = messageRecordWithReactions([
+		false,
+		true,
+		7,
+		"invented-reaction",
+		{ count: 2 },
+		{ users: ["invented-a", "invented-b"] },
+	]);
+	assert.equal(rec.reaction_count, 4);
+});
+
+test("buildMessageRecord: empty or non-array reactions count as zero", () => {
+	for (const reactions of [undefined, null, [], {}, "invented", 7, false]) {
+		assert.equal(messageRecordWithReactions(reactions).reaction_count, 0);
+	}
+});
+
+test("buildMessageRecord: preserves counts, zero and users fallback", () => {
+	const rec = messageRecordWithReactions([
+		{ count: 3, users: ["invented-a"] },
+		{ count: 0, users: ["invented-b", "invented-c"] },
+		{ users: ["invented-d", "invented-e"] },
+		{},
+	]);
+	assert.equal(rec.reaction_count, 5);
+	assert.equal(messageRecordWithReactions([{ count: 0 }]).reaction_count, 0);
 });
 
 test("buildReactionRecords: expands (emoji, user) into per-user rows", () => {

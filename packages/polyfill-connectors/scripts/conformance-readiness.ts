@@ -38,6 +38,16 @@ export function requiredForReview(
 	if (!step.advisory && step.verdict === "FAIL") {
 		return true;
 	}
+	if (
+		[
+			"submission refresh",
+			"submission deletions",
+			"submission text",
+			"submission counts",
+		].includes(step.name)
+	) {
+		return !step.advisory;
+	}
 	if (["manifest", "tests"].includes(step.name)) {
 		return true;
 	}
@@ -54,6 +64,41 @@ export function requiredForReview(
 	);
 }
 
+/** The bounded pilot covers required network bindings without other binding kinds. */
+export function isApiSubmissionPilot(manifest: unknown): boolean {
+	if (
+		!manifest ||
+		typeof manifest !== "object" ||
+		!("runtime_requirements" in manifest)
+	)
+		return false;
+	const runtime = manifest.runtime_requirements;
+	if (!runtime || typeof runtime !== "object" || !("bindings" in runtime))
+		return false;
+	const bindings = runtime.bindings;
+	if (!bindings || typeof bindings !== "object" || Array.isArray(bindings))
+		return false;
+	const entries = Object.entries(bindings);
+	return (
+		entries.some(
+			([key, binding]) =>
+				binding &&
+				typeof binding === "object" &&
+				(binding.kind ?? key) === "network" &&
+				binding.required === true,
+		) &&
+		entries.every(
+			([key, binding]) =>
+				binding &&
+				typeof binding === "object" &&
+				!Array.isArray(binding) &&
+				typeof binding.required === "boolean" &&
+				(binding.kind === undefined || typeof binding.kind === "string") &&
+				(binding.kind ?? key) === "network",
+		)
+	);
+}
+
 /** A disclosed author assertion in entrypoint comments, not an HTTP analysis. */
 export function declaredNoHttpExemption(source: string): string | undefined {
 	const header =
@@ -62,7 +107,7 @@ export function declaredNoHttpExemption(source: string): string | undefined {
 		)?.[0] ?? "";
 	const reason = header
 		.match(
-			/(?:^|\n)[\t ]*(?:\*|\/\/)[\t ]*@conformance-no-http[\t ]+([^\r\n]+)/,
+			/(?:^|\n)[\t ]*(?:\*|\/\/|\/\*)[\t ]*@conformance-no-http[\t ]+([^\r\n]+)/,
 		)?.[1]
 		?.replace(/\*\/\s*$/, "")
 		.trim();

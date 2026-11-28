@@ -63,6 +63,16 @@ test("centsFromMonetary: unparseable string -> null, never guessed", () => {
 	assert.equal(centsFromMonetary("N/A"), null);
 });
 
+test("orderRecord rejects malformed thousands separators in a charged total", () => {
+	const record = orderRecord({
+		orderUuid: "synthetic-malformed-total",
+		totalCharged: { displayString: "$12,34.56" },
+		grandTotal: { unitAmount: 1234 },
+	});
+	assert.equal(record?.total_cents, 1234);
+	assert.equal(centsFromMonetary("$1234.56"), 123_456);
+});
+
 test("centsFromMonetary: empty monetary object -> null", () => {
 	assert.equal(centsFromMonetary({}), null);
 });
@@ -262,4 +272,34 @@ test("parseOrdersResponse: unwraps the top-level data envelope and returns [] on
 test("parseOrdersResponse: also handles a response with no 'data' wrapper", () => {
 	const nodes = parseOrdersResponse({ orders: [SYNTHETIC_NODE] });
 	assert.equal(nodes.length, 1);
+});
+
+test("parseOrdersResponse: null data does not emit order-shaped error metadata", () => {
+	const response = {
+		data: null,
+		errors: [
+			{
+				message: "Synthetic source error",
+				extensions: { orders: [{ orderUuid: "synthetic-metadata" }] },
+			},
+		],
+	};
+	assert.deepEqual(parseOrdersResponse(response), []);
+});
+
+test("orderItemRecords: dropping whitespace names preserves the next item's source index", () => {
+	const items = orderItemRecords("synthetic-parent", [
+		{ name: "   " },
+		{ name: "Example item", quantity: 2 },
+	]);
+	assert.deepEqual(items, [
+		{
+			id: "synthetic-parent-item-1",
+			order_id: "synthetic-parent",
+			name: "Example item",
+			quantity: 2,
+			unit_price_cents: null,
+			customizations: [],
+		},
+	]);
 });

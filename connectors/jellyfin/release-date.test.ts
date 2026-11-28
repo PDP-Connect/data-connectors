@@ -17,7 +17,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { normalizeReleaseDate } from "./index.ts";
-import { itemsSchema } from "./schemas.ts";
+import { itemsSchema, validateItemsResponse } from "./schemas.ts";
+
+test("raw item page preserves an explicitly null PremiereDate", () => {
+	const parsed = validateItemsResponse({
+		Items: [
+			{ Id: "synthetic-undated", Name: "Undated", PremiereDate: null },
+			{ Id: "synthetic-dated", Name: "Dated", PremiereDate: "2024-02-29" },
+		],
+		TotalRecordCount: 2,
+	});
+	assert.equal(parsed.Items.length, 2);
+	assert.equal(parsed.Items[0]?.PremiereDate, null);
+	assert.equal(normalizeReleaseDate(parsed.Items[0]?.PremiereDate), null);
+	assert.equal(
+		normalizeReleaseDate(parsed.Items[1]?.PremiereDate),
+		"2024-02-29",
+	);
+});
 
 test("normalizeReleaseDate extracts the date portion from Jellyfin's full round-trip datetime shape (the live UAT shape)", () => {
 	assert.equal(

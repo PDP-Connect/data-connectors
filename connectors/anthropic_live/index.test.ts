@@ -2,19 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
-import {
-	collectAnthropicLive,
-	MAX_CONVERSATIONS_PER_RUN,
-	selectChatOrganization,
-} from "./index.ts";
+import test, { describe } from "node:test";
+import { collectAnthropicLive, selectChatOrganization } from "./index.ts";
 import {
 	buildAccountPlanRecord,
 	buildMessageRecord,
 	buildUsageLimitRecords,
+	flattenMessageText,
+	paymentCountryOf,
 	planTypeOf,
 } from "./parsers.ts";
-import { at, conv, harness, ORG, ORGS, uuid } from "./test-support.ts";
+import {
+	at,
+	CAP_ENV,
+	conv,
+	harness,
+	ORG,
+	ORGS,
+	SUBSCRIPTION,
+	TEST_CAP,
+	uuid,
+	withEnv,
+} from "./test-support.ts";
 
 /** The update time a STATE cursor has read through. */
 const through = (cursor: Record<string, unknown> | undefined) =>
@@ -165,16 +174,18 @@ test("conversations alone are read from the list without detail requests", async
 	);
 });
 
-test("the list is paged and a backlog over the per-run cap is deferred", async () => {
-	const total = MAX_CONVERSATIONS_PER_RUN + 5;
+test("the list is paged and a backlog over the opt-in per-run count cap is deferred", async () => {
+	const total = TEST_CAP + 5;
 	const convs = Array.from({ length: total }, (_, i) => {
 		const c = conv(i + 1, 0);
 		c.updated_at = new Date(Date.UTC(2026, 0, 15, 9, 0, i)).toISOString();
 		return c;
 	});
 	const h = harness(convs, { streams: ["conversations"] });
-	await collectAnthropicLive(h.ctx);
-	assert.equal(h.of("conversations").length, MAX_CONVERSATIONS_PER_RUN);
+	await withEnv({ [CAP_ENV]: String(TEST_CAP) }, () =>
+		collectAnthropicLive(h.ctx),
+	);
+	assert.equal(h.of("conversations").length, TEST_CAP);
 	assert.equal(
 		h.calls.filter((c) => c.includes("/chat_conversations?limit=50")).length,
 		// Read twice: a list of several pages is used only when two reads agree.
@@ -185,14 +196,14 @@ test("the list is paged and a backlog over the per-run cap is deferred", async (
 			type: "SKIP_RESULT",
 			stream: "conversations",
 			reason: "anthropic_live_backlog_deferred",
-			message: `Read ${MAX_CONVERSATIONS_PER_RUN} of ${total} changed conversations; the rest remain for the next run.`,
+			message: `Read ${TEST_CAP} of ${total} changed conversations; the rest remain for the next run.`,
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 		},
 	]);
 	// The cursor sits at the newest conversation read, so the next run resumes.
 	assert.equal(
 		through(h.states("conversations").at(-1)),
-		convs[MAX_CONVERSATIONS_PER_RUN - 1]?.updated_at,
+		convs[TEST_CAP - 1]?.updated_at,
 	);
 
 	const full = harness(convs, {
@@ -257,8 +268,13 @@ test("account_plan matches the chatgpt account_plan fields and omits payment dat
 			expires_at: null,
 			cancels_at: null,
 			scheduled_plan_change: null,
+			payment_country: "US",
 		},
 	]);
+	// Only the country is read: brand, last4 and type never reach a record.
+	const serialized = JSON.stringify(h.emitted);
+	for (const leaked of ["visa", "4242", '"card"'])
+		assert.equal(serialized.includes(leaked), false, leaked);
 
 	// An unchanged plan is not re-emitted on the next run.
 	const again = harness([], {
@@ -292,6 +308,69 @@ test("account_plan is skipped, not nulled, when subscription_details fails trans
 	await collectAnthropicLive(free.ctx);
 	assert.equal(free.of("account_plan")[0]?.has_active_subscription, null);
 	assert.equal(free.of("account_plan")[0]?.renews_at, null);
+});
+
+describe("payment_country is the card country when valid, otherwise null", {
+	concurrency: false,
+}, () => {
+	const withPayment = (payment_method: unknown) =>
+		harness([], {
+			streams: ["account_plan"],
+			route: (url) =>
+				url.pathname.endsWith("/subscription_details")
+					? {
+							status: 200,
+							body: { ...SUBSCRIPTION, payment_method },
+						}
+					: undefined,
+		});
+	const cases: Array<[string, unknown, string | null]> = [
+		["present", { country: "DE" }, "DE"],
+		["missing payment_method", undefined, null],
+		["null payment_method", null, null],
+		["no country", { brand: "visa" }, null],
+		["lowercase", { country: "us" }, null],
+		["three letters", { country: "USA" }, null],
+		["number", { country: 12 }, null],
+		["empty", { country: "" }, null],
+	];
+	// The harness temporarily swaps globalThis.fetch; run one case at a time.
+	cases.forEach(([name, payment, expected]) => {
+		test(name, async () => {
+			const h = withPayment(payment);
+			await collectAnthropicLive(h.ctx);
+			const [record] = h.of("account_plan");
+			assert.equal(record?.payment_country, expected, name);
+			assert.equal(record?.has_active_subscription, true, name);
+			assert.deepEqual(h.skips(), [], name);
+		});
+	});
+});
+
+describe("payment_country is null when subscription_details is unreadable", {
+	concurrency: false,
+}, () => {
+	[403, 404].forEach((status) => {
+		test(`HTTP ${status}`, async () => {
+			const h = harness([], {
+				streams: ["account_plan"],
+				route: (url) =>
+					url.pathname.endsWith("/subscription_details")
+						? { status }
+						: undefined,
+			});
+			await collectAnthropicLive(h.ctx);
+			assert.equal(
+				h.of("account_plan")[0]?.payment_country,
+				null,
+				String(status),
+			);
+			assert.deepEqual(h.skips(), []);
+		});
+	});
+	test("null parser input", () => {
+		assert.equal(paymentCountryOf(null), null);
+	});
 });
 
 test("usage_limits emits one record per reported limit", async () => {
@@ -397,6 +476,75 @@ test("parsers: plan family, usage fallback and message edge cases", () => {
 	);
 });
 
+test("text projection keeps a nonempty plain value ahead of block metadata", () => {
+	assert.equal(
+		flattenMessageText({
+			text: "Fixture A",
+			content: [{ type: "text", text: "Fixture B" }],
+		}),
+		"Fixture A",
+	);
+});
+
+test("text projection joins only nonempty text blocks in their source order", () => {
+	assert.equal(
+		flattenMessageText({
+			text: "",
+			content: [
+				{ type: "text", text: "Fixture A" },
+				{ type: "other", text: "Ignored fixture" },
+				{ type: "text", text: "" },
+				{ type: "text", text: "Fixture B" },
+			],
+		}),
+		"Fixture A\nFixture B",
+	);
+});
+
+test("usage limits reject unreadable entries instead of certifying an empty or partial inventory", () => {
+	for (const raw of [
+		{ limits: [null, {}] },
+		{ limits: [{ kind: "x" }, 5] },
+		{ limits: [{}] },
+		{ limits: [{ kind: "x" }, {}] },
+		{ five_hour: { utilization: "n/a" } },
+		{ five_hour: { utilization: 10 }, seven_day: { utilization: "n/a" } },
+		{ five_hour: 5 },
+	]) assert.equal(buildUsageLimitRecords(raw), null);
+	assert.deepEqual(buildUsageLimitRecords({ limits: [] }), []);
+	assert.deepEqual(buildUsageLimitRecords({ five_hour: null, seven_day: null }), []);
+	for (const raw of [
+		{ five_hour: null, seven_day: { utilization: 40 } },
+		{ seven_day: { utilization: 40 } },
+	]) {
+		assert.deepEqual(
+			buildUsageLimitRecords(raw)?.map((r) => [r.id, r.percent_used]),
+			[["weekly_all", 40]],
+		);
+	}
+});
+
+test("usage limits reject duplicate derived ids without changing retained ids", () => {
+	assert.equal(buildUsageLimitRecords({ limits: [
+		{ kind: "K", scope: { model: { display_name: "web" } } },
+		{ kind: "K", scope: { surface: "web" } },
+	] }), null);
+	assert.equal(buildUsageLimitRecords({ limits: [
+		{ kind: "A-B" }, { kind: "A B" },
+	] }), null);
+	assert.equal(buildUsageLimitRecords({ limits: [
+		{ kind: "K", scope: { model: { display_name: "A-B" } } },
+		{ kind: "K", scope: { model: { display_name: "A B" } } },
+	] }), null);
+	assert.deepEqual(buildUsageLimitRecords({ limits: [
+		{ kind: "Session", scope: { model: { display_name: "Model A" }, surface: "Web" }, percent: 10 },
+		{ kind: "Weekly All", scope: { surface: "Desktop" }, percent: 40 },
+	] })?.map((r) => [r.id, r.kind, r.scope_model, r.scope_surface, r.percent_used]), [
+		["session:model_a:web", "Session", "Model A", "Web", 10],
+		["weekly_all:desktop", "Weekly All", null, "Desktop", 40],
+	]);
+});
+
 test("organization selection follows the export connector's rule", () => {
 	assert.equal(selectChatOrganization(ORGS)?.uuid, ORG);
 	assert.equal(
@@ -407,24 +555,43 @@ test("organization selection follows the export connector's rule", () => {
 	assert.equal(selectChatOrganization({}), null);
 });
 
-test("account_plan rejects malformed raw secondary organizations before certifying inventory", async () => {
-	for (const malformed of [{ uuid: "team" }, { uuid: "team", capabilities: "raven" }, { capabilities: ["raven"] }, null]) {
-		const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed] });
-		await collectAnthropicLive(h.ctx);
-		assert.deepEqual(h.of("account_plan"), []);
-		assert.deepEqual(h.states("account_plan"), []);
-		assert.ok(h.emitted.every((event) => event.type !== "DETAIL_COVERAGE"));
-		assert.equal(h.skips().length, 1);
-		assert.equal(h.skips()[0]?.reason, "parse_error");
-		const skip = h.emitted.find((event) => event.type === "SKIP_RESULT") as
-			| { recovery_hint?: { retryable?: boolean } }
-			| undefined;
-		assert.equal(skip?.recovery_hint?.retryable, true);
-	}
+describe("account_plan rejects malformed raw secondary organizations before certifying inventory", {
+	concurrency: false,
+}, () => {
+	const cases = [
+		{ uuid: "team" },
+		{ uuid: "team", capabilities: "raven" },
+		{ capabilities: ["raven"] },
+		null,
+	];
+	cases.forEach((malformed, i) => {
+		test(`malformed input ${i + 1}`, async () => {
+			const h = harness([], {
+				streams: ["account_plan"],
+				orgs: [{ uuid: ORG, capabilities: ["chat"] }, malformed],
+			});
+			await collectAnthropicLive(h.ctx);
+			assert.deepEqual(h.of("account_plan"), []);
+			assert.deepEqual(h.states("account_plan"), []);
+			assert.ok(h.emitted.every((event) => event.type !== "DETAIL_COVERAGE"));
+			assert.equal(h.skips().length, 1);
+			assert.equal(h.skips()[0]?.reason, "parse_error");
+			const skip = h.emitted.find((event) => event.type === "SKIP_RESULT") as
+				| { recovery_hint?: { retryable?: boolean } }
+				| undefined;
+			assert.equal(skip?.recovery_hint?.retryable, true);
+		});
+	});
 });
 
 test("account_plan treats a valid empty-capabilities secondary as a clean snapshot", async () => {
-	const h = harness([], { streams: ["account_plan"], orgs: [{ uuid: ORG, capabilities: ["chat"] }, { uuid: "api", capabilities: [] }] });
+	const h = harness([], {
+		streams: ["account_plan"],
+		orgs: [
+			{ uuid: ORG, capabilities: ["chat"] },
+			{ uuid: "api", capabilities: [] },
+		],
+	});
 	await collectAnthropicLive(h.ctx);
 	assert.equal(h.of("account_plan").length, 1);
 	assert.equal(h.skips().length, 0);

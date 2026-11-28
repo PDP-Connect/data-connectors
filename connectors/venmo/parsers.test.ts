@@ -8,6 +8,7 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import {
 	dollarsToCents,
+	normalizeVenmoDate,
 	parseTransactionStory,
 	profileRecord,
 	userRecord,
@@ -212,7 +213,10 @@ test("parseTransactionStory marks a supported payment without date_created inval
 		withoutDate as VenmoStory,
 		"1234567890123456789",
 	);
-	assert.deepEqual(record, { kind: "invalid", reason: "missing_date_created" });
+	assert.deepEqual(record, {
+		kind: "ambiguous",
+		reason: "missing_date_created",
+	});
 });
 
 test("parseTransactionStory marks a supported payment without a story id invalid", () => {
@@ -220,7 +224,7 @@ test("parseTransactionStory marks a supported payment without a story id invalid
 	assert.deepEqual(
 		parseTransactionStory(withoutId as VenmoStory, RAW_USER.id),
 		{
-			kind: "invalid",
+			kind: "ambiguous",
 			reason: "missing_id",
 		},
 	);
@@ -272,7 +276,7 @@ test("partial payment snapshots cannot validate as complete", () => {
 			assert.equal(validateRecord("transactions", parsed.record).ok, false);
 			if (field === "actor")
 				assert.notEqual(parsed.record.is_owner_actor, false);
-		} else assert.equal(parsed.kind, "invalid");
+		} else assert.equal(parsed.kind, "ambiguous");
 	}
 });
 
@@ -321,7 +325,7 @@ test("parseTransactionStory treats a payment without an action as unfinished, no
 	assert.ok(story.payment);
 	delete story.payment.action;
 	assert.deepEqual(parseTransactionStory(story, RAW_USER.id), {
-		kind: "invalid",
+		kind: "ambiguous",
 		reason: "missing_action",
 	});
 });
@@ -335,4 +339,143 @@ test("optional payment note remains absent rather than a source null", () => {
 	);
 	assert.equal(Object.hasOwn(record, "note"), false);
 	assert.equal(validateRecord("transactions", record).ok, true);
+});
+
+test("a charge retains payer direction and only the allowed counterparty fields", () => {
+	const parsed = parseTransactionStory(
+		{
+			id: "story-1",
+			date_created: "2026-01-02T12:00:00Z",
+			payment: {
+				id: "payment-1",
+				action: "charge",
+				amount: 0,
+				actor: {
+					id: "requester",
+					username: "sample-a",
+					display_name: "Sample A",
+					phone: "synthetic",
+				},
+				target: {
+					user: {
+						id: "owner",
+						username: "sample-b",
+						display_name: "Sample B",
+						about: "not projected",
+					},
+				},
+			},
+		},
+		"owner",
+	);
+	assert.equal(parsed.kind, "record");
+	if (parsed.kind !== "record") return;
+	assert.equal(parsed.record.payment_type, "charge");
+	assert.equal(parsed.record.amount_cents, 0);
+	assert.equal(parsed.record.is_owner_actor, false);
+	assert.deepEqual(parsed.record.actor, {
+		id: "requester",
+		username: "sample-a",
+		display_name: "Sample A",
+	});
+	assert.deepEqual(parsed.record.target, {
+		id: "owner",
+		username: "sample-b",
+		display_name: "Sample B",
+	});
+});
+
+test("explicit offsets become UTC with the source's fractional digits", () => {
+	assert.equal(
+		normalizeVenmoDate("2026-01-02T01:00:00.123456+05:30"),
+		"2026-01-01T19:30:00.123456Z",
+	);
+	assert.equal(
+		normalizeVenmoDate("2026-12-31T22:30:00-04:00"),
+		"2027-01-01T02:30:00Z",
+	);
+	assert.equal(
+		normalizeVenmoDate("2026-01-02T08:10:00.5Z"),
+		"2026-01-02T08:10:00.5Z",
+	);
+	// Date would roll February 30 into March; an impossible value is not rewritten.
+	assert.equal(
+		normalizeVenmoDate("2026-02-30T01:00:00+05:30"),
+		"2026-02-30T01:00:00+05:30",
+	);
+});
+
+test("a transaction stores every projected date in UTC", () => {
+	const created = "2026-01-02T13:07:59.001+05:30";
+	const updated = "2026-01-02T04:07:59.123-04:00";
+	const completed = "2026-01-02T08:10:00.000123";
+	const parsed = parseTransactionStory(
+		{
+			id: "story-2",
+			date_created: created,
+			date_updated: updated,
+			payment: { id: "payment-2", action: "pay", date_completed: completed },
+		},
+		"owner",
+	);
+	assert.equal(parsed.kind, "record");
+	if (parsed.kind !== "record") return;
+	assert.equal(parsed.record.date_created, "2026-01-02T07:37:59.001Z");
+	assert.equal(parsed.record.date_updated, "2026-01-02T08:07:59.123Z");
+	assert.equal(parsed.record.date_completed, completed + "Z");
+	for (const key of ["date_created", "date_updated", "date_completed"]) {
+		assert.match(String(parsed.record[key]), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
+	}
+});
+
+test("transaction device metadata distinguishes absent and explicit null observations", () => {
+	const story = {
+		id: "story-3",
+		date_created: "2026-01-02T12:00:00Z",
+		payment: { id: "payment-3", action: "pay" },
+	};
+	const absent = parseTransactionStory(story, "owner");
+	const unset = parseTransactionStory({ ...story, app: null }, "owner");
+	const present = parseTransactionStory(
+		{ ...story, app: { name: "Sample App" } },
+		"owner",
+	);
+	assert.equal(absent.kind, "record");
+	assert.equal(unset.kind, "record");
+	assert.equal(present.kind, "record");
+	if (
+		absent.kind !== "record" ||
+		unset.kind !== "record" ||
+		present.kind !== "record"
+	)
+		return;
+	assert.equal(Object.hasOwn(absent.record, "device_used"), false);
+	assert.equal(unset.record.device_used, null);
+	assert.equal(present.record.device_used, "Sample App");
+});
+
+test("unknown and malformed stories are ambiguous, never known exclusions", () => {
+	for (const [value, reason] of [
+		[{ id: "1", type: "payment" }, "missing_payment"],
+		[
+			{ ...RAW_PAY_STORY, payment: { action: "future_action" } },
+			"unknown_action",
+		],
+		[{ ...RAW_PAY_STORY, payment: [] }, "malformed_payment"],
+		[null, "malformed_story"],
+	] as const) {
+		assert.deepEqual(
+			parseTransactionStory(value as unknown as VenmoStory, RAW_USER.id),
+			{ kind: "ambiguous", reason },
+		);
+	}
+});
+
+test("incoming private pay remains supported", () => {
+	const parsed = parseTransactionStory(RAW_PAY_STORY, "9876543210987654321");
+	assert.equal(parsed.kind, "record");
+	if (parsed.kind !== "record") throw new Error("expected incoming payment");
+	assert.equal(parsed.record.audience, "private");
+	assert.equal(parsed.record.is_owner_actor, false);
+	assert.equal(validateRecord("transactions", parsed.record).ok, true);
 });

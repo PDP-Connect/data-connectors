@@ -27,8 +27,6 @@ import type {
 
 export const API_BASE = "https://api.github.com";
 const NEXT_LINK_PATTERN = /<([^>]+)>; rel="next"/;
-const BODY_MAX_CHARS = 20_000;
-const GIST_FILES_CAP = 10;
 
 // ─── Link header parsing ────────────────────────────────────────────────
 
@@ -95,7 +93,7 @@ export function repoFullFromUrl(url: string | null | undefined): string | null {
 }
 
 export function truncateBody(body: string | null | undefined): string | null {
-	return typeof body === "string" ? body.slice(0, BODY_MAX_CHARS) : null;
+	return typeof body === "string" ? body : null;
 }
 
 // ─── Record builders ────────────────────────────────────────────────────
@@ -243,7 +241,11 @@ export function issueRecord(it: GitHubIssue): Record<string, unknown> {
 		closed_at: it.closed_at ?? null,
 		is_pull_request: Boolean(it.pull_request),
 		pull_request_url: it.pull_request?.html_url ?? null,
-		draft: it.pull_request ? Boolean(it.draft) : null,
+		draft: it.pull_request
+			? typeof it.draft === "boolean"
+				? it.draft
+				: null
+			: null,
 	};
 }
 
@@ -274,7 +276,10 @@ function pullRequestDetailFields(
 	detail: GitHubPullDetail | null,
 ): Record<string, unknown> {
 	return {
-		draft: Boolean(it.draft ?? detail?.draft),
+		// The list item wins; a draft state neither source reports stays unknown.
+		draft:
+			[it.draft, detail?.draft].find((value) => typeof value === "boolean") ??
+			null,
 		merged_at: detail?.merged_at ?? null,
 		merged_by_login: detail?.merged_by?.login ?? null,
 		commits_count: detail?.commits ?? null,
@@ -305,12 +310,13 @@ export function pullRequestRecord(
 export function gistRecord(g: GitHubGist): Record<string, unknown> {
 	const fileEntries =
 		g.files && typeof g.files === "object" ? Object.values(g.files) : [];
-	const capped = fileEntries.slice(0, GIST_FILES_CAP);
-	const files = capped.map((f) => ({
+	const files = fileEntries.map((f) => ({
 		filename: f.filename ?? null,
 		language: f.language ?? null,
 		size: typeof f.size === "number" ? f.size : null,
 		raw_url: f.raw_url ?? null,
+		// GitHub may truncate large file content in the gist response.
+		...("truncated" in f ? { truncated: f.truncated === true } : {}),
 	}));
 	return {
 		id: String(g.id),
@@ -318,7 +324,7 @@ export function gistRecord(g: GitHubGist): Record<string, unknown> {
 		public: Boolean(g.public),
 		html_url: g.html_url ?? null,
 		files,
-		files_truncated: fileEntries.length > GIST_FILES_CAP,
+		files_truncated: "truncated" in g && g.truncated === true,
 		files_total_count: fileEntries.length,
 		comments_count: g.comments ?? null,
 		created_at: g.created_at ?? null,
@@ -379,7 +385,12 @@ export function flattenContributionDays(
 	for (const week of weeks) {
 		for (const day of week.contributionDays ?? []) {
 			if (typeof day.date === "string" && day.date) {
-				out.push({ date: day.date, count: day.contributionCount ?? 0 });
+				const count = day.contributionCount;
+				if (count === undefined || count === null) {
+					// Do not return a partial dated inventory as measured coverage.
+					throw new Error("github_contribution_count_missing");
+				}
+				out.push({ date: day.date, count });
 			}
 		}
 	}
@@ -451,6 +462,11 @@ export function laterIso(
 	}
 	if (!b) {
 		return a;
+	}
+	const aTime = Date.parse(a);
+	const bTime = Date.parse(b);
+	if (!Number.isNaN(aTime) && !Number.isNaN(bTime)) {
+		return aTime > bTime ? a : b;
 	}
 	return a > b ? a : b;
 }

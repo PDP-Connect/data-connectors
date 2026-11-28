@@ -33,6 +33,40 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { pagesSchema } from "./schemas.ts";
+
+const pageMetadata = {
+	id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+	object: "page",
+	parent_type: null,
+	parent_id: null,
+	title: null,
+	url: null,
+	archived: false,
+	created_time: null,
+	last_edited_time: null,
+	created_by_id: null,
+	last_edited_by_id: null,
+};
+
+test("page metadata accepts explicit null title but requires the title key", () => {
+	assert.equal(pagesSchema.safeParse(pageMetadata).success, true);
+	assert.equal(
+		pagesSchema.safeParse({ ...pageMetadata, title: undefined }).success,
+		false,
+	);
+});
+
+test("page metadata accepts a title exactly at the declared limit", () => {
+	assert.equal(
+		pagesSchema.safeParse({ ...pageMetadata, title: "x".repeat(4000) }).success,
+		true,
+	);
+	assert.equal(
+		pagesSchema.safeParse({ ...pageMetadata, title: "x".repeat(4001) }).success,
+		false,
+	);
+});
 
 const ENTRYPOINT = connectorEntrypoint("notion");
 const GOOD_PAGE_ID = "11111111-1111-4111-8111-111111111111";
@@ -88,7 +122,12 @@ function pagesCoverage(messages: readonly EmittedMessage[]): {
 }
 
 /** A well-formed page. `titleText` is the only variable of interest. */
-function page(id: string, titleText: string, archived = false): string {
+function page(
+	id: string,
+	titleText: string,
+	archived = false,
+	edited = "2026-08-12T01:00:00.000Z",
+): string {
 	return JSON.stringify({
 		id,
 		object: "page",
@@ -97,7 +136,7 @@ function page(id: string, titleText: string, archived = false): string {
 		url: `https://www.notion.so/${id.replace(/-/g, "")}`,
 		archived,
 		created_time: "2026-08-12T00:00:00.000Z",
-		last_edited_time: "2026-08-12T01:00:00.000Z",
+		last_edited_time: edited,
 		created_by: { id: ACTOR_ID },
 		last_edited_by: { id: ACTOR_ID },
 	});
@@ -178,4 +217,89 @@ test("a steady-state run whose cursor suppresses every page still reads fully co
 		2,
 		"suppressed-unchanged pages are accounted for, not lost",
 	);
+});
+
+function pagesCursor(messages: readonly EmittedMessage[]) {
+	const state = messages.find(
+		(m) => m.type === "STATE" && m.stream === "pages",
+	);
+	assert.ok(state && state.type === "STATE", "expected pages STATE");
+	return state.cursor;
+}
+
+function emittedPageIds(messages: readonly EmittedMessage[]) {
+	return messages
+		.flatMap((m) =>
+			m.type === "RECORD" && m.stream === "pages" ? [m.data.id] : [],
+		)
+		.sort();
+}
+
+const T1 = "2026-08-12T01:00:00.000Z";
+const T2 = "2026-08-12T02:00:00.000Z";
+const T3 = "2026-08-12T03:00:00.000Z";
+const T4 = "2026-08-12T04:00:00.000Z";
+
+test("rejected page holds the watermark across retries until repaired", async () => {
+	// Descending provider order exercises a later valid timestamp before rejection.
+	const pages = `[${page(ARCHIVED_PAGE_ID, "C", false, T3)},
+		${page(BAD_PAGE_ID, "x".repeat(4001), false, T2)},
+		${page(GOOD_PAGE_ID, "A", false, T1)}]`;
+	const first = await runWithPages(pages);
+	assert.deepEqual(pagesCursor(first), { last_edited_time: T1 });
+	assert.deepEqual(
+		emittedPageIds(first),
+		[GOOD_PAGE_ID, ARCHIVED_PAGE_ID].sort(),
+	);
+
+	const second = await runWithPages(pages, { pages: pagesCursor(first) });
+	assert.deepEqual(pagesCursor(second), { last_edited_time: T1 });
+	assert.deepEqual(emittedPageIds(second), [ARCHIVED_PAGE_ID]);
+	for (const messages of [first, second]) {
+		assert.equal(pagesCoverage(messages).considered, 3);
+		assert.equal(pagesCoverage(messages).covered, 2);
+		const rejected = messages.filter(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.stream === "pages" &&
+				m.reason === "shape_check_failed",
+		);
+		assert.equal(rejected.length, 1, "B is retried, not suppressed");
+		assert.ok(rejected[0]?.type === "SKIP_RESULT");
+		assert.match(rejected[0].message, new RegExp(BAD_PAGE_ID));
+	}
+	const repaired = await runWithPages(
+		`[${page(BAD_PAGE_ID, "B fixed", false, T4)},
+			${page(ARCHIVED_PAGE_ID, "C", false, T3)},
+			${page(GOOD_PAGE_ID, "A", false, T1)}]`,
+		{ pages: pagesCursor(second) },
+	);
+	assert.deepEqual(pagesCursor(repaired), { last_edited_time: T4 });
+	assert.deepEqual(
+		emittedPageIds(repaired),
+		[BAD_PAGE_ID, ARCHIVED_PAGE_ID].sort(),
+	);
+	assert.equal(pagesCoverage(repaired).covered, 3);
+});
+
+test("all-valid enumeration advances to the maximum edit timestamp", async () => {
+	const messages = await runWithPages(
+		`[${page(ARCHIVED_PAGE_ID, "C", false, T3)},
+			${page(GOOD_PAGE_ID, "A", false, T1)},
+			${page(BAD_PAGE_ID, "B", false, T2)}]`,
+	);
+	assert.deepEqual(pagesCursor(messages), { last_edited_time: T3 });
+	assert.equal(pagesCoverage(messages).covered, 3);
+});
+
+test("a valid timestamp equal to a rejection cannot advance the watermark", async () => {
+	const pages = `[${page(ARCHIVED_PAGE_ID, "C", false, T3)},
+		${page(GOOD_PAGE_ID, "A", false, T2)},
+		${page(BAD_PAGE_ID, "x".repeat(4001), false, T2)}]`;
+	const messages = await runWithPages(pages, {
+		pages: { last_edited_time: T1 },
+	});
+	assert.deepEqual(pagesCursor(messages), { last_edited_time: T1 });
+	const fresh = await runWithPages(pages);
+	assert.deepEqual(pagesCursor(fresh), { last_edited_time: null });
 });

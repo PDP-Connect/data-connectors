@@ -25,9 +25,9 @@
  * Bounds: calls are paced (at most one a second across every lane) and
  * retried on Slack's rate-limit and 5xx answers; a conversation's first read
  * goes back to the lookback floor (SLACK_LOOKBACK_DAYS, default 7; 0 for
- * everything), a later one from its cursor, reaching back at most
- * SLACK_MAX_BACKFILL_DAYS (default 90; 0 for no limit) after a long pause,
- * and at most MAX_PAGES_PER_CONVERSATION pages. See collector.ts for the
+ * everything), a later one from its cursor with no default catch-up limit.
+ * SLACK_MAX_BACKFILL_DAYS (default 0) lets an owner opt into a window;
+ * MAX_PAGES_PER_CONVERSATION still bounds pages. See collector.ts for the
  * cursor and thread rules.
  *
  * Reachability probe: permanently exempt. Every method needs the owner's
@@ -80,8 +80,8 @@ const CLIENT_LOAD_TIMEOUT_MS = 90_000;
 const CLIENT_POLL_MS = 2000;
 const SIGN_IN_TIMEOUT_S = 30 * 60;
 const SIGN_IN_KEEPALIVE_MS = 60_000;
-/** How far back a later read may catch up from its cursor, by default. */
-export const DEFAULT_MAX_BACKFILL_DAYS = 90;
+/** No default catch-up limit; Slack retention still bounds what its API serves. */
+export const DEFAULT_MAX_BACKFILL_DAYS = 0;
 const CONVERSATION_KINDS: readonly ConversationKind[] = [
 	"public",
 	"private",

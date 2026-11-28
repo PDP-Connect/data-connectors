@@ -66,6 +66,40 @@ for (const [label, transform] of [
 	test(`profile withholds ${label}`, () =>
 		assert.equal(parseAccountProfile(transform(profile)), null));
 
+test("profile withholds an address inventory with a duplicate address ID", () => {
+	const withSecondAddress = (id: string) =>
+		profile.replace(
+			/"addresses":\[(\{[^}]+\})\]/,
+			(_whole, address: string) =>
+				'"addresses":[' +
+				address +
+				"," +
+				address.replace('"synthetic-address"', JSON.stringify(id)) +
+				"]",
+		);
+	assert.equal(
+		parseAccountProfile(withSecondAddress("another-address"))
+			?.delivery_addresses.length,
+		2,
+	);
+	assert.equal(
+		parseAccountProfile(withSecondAddress("synthetic-address")),
+		null,
+	);
+});
+
+test("empty history does not override a rendered later page link", () => {
+	const withPage = (page: number) =>
+		orders.replace(
+			"</main>",
+			'<a href="/my-account/your-orders?page=' +
+				page +
+				'">Page link</a></main>',
+		);
+	assert.equal(sourceReportsEmptyHistory(withPage(1)), true);
+	assert.equal(sourceReportsEmptyHistory(withPage(2)), false);
+});
+
 test("source reports first-page empty history", () =>
 	assert.equal(sourceReportsEmptyHistory(orders), true));
 for (const [label, transform] of [

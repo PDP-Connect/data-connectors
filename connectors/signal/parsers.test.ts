@@ -30,6 +30,15 @@ test("signalEpochMsToIso returns null for null/undefined/zero/negative/non-finit
 	assert.equal(signalEpochMsToIso(Number.POSITIVE_INFINITY), null);
 });
 
+test("signalEpochMsToIso returns null for finite timestamps outside Date range", () => {
+	assert.equal(signalEpochMsToIso(1_700_000_000_000_000_000), null);
+	assert.equal(signalEpochMsToIso(1e300), null);
+});
+
+test("signalEpochMsToIso accepts the inclusive upper Date boundary", () => {
+	assert.equal(signalEpochMsToIso(8.64e15), "+275760-09-13T00:00:00.000Z");
+});
+
 // ─── parseMessageJson ─────────────────────────────────────────────────────
 
 test("parseMessageJson decodes a well-formed messageJSON blob", () => {
@@ -92,6 +101,31 @@ test("buildMessageRecord falls back to receivedAtMs when sentAt is unusable", ()
 	assert.equal(built.record.sender, null);
 });
 
+test("buildMessageRecord keeps the ISO value and cursor aligned at the Date boundary", () => {
+	const maxDateMs = 8_640_000_000_000_000;
+	const row = {
+		body: null,
+		conversationId: "11111111-1111-1111-1111-111111111111",
+		id: "22222222-2222-2222-2222-222222222222",
+		json: null,
+		receivedAtMs: 1_717_594_930_000,
+		sentAt: maxDateMs + 1,
+		sourceServiceId: null,
+		type: null,
+	};
+	const fallback = buildMessageRecord(row);
+	assert.equal(fallback.record.sent_at, "2024-06-05T13:42:10.000Z");
+	assert.equal(fallback.sentAtMs, row.receivedAtMs);
+
+	const skipped = buildMessageRecord({ ...row, receivedAtMs: maxDateMs + 2 });
+	assert.equal(skipped.record.sent_at, null);
+	assert.equal(skipped.sentAtMs, null);
+
+	const valid = buildMessageRecord({ ...row, sentAt: maxDateMs });
+	assert.equal(valid.record.sent_at, "+275760-09-13T00:00:00.000Z");
+	assert.equal(valid.sentAtMs, maxDateMs);
+});
+
 test("buildMessageRecord reports sentAtMs=null and sent_at=null when neither timestamp is usable (skip signal for index.ts)", () => {
 	const built = buildMessageRecord({
 		body: "no usable date",
@@ -105,6 +139,23 @@ test("buildMessageRecord reports sentAtMs=null and sent_at=null when neither tim
 	});
 	assert.equal(built.record.sent_at, null);
 	assert.equal(built.sentAtMs, null);
+});
+
+test("buildMessageRecord does not throw for an out-of-range sentAt", () => {
+	assert.doesNotThrow(() => {
+		const built = buildMessageRecord({
+			body: "invented message",
+			conversationId: "11111111-1111-1111-1111-111111111111",
+			id: "22222222-2222-2222-2222-222222222222",
+			json: null,
+			receivedAtMs: null,
+			sentAt: 1_700_000_000_000_000_000,
+			sourceServiceId: null,
+			type: "incoming",
+		});
+		assert.equal(built.record.sent_at, null);
+		assert.equal(built.sentAtMs, null);
+	});
 });
 
 test("buildMessageRecord degrades has_attachments/is_edited to false on malformed json without failing", () => {

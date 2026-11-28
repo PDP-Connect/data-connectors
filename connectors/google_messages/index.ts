@@ -175,10 +175,12 @@ const TOKEN_SHAPED_RE =
 	/\b[a-z0-9_-]{24,}\.[a-z0-9_-]{6,}\.[a-z0-9_-]{6,}\b/giu;
 const BEARER_LIKE_RE = /\b(session|token|bearer)[=:]\s*\S+/giu;
 const BEARER_LIKE_KEY_SPLIT_RE = /[=:]/u;
+const BARE_TOKEN_RE = /[A-Za-z0-9_-]{32,}/gu;
 
 export function redactGmcliOutput(output: string): string {
 	return output
 		.replace(TOKEN_SHAPED_RE, "[REDACTED]")
+		.replace(BARE_TOKEN_RE, "[REDACTED]")
 		.replace(
 			BEARER_LIKE_RE,
 			(m) => `${m.split(BEARER_LIKE_KEY_SPLIT_RE)[0]}=[REDACTED]`,
@@ -389,7 +391,13 @@ function parseGmcliMessageRow(
 	const id = typeof row.message_id === "string" ? row.message_id : null;
 	const chatId =
 		typeof row.conversation_id === "string" ? row.conversation_id : null;
-	const body = typeof row.body === "string" ? row.body : null;
+	// Go omitempty omits caption-less media bodies; the stream requires a string.
+	const body =
+		row.body === undefined || row.body === null
+			? ""
+			: typeof row.body === "string"
+				? row.body
+				: null;
 	const sentAt = isoFromEpochMs(row.timestamp_ms);
 	const isFromMe = typeof row.is_from_me === "boolean" ? row.is_from_me : null;
 	if (!(id && chatId && body !== null && sentAt && isFromMe !== null)) {
@@ -822,9 +830,10 @@ export async function collect({
 	let emitted = 0;
 	for (const message of parsed) {
 		const record = { ...message };
-		if (validateRecord("messages", record).ok) {
-			covered += 1;
+		if (!validateRecord("messages", record).ok) {
+			continue;
 		}
+		covered += 1;
 		if (cursor.shouldEmit(record)) {
 			await emitRecord("messages", record);
 			emitted += 1;

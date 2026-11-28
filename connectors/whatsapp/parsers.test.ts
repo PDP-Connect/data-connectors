@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	occurrenceKey,
 	type ParsedWhatsAppMessage,
 	parseWhatsAppDateTime,
 	scanWhatsAppChatIdentity,
@@ -20,6 +21,37 @@ import {
 } from "./parsers.ts";
 
 process.env.TZ = "America/Chicago";
+
+test("occurrenceKey bounds retained keys for long message content", () => {
+	const key = occurrenceKey(
+		"Fixture author",
+		"2024-05-06T14:15:22.000Z",
+		"x".repeat(100_000),
+	);
+	assert.equal(key.length, 64);
+	assert.match(key, /^[a-f0-9]{64}$/);
+});
+
+test("occurrenceKey is deterministic and distinguishes changed content", () => {
+	const author = "Fixture author";
+	const sentAt = "2024-05-06T14:15:22.000Z";
+	assert.equal(
+		occurrenceKey(author, sentAt, "first"),
+		occurrenceKey(author, sentAt, "first"),
+	);
+	assert.notEqual(
+		occurrenceKey(author, sentAt, "first"),
+		occurrenceKey(author, sentAt, "second"),
+	);
+});
+
+test("occurrenceKey hashes exactly the existing concatenation", () => {
+	assert.equal(
+		occurrenceKey("a", "b", "c"),
+		"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+	);
+	assert.equal(occurrenceKey("a", "b", "c"), occurrenceKey("ab", "", "c"));
+});
 
 /**
  * Test-only convenience: drives the real two-pass streaming API
@@ -51,6 +83,55 @@ test("parseWhatsAppDateTime: returns null for an impossible calendar date", () =
 	assert.equal(parseWhatsAppDateTime("31/02/2024", "09:15"), null);
 	assert.equal(parseWhatsAppDateTime("1/1/1969", "09:15"), null);
 	assert.ok(parseWhatsAppDateTime("6/5/24", "9:15:22 AM"));
+});
+
+test("parseWhatsAppDateTime: preserves local-time interpretation across DST transitions", () => {
+	assert.equal(
+		parseWhatsAppDateTime("3/10/24", "2:30 AM"),
+		"2024-03-10T08:30:00.000Z",
+	);
+	assert.equal(
+		parseWhatsAppDateTime("3/10/24", "1:30 AM"),
+		"2024-03-10T07:30:00.000Z",
+	);
+	assert.equal(
+		parseWhatsAppDateTime("11/3/24", "1:30 AM"),
+		"2024-11-03T06:30:00.000Z",
+	);
+});
+
+test("parseWhatsAppChatFile: a spring-forward gap keeps its own message", () => {
+	const parsed = parseWhatsAppChatFileForTest(
+		"WhatsApp Chat with Mira.txt",
+		[
+			"[3/10/24, 1:59 AM] Mira: before the gap",
+			"[3/10/24, 2:30 AM] Theo: inside the gap",
+		].join("\n"),
+	);
+
+	assert.equal(parsed.messages.length, 2);
+	assert.equal(parsed.messageCount, 2);
+	assert.deepEqual(parsed.participants, ["Mira", "Theo"]);
+	assert.deepEqual(
+		parsed.messages.map(({ author, content, sent_at }) => ({
+			author,
+			content,
+			sent_at,
+		})),
+		[
+			{
+				author: "Mira",
+				content: "before the gap",
+				sent_at: "2024-03-10T07:59:00.000Z",
+			},
+			{
+				author: "Theo",
+				content: "inside the gap",
+				sent_at: "2024-03-10T08:30:00.000Z",
+			},
+		],
+	);
+	assert.notEqual(parsed.messages[0]?.id, parsed.messages[1]?.id);
 });
 
 test("parseWhatsAppChatFile: an unparseable date folds into the prior message, never the run clock", () => {

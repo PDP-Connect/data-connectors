@@ -62,23 +62,15 @@ function fakePage(
 	} = {},
 ) {
 	const sent: Xhr[] = [];
-	class Xhr {
-		private readonly listeners: Array<() => void> = [];
+	class Xhr extends EventTarget {
 		response: unknown = null;
 		responseText = "";
 		responseType = "";
 		status = 0;
-		addEventListener(type: string, listener: () => void): void {
-			if (type === "loadend") {
-				this.listeners.push(listener);
-			}
-		}
 		finish(status: number, body: string): void {
 			this.status = status;
 			this.responseText = body;
-			for (const listener of this.listeners) {
-				listener();
-			}
+			this.dispatchEvent(new Event("loadend"));
 		}
 		open(method: string, url: string): string {
 			return `opened ${method} ${url}`;
@@ -854,4 +846,162 @@ test("no page script uses eval or builds a function from text", () => {
 			/\beval\s*\(|new Function|setTimeout\s*\(\s*["'`]/,
 		);
 	}
+});
+
+test("reusing one XHR records only its own completion and leaves fetch unchanged", async () => {
+	const page = fakePage();
+	const fetchBody = '{"data":{"user":"fetch"}}';
+	const nativeResponse = {
+		status: 200,
+		clone: () => ({ text: async () => fetchBody }),
+	};
+	page.window["fetch"] = async () => nativeResponse;
+	page.run(INSTALL);
+	const xhr = new page.Xhr();
+	const firstVariables = '{"userId":"first"}';
+	const secondVariables = '{"screen_name":"second"}';
+	const firstBody = '{"data":{"likes":"first-response"}}';
+	const secondBody = '{"data":{"user":"second-response"}}';
+	xhr.open("GET", graphql("Likes", firstVariables));
+	xhr.send("first-request");
+	xhr.finish(200, firstBody);
+	xhr.open("GET", graphql("UserByScreenName", secondVariables));
+	xhr.send("second-request");
+	xhr.finish(201, secondBody);
+	assert.deepEqual(page.sent, [xhr, xhr]);
+	const expected = [
+		{
+			operation: "Likes",
+			variables: firstVariables,
+			status: 200,
+			body: firstBody,
+		},
+		{
+			operation: "UserByScreenName",
+			variables: secondVariables,
+			status: 201,
+			body: secondBody,
+		},
+	].map((entry) => ({
+		...entry,
+		wanted: true,
+		refused: false,
+		errorCode: null,
+		postCount: 0,
+	}));
+	const observed = [
+		...page.run(POLL_SCRIPT).entries,
+		...page.run(POLL_SCRIPT).entries,
+	];
+	assert.deepEqual(observed, expected);
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(`window[${JSON.stringify(OBSERVER_GLOBAL)}].seen`), 2);
+	const fetchInPage = page.window["fetch"] as (
+		input: string,
+	) => Promise<typeof nativeResponse>;
+	assert.equal(
+		await fetchInPage(graphql("UserByScreenName", '{"screen_name":"fetch"}')),
+		nativeResponse,
+	);
+	// Both fake fetch and clone.text are already-resolved promises.
+	await Promise.resolve();
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, [
+		{
+			operation: "UserByScreenName",
+			variables: '{"screen_name":"fetch"}',
+			status: 200,
+			wanted: true,
+			body: fetchBody,
+			refused: false,
+			errorCode: null,
+			postCount: 0,
+		},
+	]);
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(`window[${JSON.stringify(OBSERVER_GLOBAL)}].seen`), 3);
+});
+
+test("a fresh collection discards buffered entries, overflow and late XHR responses", () => {
+	const page = fakePage();
+	page.run(INSTALL);
+	const open = page.Xhr.prototype.open;
+	const send = page.Xhr.prototype.send;
+	for (let i = 0; i < 6; i += 1) page.request(graphql("Likes"), 200, "old");
+	const old = new page.Xhr();
+	old.open("GET", graphql("Likes"));
+	old.send();
+	page.run(INSTALL);
+	assert.equal(page.Xhr.prototype.open, open);
+	assert.equal(page.Xhr.prototype.send, send);
+	old.finish(200, "late old");
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(POLL_SCRIPT).dropped, 0);
+	page.request(graphql("Likes"), 200, "current");
+	const reading = page.run(POLL_SCRIPT);
+	assert.equal(reading.entries.length, 1);
+	assert.equal(reading.entries[0].body, "current");
+	assert.equal(reading.dropped, 0);
+});
+
+test("fetch keeps its request generation across delayed response and body completion", async () => {
+	const page = fakePage();
+	let answer!: (response: Response) => void;
+	let bodyDone!: (body: string) => void;
+	let bodyRead!: () => void;
+	const atBody = new Promise<void>((resolve) => {
+		bodyRead = resolve;
+	});
+	page.window["fetch"] = () =>
+		new Promise<Response>((resolve) => {
+			answer = resolve;
+		});
+	page.run(INSTALL);
+	const wrapped = page.window["fetch"] as (input: string) => Promise<Response>;
+	const pending = wrapped(graphql("Likes"));
+	answer({
+		status: 200,
+		clone: () => ({
+			text: () => {
+				bodyRead();
+				return new Promise<string>((resolve) => {
+					bodyDone = resolve;
+				});
+			},
+		}),
+	} as Response);
+	await atBody;
+	page.run(INSTALL);
+	assert.equal(page.window["fetch"], wrapped);
+	bodyDone("old body");
+	await pending;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	assert.equal(page.run(POLL_SCRIPT).dropped, 0);
+	const late = wrapped(graphql("Likes"));
+	page.run(INSTALL);
+	answer({
+		status: 200,
+		clone: () => ({ text: async () => "old response" }),
+	} as Response);
+	await late;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(page.run(POLL_SCRIPT).entries, []);
+	const current = wrapped(graphql("Likes"));
+	answer({
+		status: 200,
+		clone: () => ({ text: async () => "current" }),
+	} as Response);
+	await current;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(page.run(POLL_SCRIPT).entries[0].body, "current");
+});
+
+test("an incompatible observer is refused rather than stacking wrappers", () => {
+	const page = fakePage();
+	const open = page.Xhr.prototype.open;
+	const send = page.Xhr.prototype.send;
+	page.window[OBSERVER_GLOBAL] = { version: 3, buffer: [], dropped: 0 };
+	assert.equal(page.run(INSTALL), null);
+	assert.equal(page.Xhr.prototype.open, open);
+	assert.equal(page.Xhr.prototype.send, send);
 });

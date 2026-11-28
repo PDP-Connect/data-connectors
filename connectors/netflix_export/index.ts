@@ -40,6 +40,7 @@ import { runConnector } from "../../packages/polyfill-connectors/src/connector-r
 import {
 	buildViewingActivityRecord,
 	detectViewingActivitySchema,
+	directHistoryOccurrences,
 	extractViewingActivityArtifactFromFile,
 	inferDirectHistoryDateOrderFromRows,
 	parseCSVContentForValidation,
@@ -216,9 +217,9 @@ function isLoadRowsSkip(
 
 /**
  * True when at least one direct_history row's date is genuinely ambiguous
- * without a dataset-inferred order (i.e. buildViewingActivityRecord with no
- * order fails to parse it, but the date field itself is non-empty — so the
- * row isn't simply missing a date, it's unresolvable field-order ambiguity).
+ * without a dataset-inferred order: no-order parsing fails, but at least
+ * one explicit field order builds a record. Malformed dates that fail both
+ * orders remain per-row skips rather than blocking the entire import.
  * Used only after inferDirectHistoryDateOrderFromRows already found no
  * disambiguating row, to distinguish "no ambiguous dates at all" (fine, the
  * whole file might just be empty/malformed for unrelated reasons) from
@@ -232,7 +233,11 @@ function hasAmbiguousDirectHistoryDates(
 		if (!dateRaw) {
 			return false;
 		}
-		return buildViewingActivityRecord(row, "direct_history", null) === null;
+		return (
+			buildViewingActivityRecord(row, "direct_history", null) === null &&
+			(buildViewingActivityRecord(row, "direct_history", "DMY") !== null ||
+				buildViewingActivityRecord(row, "direct_history", "MDY") !== null)
+		);
 	});
 }
 
@@ -254,13 +259,13 @@ function resolveDateOrder(
 	if (order || !hasAmbiguousDirectHistoryDates(rows)) {
 		return { order };
 	}
-	// Every non-ISO date in this dataset is itself ambiguous (no row's fields
-	// disambiguate DD/MM vs MM/DD). Never guess, never silently drop every
-	// row — surface a typed, actionable coverage gap instead.
+	// At least one date needs an order, but the dataset provides no consistent
+	// evidence (none or conflicting). Never guess or silently drop rows:
+	// surface a typed, actionable coverage gap instead.
 	return {
 		reason: "ambiguous_date_order",
 		message:
-			"Every date in this Netflix viewing history CSV is ambiguous between DD/MM and MM/DD order (no row's day or month exceeds 12), so the field order can't be inferred from this dataset. Re-export with unambiguous dates, or supply a file where at least one row's day is > 12.",
+			"Some dates in this Netflix viewing history CSV need DD/MM or MM/DD order, but the rows either do not establish an order or disagree. Re-export with unambiguous dates, or supply a file whose date-order evidence is consistent.",
 	};
 }
 
@@ -361,8 +366,17 @@ async function collectViewingActivity(
 		message: `Reading ${rows.length} Netflix viewing records`,
 	});
 
-	for (const row of rows) {
-		const rec = buildViewingActivityRecord(row, schema, dateOrder);
+	const occurrences =
+		schema === "direct_history"
+			? directHistoryOccurrences(rows, dateOrder)
+			: [];
+	for (const [index, row] of rows.entries()) {
+		const rec = buildViewingActivityRecord(
+			row,
+			schema,
+			dateOrder,
+			occurrences[index] ?? 1,
+		);
 
 		// Skip rows that couldn't be parsed
 		if (!rec) {
@@ -370,8 +384,14 @@ async function collectViewingActivity(
 			continue;
 		}
 
-		// Skip rows before the since cursor
-		if (since && rec.watched_at <= since) {
+		// Replay the cursor day for day-precision history; occurrence ids upsert it.
+		// Full exports retain the exclusive exact-timestamp cursor.
+		if (
+			since &&
+			(schema === "direct_history"
+				? rec.watched_at.slice(0, 10) < since.slice(0, 10)
+				: rec.watched_at <= since)
+		) {
 			skippedCount += 1;
 			continue;
 		}

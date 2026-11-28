@@ -266,7 +266,12 @@ function harness(
 	return { ctx, messages, of, cursor, skips };
 }
 
-const FAST = { pageDelayMs: 0, activityDelayMs: 0, rateLimitDelayMs: 0 };
+const FAST = {
+	pageDelayMs: 0,
+	activityDelayMs: 0,
+	rateLimitDelayMs: 0,
+	transientRetryDelayMs: 0,
+};
 const BOTH = ["activities"];
 
 test("shares the strava source and its stream names", () => {
@@ -690,6 +695,80 @@ test("a since moved one day earlier re-walks the full list", async () => {
 	assert.equal(await walk("2026-09-01"), 1, "an unchanged since stops early");
 });
 
+test("an interrupted widening keeps the prior since and retries the full list", async () => {
+	const priorSince = "2026-09-02";
+	const range = { since: "2026-09-01" };
+	const widened = harness(
+		BOTH,
+		{
+			activities: {
+				known_ids: ["90000000005", "90000000004"],
+				pending_detail_ids: [],
+				list_complete: true,
+				requested_since: priorSince,
+			},
+		},
+		range,
+	);
+	await withStrava(
+		() => {
+			throw new TypeError("Failed to fetch");
+		},
+		() => collectStravaBrowser(widened.ctx, FAST),
+	);
+	const interrupted = widened.cursor() as { requested_since: string | null };
+	assert.equal(interrupted.requested_since, priorSince);
+	assert.equal(widened.skips().length, 1);
+
+	const log: string[] = [];
+	const retried = harness(BOTH, { activities: interrupted }, range);
+	await withStrava(listFetcher(PAGES, log), () =>
+		collectStravaBrowser(retried.ctx, FAST),
+	);
+	assert.equal(log.length, 2);
+	assert.equal(
+		(retried.cursor() as { requested_since: string | null }).requested_since,
+		range.since,
+	);
+});
+
+for (const issue of ["unreadable", "unplaced"] as const) {
+	test(`a widened list with an ${issue} activity keeps the prior boundary`, async () => {
+		const page = JSON.parse(PAGES["2"] as string) as {
+			models: Array<Record<string, unknown>>;
+		};
+		if (issue === "unreadable") {
+			page.models.push({});
+		} else {
+			delete page.models[0]?.start_date_local_raw;
+		}
+		const priorSince = "2026-09-02";
+		const log: string[] = [];
+		const h = harness(
+			["activities"],
+			{
+				activities: {
+					known_ids: ["90000000005", "90000000004"],
+					pending_detail_ids: [],
+					list_complete: true,
+					requested_since: priorSince,
+				},
+			},
+			{ since: "2026-09-01" },
+		);
+		const lines = await captureDiagnostics(() =>
+			withStrava(listFetcher({ ...PAGES, "2": JSON.stringify(page) }, log), () =>
+				collectStravaBrowser(h.ctx, FAST),
+			),
+		);
+		assert.equal(log.length, 2);
+		const coverage = coverageOf(lines);
+		assert.equal(coverage.status, "partial");
+		assert.equal(coverage.unreadable, issue === "unreadable" ? 1 : 0);
+		assert.equal((h.cursor() as { requested_since: string | null }).requested_since, priorSince);
+	});
+}
+
 test("an unreadable row marks the run summary partial", async () => {
 	const page = JSON.parse(PAGES["1"] as string) as { models: unknown[] };
 	page.models.push({});
@@ -714,8 +793,100 @@ test("off strava.com, collection navigates to the training page first", async ()
 		() => collectStravaBrowser(h.ctx, FAST),
 		"https://example.com",
 	);
-	assert.deepEqual(visits, [TRAINING_URL]);
+	// Once before the walk, then before each of the two retries.
+	assert.deepEqual(visits, [TRAINING_URL, TRAINING_URL, TRAINING_URL]);
 	assert.equal(h.of("activities").length, 0);
+	assert.equal(h.skips()[0]?.reason, "collection_interrupted");
+});
+
+test("a list read that fails in transport is retried, and the walk completes", async () => {
+	// Mobile WebViews report a fetch cut off by a navigation or by the app
+	// going to the background as "Load failed" (WebKit) or "Failed to fetch".
+	const log: string[] = [];
+	const serve = listFetcher(PAGES, log);
+	let failures = 0;
+	const h = harness(["activities"]);
+	await withStrava(
+		(url, init) => {
+			if (url.searchParams.get("page") === "1" && failures < 2) {
+				failures += 1;
+				throw new TypeError("Load failed");
+			}
+			return serve(url, init);
+		},
+		() => collectStravaBrowser(h.ctx, FAST),
+	);
+	assert.equal(failures, 2);
+	assert.equal(h.of("activities").length, 5);
+	assert.deepEqual(h.skips(), []);
+	assert.equal((h.cursor() as { list_complete: boolean }).list_complete, true);
+});
+
+test("an evaluate that throws (a PageShim bridge timeout) is retried like a failed fetch", async () => {
+	const h = harness(["activities"]);
+	const page = h.ctx.page as unknown as {
+		evaluate: (fn: (arg: unknown) => unknown, arg: unknown) => unknown;
+	};
+	const evaluate = page.evaluate;
+	let thrown = 0;
+	page.evaluate = async (fn, arg) => {
+		const isListRead =
+			typeof arg === "object" && arg !== null && "pageNumber" in arg;
+		if (isListRead && thrown === 0) {
+			thrown += 1;
+			throw new Error("PageShim bridge call evaluate timed out after 30000ms");
+		}
+		return evaluate(fn, arg);
+	};
+	await withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST));
+	assert.equal(thrown, 1);
+	assert.equal(h.of("activities").length, 5);
+	assert.deepEqual(h.skips(), []);
+});
+
+test("a list read that never gets an answer fails as collection_interrupted, not a raw error", async () => {
+	const h = harness(["activities"]);
+	let reads = 0;
+	await assert.rejects(
+		withStrava(
+			() => {
+				reads += 1;
+				throw new TypeError("Failed to fetch");
+			},
+			() =>
+				collectStravaBrowser(h.ctx, {
+					...FAST,
+					failRunOnIncompleteList: true,
+				}),
+		),
+		(error: unknown) => {
+			assert.match(String((error as Error).message), /Failed to fetch/);
+			assert.equal(
+				(error as { code?: string; reason?: string }).code ??
+					(error as { reason?: string }).reason,
+				"collection_interrupted",
+			);
+			return true;
+		},
+	);
+	assert.equal(reads, 3, "the first read and two retries");
+	assert.equal(h.of("activities").length, 0);
+});
+
+test("an answer Strava gave is not retried as a transport failure", async () => {
+	const h = harness(["activities"]);
+	let reads = 0;
+	await withStrava(
+		() => {
+			reads += 1;
+			return new Response("<html>busy</html>", {
+				status: 503,
+				headers: { "content-type": "text/html" },
+			});
+		},
+		() => collectStravaBrowser(h.ctx, FAST),
+	);
+	assert.equal(reads, 1);
 	assert.equal(h.skips()[0]?.reason, "collection_interrupted");
 });
 

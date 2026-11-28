@@ -63,6 +63,36 @@ test("times: epoch ms and seconds become RFC 3339 UTC; zoneless strings are reje
 	assert.equal(msToIso("1792607934000"), null);
 });
 
+test("zoned timestamps reject hour 24 instead of moving to the next day", () => {
+	assert.equal(zonedIsoToIso("2026-01-03T24:00:00Z"), null);
+	assert.equal(zonedIsoToIso("2026-01-03T24:00+02:00"), null);
+	assert.equal(
+		zonedIsoToIso("2026-01-03T23:59:59-02:00"),
+		"2026-01-04T01:59:59.000Z",
+	);
+});
+
+test("zoned timestamps reject impossible calendar dates before applying the offset", () => {
+	for (const value of [
+		"2026-02-30T10:00:00Z",
+		"2026-02-29T10:00:00Z",
+		"2026-04-31T10:00:00Z",
+		"2026-04-31T00:30:00+02:00",
+		"2026-13-01T10:00:00Z",
+		"2026-01-00T10:00:00Z",
+	]) {
+		assert.equal(zonedIsoToIso(value), null, value);
+	}
+	assert.equal(
+		zonedIsoToIso("2028-02-29T10:00:00Z"),
+		"2028-02-29T10:00:00.000Z",
+	);
+	assert.equal(
+		zonedIsoToIso("2028-02-29T23:30:00-08:00"),
+		"2028-03-01T07:30:00.000Z",
+	);
+});
+
 test("cleanText keeps safe text unchanged and replaces control-rich text with null", () => {
 	assert.deepEqual(cleanText("line\nnext"), {
 		value: "line\nnext",
@@ -263,4 +293,28 @@ test("connectors fixture: only connected or needs-reauth services are kept", () 
 	assert.ok(asana);
 	assert.equal(isConnectedApp(asana), false);
 	assert.equal(isConnectedApp({ ...asana, needs_reauth: true }), true);
+});
+
+test("scheduled tasks: malformed interval values stay unknown rather than rounded", () => {
+	for (const interval_seconds of [-1, 1.5]) {
+		const { record } = buildScheduledTaskRecord({
+			id: "synthetic-schedule",
+			enabled: false,
+			cadence: { kind: "interval", interval_seconds },
+		});
+		assert.equal(record.id, "synthetic-schedule");
+		assert.equal(record.enabled, false);
+		assert.equal(record.cadence_kind, "interval");
+		assert.equal(record.cadence_interval_seconds, null);
+	}
+});
+
+test("scheduled tasks: a millisecond value in the seconds field does not invent a next run", () => {
+	const { record } = buildScheduledTaskRecord({
+		id: "synthetic-run-once",
+		next_run_at_utc: 1_792_684_800_000,
+		cadence: { kind: "runonce", run_at_utc: 1_792_684_800 },
+	});
+	assert.equal(record.next_run_at, null);
+	assert.equal(record.cadence_run_at, "2026-10-22T16:00:00.000Z");
 });

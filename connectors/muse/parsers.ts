@@ -29,7 +29,7 @@ export const MEMORY_FILE_NAMES = [
 ] as const;
 
 const ZONED_ISO_RE =
-	/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+	/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
 // Epoch milliseconds between 2000-01-01 and 2200-01-01: anything else is not a
 // time this source would report.
 const MIN_MS = 946_684_800_000;
@@ -94,6 +94,14 @@ export function secondsToIso(value: unknown): string | null {
 /** A zoned ISO string normalized to UTC `Z`; null for a zoneless or bad value. */
 export function zonedIsoToIso(value: unknown): string | null {
 	if (typeof value !== "string" || !ZONED_ISO_RE.test(value)) return null;
+	// Validate the written date before applying the offset: Date.parse normalizes overflow days.
+	const day = value.slice(0, 10);
+	const midnight = new Date(day + "T00:00:00Z");
+	if (
+		!Number.isFinite(midnight.getTime()) ||
+		midnight.toISOString().slice(0, 10) !== day
+	)
+		return null;
 	const ms = Date.parse(value);
 	return Number.isNaN(ms) ? null : msToIso(ms);
 }

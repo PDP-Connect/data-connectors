@@ -19,8 +19,8 @@
 
 /** The page global that holds the observer's buffer. */
 export const OBSERVER_GLOBAL = "__pdppXObserver";
-/** Bump when the buffer entry shape changes, so a stale observer is replaced. */
-const OBSERVER_VERSION = 3;
+/** Bump when observer semantics change; incompatible wrappers need a fresh page. */
+const OBSERVER_VERSION = 4;
 
 export interface ObserverConfig {
 	/** How much of a non-200 body is kept for an operation that is not wanted. */
@@ -48,11 +48,25 @@ export function installObserverScript(config: ObserverConfig): string {
 	return `(() => {
 	const KEY = ${JSON.stringify(OBSERVER_GLOBAL)};
 	const VERSION = ${OBSERVER_VERSION};
+	// An older wrapper has no generation fence and cannot be safely reused.
+	// Fail closed until a fresh page realm replaces it; never stack wrappers.
 	const existing = window[KEY];
-	if (existing && existing.version === VERSION) return { installed: false };
-	const config = ${JSON.stringify(config)};
-	const wanted = new Set(config.wanted);
-	const state = { version: VERSION, buffer: [], seen: 0, dropped: 0 };
+	if (existing && existing.version !== VERSION) return null;
+	let config = ${JSON.stringify(config)};
+	if (existing && existing.version === VERSION) {
+		existing.begin(config);
+		return { installed: false };
+	}
+	let wanted = new Set(config.wanted);
+	const state = { version: VERSION, generation: {}, buffer: [], seen: 0, dropped: 0 };
+	state.begin = (nextConfig) => {
+		config = nextConfig;
+		wanted = new Set(config.wanted);
+		state.generation = {};
+		state.buffer = [];
+		state.seen = 0;
+		state.dropped = 0;
+	};
 	const describe = (rawUrl) => {
 		try {
 			const url = new URL(String(rawUrl), location.href);
@@ -106,6 +120,7 @@ export function installObserverScript(config: ObserverConfig): string {
 		}
 	};
 	const record = (request, status, readBody) => {
+		if (request.generation !== state.generation) return;
 		state.seen += 1;
 		if (state.buffer.length >= config.maxBuffered) {
 			state.dropped += 1;
@@ -150,7 +165,8 @@ export function installObserverScript(config: ObserverConfig): string {
 	};
 	XMLHttpRequest.prototype.send = function () {
 		try {
-			const request = requests.get(this);
+			const described = requests.get(this);
+			const request = described && { ...described, generation: state.generation };
 			if (request) {
 				const xhr = this;
 				xhr.addEventListener("loadend", () => {
@@ -163,7 +179,7 @@ export function installObserverScript(config: ObserverConfig): string {
 									: "",
 						);
 					} catch (error) {}
-				});
+				}, { once: true });
 			}
 		} catch (error) {}
 		return xhrSend.apply(this, arguments);
@@ -171,11 +187,13 @@ export function installObserverScript(config: ObserverConfig): string {
 	const nativeFetch = window.fetch;
 	if (typeof nativeFetch === "function") {
 		window.fetch = function (input) {
+			const generation = state.generation;
 			const promise = nativeFetch.apply(this, arguments);
 			try {
-				const request = describe(
+				const described = describe(
 					typeof input === "string" ? input : (input && input.url) || input,
 				);
+				const request = described && { ...described, generation };
 				if (request) {
 					promise.then(
 						(response) => {

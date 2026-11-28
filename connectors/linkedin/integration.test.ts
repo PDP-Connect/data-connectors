@@ -33,8 +33,20 @@ import {
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
+import { partialDate } from "./field-read.ts";
 import { collectLinkedIn, collectLinkedInPageShim, ensureLinkedInSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+test("LinkedIn partial dates retain year-only precision and zero-pad reported months", () => {
+	assert.deepEqual(partialDate({ year: 44 }), { kind: "read", value: "0044" });
+	assert.deepEqual(partialDate({ year: 44, month: 2 }), { kind: "read", value: "0044-02" });
+});
+
+test("LinkedIn partial dates reject malformed month values instead of dropping precision", () => {
+	for (const month of [0, 13, 2.5, "2"]) {
+		assert.deepEqual(partialDate({ year: 2026, month }), { kind: "unavailable", reason: "malformed" });
+	}
+});
 
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
 // they fire on the next tick instead of sleeping.
@@ -529,6 +541,7 @@ const DASH_PROFILE_RESPONSE = {
 				elements: [
 					{
 						dateRange: { end: { year: 2015 }, start: { year: 2011 } },
+						entityUrn: "urn:li:education:1",
 						degreeName: "B.S.",
 						fieldOfStudy: "Computer Science",
 						grade: "3.9 GPA",
@@ -571,6 +584,7 @@ const DASH_PROFILE_RESPONSE = {
 						profilePositionInPositionGroup: {
 							elements: [
 								{
+									entityUrn: "urn:li:position:1",
 									companyName: "Acme",
 									dateRange: { start: { month: 3, year: 2021 } },
 									title: "Staff Engineer",
@@ -2855,6 +2869,37 @@ for (const scenario of [
 			skip.reason === "linkedin_enumeration_unproven"), !scenario.complete);
 	});
 }
+
+test("source identity: mixed position and education IDs preserve only supported rows without STATE", async () => {
+	const profile = proofProfile();
+	const group = profile.profilePositionGroups.elements[0];
+	group.profilePositionInPositionGroup.elements.push({
+		title: "Unidentified position",
+	});
+	group.profilePositionInPositionGroup.paging.total = 2;
+	group.profilePositionInPositionGroup.paging.count = 2;
+	profile.profileEducations.elements.push({
+		schoolName: "Unidentified school",
+	});
+	profile.profileEducations.paging.total = 2;
+	profile.profileEducations.paging.count = 2;
+	const { recording } = await collectProof({ profile });
+	for (const stream of ["experience", "education"]) {
+		const rows = recording.emitted.filter((row) => row.stream === stream);
+		assert.equal(rows.length, 1, stream);
+		assert.equal(
+			rows[0]?.data.id,
+			stream === "experience" ? "urn:li:position:1" : "urn:li:education:1",
+		);
+		assert.equal(claimsFullCoverage(recording, stream), false);
+		assert.equal(
+			recording.protocolMessages.some(
+				(message) => message.type === "STATE" && message.stream === stream,
+			),
+			false,
+		);
+	}
+});
 
 // Seen live (2026-11-05): the decoration embedded 20 of 32 skills.
 function skillsFirstPageProfile() {
