@@ -20,3 +20,5 @@ The organization's [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob
 3. The rules for runtime, schemas and capture are in [the authoring guide](packages/polyfill-connectors/docs/connector-authoring-guide.md).
 4. Never commit a recording. `packages/polyfill-connectors/runs/`, HAR files and browser storage state hold account data and live session credentials. From a run, commit only `connectors/<key>/evidence/claim.json`.
 5. Stop and ask the person you work for when a step needs their account, a sign-in, a two-factor code or a CAPTCHA.
+
+For a synthetic capture and replay proof without provider sign-in, use the [offline Data Connectors verification skill](.agents/skills/us-verify-data-connectors-offline/SKILL.md).
