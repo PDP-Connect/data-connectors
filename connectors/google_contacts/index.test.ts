@@ -15,7 +15,7 @@ import type {
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { ConnectionsPage, ContactGroup, Person } from "./api.ts";
-import { PeopleSyncTokenExpiredError } from "./api.ts";
+import { GooglePeopleClient, PeopleSyncTokenExpiredError } from "./api.ts";
 import type { GoogleContactsState } from "./index.ts";
 import { collectGoogleContacts } from "./index.ts";
 
@@ -304,39 +304,80 @@ test("a page cap with a continuation token discloses truncation instead of claim
 	);
 });
 
-test("a capped incremental run preserves the age of the retained sync point", async () => {
-	const syncedAt = "2026-08-06T00:00:00Z";
-	const fakeClient = new FakePeopleClient({
-		connectionPages: [
-			{ people: [], nextPageToken: "page2", nextSyncToken: null },
-			{ people: [], nextPageToken: null, nextSyncToken: "sync-new" },
-		],
-	});
-	const { ctx, messages } = makeContext({
-		state: {
-			people: { sync_token: "sync-old", synced_at: syncedAt, fingerprints: {} },
-		},
-		streams: [{ name: "people" }],
-	});
+for (const listing of ["incremental", "full"] as const) {
+	test(`Contacts resumes page two with the same one-page limit (${listing})`, async () => {
+		const syncedAt = "2026-08-06T00:00:00Z";
+		const sync =
+			listing === "incremental"
+				? { sync_token: "delta-original", synced_at: syncedAt }
+				: {};
+		const queries: Array<Record<string, string>> = [];
+		const fetchPage = (input: string) => {
+			const url = new URL(input);
+			assert.equal(url.pathname, "/v1/people/me/connections");
+			const query = Object.fromEntries(url.searchParams);
+			queries.push(query);
+			assert.equal(query.syncToken, sync.sync_token);
+			assert.equal(query.requestSyncToken, "true");
+			assert.ok(query.pageToken === undefined || query.pageToken === "page-B");
+			const body = query.pageToken
+				? {
+						connections: [{ resourceName: "people/B" }],
+						nextSyncToken: "delta-after-B",
+					}
+				: {
+						connections: [{ resourceName: "people/A" }],
+						nextPageToken: "page-B",
+					};
+			return Promise.resolve(Response.json(body));
+		};
 
-	await collectGoogleContacts(ctx, {
-		clientFactory: () => fakeClient,
-		env: ENV,
-		maxPages: 1,
-		now: () => FIXED_NOW,
-		...FAKE_TOKEN,
-	});
+		async function run(state: GoogleContactsState) {
+			const { ctx, messages, records } = makeContext({
+				state,
+				streams: [{ name: "people" }],
+			});
+			await collectGoogleContacts(ctx, {
+				...FAKE_TOKEN,
+				maxPages: 1,
+				now: () => FIXED_NOW,
+				clientFactory: (accessToken) =>
+					new GooglePeopleClient({ accessToken, fetch: fetchPage }),
+			});
+			const cursor = lastStateCursor(
+				messages,
+				"people",
+			) as GoogleContactsState["people"];
+			assert.ok(cursor);
+			return {
+				cursor: structuredClone(cursor),
+				ids: records.map((r) => r.data.id),
+			};
+		}
 
-	const state = messages.find(
-		(message) => message.type === "STATE" && message.stream === "people",
-	);
-	assert.ok(state?.type === "STATE");
-	assert.deepEqual(state.cursor, {
-		sync_token: "sync-old",
-		synced_at: syncedAt,
-		fingerprints: {},
+		const first = await run({
+			people: { ...sync, fingerprints: { "people/previous": "known" } },
+		});
+		assert.deepEqual(first.ids, ["people/A"]);
+		assert.equal(first.cursor.sync_token, sync.sync_token);
+		assert.equal(first.cursor.synced_at, sync.synced_at);
+		assert.equal(first.cursor.fingerprints?.["people/previous"], "known");
+
+		const second = await run({ people: first.cursor });
+		assert.deepEqual(second.ids, ["people/B"]);
+		assert.equal(queries.length, 2);
+		assert.equal(queries[0]?.pageToken, undefined);
+		assert.deepEqual(queries[1], { ...queries[0], pageToken: "page-B" });
+		assert.equal(second.cursor.sync_token, "delta-after-B");
+		assert.equal(second.cursor.synced_at, new Date(FIXED_NOW).toISOString());
+		assert.ok(second.cursor.fingerprints?.["people/A"]);
+		assert.ok(second.cursor.fingerprints?.["people/B"]);
+		assert.equal(
+			second.cursor.fingerprints?.["people/previous"],
+			listing === "incremental" ? "known" : undefined,
+		);
 	});
-});
+}
 
 test("carries forward the prior syncToken cursor on an incremental run", async () => {
 	const fakeClient = new FakePeopleClient({
@@ -408,10 +449,13 @@ test("falls back to a full resync when the syncToken has expired (HTTP 410)", as
 		onListConnections: (options) => {
 			call += 1;
 			if (call === 1) {
-				assert.equal(options.syncToken, "sync-expired");
+				assert.deepEqual(options, {
+					syncToken: "sync-expired",
+					pageToken: "page-stale",
+				});
 				throw new PeopleSyncTokenExpiredError();
 			}
-			assert.equal(options.syncToken, undefined);
+			assert.deepEqual(options, {});
 			return {
 				people: [makePerson({ resourceName: "people/c-full" })],
 				nextPageToken: null,
@@ -422,6 +466,7 @@ test("falls back to a full resync when the syncToken has expired (HTTP 410)", as
 	const priorState = {
 		people: {
 			sync_token: "sync-expired",
+			continuation: { page_token: "page-stale" },
 			synced_at: "2026-08-06T00:00:00Z",
 			fingerprints: { stale: "abc" },
 		},
@@ -482,6 +527,7 @@ test("proactively forces a full resync when the syncToken is past its 7-day wind
 		people: {
 			sync_token: "sync-old",
 			synced_at: eightDaysAgo,
+			continuation: { page_token: "page-stale" },
 			fingerprints: {},
 		},
 	};
@@ -506,7 +552,7 @@ test("proactively forces a full resync when the syncToken is past its 7-day wind
 	const call = fakeClient.calls.find((c) => c.method === "listConnectionsPage");
 	assert.ok(call);
 	// No syncToken sent — full resync requested proactively, before any 410.
-	assert.equal((call.args as { syncToken?: string }).syncToken, undefined);
+	assert.deepEqual(call.args, {});
 	assert.ok(
 		progressMessages.includes(
 			"Refreshing all Google Contacts (the saved sync point is too old)",

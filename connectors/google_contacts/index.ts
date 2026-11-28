@@ -26,7 +26,7 @@
  *
  * State shape:
  *   {
- *     people: { sync_token?: string, synced_at?: string, fingerprints: { [resourceName]: sha1 } },
+ *     people: { sync_token?: string, synced_at?: string, continuation?: { page_token, pending_prune? }, fingerprints: { [resourceName]: sha1 } },
  *     contact_groups: { fingerprints: { [resourceName]: sha1 } }
  *   }
  *
@@ -57,7 +57,11 @@ import {
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import { google_contactsPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import type { ConnectionsPage, ContactGroup, Person } from "./api.ts";
-import { GooglePeopleClient, PeopleSyncTokenExpiredError } from "./api.ts";
+import {
+	GooglePeopleClient,
+	PeopleApiError,
+	PeopleSyncTokenExpiredError,
+} from "./api.ts";
 import { validateRecord } from "./schemas.ts";
 
 const REFRESH_TOKEN_ENV_VAR = "GOOGLE_CONTACTS_REFRESH_TOKEN";
@@ -73,18 +77,11 @@ const httpGovernor = createConnectorHttpGovernor({
 	profile: google_contactsPacingProfile(),
 });
 
-/** See the matching comment in connectors/google_calendar/index.ts: the HTTP
- *  governor wraps a first-attempt throw in RetryExhaustedError. */
-function isSyncTokenExpired(error: unknown): boolean {
-	if (error instanceof PeopleSyncTokenExpiredError) {
-		return true;
-	}
-	return (
-		error instanceof Error &&
-		"originalCause" in error &&
-		(error as { originalCause?: unknown }).originalCause instanceof
-			PeopleSyncTokenExpiredError
-	);
+/** The HTTP governor wraps the provider error in RetryExhaustedError. */
+function providerCause(error: unknown): unknown {
+	return error instanceof Error && "originalCause" in error
+		? error.originalCause
+		: error;
 }
 
 /**
@@ -102,6 +99,11 @@ function isSyncTokenExpired(error: unknown): boolean {
  * any future gate lands as a compile error in the tests, not as silence.
  */
 export interface PeopleState {
+	readonly continuation?: {
+		readonly page_token: string;
+		/** Prior fingerprint IDs not yet seen in this full listing. */
+		readonly pending_prune?: readonly string[];
+	};
 	readonly fingerprints?: Record<string, string>;
 	readonly sync_token?: string;
 	readonly synced_at?: string;
@@ -199,34 +201,54 @@ interface SyncPeopleResult {
 	 *  check would reject is NOT counted, so a schema drift that silently
 	 *  drops contacts reads as a shortfall instead of a full green run. */
 	readonly covered: number;
-	readonly fullResync: boolean;
+	readonly nextPageToken: string | null;
 	readonly nextSyncToken: string | null;
+	readonly pendingPrune: ReadonlySet<string> | undefined;
 	readonly truncated: boolean;
 }
 
 async function syncPeoplePages(args: {
+	readonly continuation?: PeopleState["continuation"];
 	readonly client: PeopleClientLike;
 	readonly ctx: CollectContext;
 	readonly cursor: FingerprintCursor;
 	readonly maxPages: number;
 	readonly syncToken: string | undefined;
 }): Promise<SyncPeopleResult> {
-	const { client, ctx, cursor, maxPages, syncToken } = args;
-	let pageToken: string | undefined;
+	const { client, continuation, ctx, cursor, maxPages, syncToken } = args;
+	const pageToken = continuation?.page_token;
+	let pendingPrune = syncToken
+		? undefined
+		: new Set(continuation?.pending_prune ?? Object.keys(cursor.toState()));
+	let nextPageToken = pageToken ?? null;
 	let nextSyncToken: string | null = null;
+	const readPage = (continuationToken: string | null) =>
+		httpGovernor.request(
+			() =>
+				client.listConnectionsPage({
+					...(syncToken ? { syncToken } : {}),
+					...(continuationToken ? { pageToken: continuationToken } : {}),
+				}),
+			(value) => ({ status: 200, value }),
+		);
 	let considered = 0;
 	let covered = 0;
-	const walk = await walkPagesWithCeiling({
+	const { truncated } = await walkPagesWithCeiling({
 		maxPages,
 		fetchPage: async (pageNumber) => {
-			const page = await httpGovernor.request(
-				() =>
-					client.listConnectionsPage({
-						...(syncToken ? { syncToken } : {}),
-						...(pageToken ? { pageToken } : {}),
-					}),
-				(value) => ({ status: 200, value }),
-			);
+			const page = await readPage(nextPageToken).catch((error: unknown) => {
+				const cause = providerCause(error);
+				if (
+					pageNumber !== 1 ||
+					!pageToken ||
+					!(cause instanceof PeopleApiError && cause.status === 400)
+				) {
+					throw error;
+				}
+				// Retry a rejected saved page token once from the start of the same query.
+				if (pendingPrune) pendingPrune = new Set(Object.keys(cursor.toState()));
+				return readPage(null);
+			});
 			await ctx.progress(
 				`Fetched Google Contacts connections page ${String(pageNumber)}`,
 				{
@@ -235,6 +257,7 @@ async function syncPeoplePages(args: {
 				},
 			);
 			for (const person of page.value.people) {
+				pendingPrune?.delete(person.resourceName);
 				const record = personRecord(person);
 				considered += 1;
 				// The runtime drops a record that fails its shape check (it emits a
@@ -249,17 +272,18 @@ async function syncPeoplePages(args: {
 					await ctx.emitRecord("people", record);
 				}
 			}
-			pageToken = page.value.nextPageToken ?? undefined;
-			nextSyncToken = page.value.nextSyncToken ?? nextSyncToken;
-			return Boolean(pageToken);
+			nextPageToken = page.value.nextPageToken;
+			nextSyncToken = page.value.nextSyncToken;
+			return Boolean(nextPageToken);
 		},
 	});
 	return {
-		fullResync: !(syncToken || walk.truncated),
-		nextSyncToken: walk.truncated ? (syncToken ?? null) : nextSyncToken,
-		considered: considered + (walk.truncated ? 1 : 0),
+		nextPageToken,
+		nextSyncToken: truncated ? (syncToken ?? null) : nextSyncToken,
+		pendingPrune,
+		considered: considered + (truncated ? 1 : 0),
 		covered,
-		truncated: walk.truncated,
+		truncated,
 	};
 }
 
@@ -289,9 +313,16 @@ async function syncPeopleWithFallback(args: {
 		);
 	}
 	try {
-		return await syncPeoplePages({ client, ctx, cursor, maxPages, syncToken });
+		return await syncPeoplePages({
+			client,
+			ctx,
+			cursor,
+			maxPages,
+			syncToken,
+			continuation: tokenIsStale ? undefined : priorState?.continuation,
+		});
 	} catch (error) {
-		if (!isSyncTokenExpired(error)) {
+		if (!(providerCause(error) instanceof PeopleSyncTokenExpiredError)) {
 			throw error;
 		}
 		connectorDiagnostic("google_contacts", "sync_token_rejected", {
@@ -399,11 +430,9 @@ export async function collectGoogleContacts(
 		priorState: state.people,
 		now,
 	});
-	// A syncToken response is a PARTIAL delta; only a full resync (no
-	// syncToken, or the fallback path) may prune stale fingerprints — matching
-	// the Calendar connector's identical rule.
-	if (result.fullResync) {
-		peopleCursor.dropUnseenIds();
+	const fingerprints = peopleCursor.toState();
+	if (!result.truncated && result.pendingPrune) {
+		for (const id of result.pendingPrune) delete fingerprints[id];
 	}
 	if (result.truncated) {
 		await ctx.emit({
@@ -417,19 +446,26 @@ export async function collectGoogleContacts(
 			diagnostics: { page_limit: maxPages, unread_pages: 1 },
 		});
 	}
+	// Reusing the input token never renews its age, including on a terminal delta.
+	const token = result.nextSyncToken;
+	let syncedAt = state.people?.synced_at;
+	if (token && (result.pendingPrune || token !== state.people?.sync_token)) {
+		syncedAt = new Date(now()).toISOString();
+	}
 	const nextPeopleState: PeopleState = {
-		...(result.nextSyncToken
+		...(token ? { sync_token: token } : {}),
+		...(token && syncedAt !== undefined ? { synced_at: syncedAt } : {}),
+		...(result.nextPageToken
 			? {
-					sync_token: result.nextSyncToken,
-					// A capped walk retained the input token; its age has not changed.
-					...(result.truncated
-						? state.people?.synced_at === undefined
-							? {}
-							: { synced_at: state.people.synced_at }
-						: { synced_at: new Date(now()).toISOString() }),
+					continuation: {
+						page_token: result.nextPageToken,
+						...(result.pendingPrune
+							? { pending_prune: [...result.pendingPrune] }
+							: {}),
+					},
 				}
 			: {}),
-		fingerprints: peopleCursor.toState(),
+		fingerprints,
 	};
 	await ctx.emit({ type: "STATE", stream: "people", cursor: nextPeopleState });
 
