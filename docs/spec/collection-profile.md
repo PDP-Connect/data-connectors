@@ -2721,6 +2721,10 @@ with unchanged readers. Old required-only readers that do not support a declared
 runtime-first: upgrade readers to implement the elective exception before
 deploying manifests that declare `RUN_COVERAGE_V1`, as required by Section 8.
 
+The evidence in `DONE.coverage` is the connector's own claim. A runtime MUST
+present a positive `collected` as the connector's report and MUST NOT use it as
+the sole basis for a health verdict.
+
 #### 7.1.1 Declaration and negotiation
 
 A connector that uses this extension MUST declare `RUN_COVERAGE_V1` in
@@ -2891,9 +2895,10 @@ A coverage projection derived from DETAIL_COVERAGE or STREAM_EVIDENCE SHOULD
 carry the same facts. This profile leaves those projections runtime-specific.
 
 Informative presentation and deployment guidance (non-normative): for example,
-"collection of <store> completed in run R; committed at T". Deployment-specific
-event exclusions, stricter local verdicts, restore-path disclosure and catalog
-migration policy are implementer guidance, not additional protocol requirements.
+"the connector reported collection of <store> in run R; committed at T".
+Deployment-specific event exclusions, stricter local verdicts, restore-path
+disclosure and catalog migration policy are implementer guidance, not
+additional protocol requirements.
 See the non-normative implementer note and its requirement/test mapping:
 https://github.com/PDP-Connect/data-connect/blob/feat/local-run-coverage-verdict/docs/261021-local-device-coverage-evidence.md
 

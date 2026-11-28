@@ -158,7 +158,7 @@ export function buildMessageFamily(
 		// A file with no id has no key to emit under, but the message still
 		// says has_files/file_count, so dropping it silently would lose it.
 		// The count comes back with the family as a per-message gap.
-		if (file.id === undefined) {
+		if (!file.id?.trim()) {
 			fileGaps += 1;
 			continue;
 		}

@@ -274,7 +274,9 @@ export function activityRecord(row: unknown): RecordData | null {
 	const sportType = integer(row.sportType);
 	if (id === null || startAt === null || sportType === null) return null;
 	const quarters = integer(row.startTimezone);
-	const offset = quarters === null ? null : quarters * 15;
+	// Match the activity schema's ±16-hour range; invalid offsets count as absent.
+	const offset =
+		quarters !== null && Math.abs(quarters) <= 16 * 4 ? quarters * 15 : null;
 	const startDate =
 		offset !== null
 			? new Date(Date.parse(startAt) + offset * 60_000)

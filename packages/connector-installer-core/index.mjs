@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path";
+import { basename, dirname, join, posix, relative, resolve as resolvePath, sep } from "node:path";
 
 import { readTarGzEntries } from "./tar-stream.mjs";
 
@@ -538,6 +538,14 @@ async function fetchOciArtifact(entry, options = {}) {
     manifestBuffer: profileBytes,
     entrypointBuffer: entrypointFile.buffer,
     entrypointPath: entry.entrypointPath,
+    // Every verified code-layer member in artifact-wide form (`code/<member>`),
+    // sorted by path, and `codeEntrypointPath` names the one the config
+    // declares. Each buffer is a copy, so a caller cannot change the bytes
+    // `entrypointBuffer` and `checksums.entrypoint` describe.
+    codeFiles: codeFiles
+      .map((file) => ({ path: `code/${file.path}`, buffer: Buffer.from(file.buffer) }))
+      .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
+    codeEntrypointPath: entrypointInArtifact,
     provenanceBuffer: provenanceBytes,
     provenancePath: entry.provenancePath,
     // Retained next to the profile so the host can read back the exact
@@ -566,7 +574,41 @@ async function fetchOciArtifact(entry, options = {}) {
   };
 }
 
+// The entrypoint installs at the lock's `entrypointPath`. Every other code
+// member keeps its position relative to the entrypoint, so the relative
+// imports between modules resolve in the installed tree as they did in the
+// layer. That only holds when the entrypoint keeps its file name: a helper that
+// imports `./main.mjs` finds nothing if the entrypoint was installed under a
+// different name, and the signed bytes cannot be rewritten to fix it. So a
+// multi-member code layer is refused, before any write, when the lock renames
+// the entrypoint. (A single-member layer has no sibling to import it.) The
+// publisher and every lock in this repo use `collection-profile.mjs` for both.
+// A member that would land above the install root is refused as well.
+function assertCodeLayerInstallable(resolved) {
+  if (resolved.codeFiles.length > 1 &&
+      posix.basename(resolved.entry.entrypointPath) !== posix.basename(resolved.codeEntrypointPath)) {
+    throw new Error(
+      `Refusing ${resolved.connectorId}: the code layer has ${resolved.codeFiles.length} members, so its ` +
+        `entrypoint must keep its file name, but the lock installs "${resolved.codeEntrypointPath}" ` +
+        `as "${resolved.entry.entrypointPath}"`
+    );
+  }
+}
+
+function installedCodeMemberPath(resolved, file) {
+  const fromEntrypoint = posix.relative(posix.dirname(resolved.codeEntrypointPath), file.path);
+  const installed = posix.join(posix.dirname(resolved.entry.entrypointPath), fromEntrypoint);
+  if (installed.startsWith("../") || installed === "..") {
+    throw new Error(
+      `Code member "${file.path}" would install outside the artifact root, ` +
+        `relative to entrypoint "${resolved.codeEntrypointPath}" installed at "${resolved.entry.entrypointPath}"`
+    );
+  }
+  return installed;
+}
+
 function buildPdppCollectionProfileWrites(resolved) {
+  assertCodeLayerInstallable(resolved);
   const artifactRoot = `collection-profiles/${resolved.connectorId}`;
   const writes = [
     {
@@ -577,6 +619,12 @@ function buildPdppCollectionProfileWrites(resolved) {
       relativePath: `${artifactRoot}/${resolved.entry.entrypointPath}`,
       buffer: resolved.entrypointBuffer,
     },
+    ...resolved.codeFiles
+      .filter((file) => file.path !== resolved.codeEntrypointPath)
+      .map((file) => ({
+        relativePath: `${artifactRoot}/${installedCodeMemberPath(resolved, file)}`,
+        buffer: file.buffer,
+      })),
     {
       relativePath: `${artifactRoot}/${resolved.entry.provenancePath}`,
       buffer: resolved.provenanceBuffer,

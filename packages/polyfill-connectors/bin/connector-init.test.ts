@@ -70,6 +70,24 @@ const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
 const TEMP_NAME_BROWSER = `zz_init_browser_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";
 
+test("connector-init identifies an unsupported scaffold option", () => {
+	assert.throws(() => parseArgs(["synthetic_reader", "--template", "sample"]), {
+		name: "Error",
+		message: "unrecognized argument: --template",
+	});
+});
+
+test("connector-init identifies invalid stream names even in browser scaffold mode", () => {
+	assert.throws(
+		() =>
+			parseArgs(["synthetic_reader", "--browser", "--stream", "Book-Notes"]),
+		(error: unknown) =>
+			error instanceof InitArgsError &&
+			error.message ===
+				'invalid stream name "Book-Notes": must be lowercase snake_case (e.g. "items")',
+	);
+});
+
 test("API scaffold reports transient HTTP failures as retryable and client errors as terminal", () => {
 	withPrivateConnectorTree(() => {
 		const args = parseArgs([TEMP_NAME]);
@@ -498,6 +516,41 @@ test("connector-init: rejects a non-snake_case connector name before touching di
 			/invalid connector name/i.test(err.message),
 		"should reject on invalid name shape",
 	);
+});
+
+test("connector-init: explicit display name and stream survive browser mode", () => {
+	assert.deepEqual(
+		parseArgs([
+			"demo_catalog",
+			"--browser",
+			"--stream",
+			"order_items",
+			"--display-name",
+			"Demo Product",
+		]),
+		{
+			name: "demo_catalog",
+			displayName: "Demo Product",
+			stream: "order_items",
+			browser: true,
+		},
+	);
+	assert.deepEqual(parseArgs(["demo_catalog"]), {
+		name: "demo_catalog",
+		displayName: "Demo Catalog",
+		stream: "items",
+		browser: false,
+	});
+});
+
+test("connector-init: a malformed explicit stream does not silently use the default", () => {
+	assert.throws(
+		() => parseArgs(["demo_catalog", "--stream", "Order-items"]),
+		(error: unknown) =>
+			error instanceof InitArgsError &&
+			/invalid stream name/i.test(error.message),
+	);
+	assert.throws(() => parseArgs(["demo_catalog", "--stream"]), InitArgsError);
 });
 
 function withTrackedSource(run: (root: string) => void): void {

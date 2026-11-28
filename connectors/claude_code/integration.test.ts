@@ -44,7 +44,11 @@ import {
 	observeJsonlFields,
 	processJsonlLine,
 } from "./index.ts";
-import { makeEmptySessionAccumulator } from "./parsers.ts";
+import {
+	buildSkillRecord,
+	makeEmptySessionAccumulator,
+	SKILL_BODY_MAX_CHARS,
+} from "./parsers.ts";
 import type { JsonlObject, SessionAccumulator } from "./types.ts";
 
 interface RecordingHarness {
@@ -111,6 +115,26 @@ function attachmentLine(overrides: Partial<JsonlObject> = {}): JsonlObject {
 		...overrides,
 	};
 }
+
+test("skill content stays valid Unicode at the inline size limit", () => {
+	const prefix = "a".repeat(SKILL_BODY_MAX_CHARS - 1);
+	const args = {
+		name: "example",
+		frontmatter: {},
+		path: "example/SKILL.md",
+		mtimeMs: 0,
+	};
+	assert.equal(
+		buildSkillRecord({ ...args, body: `${prefix}🧪` }).content,
+		prefix,
+	);
+
+	const withinLimit = `${prefix.slice(1)}🧪`;
+	assert.equal(
+		buildSkillRecord({ ...args, body: `${withinLimit}z` }).content,
+		withinLimit,
+	);
+});
 
 // ─── Invariant 1: session id must be pinned before children ─────────────────
 
@@ -598,4 +622,41 @@ test("processJsonlLine: buildOnly=false (default behavior) DOES emit when reques
 
 	assert.equal(emitted.length, 1);
 	assert.equal(emitted[0]?.stream, "messages");
+});
+
+test("session observations take the first title only from an ai-title row", () => {
+	const obs = makeJsonlObservations("synthetic-session");
+	observeJsonlFields(
+		{ type: "user", aiTitle: "not metadata" },
+		obs,
+		"synthetic-session",
+	);
+	assert.equal(obs.title, null);
+
+	observeJsonlFields(
+		{ type: "ai-title", aiTitle: "original title" },
+		obs,
+		"synthetic-session",
+	);
+	observeJsonlFields(
+		{ type: "ai-title", aiTitle: "later title" },
+		obs,
+		"synthetic-session",
+	);
+	assert.equal(obs.title, "original title");
+});
+
+test("session observations preserve the full time range when rows arrive out of order", () => {
+	const obs = makeJsonlObservations("synthetic-session");
+	const timestamps = [
+		"2026-01-02T12:00:00.000Z",
+		"2026-01-01T12:00:00.000Z",
+		"2026-01-03T12:00:00.000Z",
+		"2026-01-02T15:00:00.000Z",
+	];
+	for (const timestamp of timestamps) {
+		observeJsonlFields({ type: "user", timestamp }, obs, "synthetic-session");
+	}
+	assert.equal(obs.firstTimestamp, timestamps[1]);
+	assert.equal(obs.lastTimestamp, timestamps[2]);
 });
