@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { Page } from "playwright";
 import type {
@@ -12,6 +15,8 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import {
 	type AccountDetailOutcome,
 	type EmitDeps,
+	parseQfxFile,
+	processParsedAccountQfx,
 	emitBalancesDetailCoverage,
 	runTransactionsAndBalances,
 } from "./index.ts";
@@ -82,6 +87,80 @@ function balancesCoverage(
 			m.type === "DETAIL_COVERAGE" && m.stream === "balances",
 	);
 }
+
+async function collectSyntheticQfxBalance(
+	balanceBlock: string,
+): Promise<{ coverage: ReturnType<typeof balancesCoverage>; attempts: number }> {
+	const { deps, messages } = makeDeps({
+		requested: new Map([
+			["accounts", { name: "accounts" }],
+			["balances", { name: "balances" }],
+		]),
+		wantsTransactions: false,
+	});
+	let attempts = 0;
+	deps.emitRecord = async (stream) => {
+		assert.equal(stream, "balances");
+		attempts += 1;
+		// A scope/record rejection returns without invoking beforeEmit.
+	};
+	const dir = await mkdtemp(join(tmpdir(), "chase-balance-coverage-"));
+	try {
+		const file = join(dir, "statement.qfx");
+		await writeFile(
+			file,
+			[
+				'<?xml version="1.0" encoding="UTF-8"?>',
+				'<?OFX OFXHEADER="200" VERSION="211" SECURITY="NONE" OLDFILEUID="NONE" NEWFILEUID="NONE"?>',
+				"<OFX><BANKMSGSRSV1><STMTTRNRS><TRNUID>1</TRNUID>",
+				"<STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS>",
+				"<STMTRS><CURDEF>USD</CURDEF><BANKACCTFROM>",
+				"<BANKID>000000000</BANKID><ACCTID>1111</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE>",
+				"</BANKACCTFROM><BANKTRANLIST>",
+				"<DTSTART>20260401000000</DTSTART><DTEND>20260422000000</DTEND>",
+				"</BANKTRANLIST>",
+				balanceBlock,
+				"</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>",
+			].join("\n"),
+		);
+		const account = { internal_id: "ACC-1" } as Parameters<
+			typeof processParsedAccountQfx
+		>[1];
+		const outcome = await processParsedAccountQfx(
+			deps,
+			account,
+			"all",
+			await parseQfxFile(file),
+		);
+		await emitBalancesDetailCoverage(deps, [outcome]);
+		return { coverage: balancesCoverage(messages), attempts };
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+test("a parsed balance rejected by the emitter is required but not covered or gapped", async () => {
+	const { coverage, attempts } = await collectSyntheticQfxBalance(
+		"<LEDGERBAL><BALAMT>10.00</BALAMT><DTASOF>20260422120000</DTASOF></LEDGERBAL>",
+	);
+	assert.equal(attempts, 1, "the parsed QFX supplied a recognizable balance");
+	assert.ok(coverage);
+	assert.deepEqual(coverage.required_keys, ["ACC-1"]);
+	assert.equal(coverage.considered, 1);
+	assert.equal(coverage.covered, 0);
+	assert.deepEqual(coverage.hydrated_keys, []);
+	assert.equal(coverage.gap_keys, undefined);
+});
+
+test("the same QFX without a balance remains covered without a balance emission", async () => {
+	const { coverage, attempts } = await collectSyntheticQfxBalance("");
+	assert.equal(attempts, 0);
+	assert.ok(coverage);
+	assert.equal(coverage.considered, 1);
+	assert.equal(coverage.covered, 1);
+	assert.deepEqual(coverage.hydrated_keys, ["ACC-1"]);
+	assert.equal(coverage.gap_keys, undefined);
+});
 
 test("emitBalancesDetailCoverage: all accounts hydrated with a balance -> complete coverage", async () => {
 	const { deps, messages } = makeDeps();

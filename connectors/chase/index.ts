@@ -2165,16 +2165,16 @@ function accountDetailCoverageKeys(outcomes: readonly AccountDetailOutcome[]): {
 }
 
 /**
- * Emit the per-run DETAIL_COVERAGE for the account -> balances detail
- * fan-out, using the same `AccountDetailOutcome[]` and key derivation
- * (`accountDetailCoverageKeys`) as `emitTransactionsDetailCoverage` — both
- * ride the same per-account QFX pass, so a `hydrated` account (balance
- * emitted, or QFX parsed with no balance block per `extractBalance`'s null
- * path — rare but possible) or a `no_activity` account (Chase's no-activity
- * confirmation page never serves a QFX response, so there is no
- * LEDGERBAL/AVAILBAL block to read this run, regardless of prior runs) are
- * both real coverage of this run's balance pass, never a gap. Only a `gap`
- * (transient QFX failure) is unaccounted.
+ * Emit DETAIL_COVERAGE for the account -> balances detail fan-out.
+ * A reached account is covered if its balance was accepted, its parsed QFX
+ * had no balance block, or the provider reported no activity for the window.
+ * A present but unaccepted balance remains required and uncovered without
+ * a transport gap. Transaction parse debt is evaluated independently:
+ * an accepted balance still covers the balances side of that account.
+ *
+ * This uses the same account denominator as the transactions detail pass;
+ * each balances outcome is projected using its own acceptance evidence.
+ *
  *
  * Only emitted when balances and accounts are both in scope. Unlike
  * `emitTransactionsDetailCoverage`, this does NOT require `wantsTransactions`:
@@ -2195,22 +2195,24 @@ export async function emitBalancesDetailCoverage(
 	if (!(deps.wantsBalances && deps.wantsAccounts)) {
 		return;
 	}
-	const { requiredKeys, hydratedKeys, gapKeys } = accountDetailCoverageKeys(
-		outcomes.map((outcome) =>
-			outcome.kind === "gap" && outcome.balanceEmitted
-				? { kind: "hydrated", accountId: outcome.accountId }
-				: outcome,
-		),
-	);
-	// A parsed but unaccepted balance is debt, not a fabricated transport gap.
-	const actualGapKeys = gapKeys.filter((key) =>
-		outcomes.some(
-			(outcome) =>
-				outcome.accountId === key &&
-				outcome.kind === "gap" &&
-				outcome.balanceEmitted === undefined,
-		),
-	);
+	const requiredKeys = outcomes.map((outcome) => outcome.accountId);
+	const hydratedKeys = outcomes
+		.filter((outcome) => {
+			if (outcome.kind === "gap") {
+				return outcome.balanceEmitted === true;
+			}
+			return !(
+				outcome.kind === "hydrated" &&
+				outcome.balanceWasPresent &&
+				!outcome.balanceEmitted
+			);
+		})
+		.map((outcome) => outcome.accountId);
+	const actualGapKeys = outcomes
+		.filter(
+			(outcome) => outcome.kind === "gap" && outcome.balanceEmitted === undefined,
+		)
+		.map((outcome) => outcome.accountId);
 	await deps.emit(
 		buildDetailCoverageMessage({
 			stream: "balances",
@@ -2338,26 +2340,27 @@ function accountProgressDiagnostic(accountProgress?: {
 }
 
 /**
- * Per-account outcome of the QFX (transactions/balances) detail pass. The
- * `accounts` stream is Chase's enumerated inventory — a known denominator —
- * and each account is one key considered for the per-account QFX detail
- * fetch. The runtime turns these outcomes into an honest DETAIL_COVERAGE
- * report (`required_keys` = accounts considered; `hydrated_keys` = accounts
- * the connector successfully reached; `gap_keys` = retryable failures).
+ * Per-account outcome of the shared transactions/balances QFX detail pass.
+ * The accounts stream provides the denominator; each reached account is
+ * considered independently for each requested detail stream.
  *
- * Three outcomes, deliberately distinct:
- *   - `hydrated`: QFX downloaded and parsed for this account. Includes the
- *     0-transaction parse — the account WAS reached; an empty ledger is
- *     real coverage, not a failure.
- *   - `no_activity`: Chase reported no activity for an explicit bounded
- *     window. This is source-limited completeness, not a gap.
- *   - `gap`: the QFX download or parse failed transiently. A retryable
- *     DETAIL_GAP is emitted so the next run retries this account, and the
- *     key lands in `gap_keys` — partial, not complete, and not silently
- *     dropped.
+ * Hydrated means QFX was downloaded and parsed, including an empty ledger.
+ * For balances, a parsed balance also needs acceptance before it counts.
+ * No activity is source-limited coverage of an explicit bounded window.
+ * A gap is retryable QFX debt. It can still contain an accepted balance
+ * when only the transaction parser found debt.
+ *
+ * The balances-specific fields never affect transaction coverage.
+ *
+ * Outcome producers without QFX evidence can leave those fields unset.
  */
 export type AccountDetailOutcome =
-	| { kind: "hydrated"; accountId: string; balanceEmitted?: boolean }
+	| {
+			kind: "hydrated";
+			accountId: string;
+			balanceEmitted?: boolean;
+			balanceWasPresent?: boolean;
+	  }
 	| { kind: "no_activity"; accountId: string; balanceEmitted?: boolean }
 	| {
 			kind: "gap";
@@ -2510,7 +2513,7 @@ export async function processParsedAccountQfx(
 			deps.transactionsFingerprintCursor,
 		);
 	}
-
+	const balanceWasPresent = deps.wantsBalances && balance !== null;
 	let balanceEmitted = false;
 	if (deps.wantsBalances && balance) {
 		await deps.emitRecord(
@@ -2553,9 +2556,12 @@ export async function processParsedAccountQfx(
 			balanceEmitted,
 		};
 	}
-	// Reached and parsed (even a 0-transaction QFX is real coverage of this
-	// account's ledger for the window).
-	return { kind: "hydrated", accountId: account.internal_id, balanceEmitted };
+	return {
+		kind: "hydrated",
+		accountId: account.internal_id,
+		balanceEmitted,
+		balanceWasPresent,
+	};
 }
 
 /**
