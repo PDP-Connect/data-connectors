@@ -20,6 +20,7 @@
  * On session expiry, emits INTERACTION kind=manual_action with sign-in URL.
  */
 
+import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import pRetry, { AbortError } from "p-retry";
 import type { BrowserContext, Page } from "playwright";
@@ -76,6 +77,7 @@ export interface YearState {
 	frozen: boolean;
 	last_scraped: string;
 	order_count: number;
+	order_id_digest?: string;
 	/** The parser version the year was read with. A year read by an older
 	 *  parser is read again once, so a parser fix reaches stored history. */
 	parser_version?: number;
@@ -2169,6 +2171,7 @@ export async function processResolvedListOrder(
 
 interface YearRunResult {
 	orderCount: number;
+	orderIdDigest: string;
 	/** True when the year's walk stopped at `PAGE_LIMIT` with orders still
 	 *  arriving, rather than because the year ran out of pages. */
 	truncated: boolean;
@@ -2184,6 +2187,7 @@ interface YearCompletionArgs {
 	unparseableDateCount: number;
 	year: number;
 	yearOrderCount: number;
+	yearOrderIdDigest?: string;
 }
 
 function markYearIncomplete(
@@ -2207,6 +2211,7 @@ export async function applyYearCompletionState({
 	unparseableDateCount,
 	year,
 	yearOrderCount,
+	yearOrderIdDigest,
 }: YearCompletionArgs): Promise<void> {
 	// A year whose walk hit PAGE_LIMIT is a PREFIX of that year, not the year.
 	// Recording it would be the permanent-loss case this connector's freeze
@@ -2233,13 +2238,16 @@ export async function applyYearCompletionState({
 	// must be allowed to retry the year after a parser fix instead of
 	// treating the year as complete forever.
 	if (unparseableDateCount === 0) {
-		const stableCount =
+		const stableMembership =
 			prior !== undefined &&
 			!(prior.incomplete === true && !prior.last_scraped) &&
-			prior.order_count === yearOrderCount;
+			prior.order_count === yearOrderCount &&
+			yearOrderIdDigest !== undefined &&
+			prior.order_id_digest === yearOrderIdDigest;
 		newYearsState[String(year)] = {
 			order_count: yearOrderCount,
-			frozen: year < new Date().getFullYear() && stableCount,
+			...(yearOrderIdDigest === undefined ? {} : { order_id_digest: yearOrderIdDigest }),
+			frozen: year < new Date().getFullYear() && stableMembership,
 			last_scraped: nowIso(),
 			parser_version: AMAZON_DETAIL_PARSER_VERSION,
 		};
@@ -2332,6 +2340,7 @@ async function runYear(
 	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
 ): Promise<YearRunResult> {
 	let yearOrderCount = 0;
+	const acceptedOrderIds = new Set<string>();
 	let unparseableDateCount = 0;
 	let pageCount = 0;
 	const walk = await walkPagesWithCeiling({
@@ -2383,6 +2392,8 @@ async function runYear(
 				if (!processed) {
 					// biome-ignore lint/style/noIncrementDecrement: integration.test.ts asserts this literal `unparseableDateCount++` source text (source-regex oracle); switching to += would fail that pre-existing test for a purely cosmetic change.
 					unparseableDateCount++;
+				} else {
+					acceptedOrderIds.add(o.orderId);
 				}
 			}
 			pageCount += 1;
@@ -2425,6 +2436,9 @@ async function runYear(
 	}
 	return {
 		orderCount: yearOrderCount,
+		orderIdDigest: createHash("sha256")
+			.update(JSON.stringify([...acceptedOrderIds].sort()))
+			.digest("hex"),
 		truncated: walk.truncated,
 		unparseableDateCount,
 	};
@@ -2869,6 +2883,7 @@ if (isMainModule(import.meta.url)) {
 				}
 				const {
 					orderCount: yearOrderCount,
+					orderIdDigest: yearOrderIdDigest,
 					truncated,
 					unparseableDateCount,
 				} = yearResult;
@@ -2883,6 +2898,7 @@ if (isMainModule(import.meta.url)) {
 					unparseableDateCount,
 					year,
 					yearOrderCount,
+					yearOrderIdDigest,
 				});
 				// Carry the per-order fingerprint map and known-hydrated order map
 				// forward alongside the year cursors so the next run can suppress

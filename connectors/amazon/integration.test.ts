@@ -3950,12 +3950,14 @@ test("applyYearCompletionState: an honest (untruncated) stable past year still f
 			frozen: false,
 			last_scraped: "2026-01-01T00:00:00.000Z",
 			order_count: 312,
+			order_id_digest: "stable-membership",
 		},
 		progress,
 		truncated: false,
 		unparseableDateCount: 0,
 		year: 2024,
 		yearOrderCount: 312,
+		yearOrderIdDigest: "stable-membership",
 	});
 
 	const recorded = newYearsState["2024"] as
@@ -4156,6 +4158,35 @@ test("collectAmazonProfile: a page-read failure emits SKIP_RESULT with zero cove
 		assert.equal(coverage.considered, 1);
 		assert.equal(coverage.covered, 0);
 	}
+});
+
+test("equal order counts with changed membership do not freeze a past year", async () => {
+	const years: YearsCursor = {};
+	const year = 2024;
+	const legacy: YearState = {
+		frozen: false,
+		last_scraped: "2025-01-01T00:00:00Z",
+		order_count: 2,
+	};
+	const apply = (prior: YearState | undefined, yearOrderIdDigest: string) =>
+		applyYearCompletionState({
+			newYearsState: years,
+			prior,
+			progress: async () => {},
+			truncated: false,
+			unparseableDateCount: 0,
+			year,
+			yearOrderCount: 2,
+			yearOrderIdDigest,
+		});
+	await apply(undefined, "membership-a-b");
+	await apply(years["2024"], "membership-a-c");
+	assert.equal(years["2024"]?.frozen, false);
+	assert.equal(years["2024"]?.order_id_digest, "membership-a-c");
+	await apply(years["2024"], "membership-a-c");
+	assert.equal(years["2024"]?.frozen, true);
+	await apply(legacy, "membership-a-c");
+	assert.equal(years["2024"]?.frozen, false);
 });
 
 test("an incomplete rescan of a frozen year stores it as not frozen", async () => {
