@@ -623,9 +623,16 @@ async function ensureOnDocumentsPage(page: Page): Promise<void> {
 			timeout: DOCUMENTS_NAV_TIMEOUT_MS,
 		})
 		.catch(() => {
-			/* ignore */
+			throw new Error(
+				"Unable to open the Documents page for statement downloads",
+			);
 		});
 	await sleep(DOCUMENTS_RELOAD_SETTLE_MS);
+	if (!DOCUMENTS_PATH_RE.test(page.url())) {
+		throw new Error(
+			"Unable to open the Documents page for statement downloads",
+		);
+	}
 }
 
 interface HydrateCallbacks {

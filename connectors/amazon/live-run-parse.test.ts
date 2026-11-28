@@ -11,6 +11,7 @@ import { test } from "node:test";
 import {
 	buildOrderRecord,
 	parseAmazonProfileDom,
+	parseCurrencyCents,
 	parseOrderDetailDom,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -18,6 +19,19 @@ import { parsePostalCode, storeById } from "./stores.ts";
 
 // biome-ignore lint/style/noNonNullAssertion: the store table is a literal.
 const store = (id: string) => storeById(id)!;
+
+test("currency cents: a final decimal separator is distinguished from grouping", () => {
+	assert.equal(parseCurrencyCents("1.234,5"), 123450);
+	assert.equal(parseCurrencyCents("1,234.50"), 123450);
+	assert.equal(parseCurrencyCents("1,234"), 123400);
+});
+
+test("currency cents: zero is distinct from missing and a negative amount stays negative", () => {
+	assert.equal(parseCurrencyCents("0,00"), 0);
+	assert.equal(parseCurrencyCents(undefined), null);
+	assert.equal(parseCurrencyCents("not available"), null);
+	assert.equal(parseCurrencyCents("(1.234,50)"), -123450);
+});
 
 const UPX_SCRIPT = `<script>try{window.__UPX_HTML_PARSED_TIME__=performance.now()}catch(e){}!function(){try{var e=document.createElement("meta");e.name="upx";document.head.appendChild(e)}catch(t){}}();</script>`;
 

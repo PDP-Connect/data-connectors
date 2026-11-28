@@ -3,10 +3,14 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import test from "node:test";
-import { checkManifest, readinessSteps } from "../scripts/conformance.ts";
+import {
+	checkManifest,
+	jsonReport,
+	readinessSteps,
+} from "../scripts/conformance.ts";
 import {
 	checkCoverageProof,
 	checkEvidence,
@@ -247,6 +251,72 @@ test("only an explicit leading no-HTTP assertion exempts UNKNOWN mutation", () =
 		),
 		true,
 	);
+});
+
+test("no-HTTP reasons support one-line block, multi-line block and line comments", () => {
+	for (const header of [
+		"/* @conformance-no-http reads local files only */",
+		"/**\n * @conformance-no-http reads local files only\n */",
+		"// @conformance-no-http reads local files only",
+	]) {
+		assert.equal(
+			declaredNoHttpExemption(`${header}\nexport {};`),
+			"reads local files only",
+			header,
+		);
+	}
+});
+
+test("JSON no-HTTP note only qualifies UNKNOWN and PASS mock mutation findings", () => {
+	const directory = mkdtempSync(join(connectorsDir, "conformance-no-http-"));
+	const connector = basename(directory);
+	try {
+		writeFileSync(
+			join(directory, "index.ts"),
+			"// @conformance-no-http reads local files only\nexport {};\n",
+		);
+		writeFileSync(
+			join(directory, "manifest.json"),
+			JSON.stringify({
+				capabilities: { public_listing: { tier: "supported" } },
+			}),
+		);
+		const verdicts = ["WEAK", "UNKNOWN", "PASS", "FAIL", "ADVISORY"] as const;
+		const steps: Step[] = verdicts.map((verdict) => ({
+			name: "mock mutation",
+			verdict,
+			detail: "synthetic mutation detail",
+			advisory: true,
+		}));
+		const report = jsonReport(
+			connector,
+			false,
+			{
+				revision: null,
+				clean: false,
+				source_digest: null,
+				declaration_digest: null,
+			},
+			false,
+			steps,
+		);
+		for (const step of report.steps) {
+			assert.equal(
+				step.detail,
+				step.verdict === "UNKNOWN" || step.verdict === "PASS"
+					? "synthetic mutation detail; author declares no HTTP requests: reads local files only"
+					: "synthetic mutation detail",
+				step.verdict,
+			);
+			assert.equal(
+				step.required_for_review,
+				step.verdict !== "UNKNOWN",
+				`${step.verdict} gating must not change`,
+			);
+		}
+	} finally {
+		rmSync(directory, { recursive: true, force: true });
+	}
 });
 
 test("conformance points a missing manifest at connectors/<key>/manifest.json", () => {

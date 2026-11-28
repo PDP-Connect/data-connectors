@@ -63,6 +63,18 @@ test("connections need stable owner summaries and a confirming empty page", () =
 	assert.equal(connectionEvidence({ ...args, before: { total: 0 }, after: { total: 0 }, distinctCount: 0 }), undefined);
 });
 
+test("partial date retains year precision but refuses a nonnumeric month", async () => {
+	const { partialDate } = await import("./field-read.ts");
+	assert.deepEqual(partialDate({ year: 2026 }), { kind: "read", value: "2026" });
+	assert.deepEqual(partialDate({ year: 2026, month: "3" }), { kind: "unavailable", reason: "malformed" });
+});
+
+test("connection timestamp distinguishes not reported from an invalid date", async () => {
+	const { epochMillis } = await import("./field-read.ts");
+	assert.deepEqual(epochMillis(0), { kind: "empty" });
+	assert.deepEqual(epochMillis(-1), { kind: "unavailable", reason: "malformed" });
+});
+
 test("summary binds opaque profile IDs separately from numeric member IDs", () => {
 	const owner = { plainId: 42, miniProfile: {
 		entityUrn: "urn:li:fs_miniProfile:synthetic-owner",

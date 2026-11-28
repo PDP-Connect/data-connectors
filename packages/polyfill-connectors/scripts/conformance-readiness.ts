@@ -107,7 +107,7 @@ export function declaredNoHttpExemption(source: string): string | undefined {
 		)?.[0] ?? "";
 	const reason = header
 		.match(
-			/(?:^|\n)[\t ]*(?:\*|\/\/)[\t ]*@conformance-no-http[\t ]+([^\r\n]+)/,
+			/(?:^|\n)[\t ]*(?:\*|\/\/|\/\*)[\t ]*@conformance-no-http[\t ]+([^\r\n]+)/,
 		)?.[1]
 		?.replace(/\*\/\s*$/, "")
 		.trim();

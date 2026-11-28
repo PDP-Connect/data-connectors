@@ -18,7 +18,18 @@ import {
 	skipPoliteDelays,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { hebConnector } from "./index.ts";
+import { parseCurrencyCents, parseDetailQuantity } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
+
+test("detail quantity prefers the structured actual amount when both labels exist", () => {
+	assert.equal(parseDetailQuantity("Quantity: 4\nQty: 1.25 of 4"), 1.25);
+});
+
+test("currency conversion distinguishes missing prices from zero and accepts grouped amounts", () => {
+	assert.equal(parseCurrencyCents("Unavailable"), null);
+	assert.equal(parseCurrencyCents("$0.00"), 0);
+	assert.equal(parseCurrencyCents("$2 345.60"), 234_560);
+});
 
 // Pacing pauses are anti-bot courtesy that these tests do not assert on, so
 // they fire on the next tick instead of sleeping.

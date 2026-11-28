@@ -29,6 +29,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { CodexArtifactLedger } from "./artifact-ledger.ts";
 import { cursorKeyForEntry } from "./index.ts";
 
 // ─── cursorKeyForEntry (pure, I/O-free) ─────────────────────────────────
@@ -551,4 +552,34 @@ test("safety case 4 (naming-collision guard): the filesystem relocation concept 
 		parsersSource.includes("archived: t.archived === 1 || t.archived === true"),
 		"threads.archived (Codex's own in-app archive boolean) is untouched by this change",
 	);
+});
+
+test("artifact ledger retries a failed body by identity without disturbing a sibling", () => {
+	const ledger = new CodexArtifactLedger({ enabled: true });
+	const earlier = "a".repeat(64);
+	const latest = "b".repeat(64);
+	ledger.record("synthetic-a", "failed", null);
+	assert.equal(ledger.capturedMarker("synthetic-a", earlier), undefined);
+	assert.equal(ledger.isSettled("synthetic-a", earlier), false);
+	assert.equal(ledger.capturedMarker("synthetic-b", earlier), earlier);
+	assert.equal(ledger.isSettled("synthetic-b", earlier), true);
+	assert.equal(ledger.pendingUpload, 0);
+	ledger.record("synthetic-a", "captured", latest);
+	ledger.noteBackfilled("synthetic-a");
+	assert.equal(ledger.size, 0);
+	assert.equal(ledger.capturedMarker("synthetic-a", earlier), latest);
+	assert.deepEqual([...ledger.backfilled], ["synthetic-a"]);
+	assert.equal(ledger.pendingUpload, 1);
+});
+
+test("capture-disabled ledger carries prior evidence without creating a new upload debt", () => {
+	const ledger = new CodexArtifactLedger({ enabled: false });
+	const prior = "c".repeat(64);
+	ledger.record("synthetic-a", "failed", null);
+	ledger.record("synthetic-b", "captured", "d".repeat(64));
+	assert.equal(ledger.isSettled("synthetic-a", undefined), true);
+	assert.equal(ledger.capturedMarker("synthetic-a", prior), prior);
+	assert.equal(ledger.capturedMarker("synthetic-b", undefined), undefined);
+	assert.equal(ledger.size, 0);
+	assert.equal(ledger.pendingUpload, 0);
 });
