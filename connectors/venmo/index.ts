@@ -520,6 +520,13 @@ async function emitTransactionsPage(
 	};
 }
 
+function supportedTransactionsCursor(value: unknown): Record<string, unknown> {
+	const prototype = value && typeof value === "object" ? Object.getPrototypeOf(value) : undefined;
+	if (prototype !== Object.prototype && prototype !== null) return {};
+	const cursor = value as Record<string, unknown>;
+	return cursor.version === undefined || cursor.version === 2 ? cursor : {};
+}
+
 export async function collectTransactions(
 	ctx: BrowserCollectContext,
 	fetchPath: VenmoPageFetch,
@@ -539,13 +546,7 @@ export async function collectTransactions(
 	truncated: boolean;
 }> {
 	const progress = ctx.progress as VenmoProgress;
-	const priorCursor = ctx.state.transactions;
-	const prior =
-		priorCursor &&
-		typeof priorCursor === "object" &&
-		!Array.isArray(priorCursor)
-			? (priorCursor as Record<string, unknown>)
-			: {};
+	const prior = supportedTransactionsCursor(ctx.state.transactions);
 	const priorBackfill =
 		typeof prior.backfill_before_id === "string" && prior.backfill_before_id
 			? prior.backfill_before_id
@@ -1054,14 +1055,8 @@ export async function collectAllStreams(
 			rejectionReason,
 			truncated,
 		} = await collectTransactions(ctx, fetchPath, ownerId, delay);
-		const priorCursor = ctx.state.transactions;
 		const priorLatestSeenAt =
-			priorCursor &&
-			typeof priorCursor === "object" &&
-			!Array.isArray(priorCursor)
-				? (priorCursor as { last_seen_date_created?: unknown })
-						.last_seen_date_created
-				: undefined;
+			supportedTransactionsCursor(ctx.state.transactions).last_seen_date_created;
 		if (truncated) {
 			await reportVenmoStreamFailure(
 				ctx,

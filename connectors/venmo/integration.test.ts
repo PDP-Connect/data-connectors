@@ -317,6 +317,29 @@ test("collectTransactions: a short non-empty page does not terminate the walk", 
 	);
 });
 
+test("collectTransactions starts at the head for an unsupported saved cursor", async () => {
+	const a = story("4101", "2026-07-02T00:00:00Z");
+	const b = story("4100", "2026-07-01T00:00:00Z");
+	const beforeIds: Array<string | undefined> = [];
+	const fetchPath: VenmoPageFetch = (_path, query) => {
+		const beforeId = query?.before_id;
+		beforeIds.push(beforeId);
+		const data = beforeId === undefined ? [a] : beforeId === a.id ? [b] : [];
+		return Promise.resolve({ status: 200, body: JSON.stringify({ data }) });
+	};
+	const { ctx } = makeCtx({
+		transactions: {
+			version: 99,
+			head_anchor_id: a.id,
+			backfill_before_id: "stale-tail",
+			head_gaps: [{ start_id: a.id, before_id: "gap-b", end_id: "gap-c" }],
+		},
+	}, ["transactions"]);
+
+	await collectTransactions(ctx, fetchPath, OWNER_ID, NO_DELAY);
+	assert.deepEqual(beforeIds, [undefined, a.id, b.id]);
+});
+
 test("collectTransactions: an empty first page stops immediately with zero records", async () => {
 	const { fetchPath } = makeScriptedFetch({
 		"/stories/target-or-actor/1111111111111111111": [{ body: { data: [] } }],
