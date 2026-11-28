@@ -15919,7 +15919,7 @@
 				},
 				"connector_key": "ical",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ical",
-				"version": "0.1.27",
+				"version": "0.1.28",
 				"display_name": "Calendar (iCal)",
 				"brand": {
 					"icon": "icon.svg",
@@ -31015,7 +31015,7 @@
 				},
 				"connector_key": "whoop",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whoop",
-				"version": "0.1.30",
+				"version": "0.1.31",
 				"display_name": "WHOOP",
 				"brand": {
 					"icon": "icon.svg",
