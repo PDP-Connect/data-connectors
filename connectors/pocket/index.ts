@@ -75,9 +75,9 @@ const isoFromUnix = (u: string | number | undefined | null): string | null => {
 		return null;
 	}
 	const sec = Number(u);
-	return Number.isFinite(sec) && sec > 0
-		? new Date(sec * 1000).toISOString()
-		: null;
+	if (!Number.isFinite(sec) || sec <= 0 || sec > 253_402_300_799) return null;
+	const date = new Date(sec * 1000);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
 function itemRecord(it: PocketItem): RecordData {
@@ -184,10 +184,8 @@ runConnector({
 				break;
 			}
 			for (const it of items) {
-				const updated = Number.parseInt(
-					String(it.time_updated || it.time_added || "0"),
-					10,
-				);
+				const sourceTime = it.time_updated || it.time_added || "0";
+				const updated = isoFromUnix(sourceTime) === null ? 0 : Math.floor(Number(sourceTime));
 				await emitRecord("items", itemRecord(it));
 				if (updated > latest) {
 					latest = updated;
