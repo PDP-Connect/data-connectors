@@ -209,7 +209,7 @@ type VenmoFetchOutcome =
 	| { kind: "response"; body: string; status: number }
 	| { kind: "transport_error"; message: string };
 
-function makePageFetch(page: Page): VenmoPageFetch {
+export function makePageFetch(page: Page): VenmoPageFetch {
 	return async (path, query) => {
 		const url = new URL(API_BASE + path);
 		for (const [key, value] of Object.entries(query ?? {})) {
@@ -226,7 +226,12 @@ function makePageFetch(page: Page): VenmoPageFetch {
 					return {
 						kind: "response" as const,
 						status: res.status,
-						body: await res.text().catch(() => ""),
+						body: await res.text().catch(() => {
+							if (!res.ok) {
+								return "";
+							}
+							throw new Error("response_body_unreadable");
+						}),
 					};
 				} catch (err) {
 					return {
