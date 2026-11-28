@@ -2394,15 +2394,15 @@ async function scanChildSource(input: {
 	});
 	observeLocalJsonlScan(input.telemetry, result);
 	const rebuilt = result.decision.kind === "rebuild";
-	// A rebuild re-derived every line, so earlier offsets no longer apply. A
-	// run without the attachments stream leaves a prior obligation in place.
+	// A messages-only rebuild cannot settle attachment debt. The old offset can
+	// no longer identify the owed bytes; replay from zero in the new prefix.
+	const rebuiltOwedFrom =
+		priorOwedFrom !== undefined && result.cursor.committed_offset_bytes > 0
+			? 0
+			: undefined;
 	const owedFrom = emitAttachments
-		? rebuilt
-			? scanOwedFrom
-			: (replayOwedFrom ?? scanOwedFrom)
-		: rebuilt
-			? undefined
-			: priorOwedFrom;
+		? (rebuilt ? scanOwedFrom : (replayOwedFrom ?? scanOwedFrom))
+		: (rebuilt ? rebuiltOwedFrom : priorOwedFrom);
 	const { attachments_owed_from_bytes: _settled, ...physical } =
 		result.cursor as ClaudeChildFileCursorV1;
 	return {

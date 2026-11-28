@@ -262,6 +262,39 @@ test("M5: a same-size committed-prefix rewrite rebuilds", async () => {
 	);
 });
 
+test("messages-only rebuild rebases outstanding attachment debt", async () => {
+	const source = await makeSource();
+	const firstLine = `${transcriptLine("top-1", "2026-07-21T00:00:00Z")}\n`;
+	const toolResult = `${transcriptLine("top-2", "2026-07-21T00:01:00Z", {
+		message: {
+			content: [{ type: "tool_result", tool_use_id: "toolu_fixture", content: "fixture output" }],
+		},
+	})}\n`;
+	await writeFile(source.top, firstLine + toolResult);
+	const streams = ["messages"];
+	const first = await run({ ...source, streams });
+	type FileCursor = {
+		committed_offset_bytes: number;
+		attachments_owed_from_bytes?: number;
+	};
+	type MessagesCursor = { file_cursors: Record<string, FileCursor> };
+	const prior = (first.states.messages as MessagesCursor).file_cursors[source.top];
+	assert.ok(prior);
+	const owed = Buffer.byteLength(firstLine);
+	assert.ok(owed > 0 && owed < prior.committed_offset_bytes);
+	prior.attachments_owed_from_bytes = owed;
+
+	// Rewrite bytes in the committed prefix, leaving the complete tool-result
+	// line in place. The edit must rebuild, not follow an append-only cursor.
+	await writeFile(source.top, firstLine.replace('"content":"x"', '"content":"y"') + toolResult);
+	const rebuilt = await run({ ...source, streams, state: first.states });
+	assert.ok(rebuilt.records.some((record) => record.stream === "messages"));
+	assert.deepEqual(rebuilt.records.filter((record) => record.stream === "attachments"), []);
+	const next = (rebuilt.states.messages as MessagesCursor).file_cursors[source.top];
+	assert.ok(next);
+	assert.equal(next.attachments_owed_from_bytes, 0);
+});
+
 test("M6: replacement with a matching prefix tails only the replacement suffix", async () => {
 	const root = await createTempDir("pdpp-m6-");
 	const path = join(root, "events.jsonl");
