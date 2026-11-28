@@ -41,6 +41,7 @@ import {
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import { requestText } from "../../packages/polyfill-connectors/src/governed-text-request.ts";
 import { steamPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -260,12 +261,6 @@ export function classifySteamHttpResponse(
 	return { kind: "ok" };
 }
 
-interface SteamRawResponse {
-	body: string;
-	headers?: Record<string, string | undefined>;
-	status: number;
-}
-
 async function steamApiRequest<T>(
 	path: string,
 	apiKey: string,
@@ -280,32 +275,10 @@ async function steamApiRequest<T>(
 	}
 
 	try {
-		const r = await httpGovernor.request<SteamRawResponse, SteamRawResponse>(
-			async () => {
-				const res = await fetch(url, {
-					headers: { Accept: "application/json" },
-				});
-				const retryAfter = res.headers.get("retry-after");
-				return {
-					body: await res.text().catch((): string => ""),
-					...(retryAfter === null
-						? {}
-						: { headers: { "retry-after": retryAfter } }),
-					status: res.status,
-				};
-			},
-			(raw) => ({
-				status: raw.status,
-				...(raw.headers === undefined ? {} : { headers: raw.headers }),
-				value: raw,
-			}),
+		const { status, value: body } = await requestText(httpGovernor, () =>
+			fetch(url, { headers: { Accept: "application/json" } }),
 		);
-		const result = r.value;
-
-		const classification = classifySteamHttpResponse(
-			result.status,
-			result.body,
-		);
+		const classification = classifySteamHttpResponse(status, body);
 		if (classification.kind === "error") {
 			throw new SteamHttpError(
 				path,
@@ -313,7 +286,7 @@ async function steamApiRequest<T>(
 				classification.message,
 			);
 		}
-		return JSON.parse(result.body) as T;
+		return JSON.parse(body) as T;
 	} catch (error) {
 		if (
 			error instanceof SteamHttpError &&

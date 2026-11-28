@@ -36,6 +36,7 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import { redactTransportDetail } from "@pdpp/connector-protocol/http-retry";
 import {
 	type ConnectorHttpGovernor,
+	type ConnectorHttpResult,
 	createConnectorHttpGovernor,
 } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
@@ -49,6 +50,7 @@ import {
 	type FingerprintCursor,
 	openFingerprintCursor,
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import { requestText } from "../../packages/polyfill-connectors/src/governed-text-request.ts";
 import { ynabPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -387,12 +389,6 @@ export function errorDetail(body: string): string {
 	return redactTransportDetail(body).slice(0, ERROR_DETAIL_MAX);
 }
 
-interface YnabRawResponse {
-	body: string;
-	headers?: Record<string, string | undefined>;
-	status: number;
-}
-
 export type YnabRequest = <T>(
 	path: string,
 	token: string,
@@ -418,29 +414,11 @@ export function createYnabRequest(
 		if (sinceDate) {
 			url.searchParams.set("since_date", sinceDate);
 		}
-		let result: YnabRawResponse;
+		let result: ConnectorHttpResult<string>;
 		try {
-			const r = await governor.request<YnabRawResponse, YnabRawResponse>(
-				async () => {
-					const res = await fetch(url, {
-						headers: { Authorization: `Bearer ${token}` },
-					});
-					const retryAfter = res.headers.get("retry-after");
-					return {
-						body: await res.text().catch((): string => ""),
-						...(retryAfter === null
-							? {}
-							: { headers: { "retry-after": retryAfter } }),
-						status: res.status,
-					};
-				},
-				(raw) => ({
-					status: raw.status,
-					...(raw.headers === undefined ? {} : { headers: raw.headers }),
-					value: raw,
-				}),
+			result = await requestText(governor, () =>
+				fetch(url, { headers: { Authorization: `Bearer ${token}` } }),
 			);
-			result = r.value;
 		} catch (error) {
 			// Terminal rate-limit: emit the same progress side-effect the hand-rolled
 			// path did, then rethrow `ynab_rate_limited` for the cross-run contract.
@@ -472,10 +450,10 @@ export function createYnabRequest(
 		}
 		if (result.status < 200 || result.status >= 300) {
 			throw new Error(
-				`ynab_http_${String(result.status)} [endpoint ${endpointLabel(path)}]: ${errorDetail(result.body)}`,
+				`ynab_http_${String(result.status)} [endpoint ${endpointLabel(path)}]: ${errorDetail(result.value)}`,
 			);
 		}
-		return JSON.parse(result.body) as T;
+		return JSON.parse(result.value) as T;
 	};
 }
 

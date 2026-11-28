@@ -40,6 +40,8 @@ The rules behind each step are in the [connector authoring guide](packages/polyf
 
    Where the package already does a job, use its helper instead of your own code. For example, `createConnectorHttpGovernor` paces requests and handles rate limits, and `buildFullScanCoverageMessage` reports coverage for a stream that reads everything on each run. They are in `packages/polyfill-connectors/src/connector-http-governor.ts` and `packages/polyfill-connectors/src/connector-runtime.ts`.
 
+   Steam and YNAB use [`requestText`](packages/polyfill-connectors/src/governed-text-request.ts) with a governor and a native fetch callback. Use it when the connector can read the whole response as text and treat an unreadable body as empty. It preserves the HTTP status and forwards `Retry-After` to the governor. Keep a custom reader for streaming byte limits or provider-specific response headers.
+
 2. Define each stream in `manifest.json`. The scaffold writes one stream with defaults that you must check.
 
    1. Set `primary_key` to the field that identifies a record, and `cursor_field` to the field a later run continues from. Remove `cursor_field` and set `incremental` to `false` if each run reads everything.
