@@ -2,6 +2,8 @@
 
 Read the files in this repository that a change touches before you edit them. Do not rely on what you remember about it.
 
+For architecture investigations or claims that cross a connector, runtime or installer boundary, use the [System Investigation Guide](docs/system-investigation.md).
+
 ### Contributing
 
 The organization's [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob/main/CONTRIBUTING.md) sets the policy. In this repository:

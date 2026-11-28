@@ -18,5 +18,6 @@ A maintainer reviews the PR against [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md). 
 | Look up what each evidence tier needs | [Connector checklist](packages/polyfill-connectors/CONNECTOR-CHECKLIST.md) |
 | Add a connector to the mobile app | [docs/add-a-connector-to-mobile.md](docs/add-a-connector-to-mobile.md) |
 | Run the test suites | [TESTING.md](TESTING.md) |
+| Investigate a design decision or verify what the next caller receives | [System Investigation Guide](docs/system-investigation.md) |
 | Learn how connectors are versioned and published | [docs/publishing.md](docs/publishing.md) |
 | Review, merge and publish a connector PR | [CONNECTOR-REVIEW.md](CONNECTOR-REVIEW.md) |
