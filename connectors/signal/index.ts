@@ -1265,7 +1265,23 @@ async function emitMessageAnchorEvidence(
 	result: QueriedMessageRows,
 	since: number,
 	proveBackfill: boolean,
+	idsAtCapacity: boolean,
 ): Promise<void> {
+	if (idsAtCapacity) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "messages",
+			reason: "backfill_check_unproven_truncated_cursor",
+			message:
+				"Below-watermark backfill could not be checked because the previous message-ID list reached its limit. A full refresh can read the older messages again.",
+			diagnostics: {
+				source_total: anchor.sourceTotal,
+				below_watermark: anchor.belowWatermark,
+			},
+			recovery_hint: { action: "manual_action_required", retryable: false },
+		});
+		return;
+	}
 	if (!proveBackfill) {
 		// A legacy cursor (watermark, no emitted-id set) cannot distinguish
 		// "already emitted" from "newly backfilled". Say so plainly rather than
@@ -1332,6 +1348,7 @@ async function collectMessagesAndReactions({
 	emitReactions,
 	priorEmittedIds,
 	proveBackfill,
+	idsAtCapacity,
 	since,
 }: {
 	ctx: CollectContext;
@@ -1339,8 +1356,9 @@ async function collectMessagesAndReactions({
 	emitMessages: boolean;
 	emitReactions: boolean;
 	priorEmittedIds: ReadonlySet<string>;
-	/** False on a legacy cursor with no emitted-id set — see the caller. */
+	/** Whether prior evidence can prove what was emitted below the watermark. */
 	proveBackfill: boolean;
+	idsAtCapacity: boolean;
 	since: number;
 }): Promise<void> {
 	const { emit, emitRecord, progress } = ctx;
@@ -1384,7 +1402,15 @@ async function collectMessagesAndReactions({
 				message: `Skipped ${result.skippedNullDate} message(s) with a missing or unusable sent_at/received_at_ms; they cannot be placed on the sent_at cursor without fabricating a timestamp.`,
 			});
 		}
-		await emitMessageAnchorEvidence(emit, anchor, result, since, proveBackfill);
+		await emitMessageAnchorEvidence(
+			emit,
+			anchor,
+			result,
+			since,
+			proveBackfill,
+			idsAtCapacity,
+		);
+		const emittedIds = mergeEmittedIds(priorEmittedIds, result.emittedIds);
 		await emit({
 			type: "STATE",
 			stream: "messages",
@@ -1394,8 +1420,9 @@ async function collectMessagesAndReactions({
 				// is what makes the backfill check a SET comparison rather than a
 				// count: without it there is no way to tell a below-watermark row
 				// we already have from one a re-link just introduced.
-				emitted_ids: mergeEmittedIds(priorEmittedIds, result.emittedIds),
-				emitted_ids_complete: proveBackfill,
+				emitted_ids: emittedIds,
+				emitted_ids_complete:
+					proveBackfill && emittedIds.length < MAX_EMITTED_ID_CURSOR,
 			},
 		});
 	}
@@ -1466,10 +1493,14 @@ async function collectMessagesConversationsReactions(
 			const since = emitMessages
 				? parseCursorMs(messagesState.last_sent_at_ms ?? 0)
 				: 0;
-			const priorEmittedIds = parseEmittedIds(messagesState.emitted_ids);
+			const storedIds = messagesState.emitted_ids;
+			const priorEmittedIds = parseEmittedIds(storedIds);
+			const idsAtCapacity =
+				since > 0 && Array.isArray(storedIds) && storedIds.length >= MAX_EMITTED_ID_CURSOR;
 			const hasCompleteEmittedIds =
+				!idsAtCapacity &&
 				messagesState.emitted_ids_complete === true &&
-				Array.isArray(messagesState.emitted_ids);
+				Array.isArray(storedIds);
 			await collectMessagesAndReactions({
 				ctx,
 				db,
@@ -1477,6 +1508,7 @@ async function collectMessagesConversationsReactions(
 				emitReactions,
 				priorEmittedIds,
 				proveBackfill: since === 0 || hasCompleteEmittedIds,
+				idsAtCapacity,
 				since,
 			});
 		}

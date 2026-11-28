@@ -21,6 +21,13 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { registerHooks, stripTypeScriptTypes } from "node:module";
+import { DatabaseSync } from "node:sqlite";
+import type {
+	CollectContext,
+	EmittedMessage,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { test } from "node:test";
 import {
 	DEFAULT_MAX_ATTACHMENT_BYTES,
@@ -259,4 +266,64 @@ test("signal requires a positive whole-byte attachment limit override", () => {
 			DEFAULT_MAX_ATTACHMENT_BYTES,
 		);
 	}
+});
+
+test("a capped Signal history cursor does not claim the older row was never emitted", async () => {
+	const entry = new URL("./index.ts?fixture=emitted-cap-three", import.meta.url);
+	const sourceUrl = new URL("./index.ts", import.meta.url);
+	const original = readFileSync(sourceUrl, "utf8");
+	const cap = "const MAX_EMITTED_ID_CURSOR = 200_000;";
+	const injected = original.replace(cap, "const MAX_EMITTED_ID_CURSOR = 3;");
+	const open = "await withExportedDatabase(async (db) => {";
+	const collect = injected.indexOf("async function collectMessagesConversationsReactions(");
+	assert.ok(collect >= 0);
+	assert.notEqual(injected, original);
+	const tail = injected.slice(collect).replace(
+		open,
+		"await globalThis[Symbol.for('signal-anchor-fixture-db')](async (db) => {",
+	);
+	assert.notEqual(tail, injected.slice(collect));
+	const source = stripTypeScriptTypes(
+		injected.slice(0, collect) + tail + "\nexport { collectMessagesConversationsReactions };",
+		{ mode: "transform" },
+	);
+	const hooks = registerHooks({
+		load(url, context, nextLoad) {
+			return url === entry.href
+				? { format: "module", shortCircuit: true, source }
+				: nextLoad(url, context);
+		},
+	});
+	let fixture: { collectMessagesConversationsReactions(ctx: CollectContext): Promise<void> };
+	try {
+		fixture = await import(entry.href);
+	} finally {
+		hooks.deregister();
+	}
+	const db = new DatabaseSync(":memory:");
+	const globals = globalThis as Record<symbol, unknown>;
+	const key = Symbol.for("signal-anchor-fixture-db");
+	const frames: EmittedMessage[] = [];
+	try {
+		db.exec("CREATE TABLE messages (id TEXT, conversationId TEXT, sent_at INTEGER, body TEXT, type TEXT, json TEXT)");
+		db.prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)").run("older", "fixture", 1, "", "incoming", null);
+		globals[key] = async (read: (value: DatabaseSync) => Promise<void>) => read(db);
+		await fixture.collectMessagesConversationsReactions({
+			state: { messages: { last_sent_at_ms: 10, emitted_ids: ["later-1", "later-2", "later-3"], emitted_ids_complete: true } },
+			requested: new Map([["messages", {}]]),
+			emit: async (frame: EmittedMessage) => { frames.push(frame); },
+			emitRecord: async () => { assert.fail("no above-watermark records in this fixture"); },
+			progress: async () => {},
+		} as unknown as CollectContext);
+	} finally {
+		delete globals[key];
+		db.close();
+	}
+	assert.deepEqual(
+		frames.flatMap((frame) => frame.type === "SKIP_RESULT" ? [frame.reason] : []),
+		["backfill_check_unproven_truncated_cursor"],
+	);
+	assert.equal(frames.some((frame) => frame.type === "DETAIL_COVERAGE"), false);
+	assert.equal(frames.some((frame) =>
+		frame.type === "STATE" && Reflect.get(frame.cursor, "emitted_ids_complete") === false), true);
 });
