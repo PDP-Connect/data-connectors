@@ -41,6 +41,7 @@ import {
 import {
 	collectFitbit,
 	consentTimeField,
+	coverageMessage,
 	type DailyFamily,
 	dailyTaint,
 	type FamilyName,
@@ -654,6 +655,27 @@ const NOT_STEPS = [
 	"resting_heart_rate_bpm",
 ];
 
+test("sleep-score rows of the wrong width cannot be attributed to a log", async () => {
+	const { readScoreRow } = await import("./parsers.ts");
+	const columns = { id: 0, score: 1, width: 3 };
+	assert.deepEqual(readScoreRow(["123", "72"], columns), {
+		kind: "unplaceable",
+	});
+	assert.equal(readScoreRow(["  "], columns), null);
+});
+
+test("an unreadable sleep score retains the log key without inventing a value", async () => {
+	const { readScoreRow } = await import("./parsers.ts");
+	assert.deepEqual(
+		readScoreRow(["123", "unavailable"], { id: 0, score: 1, width: 2 }),
+		{
+			kind: "value",
+			key: "123",
+			reading: { value: null, unreadable: true, present: true },
+		},
+	);
+});
+
 test("fields_unavailable: the fields no object carried, also beside a row that could not be placed", () => {
 	const read = dailyRead();
 	assert.deepEqual(
@@ -912,4 +934,22 @@ test("consentTimeField: a UTC start for activities, the date for the daily strea
 		);
 	}
 	assert.throws(() => new StreamRead(["exercise"]).family("sleep"), RangeError);
+});
+
+test("owner progress distinguishes an empty import from a completed import", () => {
+	assert.equal(
+		coverageMessage("daily_summaries", "empty", 0),
+		"Fitbit daily summaries: none imported.",
+	);
+	assert.equal(
+		coverageMessage("sleep", "complete", 2),
+		"Fitbit sleep logs: 2 imported.",
+	);
+});
+
+test("owner progress reports a partial import without hiding saved records", () => {
+	assert.equal(
+		coverageMessage("activities", "partial", 2),
+		"Fitbit activities: 2 imported; some could not be read.",
+	);
 });

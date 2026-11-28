@@ -426,6 +426,17 @@ test("decodeBodyPart: quoted-printable decodes =HH + soft-break", () => {
 	assert.equal(decodeBodyPart(qp, "quoted-printable", "utf8"), "Hello World");
 });
 
+test("decodeBodyPart falls back to UTF-8 for an unknown charset after decoding MIME transfer", () => {
+	for (const [encoding, encoded] of [
+		["base64", Buffer.from("café", "utf8").toString("base64")],
+		["quoted-printable", "caf=C3=A9"],
+	] as const) {
+		const input = Buffer.from(encoded, "ascii");
+		assert.equal(decodeBodyPart(input, encoding, "x-fixture-unknown"), "café");
+		assert.equal(decodeBodyPart(input, encoding, "utf8"), "café");
+	}
+});
+
 ["us-ascii", "US-ASCII"].forEach((charset) => {
 	test(`decodeBodyPart: base64 decodes MIME charset ${charset}`, () => {
 		const body = Buffer.from(

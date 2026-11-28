@@ -50,6 +50,16 @@ export function canonicalShopUrl(value: string): string {
 
 const CENTS_PER_UNIT = 100;
 const SHOP_ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+
+function isValidShopDateTime(value: unknown): value is string {
+	if (typeof value !== "string" || !SHOP_ISO_DATETIME_RE.test(value) ||
+		!Number.isFinite(Date.parse(value))) return false;
+	// Date.parse can normalize an impossible source day (for example Feb 29
+	// in a common year). Validate the calendar day independently of its offset.
+	const day = value.slice(0, 10);
+	const midnight = new Date(`${day}T00:00:00Z`);
+	return Number.isFinite(midnight.getTime()) && midnight.toISOString().startsWith(day);
+}
 const PAGINATED_LIST_KEY_RE = /^deliveriesOrdersList:/;
 const CURSOR_LIST_KEY_RE = /^deliveriesOrdersList\(/;
 const SHOP_MONEY_RE =
@@ -463,8 +473,7 @@ function parseOrderWithCoverage(cache: ApolloCache, ref: string): ParsedOrderCov
 	const status = order.displayStatus;
 	const placedAtValue = typeof placedAt === "string" ? placedAt : null;
 	const statusValue = typeof status === "string" ? status : null;
-	const validPlacedAt = typeof placedAt === "string" && placedAt.length > 0 &&
-		SHOP_ISO_DATETIME_RE.test(placedAt) && Number.isFinite(Date.parse(placedAt));
+	const validPlacedAt = isValidShopDateTime(placedAt);
 	fields.push(field("placed_at", !Object.hasOwn(order, "createdAt")
 		? "UNAVAILABLE" : placedAt === null || placedAt === ""
 			? "EXPLICIT_EMPTY" : validPlacedAt ? "READ" : "UNAVAILABLE",

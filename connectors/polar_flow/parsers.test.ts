@@ -19,7 +19,9 @@ import {
 	parseTrainingRow,
 	parseTrainingSummary,
 	profileRecord,
+	rowDate,
 	sleepRecord,
+	sleepRows,
 	trainingSessionRecord,
 	userId,
 	utcOffset,
@@ -47,6 +49,19 @@ test("localTime normalises Polar's zoneless times and refuses anything else", ()
 	assert.equal(localTime("2026-02-30 07:12:09.000"), null);
 	assert.equal(localTime("2026-11-03 24:00:00"), null);
 	assert.equal(localTime(1793776329000), null);
+});
+
+test("localTime keeps leap days and refuses the same date in a non-leap year", () => {
+	assert.equal(localTime("2024-02-29 23:59:59"), "2024-02-29T23:59:59");
+	assert.equal(localTime("2025-02-29 23:59:59"), null);
+});
+
+test("localTime accepts up to nine fractional digits and emits whole seconds", () => {
+	assert.equal(
+		localTime("2026-01-01T00:00:00.123456789"),
+		"2026-01-01T00:00:00",
+	);
+	assert.equal(localTime("2026-01-01T00:00:00.1234567890"), null);
 });
 
 test("profile: Polar's sleep goal is in seconds", () => {
@@ -402,6 +417,48 @@ test("daily activity: a recorded day, a day nothing recorded and a day past the 
 	});
 });
 
+test("daily activity: a valid sync alone keeps the day but invalid sync times do not", () => {
+	const day = "2026-11-03";
+	const sync = 1_700_000_000_000;
+	const activity = (lastSync: number, stepCount = 0) => ({
+		dataPanelData: { stepCount },
+		activityGraphData: { lastSync },
+	});
+	assert.equal(
+		valid("daily_activity", dailyActivityRecord(day, activity(sync)))
+			.last_sync_at,
+		"2023-11-14T22:13:20.000Z",
+	);
+	for (const bad of [0, -1, 1.25, 253_402_300_800_000]) {
+		assert.deepEqual(dailyActivityRecord(day, activity(bad)), {
+			kind: "empty",
+		});
+		const kept = valid(
+			"daily_activity",
+			dailyActivityRecord(day, activity(bad, 7)),
+		);
+		assert.equal(kept.steps, 7);
+		assert.equal(kept.last_sync_at, null);
+	}
+});
+
+test("Nightly Recharge: fractional ratings are unknown but zero measured HRV is retained", () => {
+	const row = valid(
+		"nightly_recharge",
+		nightlyRechargeRecord({
+			date: "2026-11-03",
+			recoveryIndicator: 2.5,
+			ansRate: 1.5,
+			ansStatus: 3,
+			rmssd: 0,
+		}),
+	);
+	assert.equal(row.nightly_recharge_status, null);
+	assert.equal(row.ans_charge_status, null);
+	assert.equal(row.ans_charge, null);
+	assert.equal(row.hrv_rmssd_ms, 0);
+});
+
 test("sleep: a scored night and an unscored one, dated by the wake-up day", () => {
 	const { sleep } = fixtureData();
 	const scored = valid("sleep", sleepRecord(sleep[0]));
@@ -473,4 +530,16 @@ test("Nightly Recharge: a night with no value is empty, a status out of range is
 	assert.deepEqual(nightlyRechargeRecord({ date: "05.11.2026", rmssd: 40 }), {
 		kind: "unreadable",
 	});
+});
+
+test("rowDate reads only a calendar-day string and rejects timestamp-shaped metadata", () => {
+	assert.equal(rowDate({ date: "2026-09-30" }), "2026-09-30");
+	assert.equal(rowDate({ date: "2026-09-30T00:00:00Z" }), null);
+	assert.equal(rowDate({}), null);
+});
+
+test("sleepRows keeps an empty list distinct from a malformed aggregate shape", () => {
+	assert.deepEqual(sleepRows([]), []);
+	assert.equal(sleepRows({ rows: [] }), null);
+	assert.equal(sleepRows(null), null);
 });

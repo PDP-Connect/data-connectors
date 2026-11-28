@@ -65,6 +65,7 @@ const APPLE_HEALTH_TYPE_PREFIX_RE =
 const APPLE_HEALTH_WORKOUT_PREFIX_RE = /^HKWorkoutActivityType/;
 // Trailing UTC offset on an Apple Health timestamp: "2024-06-05 13:45:22 -0700".
 const APPLE_HEALTH_TZ_OFFSET_RE = /([+-])(\d{2}):?(\d{2})\s*$/;
+const APPLE_HEALTH_CALENDAR_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})(?=[ T]|$)/;
 // The leading run of well-formed attributes of a pending tail, in the tag
 // regex's own grammar, so a dropped element can be range-checked, and a
 // Record assigned to its area's stream, before it is charged to a receipt.
@@ -598,7 +599,25 @@ export function isoDate(v: string | undefined): string | null {
 		return null;
 	}
 	// Apple Health dates look like "2024-06-05 13:45:22 -0700"
-	const d = new Date(v);
+	// JavaScript can roll an impossible local date into the following month.
+	// Validate its calendar fields before applying the source UTC offset.
+	const text = v.trim();
+	const calendarDate = APPLE_HEALTH_CALENDAR_DATE_RE.exec(text);
+	if (calendarDate) {
+		const year = Number(calendarDate[1]);
+		const month = Number(calendarDate[2]) - 1;
+		const day = Number(calendarDate[3]);
+		const calendar = new Date(0);
+		calendar.setUTCFullYear(year, month, day);
+		if (
+			calendar.getUTCFullYear() !== year ||
+			calendar.getUTCMonth() !== month ||
+			calendar.getUTCDate() !== day
+		) {
+			return null;
+		}
+	}
+	const d = new Date(text);
 	if (Number.isNaN(d.getTime())) {
 		return null;
 	}

@@ -304,6 +304,40 @@ test("a page cap with a continuation token discloses truncation instead of claim
 	);
 });
 
+test("a capped incremental run preserves the age of the retained sync point", async () => {
+	const syncedAt = "2026-08-06T00:00:00Z";
+	const fakeClient = new FakePeopleClient({
+		connectionPages: [
+			{ people: [], nextPageToken: "page2", nextSyncToken: null },
+			{ people: [], nextPageToken: null, nextSyncToken: "sync-new" },
+		],
+	});
+	const { ctx, messages } = makeContext({
+		state: {
+			people: { sync_token: "sync-old", synced_at: syncedAt, fingerprints: {} },
+		},
+		streams: [{ name: "people" }],
+	});
+
+	await collectGoogleContacts(ctx, {
+		clientFactory: () => fakeClient,
+		env: ENV,
+		maxPages: 1,
+		now: () => FIXED_NOW,
+		...FAKE_TOKEN,
+	});
+
+	const state = messages.find(
+		(message) => message.type === "STATE" && message.stream === "people",
+	);
+	assert.ok(state?.type === "STATE");
+	assert.deepEqual(state.cursor, {
+		sync_token: "sync-old",
+		synced_at: syncedAt,
+		fingerprints: {},
+	});
+});
+
 test("carries forward the prior syncToken cursor on an incremental run", async () => {
 	const fakeClient = new FakePeopleClient({
 		connectionPages: [
