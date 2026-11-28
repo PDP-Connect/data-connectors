@@ -386,10 +386,12 @@ function earliestAggregateCursor(
 	requested: ReadonlySet<string>,
 ): string | null {
 	const values = AGGREGATE_STREAMS.filter((stream) => requested.has(stream))
-		.map((stream) => cursorThrough(state, stream))
+		.map((stream) => cursorThrough(state, stream));
+	// Every requested stream must be represented before sharing a later start.
+	if (values.some((value) => value === null)) return null;
+	return values
 		.filter((value): value is string => value !== null)
-		.sort((left, right) => left.localeCompare(right));
-	return values[0] ?? null;
+		.sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
 }
 
 function historyStart(bootstrap: WhoopBootstrap, cursor: string | null): Date {

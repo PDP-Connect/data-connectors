@@ -105,6 +105,28 @@ test("collectWhoop emits six validated streams before post-record state", async 
 	);
 });
 
+test("collectWhoop starts at bootstrap history when one requested aggregate has no cursor", async () => {
+	const raw = await fixture("bootstrap.json") as { account: Record<string, unknown> };
+	const startTime = "2026-07-01T00:00:00.000Z";
+	const bootstrap = { ...raw, account: { ...raw.account, created_at: startTime } };
+	const cycles = await fixture("cycles.json");
+	const harness = makeRecordingEmit(validateRecord);
+	const starts: string[] = [];
+	const fetchPath: WhoopFetch = async (path) => {
+		if (path.startsWith("/users-service")) return { status: 200, json: bootstrap };
+		const start = new URL(path, "https://fixture.invalid").searchParams.get("startTime") ?? "";
+		starts.push(start);
+		return { status: 200, json: start === startTime ? cycles : [] };
+	};
+	await collectWhoop({
+		emit: harness.emit, emitRecord: harness.emitRecord, fetchPath, now: NOW,
+		requested: new Set(["cycles", "recoveries"]),
+		state: { cycles: { through: "2026-08-10T00:00:00.000Z" } },
+	});
+	assert.equal(starts[0], startTime);
+	assert.equal(harness.emitted.filter((entry) => entry.stream === "recoveries").length, 1);
+});
+
 test("collectWhoop filters unrequested streams and carries incremental overlap", async () => {
 	const source = scriptedFetch(await fixture("bootstrap.json"), {
 		records: await fixture("cycles.json"),
