@@ -116,6 +116,7 @@ import {
 	chatReadPlan,
 	chatRecord,
 	connectionRecords,
+	deliveredAll,
 	deviceRecords,
 	eventEpochSeconds,
 	hasSubSecondTime,
@@ -127,7 +128,6 @@ import {
 	shouldEmitEvent,
 	stopBelowSecond,
 	toIso,
-	deliveredAll,
 	trustedPeopleRecords,
 	vaultEntryRecords,
 } from "./parsers.ts";
@@ -1422,11 +1422,64 @@ export function readChatCheckpoints(
 	return marks;
 }
 
-/** The whole chat list, or a StreamIncomplete when its end was not observed. */
-async function readChatList(args: CollectInstinctArgs): Promise<Chat[]> {
+interface ChatListContinuation {
+	readonly next: string;
+	readonly scopeKey: string;
+	readonly chatIds: string[];
+	readonly cursors: string[];
+}
+
+function chatListScopeKey(args: CollectInstinctArgs): string {
+	return JSON.stringify([
+		args.collectionMode ?? "incremental",
+		args.requested.has("chat_events"),
+		args.scopes?.get("chats") ?? null,
+		args.scopes?.get("chat_events") ?? null,
+	]);
+}
+
+function readChatListContinuation(
+	args: CollectInstinctArgs,
+): ChatListContinuation | null {
+	const state = args.state?.chats;
+	const value =
+		state && typeof state === "object"
+			? Reflect.get(state, "chat_list_resume")
+			: null;
+	if (!value || typeof value !== "object") return null;
+	const { next, scopeKey, chatIds, cursors } =
+		value as Partial<ChatListContinuation>;
+	const bounded = (items: unknown, max: number): items is string[] =>
+		Array.isArray(items) &&
+		items.length <= max &&
+		items.every((item) => typeof item === "string" && item.length <= 512);
+	if (
+		typeof next !== "string" ||
+		next.length === 0 ||
+		next.length > 512 ||
+		scopeKey !== chatListScopeKey(args) ||
+		!bounded(chatIds, 8_000) ||
+		!bounded(cursors, 2_048) ||
+		!cursors.includes(next)
+	)
+		return null;
+	return { next, scopeKey, chatIds, cursors };
+}
+
+/** Read one bounded slice; only an explicit end attests full inventory. */
+async function readChatList(
+	args: CollectInstinctArgs,
+	prior: ChatListContinuation | null = null,
+): Promise<{
+	chats: Chat[];
+	chatIds: string[];
+	resume: ChatListContinuation | null;
+}> {
 	const chats = new Map<string, Chat>();
-	const seenCursors = new Set<string>();
-	let cursor: string | null = null;
+	const completedBefore = new Set(prior?.chatIds);
+	const chatIds = new Set(completedBefore);
+	const seenCursors = new Set(prior?.cursors);
+	let cursor: string | null = prior?.next ?? null;
 	for (let page = 0; page < MAX_CHAT_LIST_PAGES; page += 1) {
 		const parsed = chatsResponseSchema.safeParse(
 			assertTransport(
@@ -1446,7 +1499,8 @@ async function readChatList(args: CollectInstinctArgs): Promise<Chat[]> {
 			throw new StreamIncomplete("Instinct returned no chat list.", true);
 		}
 		for (const chat of pageData.chats) {
-			chats.set(chat.id, chat);
+			if (!completedBefore.has(chat.id)) chats.set(chat.id, chat);
+			chatIds.add(chat.id);
 		}
 		if (pageData.cursor === undefined) {
 			throw new StreamIncomplete(
@@ -1456,7 +1510,11 @@ async function readChatList(args: CollectInstinctArgs): Promise<Chat[]> {
 		}
 		const next = pageData.cursor;
 		if (next === null) {
-			return [...chats.values()];
+			return {
+				chats: [...chats.values()],
+				chatIds: [...chatIds],
+				resume: null,
+			};
 		}
 		if (seenCursors.has(next)) {
 			throw new StreamIncomplete(
@@ -1467,10 +1525,28 @@ async function readChatList(args: CollectInstinctArgs): Promise<Chat[]> {
 		seenCursors.add(next);
 		cursor = next;
 	}
-	throw new StreamIncomplete(
-		`Instinct's chat list still had more after ${String(MAX_CHAT_LIST_PAGES)} pages, so it was not read to its end.`,
-		true,
-	);
+	if (
+		cursor === null ||
+		chatIds.size > 8_000 ||
+		seenCursors.size > 2_048 ||
+		[...chatIds, ...seenCursors].some((key) => key.length > 512)
+	) {
+		throw new StreamIncomplete(
+			"Instinct chat enumeration exceeded its bounded continuation storage without proving the inventory end.",
+			true,
+		);
+	}
+	const keys = [...chatIds];
+	return {
+		chats: [...chats.values()],
+		chatIds: keys,
+		resume: {
+			next: cursor,
+			scopeKey: chatListScopeKey(args),
+			chatIds: keys,
+			cursors: [...seenCursors],
+		},
+	};
 }
 
 type ChatGap = {
@@ -1948,7 +2024,8 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 	}
 	const plan = chatReadPlan(args.scopes?.get("chat_events"));
 	const prior =
-		args.collectionMode === "full_refresh"
+		args.collectionMode === "full_refresh" &&
+		readChatListContinuation(args) === null
 			? {}
 			: readChatCheckpoints(args.state);
 
@@ -1972,13 +2049,14 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 		return;
 	}
 
+	const previousScan = readChatListContinuation(args);
 	const listed = await readOrFail(args, ["chats", "chat_events"], () =>
-		readChatList(args),
+		readChatList(args, previousScan),
 	);
 	if (listed === null) {
 		return;
 	}
-	const chats = listed.value;
+	const { chats, chatIds, resume } = listed.value;
 	// Checked before any history is read: a record that cannot be stored
 	// fails both streams whatever its latest activity (always a valid time).
 	const unread = chats.map((chat) => chatRecord(chat, null));
@@ -2037,13 +2115,33 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 	for (const record of records) {
 		await args.emitRecord("chats", record);
 	}
-	await args.emit(buildFullScanCoverageMessage("chats", records.length));
+	if (resume === null) {
+		await args.emit(buildFullScanCoverageMessage("chats", chatIds.length));
+	} else {
+		await args.emit({
+			type: "SKIP_RESULT",
+			stream: "chats",
+			reason: "instinct_chat_list_deferred_page_budget",
+			message:
+				"Instinct chat enumeration is incomplete. The next run will resume from the saved position.",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	}
 	// The per-chat event checkpoints live in the chats STATE, written after
 	// the events and their coverage. A chats-only run carries them forward.
 	let marks: Record<string, ChatCheckpoint> = {};
 	if (wantEvents) {
+		const chunk = resume
+			? {
+					...args,
+					emit: (event: Parameters<CollectInstinctArgs["emit"]>[0]) =>
+						event.type === "DETAIL_COVERAGE"
+							? Promise.resolve()
+							: args.emit(event),
+				}
+			: args;
 		marks = await hydrateChats(
-			args,
+			chunk,
 			chats.map((chat) => chat.id),
 			args.detailGaps,
 			prior,
@@ -2058,8 +2156,18 @@ async function collectChatStreams(args: CollectInstinctArgs): Promise<void> {
 			}
 		}
 	}
+	// Retain marks from earlier chunks until the complete inventory is known.
+	const observed = new Set(chatIds);
+	const retained = resume
+		? prior
+		: Object.fromEntries(
+				Object.entries(prior).filter(([id]) => observed.has(id)),
+			);
 	await args.emit({
-		cursor: { chats: marks },
+		cursor: {
+			chats: { ...retained, ...marks },
+			...(resume ? { chat_list_resume: resume } : {}),
+		},
 		stream: "chats",
 		type: "STATE",
 	});

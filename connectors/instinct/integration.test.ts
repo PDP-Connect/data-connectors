@@ -1081,6 +1081,58 @@ test("a trust-list cursor that comes back again fails the stream instead of the 
 	assert.deepEqual(stateStreams(harness), []);
 });
 
+test("bounded chat enumeration resumes after page twenty and declares full chat coverage only at the end", async () => {
+	const bundle = (await fixture("chats")) as {
+		data: { chats: { chats: Record<string, unknown>[] } };
+	};
+	const sample = bundle.data.chats.chats[0];
+	assert.ok(sample);
+	const visited: (string | null)[] = [];
+	const pages = (variables: Readonly<Record<string, unknown>>) => {
+		const cursor =
+			typeof variables.cursor === "string" ? variables.cursor : null;
+		visited.push(cursor);
+		const page = cursor === null ? 1 : Number(cursor.slice(5)) + 1;
+		return {
+			data: {
+				chats: {
+					chats: [{ ...sample, id: `fixture-chat-${page}` }],
+					cursor: page < 21 ? `page-${page}` : null,
+				},
+			},
+		};
+	};
+	const overrides = {
+		InstinctChats: pages,
+		InstinctChatHistory: {
+			data: { chatHistory: { cursor: null, events: [] } },
+		},
+	};
+	const first = await runChats({ overrides });
+	assert.equal(visited.length, 20);
+	assert.equal(
+		wire(first.harness).some(
+			(event) => event.type === "DETAIL_COVERAGE" && event.stream === "chats",
+		),
+		false,
+	);
+	const resume = chatEventsState(first.harness);
+	assert.ok(resume.chats);
+	const second = await runChats({ state: resume, overrides });
+	assert.equal(visited[20], "page-20");
+	assert.ok(
+		second.harness.emitted.some(
+			(record) =>
+				record.stream === "chats" && record.data.id === "fixture-chat-21",
+		),
+	);
+	assert.ok(
+		wire(second.harness).some(
+			(event) => event.type === "DETAIL_COVERAGE" && event.stream === "chats",
+		),
+	);
+});
+
 test("a chat-list cursor that repeats fails chats and chat_events with no checkpoint", async () => {
 	const chats = (await fixture("chats")) as {
 		data: { chats: { cursor: string | null } };
