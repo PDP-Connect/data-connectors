@@ -128,6 +128,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	buildDetailCoverageMessage,
@@ -195,6 +196,52 @@ export function resolveSigtopBin(env: NodeJS.ProcessEnv = process.env): string {
 	return env.SIGTOP_BIN || "sigtop";
 }
 
+/**
+ * Environment variables the sigtop sidecar may inherit. sigtop decrypts Signal
+ * Desktop's database with a key from the platform keyring (libsecret over the
+ * session D-Bus on Linux, Keychain on macOS, DPAPI on Windows), so it needs the
+ * user/home/session variables below. It must not inherit the rest of the
+ * connector environment, which holds the run-scoped blob upload credential.
+ */
+const SIGTOP_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+	"APPDATA",
+	"DBUS_SESSION_BUS_ADDRESS",
+	"DISPLAY",
+	"HOME",
+	"LANG",
+	"LOCALAPPDATA",
+	"LOGNAME",
+	"PATH",
+	"PROGRAMDATA",
+	"SYSTEMROOT",
+	"TEMP",
+	"TMP",
+	"TMPDIR",
+	"USER",
+	"USERNAME",
+	"USERPROFILE",
+	"WAYLAND_DISPLAY",
+	"WINDIR",
+]);
+const SIGTOP_ENV_PREFIX_ALLOWLIST = ["LC_", "XDG_", "GNOME_KEYRING_"] as const;
+
+export function sigtopChildEnv(
+	env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+	const out: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(env)) {
+		if (value === undefined) continue;
+		const upper = key.toUpperCase();
+		if (
+			SIGTOP_ENV_ALLOWLIST.has(upper) ||
+			SIGTOP_ENV_PREFIX_ALLOWLIST.some((prefix) => upper.startsWith(prefix))
+		) {
+			out[key] = value;
+		}
+	}
+	return out;
+}
+
 export function formatSigtopMissingError(bin: string): string {
 	return [
 		`sigtop binary not found: ${bin}`,
@@ -227,7 +274,10 @@ export function runSigtop(
 	return new Promise((resolve, reject) => {
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+			child = spawn(bin, args, {
+				env: sigtopChildEnv(),
+				stdio: ["ignore", "pipe", "pipe"],
+			});
 		} catch (err) {
 			reject(err instanceof Error ? err : new Error(String(err)));
 			return;
@@ -960,13 +1010,13 @@ function uploadAttachmentBlob(args: {
 	recordKey: string;
 }): Promise<ReferenceBlobRef | null> {
 	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-	const ownerToken = process.env.PDPP_OWNER_TOKEN;
-	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
+	const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && uploadToken)) {
 		return Promise.resolve(null);
 	}
 	const uploader = makeReferenceBlobUploader({
 		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-		ownerToken,
+		uploadToken,
 		rsUrl,
 	});
 	return uploader({
@@ -1068,6 +1118,7 @@ async function resolveAttachmentHydration(
 	id: string,
 	maxBytes: number,
 	exportRoot: string,
+	reportBlobUploadGap: () => Promise<void>,
 ): Promise<AttachmentHydrationResult> {
 	const safe = resolveSafeAttachmentPath(localPath, exportRoot);
 	if (!(safe.ok && safe.path)) {
@@ -1086,6 +1137,7 @@ async function resolveAttachmentHydration(
 		return local;
 	}
 	try {
+		await reportBlobUploadGap();
 		const blobRef = await uploadAttachmentBlob({
 			bytes: local.bytes,
 			mimeType: contentType,
@@ -1116,12 +1168,14 @@ async function emitAttachmentRows({
 	maxBytes,
 	metadataIndex,
 	progress,
+	reportBlobUploadGap,
 }: {
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	exportRoot: string;
 	files: readonly string[];
 	maxBytes: number;
 	metadataIndex: Map<string, AttachmentMetadata>;
+	reportBlobUploadGap: () => Promise<void>;
 	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
 }): Promise<number> {
 	let emitted = 0;
@@ -1136,6 +1190,7 @@ async function emitAttachmentRows({
 			id,
 			maxBytes,
 			exportRoot,
+			reportBlobUploadGap,
 		);
 
 		await emitRecord("attachments", {
@@ -1212,6 +1267,11 @@ async function collectAttachments(ctx: CollectContext): Promise<void> {
 		maxBytes,
 		metadataIndex,
 		progress,
+		reportBlobUploadGap: makeBlobUploadGapReporter({
+			connector: "signal",
+			emit,
+			stream: "attachments",
+		}),
 	});
 	if (emitted === 0) {
 		await emit({

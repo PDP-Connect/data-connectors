@@ -61,6 +61,7 @@
 import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { SaxesParser } from "saxes";
+import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
@@ -1145,13 +1146,13 @@ function makeUploader(): BlobUploader | undefined {
 		return;
 	}
 	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-	const ownerToken = process.env.PDPP_OWNER_TOKEN;
-	if (!(rsUrl && ownerToken)) {
+	const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+	if (!(rsUrl && uploadToken)) {
 		return;
 	}
 	const blobUploader = makeReferenceBlobUploader({
 		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-		ownerToken,
+		uploadToken,
 		rsUrl,
 	});
 	return async (
@@ -1818,6 +1819,8 @@ interface AttachmentRecordEmitterDeps {
 	attachmentCursor: ReturnType<typeof openFingerprintCursor>;
 	coverageByParent: Record<AttachmentParentStream, AttachmentDetailCoverage>;
 	emitRecord: CollectContext["emitRecord"];
+	/** Called when an attachment had no upload attempted (hydration `deferred`). */
+	reportBlobUploadGap: () => Promise<void>;
 }
 
 function createAttachmentRecordEmitter(
@@ -1826,6 +1829,9 @@ function createAttachmentRecordEmitter(
 	return async (data: RecordData): Promise<void> => {
 		const parent = data.message_stream as AttachmentParentStream;
 		recordAttachmentCoverage(deps.coverageByParent[parent], data);
+		if (data.hydration_status === "deferred") {
+			await deps.reportBlobUploadGap();
+		}
 		if (deps.attachmentCursor.shouldEmit(data)) {
 			await deps.emitRecord("attachments", data);
 		}
@@ -2717,6 +2723,11 @@ export async function collect(
 				attachmentCursor,
 				coverageByParent: attachmentCoverageByParent,
 				emitRecord,
+				reportBlobUploadGap: makeBlobUploadGapReporter({
+					connector: "groupme",
+					emit,
+					stream: "attachments",
+				}),
 			})
 		: undefined;
 

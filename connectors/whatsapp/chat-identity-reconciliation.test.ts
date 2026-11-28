@@ -79,7 +79,7 @@ async function runImport(
 		cwd: PACKAGE_ROOT,
 		entrypoint: WHATSAPP_ENTRYPOINT,
 		env: {
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			TZ: "America/Chicago",

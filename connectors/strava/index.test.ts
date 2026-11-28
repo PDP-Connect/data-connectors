@@ -108,7 +108,7 @@ async function run(
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
 		env: {
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			STRAVA_EXPORT_DIR: dir,
@@ -134,7 +134,7 @@ async function runFullRefresh(dir: string, state?: Record<string, unknown>) {
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
 		env: {
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			STRAVA_EXPORT_DIR: dir,

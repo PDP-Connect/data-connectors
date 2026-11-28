@@ -657,7 +657,7 @@ async function driveGoogleMessagesWithMode(
 		env: {
 			GMCLI_BIN: FAKE_GMCLI,
 			FAKE_GMCLI_MODE: mode,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 		},

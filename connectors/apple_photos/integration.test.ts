@@ -44,12 +44,27 @@ function records(
 		.map((m) => m.data);
 }
 
-function skips(
+function allSkips(
 	messages: readonly EmittedMessage[],
 ): Extract<EmittedMessage, { type: "SKIP_RESULT" }>[] {
 	return messages.filter(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT",
+	);
+}
+
+// runApplePhotos gives the connector no blob upload credential, so a run that
+// emits a photo also reports the once-per-run `blob_upload_unavailable` gap.
+// `skips` is the per-file disclosures; `uploadGaps` is that run-level gap.
+function skips(messages: readonly EmittedMessage[]) {
+	return allSkips(messages).filter(
+		(m) => m.reason !== "blob_upload_unavailable",
+	);
+}
+
+function uploadGaps(messages: readonly EmittedMessage[]) {
+	return allSkips(messages).filter(
+		(m) => m.reason === "blob_upload_unavailable",
 	);
 }
 
@@ -83,7 +98,7 @@ function runApplePhotos(
 		entrypoint: ENTRYPOINT,
 		env: {
 			APPLE_PHOTOS_EXPORT_DIR: exportDir,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 		},
@@ -215,6 +230,11 @@ test("apple_photos collects all four additional media extensions", async () => {
 		]);
 		assert.deepEqual(actual.sort(), [...samples].sort());
 		assert.equal(skips(result.messages).length, 0);
+		assert.equal(
+			uploadGaps(result.messages).length,
+			1,
+			"the missing upload credential is reported exactly once for the run",
+		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
@@ -281,6 +301,8 @@ test("apple_photos does not repeat an unsupported skip at or before its returned
 		});
 		assert.equal(records(second.messages, "photos").length, 0);
 		assert.deepEqual(skips(second.messages), []);
+		// Nothing past the cursor qualifies, so the run reports no upload gap.
+		assert.deepEqual(uploadGaps(second.messages), []);
 		assert.match(
 			second.stderr,
 			/coverage \{"files_scanned":1,"reason":"collected","status":"collected","stream":"photos"\}/,
@@ -298,6 +320,7 @@ test("apple_photos treats a .DS_Store-only export as having no unsupported files
 		const result = await runApplePhotos(dir, ["photos"]);
 		assert.equal(records(result.messages, "photos").length, 0);
 		assert.deepEqual(skips(result.messages), []);
+		assert.deepEqual(uploadGaps(result.messages), []);
 		assert.match(
 			result.stderr,
 			/coverage \{"files_scanned":0,"reason":"collected","status":"collected","stream":"photos"\}/,

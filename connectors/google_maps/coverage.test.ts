@@ -60,7 +60,7 @@ async function runImport(
 		entrypoint: ENTRYPOINT,
 		env: {
 			GOOGLE_MAPS_TIMELINE_DIR: importRoot,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 		},

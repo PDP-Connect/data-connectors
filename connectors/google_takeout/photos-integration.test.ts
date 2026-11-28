@@ -74,7 +74,7 @@ async function runTakeoutImport(
 		entrypoint: GOOGLE_TAKEOUT_ENTRYPOINT,
 		env: {
 			GOOGLE_TAKEOUT_DIR: importRoot,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			...env,
@@ -431,7 +431,7 @@ test("photos stream hydrates bytes through the reference blob endpoint", async (
 
 		await withBlobServer(
 			async (req) => {
-				assert.equal(req.headers.authorization, "Bearer owner-token");
+				assert.equal(req.headers.authorization, "Bearer upload-token");
 				assert.equal(req.headers["content-type"], "application/octet-stream");
 				const url = new URL(req.url ?? "", "http://127.0.0.1");
 				assert.equal(url.searchParams.get("mime_type"), "image/jpeg");
@@ -450,7 +450,7 @@ test("photos stream hydrates bytes through the reference blob endpoint", async (
 			},
 			async (baseUrl) => {
 				const { photos } = await runPhotosImport(importRoot, {
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(photos.length, 1);
@@ -485,7 +485,7 @@ test("photos stream marks hydration failed (not fabricated deletion) when blob u
 			}),
 			async (baseUrl) => {
 				const { photos } = await runPhotosImport(importRoot, {
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(
@@ -501,6 +501,47 @@ test("photos stream marks hydration failed (not fabricated deletion) when blob u
 					/IMG_2222|Photos from 2024/,
 				);
 			},
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("photos stream reports once per run that bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-nogap-"));
+	try {
+		const photosDir = join(importRoot, "Photos", "Photos from 2024");
+		await mkdir(photosDir, { recursive: true });
+		await Promise.all(
+			(
+				[
+					["IMG_0001.jpg", TINY_JPEG_A],
+					["IMG_0002.jpg", TINY_JPEG_B],
+				] as const
+			).flatMap(([name, bytes]) => [
+				writeFile(join(photosDir, name), bytes),
+				writeFile(
+					join(photosDir, `${name}.json`),
+					JSON.stringify({ photoTakenTime: { timestamp: "1717600000" } }),
+				),
+			]),
+		);
+		const { messages, photos } = await runPhotosImport(importRoot, {
+			PDPP_OWNER_TOKEN: "legacy-owner-secret",
+			PDPP_RS_URL: "http://rs.local",
+		});
+		assert.equal(photos.length, 2);
+		for (const photo of photos) {
+			assert.equal(photo.hydration_status, "unavailable");
+		}
+		const gaps = skipResults(messages).filter(
+			(s) => s.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per photo");
+		assert.equal(gaps[0]?.stream, "photos");
+		assert.ok(
+			!JSON.stringify(messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
 		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });

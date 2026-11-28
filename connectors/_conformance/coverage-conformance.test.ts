@@ -54,10 +54,11 @@
  *     — see the dedicated capability-pin section): the ONE strategy the
  *     shared oracle excludes from window-bounding, so its numerator must
  *     actually satisfy its denominator. This is the only strategy where
- *     `boundary_shortfall` is reachable, and it is proven here through
- *     GroupMe's real per-attachment hydration accounting (an unconfigured
- *     blob backend leaves `covered < considered`), not a synthetic
- *     envelope. `attachments` is not required, so it cannot appear in the
+ *     `boundary_shortfall` is reachable (the Reddit submitted-stream
+ *     mutation below reaches it through a real run). GroupMe's real per-attachment hydration accounting with an
+ *     unconfigured blob backend leaves `covered < considered` and also emits
+ *     a declared blob_upload_unavailable skip, which the oracle ranks first:
+ *     unresolved_attempt. `attachments` is not required, so it cannot appear in the
  *     aggregate required-stream gate/ratchet below — its proof lives
  *     entirely in the capability-pin tests, the same pattern already used
  *     for Amazon's zero-result and Reddit's malformed pins.
@@ -150,16 +151,19 @@ async function runParentDetailAccountingProbe(): Promise<{
 	const verdict = evaluateStreamCoherence(envelope, {
 		coverage_strategy: "parent_detail_accounting",
 	});
-	if (verdict.reason !== "boundary_shortfall" || verdict.proven !== false) {
+	// The run reports the missing upload credential as a SKIP_RESULT, and the
+	// oracle ranks a declared skip (coherence.ts rule 1) above the numerator
+	// check, so the uncovered attachment reads unresolved_attempt.
+	if (verdict.reason !== "unresolved_attempt" || verdict.proven !== false) {
 		return {
 			ok: false,
-			report: `parent_detail_accounting probe (groupme.attachments) expected proven=false/reason=boundary_shortfall, got proven=${verdict.proven}/reason=${verdict.reason} (envelope: considered=${envelope.considered}, covered=${envelope.covered})`,
+			report: `parent_detail_accounting probe (groupme.attachments) expected proven=false/reason=unresolved_attempt, got proven=${verdict.proven}/reason=${verdict.reason} (envelope: considered=${envelope.considered}, covered=${envelope.covered})`,
 		};
 	}
 	return {
 		ok: true,
 		report:
-			"groupme.attachments: real boundary_shortfall reached (parent_detail_accounting)",
+			"groupme.attachments: uncovered attachment reads unresolved_attempt (parent_detail_accounting)",
 	};
 }
 
@@ -561,7 +565,7 @@ test("verified-coverage conformance: every exercised required stream proves cove
 		if (strategy === "parent_detail_accounting") {
 			// Verified above via the direct probe call, not window-bounding
 			// proof — a bare `provenStrategies.has(...)` check would be the wrong
-			// question for the one strategy where `boundary_shortfall`, not
+			// question for the one strategy where an uncovered attachment, not
 			// `proven: true`, IS the expected/discriminating outcome.
 			continue;
 		}
@@ -1175,7 +1179,7 @@ test("capability: GroupMe's high-volume group walk folds every page and group in
 // REDDIT_MALFORMED_DRIVER already prove claims outside the required-stream
 // loop.
 
-test("capability: GroupMe's real collect() path reaches a genuine boundary_shortfall for parent_detail_accounting when a blob backend is unconfigured", async () => {
+test("capability: GroupMe's real collect() path reads unresolved_attempt for parent_detail_accounting when a blob backend is unconfigured", async () => {
 	const { envelope, verdict } = await runAndEvaluate(
 		GROUPME_ATTACHMENTS_SHORTFALL_DRIVER,
 		"attachments",
@@ -1194,8 +1198,9 @@ test("capability: GroupMe's real collect() path reaches a genuine boundary_short
 	);
 	assert.equal(
 		verdict.reason,
-		"boundary_shortfall",
-		"parent_detail_accounting is excluded from window-bounding — covered < considered must surface as a real shortfall, not enumeration_boundary",
+		"unresolved_attempt",
+		// The missing upload credential is declared as a SKIP_RESULT, and the oracle ranks a declared skip above the covered < considered shortfall.
+		"the declared blob_upload_unavailable skip names the gap, so it outranks boundary_shortfall",
 	);
 });
 

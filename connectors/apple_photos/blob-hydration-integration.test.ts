@@ -94,7 +94,7 @@ async function runApplePhotos(
 		entrypoint: ENTRYPOINT,
 		env: {
 			APPLE_PHOTOS_EXPORT_DIR: exportDir,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			...env,
@@ -118,7 +118,7 @@ test("photos stream hydrates bytes through the reference blob endpoint", async (
 
 		await withBlobServer(
 			async (req) => {
-				assert.equal(req.headers.authorization, "Bearer owner-token");
+				assert.equal(req.headers.authorization, "Bearer upload-token");
 				assert.equal(req.headers["content-type"], "application/octet-stream");
 				const url = new URL(req.url ?? "", "http://127.0.0.1");
 				assert.equal(url.searchParams.get("mime_type"), "image/jpeg");
@@ -137,7 +137,7 @@ test("photos stream hydrates bytes through the reference blob endpoint", async (
 			},
 			async (baseUrl) => {
 				const { photos } = await runApplePhotos(dir, {
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(photos.length, 1);
@@ -168,7 +168,7 @@ test("photos stream marks hydration failed (not fabricated deletion) when blob u
 			}),
 			async (baseUrl) => {
 				const { photos } = await runApplePhotos(dir, {
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(
@@ -234,6 +234,32 @@ test("photos stream dedupes identical-content files discovered under different n
 			ids.size,
 			1,
 			"identical content collapses to a single record id (dedup by content hash)",
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("photos stream reports once per run that bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-apple-photos-nogap-"));
+	try {
+		await writeFile(join(dir, "IMG_1111.jpg"), TINY_JPEG_A);
+		await writeFile(join(dir, "IMG_2222.jpg"), Buffer.from([0xff, 0xd8, 0x01]));
+		const { messages, photos } = await runApplePhotos(dir, {
+			PDPP_OWNER_TOKEN: "legacy-owner-secret",
+			PDPP_RS_URL: "http://rs.local",
+		});
+		assert.equal(photos.length, 2);
+		for (const photo of photos) {
+			assert.equal(photo.hydration_status, "unavailable");
+		}
+		const gaps = messages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per photo");
+		assert.ok(
+			!JSON.stringify(messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
 		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });

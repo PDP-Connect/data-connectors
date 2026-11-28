@@ -70,6 +70,7 @@ import { existsSync } from "node:fs";
 import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
+import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -272,6 +273,12 @@ runConnector({
 		const unsupported = new Map<string, number>();
 		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
 
+		const reportBlobUploadGap = makeBlobUploadGapReporter({
+			connector: "apple_photos",
+			emit,
+			stream: "photos",
+		});
+
 		connectorDiagnostic("apple_photos", "emit_start", {
 			pass: "emit",
 			phase: "emit",
@@ -291,6 +298,9 @@ runConnector({
 				maxBytes,
 				stream: "photos",
 			});
+			if (hydration.hydrationStatus === "unavailable") {
+				await reportBlobUploadGap();
+			}
 			const record = buildPhotoRecord(file, filename, hydration);
 			latest = advanceCursor(latest, file.mtimeIso);
 			await emitRecord("photos", { ...record });

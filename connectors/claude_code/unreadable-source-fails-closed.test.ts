@@ -48,7 +48,7 @@ async function runSkills(home: string): Promise<{
 			CLAUDE_CODE_HOME: home,
 			CLAUDE_CODE_PROJECTS_DIR: join(home, "projects"),
 			HOME: home,
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 		},

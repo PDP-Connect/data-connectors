@@ -73,6 +73,7 @@ import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { makeBlobUploadGapReporter } from "../../packages/polyfill-connectors/src/blob-upload-gap.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type EmittedMessage,
@@ -445,13 +446,13 @@ function uploadAttachmentBlob(args: {
 	recordKey: string;
 }): Promise<ReferenceBlobRef | null> {
 	const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-	const ownerToken = process.env.PDPP_OWNER_TOKEN;
-	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
+	const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+	if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && uploadToken)) {
 		return Promise.resolve(null);
 	}
 	const uploader = makeReferenceBlobUploader({
 		connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-		ownerToken,
+		uploadToken,
 		rsUrl,
 	});
 	return uploader({
@@ -602,6 +603,7 @@ async function resolveAttachmentHydration(
 	id: string,
 	maxBytes: number,
 	attachmentsRoot: string,
+	reportBlobUploadGap: () => Promise<void>,
 ): Promise<AttachmentHydrationResult> {
 	if (!r.filename) {
 		return {
@@ -642,6 +644,7 @@ async function resolveAttachmentHydration(
 		return local;
 	}
 	try {
+		await reportBlobUploadGap();
 		const blobRef = await uploadAttachmentBlob({
 			bytes: local.bytes,
 			mimeType: contentType,
@@ -671,11 +674,13 @@ async function emitAttachmentRows({
 	emitRecord,
 	maxBytes,
 	progress,
+	reportBlobUploadGap,
 }: {
 	attachmentsRoot: string;
 	db: DatabaseSync;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	maxBytes: number;
+	reportBlobUploadGap: () => Promise<void>;
 	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
 }): Promise<number> {
 	if (
@@ -701,6 +706,7 @@ async function emitAttachmentRows({
 			id,
 			maxBytes,
 			attachmentsRoot,
+			reportBlobUploadGap,
 		);
 
 		await emitRecord("attachments", {
@@ -856,6 +862,11 @@ if (isMainModule(import.meta.url)) {
 					emitRecord,
 					maxBytes,
 					progress,
+					reportBlobUploadGap: makeBlobUploadGapReporter({
+						connector: "imessage",
+						emit,
+						stream: "attachments",
+					}),
 				});
 				if (emitted === 0 && !hasAttachmentTables) {
 					await emit({

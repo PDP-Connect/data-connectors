@@ -193,7 +193,7 @@ async function run(
 	const originalFetch = globalThis.fetch;
 	const originalEnv = {
 		PDPP_RS_URL: process.env.PDPP_RS_URL,
-		PDPP_OWNER_TOKEN: process.env.PDPP_OWNER_TOKEN,
+		PDPP_BLOB_UPLOAD_TOKEN: process.env.PDPP_BLOB_UPLOAD_TOKEN,
 	};
 	process.stdout.write = ((data: string) => {
 		if (opts.failWrite?.(data)) throw new Error("gap persistence unavailable");
@@ -206,7 +206,7 @@ async function run(
 	}) as typeof process.stdout.write;
 	globalThis.fetch = blobEndpoint;
 	process.env.PDPP_RS_URL = "http://rs.test";
-	process.env.PDPP_OWNER_TOKEN = "test-owner-token";
+	process.env.PDPP_BLOB_UPLOAD_TOKEN = "test-upload-token";
 	try {
 		const filters = new Map<string, Set<string> | null>();
 		for (const [name, scope] of streams) filters.set(name, resourceSet(scope));

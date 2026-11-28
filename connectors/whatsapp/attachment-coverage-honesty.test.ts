@@ -128,7 +128,7 @@ test("WhatsApp attachments - media that fails to extract reads as a coverage sho
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				TZ: "America/Chicago",
@@ -172,18 +172,31 @@ test("WhatsApp attachments - media that fails to extract reads as a coverage sho
 			"an export with unreadable media must not report full coverage",
 		);
 
-		const skipResults = result.messages.filter(
+		// This run has no blob upload credential, so the connector also reports
+		// its once-per-run `blob_upload_unavailable` gap. Count only the
+		// per-file extraction-failure disclosures here.
+		const attachmentSkips = result.messages.filter(
 			(message) =>
 				message.type === "SKIP_RESULT" && message.stream === "attachments",
 		);
+		const mediaSkips = attachmentSkips.filter(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason !== "blob_upload_unavailable",
+		);
 		assert.equal(
-			skipResults.length,
+			mediaSkips.length,
 			1,
 			"the skipped media file is still disclosed as a SKIP_RESULT",
 		);
 		assert.equal(
-			skipResults[0]?.type === "SKIP_RESULT"
-				? skipResults[0].reason
+			attachmentSkips.length - mediaSkips.length,
+			1,
+			"the missing upload credential is reported exactly once for the run",
+		);
+		assert.equal(
+			mediaSkips[0]?.type === "SKIP_RESULT"
+				? mediaSkips[0].reason
 				: undefined,
 			"media_exceeds_bounded_read_policy",
 		);
@@ -210,7 +223,7 @@ test("WhatsApp attachments - a fully readable export still proves full coverage"
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				TZ: "America/Chicago",
@@ -242,10 +255,14 @@ test("WhatsApp attachments - a fully readable export still proves full coverage"
 			).length,
 			2,
 		);
+		// The run-level blob_upload_unavailable gap is expected here: this run has
+		// no upload credential. No media file may be skipped.
 		assert.equal(
 			result.messages.some(
 				(message) =>
-					message.type === "SKIP_RESULT" && message.stream === "attachments",
+					message.type === "SKIP_RESULT" &&
+					message.stream === "attachments" &&
+					message.reason !== "blob_upload_unavailable",
 			),
 			false,
 		);

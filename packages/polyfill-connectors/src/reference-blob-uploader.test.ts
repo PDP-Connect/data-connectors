@@ -11,6 +11,7 @@ import type { AttachmentRecord } from "../../../connectors/gmail/types.ts";
 import {
 	makeReferenceBlobUploader,
 	ReferenceBlobUploadFailure,
+	runtimeBlobUploadAvailable,
 } from "./reference-blob-uploader.ts";
 
 const baseArgs = {
@@ -73,7 +74,7 @@ function composedHydrator(
 ) {
 	const uploadBlob = makeReferenceBlobUploader({
 		fetchFn,
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 	});
 	return makeAttachmentHydrator({
@@ -112,7 +113,7 @@ test("makeReferenceBlobUploader: classifies transport and HTTP response families
 	for (const { fetchFn, cause, kind } of cases) {
 		const upload = makeReferenceBlobUploader({
 			fetchFn,
-			ownerToken: "test-token",
+			uploadToken: "test-token",
 			rsUrl: "https://pdpp.example.test",
 		});
 		await assert.rejects(
@@ -149,7 +150,7 @@ test("makeReferenceBlobUploader: extracts the real message from the RI host's ob
 				}),
 				{ status: 503 },
 			),
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 	});
 	await assert.rejects(
@@ -170,7 +171,7 @@ test("makeReferenceBlobUploader: classifies invalid successful responses and int
 	const invalidResponseUpload = makeReferenceBlobUploader({
 		fetchFn: async () =>
 			new Response(JSON.stringify({ object: "not-a-blob" }), { status: 200 }),
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 	});
 	await assert.rejects(
@@ -195,7 +196,7 @@ test("makeReferenceBlobUploader: classifies invalid successful responses and int
 				{ status: 200 },
 			);
 		},
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 	});
 	await assert.rejects(
@@ -233,7 +234,7 @@ test("makeReferenceBlobUploader: transports exact bytes separately from their de
 				{ status: 200 },
 			);
 		},
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 	});
 
@@ -254,7 +255,7 @@ test("makeReferenceBlobUploader: classifies source stream failures separately fr
 			await consumeBody(init as RequestInit);
 			return new Response(null, { status: 200 });
 		},
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 	});
 	await assert.rejects(
@@ -391,7 +392,7 @@ test("makeAttachmentHydrator + makeReferenceBlobUploader: preserves streamed siz
 
 test("makeReferenceBlobUploader: source proximity never replaces an independent transport cause", async () => {
 	const upload = makeReferenceBlobUploader({
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 		fetchFn: async (_input, init) => {
 			const reader = requestBody(init).getReader();
@@ -445,7 +446,7 @@ test("makeReferenceBlobUploader: source proximity never replaces an independent 
 	};
 	const transportAfterSource = new Error("transport after source marker");
 	const uploadAfterSource = makeReferenceBlobUploader({
-		ownerToken: "test-token",
+		uploadToken: "test-token",
 		rsUrl: "https://pdpp.example.test",
 		fetchFn: async (_input, init) => {
 			const reader = requestBody(init).getReader();
@@ -462,5 +463,27 @@ test("makeReferenceBlobUploader: source proximity never replaces an independent 
 			assert.equal(err.message, "transport after source marker");
 			return true;
 		},
+	);
+});
+
+test("runtimeBlobUploadAvailable requires the run-scoped upload token", () => {
+	assert.equal(
+		runtimeBlobUploadAvailable({
+			PDPP_RS_URL: "http://rs.local",
+			PDPP_BLOB_UPLOAD_TOKEN: "run-scoped-token",
+		}),
+		true,
+	);
+});
+
+test("runtimeBlobUploadAvailable reports unavailable when only the retired owner-token variable is set", () => {
+	// A stale runtime that still hands out the old variable must be visible as
+	// "blob upload unavailable", not silently accepted.
+	assert.equal(
+		runtimeBlobUploadAvailable({
+			PDPP_RS_URL: "http://rs.local",
+			PDPP_OWNER_TOKEN: "stale-owner-token",
+		}),
+		false,
 	);
 });

@@ -90,7 +90,7 @@ test("a .txt export rewritten (same size, new mtime) between pass 1 and pass 2 f
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				PDPP_TEST_TXT_TOCTOU_BARRIER_DIR: importRoot,
 				RS_URL: "",
@@ -148,7 +148,7 @@ test("a .txt export left UNCHANGED between pass 1 and pass 2 (barrier active, no
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				PDPP_TEST_TXT_TOCTOU_BARRIER_DIR: importRoot,
 				RS_URL: "",

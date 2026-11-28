@@ -124,7 +124,7 @@ async function runWhatsAppImport(
 		cwd: PACKAGE_ROOT,
 		entrypoint: WHATSAPP_ENTRYPOINT,
 		env: {
-			PDPP_OWNER_TOKEN: "",
+			PDPP_BLOB_UPLOAD_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
 			TZ: "America/Chicago",
@@ -304,7 +304,7 @@ test("WhatsApp rejected exports stay in the chat denominator but out of coverage
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				TZ: "America/Chicago",
@@ -382,7 +382,7 @@ test("WhatsApp connector reports unsupported scoped imports on a declared stream
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				WHATSAPP_EXPORT_DIR: importRoot,
@@ -423,7 +423,7 @@ test("WhatsApp connector's collect() rejects an export past the message-count ca
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				WHATSAPP_EXPORT_DIR: importRoot,
@@ -465,7 +465,7 @@ test("WhatsApp connector hydrates zip media through the reference blob endpoint"
 		await writeMediaZip(importRoot);
 		await withBlobServer(
 			async (req) => {
-				assert.equal(req.headers.authorization, "Bearer owner-token");
+				assert.equal(req.headers.authorization, "Bearer upload-token");
 				assert.equal(req.headers["content-type"], "application/octet-stream");
 				assert.equal(req.url?.startsWith("/v1/blobs?"), true);
 				const url = new URL(req.url ?? "", "http://127.0.0.1");
@@ -499,7 +499,7 @@ test("WhatsApp connector hydrates zip media through the reference blob endpoint"
 			async (baseUrl) => {
 				const { attachment } = await runWhatsAppImport(importRoot, {
 					PDPP_CONNECTOR_INSTANCE_ID: "cin_whatsapp_media",
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(attachment.hydration_status, "hydrated");
@@ -528,7 +528,7 @@ test("WhatsApp connector marks media hydration failed when blob upload fails", a
 			}),
 			async (baseUrl) => {
 				const { attachment } = await runWhatsAppImport(importRoot, {
-					PDPP_OWNER_TOKEN: "owner-token",
+					PDPP_BLOB_UPLOAD_TOKEN: "upload-token",
 					PDPP_RS_URL: baseUrl,
 				});
 				assert.equal(attachment.hydration_status, "failed");
@@ -538,6 +538,53 @@ test("WhatsApp connector marks media hydration failed when blob upload fails", a
 					/500.*synthetic upload failure/,
 				);
 			},
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("WhatsApp reports once per run that attachment bytes were not uploaded when the runtime gave no blob upload credential", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-whatsapp-media-"));
+	try {
+		const stagedDir = join(importRoot, "artifact_123");
+		await mkdir(stagedDir, { recursive: true });
+		await writeFile(
+			join(stagedDir, "Alice export.zip"),
+			makeStoredZip([
+				{ name: "WhatsApp Chat - Alice.txt", data: VALID_EXPORT },
+				{ name: "IMG-20240605-WA0001.jpg", data: Buffer.from([1, 2, 3, 4]) },
+				{ name: "IMG-20240605-WA0002.jpg", data: Buffer.from([5, 6, 7, 8]) },
+			]),
+		);
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint: WHATSAPP_ENTRYPOINT,
+			env: {
+				PDPP_BLOB_UPLOAD_TOKEN: "",
+				PDPP_OWNER_TOKEN: "legacy-owner-secret",
+				PDPP_RS_URL: "http://rs.local",
+				RS_URL: "",
+				TZ: "America/Chicago",
+				WHATSAPP_EXPORT_DIR: importRoot,
+			},
+			start: {
+				scope: { streams: [{ name: "chats" }, { name: "attachments" }] },
+				type: "START",
+			},
+		});
+		assert.equal(records(result.messages, "attachments").length, 2);
+		const gaps = result.messages.filter(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "blob_upload_unavailable",
+		);
+		assert.equal(gaps.length, 1, "exactly one gap per run, not per attachment");
+		assert.equal(
+			gaps[0]?.type === "SKIP_RESULT" ? gaps[0].stream : null,
+			"attachments",
+		);
+		assert.ok(
+			!JSON.stringify(result.messages).includes("legacy-owner-secret"),
+			"token value leaked into the protocol stream",
 		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });

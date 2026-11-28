@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { canary, canaryReplacementText, locateCanary } from "./canary.mjs";
 import { verifyInvocation } from "./evidence.mjs";
 
-const anchor = { line: 1491, column: 23 };
+const anchor = { line: 1492, column: 23 };
 const owner = canary.owner;
 const nativeOther = "connectors/groupme/index.test.ts";
 
@@ -34,7 +34,7 @@ function invocation(overrides = {}) {
 			id: "0",
 			mutatorName: "ConditionalExpression",
 			replacement: "true",
-			location: location(1491, 7, 56),
+			location: location(1492, 7, 56),
 			status: "Survived",
 			testsCompleted: 7,
 			killedBy: [],
@@ -322,7 +322,7 @@ test("missing or duplicate Stryker lifecycle events fail closed", () => {
 });
 
 test("the canary must still name exactly one operator in the production source", () => {
-	const wrongLine = invocation({ anchor: { line: 1492, column: 23 } });
+	const wrongLine = invocation({ anchor: { line: 1493, column: 23 } });
 	assert.throws(
 		() => verifyInvocation(wrongLine),
 		/canary identity matched 0 mutants/,
@@ -336,9 +336,9 @@ test("the canary anchor occurs exactly once in the real production source", () =
 		),
 		"utf8",
 	);
-	assert.deepEqual(locateCanary(source), { line: 1491, column: 23 });
+	assert.deepEqual(locateCanary(source), { line: 1492, column: 23 });
 	assert.throws(
-		() => locateCanary(source + "\n" + source.split("\n")[1490]),
+		() => locateCanary(source + "\n" + source.split("\n")[1491]),
 		/exactly once/,
 	);
 });

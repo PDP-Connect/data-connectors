@@ -132,7 +132,7 @@ test("a large synthetic WhatsApp .txt export (well past the old 1 GiB cap) parse
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				TZ: "America/Chicago",
@@ -272,7 +272,7 @@ test("outcome proof (H3): a zip export with 250 MiB of media attachments never p
 			cwd: PACKAGE_ROOT,
 			entrypoint: WHATSAPP_ENTRYPOINT,
 			env: {
-				PDPP_OWNER_TOKEN: "",
+				PDPP_BLOB_UPLOAD_TOKEN: "",
 				PDPP_RS_URL: "",
 				RS_URL: "",
 				TZ: "America/Chicago",
