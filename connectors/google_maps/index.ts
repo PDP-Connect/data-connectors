@@ -483,6 +483,13 @@ function discoveryFailureMessage(reason: DiscoveryIncompleteReason): string {
 	}
 }
 
+function readTimelineWatermark(value: unknown): string | undefined {
+	if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(value))
+		return undefined;
+	const time = Date.parse(value);
+	return Number.isFinite(time) ? new Date(time).toISOString() : undefined;
+}
+
 async function loadExports(
 	ctx: CollectContext,
 	importDir: string,
@@ -492,8 +499,24 @@ async function loadExports(
 	const { files } = discovery;
 	const requestedPoints = ctx.requested.has("timeline_points");
 	const requestedSegments = ctx.requested.has("timeline_segments");
-	const pointSince = state.timeline_points?.last_timestamp;
-	const segmentSince = state.timeline_segments?.last_start_time;
+	const rawPoint = state.timeline_points?.last_timestamp;
+	const rawSegment = state.timeline_segments?.last_start_time;
+	const pointSince = readTimelineWatermark(rawPoint);
+	const segmentSince = readTimelineWatermark(rawSegment);
+	if (requestedPoints && rawPoint !== undefined && pointSince === undefined) {
+		connectorDiagnostic("google_maps", "invalid_checkpoint", {
+			stream: "timeline_points",
+		});
+	}
+	if (
+		requestedSegments &&
+		rawSegment !== undefined &&
+		segmentSince === undefined
+	) {
+		connectorDiagnostic("google_maps", "invalid_checkpoint", {
+			stream: "timeline_segments",
+		});
+	}
 	const summary: LoadSummary = {
 		complete: discovery.complete,
 		latestPoint: pointSince,
@@ -584,11 +607,13 @@ async function finishPoints(
 	if (!summary.complete) {
 		return;
 	}
-	await ctx.emit({
-		type: "STATE",
-		stream: "timeline_points",
-		cursor: { last_timestamp: summary.latestPoint },
-	});
+	if (summary.pointsUnaccounted === 0) {
+		await ctx.emit({
+			type: "STATE",
+			stream: "timeline_points",
+			cursor: { last_timestamp: summary.latestPoint },
+		});
+	}
 	// Artifact reconciliation, NOT an account-completeness claim. The denominator
 	// is every point element the parser produced from the uploaded file —
 	// accounted-for plus unaccountable — measured at the parse site. The numerator
