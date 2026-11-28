@@ -211,7 +211,8 @@ function integerOrNull(value: string | undefined): number | null {
 function numberOrNull(value: string | undefined): number | null {
 	const text = cleanText(value);
 	if (text === null || !NUMBER_RE.test(text)) return null;
-	return Number(text);
+	const n = Number(text);
+	return Number.isFinite(n) ? n : null;
 }
 
 /** "Your Stars" is -1 when the owner gave no stars. */
