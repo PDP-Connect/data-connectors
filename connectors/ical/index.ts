@@ -19,24 +19,28 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+	type CollectContext,
 	type EmittedMessage,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isMainModule } from "@pdpp/connector-protocol";
 import {
 	advanceCursor,
 	buildEventRecord,
+	hashId,
 	ICS_EXT_RE,
 	isBeforeCursor,
 	parseIcs,
 	RETRYABLE_FETCH_RE,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
-import type { IcalState, IcsSource } from "./types.ts";
+import type { IcsSource } from "./types.ts";
+type CheckpointSource = IcsSource & { checkpointKey: string };
 
-async function fetchIcs(url: string): Promise<string> {
-	const res = await fetch(url);
+async function fetchIcs(url: string, fetchImpl: typeof fetch): Promise<string> {
+	const res = await fetchImpl(url);
 	if (!res.ok) {
-		throw new Error(`ics_fetch_${res.status}: ${url}`);
+		throw new Error(`ics_fetch_${res.status}`);
 	}
 	return res.text();
 }
@@ -46,8 +50,8 @@ async function fetchIcs(url: string): Promise<string> {
  * Silently swallows read errors — matches the prior inline try/catch
  * behavior in collect() before decomposition.
  */
-async function loadLocalSources(dir: string): Promise<IcsSource[]> {
-	const sources: IcsSource[] = [];
+async function loadLocalSources(dir: string): Promise<CheckpointSource[]> {
+	const sources: CheckpointSource[] = [];
 	if (!existsSync(dir)) {
 		return sources;
 	}
@@ -56,10 +60,16 @@ async function loadLocalSources(dir: string): Promise<IcsSource[]> {
 			f.toLowerCase().endsWith(".ics"),
 		);
 		for (const f of files) {
-			sources.push({
-				name: f.replace(ICS_EXT_RE, ""),
-				text: await readFile(join(dir, f), "utf8"),
-			});
+			const file = join(dir, f);
+			try {
+				sources.push({
+					checkpointKey: hashId("file:" + file),
+					name: f.replace(ICS_EXT_RE, ""),
+					text: await readFile(file, "utf8"),
+				});
+			} catch {
+				// Keep this file's checkpoint and continue with independent files.
+			}
 		}
 	} catch {
 		/* ignore — fall through with whatever we collected */
@@ -74,19 +84,20 @@ async function loadLocalSources(dir: string): Promise<IcsSource[]> {
 async function loadSubscriptionSources(
 	urls: readonly string[],
 	emit: (msg: EmittedMessage) => Promise<void>,
-): Promise<IcsSource[]> {
-	const sources: IcsSource[] = [];
+	fetchImpl: typeof fetch,
+): Promise<CheckpointSource[]> {
+	const sources: CheckpointSource[] = [];
 	for (const url of urls) {
 		try {
-			const text = await fetchIcs(url);
-			sources.push({ name: new URL(url).hostname, text });
-		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
+			const sourceUrl = new URL(url);
+			const text = await fetchIcs(url, fetchImpl);
+			sources.push({ checkpointKey: hashId("url:" + sourceUrl.href), name: sourceUrl.hostname, text });
+		} catch {
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "events",
 				reason: "ics_fetch_failed",
-				message: msg,
+				message: "An iCal subscription could not be fetched.",
 			});
 		}
 	}
@@ -127,43 +138,48 @@ async function emitEventsFromSource(
 	}
 }
 
-runConnector({
-	name: "ical",
-	retryablePattern: RETRYABLE_FETCH_RE,
-	validateRecord,
-	async collect({ state, emit, emitRecord, progress }) {
-		const dir =
-			process.env.ICAL_IMPORT_DIR || join(homedir(), ".pdpp/imports/ical");
-		const subscriptionUrls = readSubscriptionUrls();
+export async function collectIcal(
+	{ state, emit, emitRecord, progress }: Pick<CollectContext, "state" | "emit" | "emitRecord" | "progress">,
+	{ dir = process.env.ICAL_IMPORT_DIR || join(homedir(), ".pdpp/imports/ical"),
+		subscriptionUrls = readSubscriptionUrls(), fetchImpl = fetch } = {},
+): Promise<void> {
+	const localSources = await loadLocalSources(dir);
+	const remoteSources = await loadSubscriptionSources(subscriptionUrls, emit, fetchImpl);
+	const sources = [...localSources, ...remoteSources];
 
-		const localSources = await loadLocalSources(dir);
-		const remoteSources = await loadSubscriptionSources(subscriptionUrls, emit);
-		const sources = [...localSources, ...remoteSources];
-
-		if (!sources.length) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "events",
-				reason: "no_calendar_sources",
-				message: `no .ics files in ${dir} and no ICAL_SUBSCRIPTION_URL set`,
-			});
-			return;
-		}
-
-		const typedState = state as IcalState;
-		const cursor: EventCursor = {
-			since: typedState.events?.latest_start,
-			latest: typedState.events?.latest_start,
-		};
-
-		for (const src of sources) {
-			await emitEventsFromSource(src, cursor, emitRecord, progress);
-		}
-
+	if (!sources.length) {
 		await emit({
-			type: "STATE",
+			type: "SKIP_RESULT",
 			stream: "events",
-			cursor: { latest_start: cursor.latest },
+			reason: "no_calendar_sources",
+			message: "No readable .ics exports or subscription feeds were available.",
 		});
-	},
-});
+		return;
+	}
+
+	const eventState = state.events;
+	const prior = eventState && typeof eventState === "object" ? Reflect.get(eventState, "per_source") : undefined;
+	const perSource: Record<string, string> = {};
+	if (prior && typeof prior === "object" && !Array.isArray(prior)) {
+		for (const [id, value] of Object.entries(prior)) {
+			if (/^[a-f0-9]{24}$/.test(id) && typeof value === "string" && Number.isFinite(Date.parse(value))) {
+				perSource[id] = value;
+			}
+		}
+	}
+
+	// A legacy global cursor cannot prove which feed was read. Re-read each
+	// feed once when it first succeeds, then use only its own watermark.
+	for (const src of sources) {
+		const since = perSource[src.checkpointKey];
+		const cursor: EventCursor = { since, latest: since };
+		await emitEventsFromSource(src, cursor, emitRecord, progress);
+		if (cursor.latest !== undefined) perSource[src.checkpointKey] = cursor.latest;
+	}
+	await emit({ type: "STATE", stream: "events", cursor: { per_source: perSource } });
+}
+
+if (isMainModule(import.meta.url)) {
+	runConnector({ name: "ical", retryablePattern: RETRYABLE_FETCH_RE, validateRecord,
+		collect: (ctx) => collectIcal(ctx) });
+}

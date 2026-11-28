@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { collectIcal } from "./index.ts";
 import {
 	ALL_DAY_ICS,
 	BASIC_ICS,
@@ -24,6 +25,34 @@ import {
 import type { IcsEvent } from "./types.ts";
 
 // ─── parseIcsDate ───────────────────────────────────────────────────────
+
+test("calendar feeds keep independent checkpoints across failure and recovery", async () => {
+	const a = "https://fixture.invalid/feed-a", b = "https://fixture.invalid/feed-b";
+	const calendar = (uid: string, start: string) => [
+		"BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT", "UID:" + uid,
+		"DTSTART:" + start, "SUMMARY:" + uid, "END:VEVENT", "END:VCALENDAR",
+	].join("\r\n");
+	let failA = true;
+	const subscriptions = [a, b];
+	const fetchImpl: typeof fetch = async (input) => String(input) === a
+		? (failA ? new Response(null, { status: 503 }) : new Response(calendar("a", "20260601T120000Z")))
+		: new Response(calendar("b", "20260603T120000Z"));
+	let state: Record<string, unknown> = { events: { latest_start: "2026-06-02T00:00:00Z" } };
+	const run = async () => {
+		const events: string[] = [];
+		await collectIcal({
+			state,
+			emit: async (message) => { if (message.type === "STATE") state = { events: message.cursor }; },
+			emitRecord: async (_stream, event) => { events.push(String(event.summary)); },
+			progress: async () => {},
+		}, { dir: "/path/that/cannot/exist/fixture-ical", subscriptionUrls: subscriptions, fetchImpl });
+		return events;
+	};
+	assert.deepEqual(await run(), ["b"]);
+	failA = false;
+	assert.deepEqual(await run(), ["a"]);
+	assert.deepEqual(await run(), []);
+});
 
 test("parseIcsDate: UTC datetime → ISO Z", () => {
 	assert.equal(parseIcsDate("20240605T130000Z", false), "2024-06-05T13:00:00Z");
