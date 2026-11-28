@@ -407,13 +407,20 @@ interface ConnectionsResult {
 	total: number | null;
 }
 
+export const pageShimStructuredProgress = true;
+
+type LinkedInProgress = (
+	message: string,
+	extra?: ProgressExtra & { phase?: "connections" | "connection_profiles" },
+) => Promise<void>;
+
 /** Walk the owner's connections list and retain why the walk stopped.
  *  Empty/short pages and paging totals are observations, never inventory proof.
  *  Stable owner summaries, distinct emitted URNs, and an independent empty
  *  confirmation at the summary total are required by connectionEvidence. */
 async function fetchConnections(
 	page: Page,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+	progress: LinkedInProgress,
 	capture?: CaptureSession | null,
 ): Promise<ConnectionsResult> {
 	const elements: VoyagerConnectionElement[] = [];
@@ -535,6 +542,7 @@ async function fetchConnections(
 		if (missingUrn) return finish("malformed_page");
 		await progress("Fetched LinkedIn connections page", {
 			count: elements.length,
+			phase: "connections",
 			stream: "connections",
 			...(total === null ? {} : { total }),
 		});
@@ -556,7 +564,7 @@ async function fetchConnections(
 async function resolveConnectionProfiles(
 	page: Page,
 	memberUrns: string[],
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+	progress: LinkedInProgress,
 	capture?: CaptureSession | null,
 ): Promise<ConnectionProfileResolution> {
 	const resolved = new Map<string, ResolvedConnectionProfile>();
@@ -685,6 +693,7 @@ async function resolveConnectionProfiles(
 
 		await progress("Resolved LinkedIn connection profiles", {
 			count: resolved.size,
+			phase: "connection_profiles",
 			stream: "connections",
 			total: memberUrns.length,
 		});
@@ -811,7 +820,22 @@ export async function collectLinkedInPageShim(ctx: BrowserCollectContext): Promi
 export async function collectLinkedIn(
 	ctx: BrowserCollectContext,
 ): Promise<void> {
-	const { capture, emit, emitRecord, page, progress, requested } = ctx;
+	const { capture, emit, emitRecord, page, requested } = ctx;
+	const connectionScope = requested.get("connections");
+	// Voyager pages through the account-wide list. A narrowed grant does not
+	// provide a comparable denominator for the records selected by the runtime.
+	const publishConnectionCounts =
+		connectionScope !== undefined &&
+		connectionScope.resources === undefined &&
+		connectionScope.time_range === undefined;
+	const emitProgress: LinkedInProgress = ctx.progress;
+	const progress: LinkedInProgress = (message, extra) =>
+		!publishConnectionCounts && extra?.stream === "connections"
+			? emitProgress(message, {
+					stream: extra.stream,
+					...(extra.phase === undefined ? {} : { phase: extra.phase }),
+				})
+			: emitProgress(message, extra);
 
 	await page
 		.goto(LINKEDIN_FEED_URL, {
@@ -885,7 +909,10 @@ export async function collectLinkedIn(
 	if (wantsProfileFields || wantsConnections) {
 		beforeSummary = summaryEvidence(await voyagerFetch(page,
 			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-before"), meResult);
-		await progress("Fetching LinkedIn connections", { stream: "connections" });
+		await progress("Fetching LinkedIn connections", {
+			phase: "connections",
+			stream: "connections",
+		});
 		connectionsResult = await fetchConnections(page, progress, capture);
 		if (beforeSummary.total !== undefined && beforeSummary.total <= CONNECTIONS_MAX) {
 			confirmation = await voyagerFetch(page,
@@ -980,6 +1007,10 @@ export async function collectLinkedIn(
 		const memberUrns = elements
 			.map((e) => e.connectedMember)
 			.filter((u): u is string => typeof u === "string" && u.trim().length > 0);
+		await progress("Resolving LinkedIn connection profiles", {
+			phase: "connection_profiles",
+			stream: "connections",
+		});
 		const resolution = await resolveConnectionProfiles(
 			page,
 			memberUrns,

@@ -486,13 +486,25 @@ test("the real runtime: a failed run keeps a healthy sibling's records", async (
 	}
 });
 
-test("resource selection of connections does not become missing enrichment", async () => {
+test("resource selection does not report missing enrichment or account-wide progress", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const ctx = buildCtx(["connections"], recording, (path) => {
 		if (path.includes("connectionsSummary")) return { ...PROOF_SUMMARY, numConnections: 2 };
 		if (path.includes("/connections?")) {
 			const start = new URL(path, "https://www.linkedin.com").searchParams.get("start");
-			return { elements: start === "0" ? [CONNECTIONS_PAGE_1.elements[0], { connectedMember: "urn:li:fsd_profile:conn-2", createdAt: 1_700_000_000_000 }] : [] };
+			return {
+				elements:
+					start === "0"
+						? [
+								CONNECTIONS_PAGE_1.elements[0],
+								{
+									connectedMember: "urn:li:fsd_profile:conn-2",
+									createdAt: 1_700_000_000_000,
+								},
+							]
+						: [],
+				paging: { start: Number(start), count: 40, total: 2 },
+			};
 		}
 		if (path.includes("profiles?ids=")) return { results: { ...RESOLVED_PROFILES.results,
 			"urn:li:fsd_profile:conn-2": { ...RESOLVED_PROFILES.results["urn:li:fsd_profile:conn-1"], publicIdentifier: "other" } } };
@@ -504,8 +516,34 @@ test("resource selection of connections does not become missing enrichment", asy
 		emittedAt: EMITTED_AT, validateRecord, isTombstone: undefined, timeRangeFieldFor: () => null });
 	ctx.emitRecord = gate.emit;
 	ctx.isRecordSelected = gate.isSelected;
+	const progress: Array<{ message: string; count?: number; total?: number }> =
+		[];
+	ctx.progress = async (message, extra) => {
+		if (extra?.stream === "connections") progress.push({ message, ...extra });
+	};
 	await collectLinkedIn(ctx);
-	assert.deepEqual(messages.filter(message => message.type === "RECORD").map(message => message.data.id), ["urn:li:fsd_profile:conn-1"]);
+	assert.ok(
+		progress.some(
+			({ message }) => message === "Fetched LinkedIn connections page",
+		),
+	);
+	assert.ok(
+		progress.some(
+			({ message }) => message === "Resolved LinkedIn connection profiles",
+		),
+	);
+	assert.ok(
+		progress.every(
+			({ count, total }) => count === undefined && total === undefined,
+		),
+		"a narrowed grant never publishes the account-wide counts",
+	);
+	assert.deepEqual(
+		messages
+			.filter((message) => message.type === "RECORD")
+			.map((message) => message.data.id),
+		["urn:li:fsd_profile:conn-1"],
+	);
 	assert.deepEqual(skipResults(recording), []);
 	assert.equal(recording.protocolMessages.some(message => message.type === "STATE"), false);
 });

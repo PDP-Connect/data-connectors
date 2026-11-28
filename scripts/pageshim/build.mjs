@@ -335,6 +335,7 @@ const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "
 ) =>
   runOnPageShim(page, {
     ...config,
+    structuredProgress: (implementation as Record<string, unknown>).pageShimStructuredProgress === true,
     validateRecord: validateRecord as never,
     probe: (pw) => probe(pw as never),
     prepareRequested: (requested) => applyRequestedScopeEntries(
