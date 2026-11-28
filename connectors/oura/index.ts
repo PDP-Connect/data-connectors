@@ -39,6 +39,7 @@ import { validateRecord } from "./schemas.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
 const MAX_PAGES = 100;
+const RETRYABLE_ERROR_PATTERN = /rate_limited|ECONN|fetch failed/i;
 
 // Single per-provider send governor + retry layer (shared convergence
 // primitive). `maxAttempts: 1` keeps today's behavior byte-identical: a 429
@@ -216,9 +217,10 @@ async function fetchAll<T>(
 				params.next_token = nextToken;
 			}
 			const json = await oura<T>(governor, endpoint, token, params);
-			if (Array.isArray(json.data)) {
-				all.push(...json.data);
+			if (!Array.isArray(json?.data)) {
+				throw new Error(`oura_invalid_page: ${endpoint} response must contain a data array`);
 			}
+			all.push(...json.data);
 			nextToken = json.next_token || undefined;
 			return Boolean(nextToken);
 		},
@@ -400,7 +402,9 @@ async function runStream<T extends OuraRow>(
  * fetch, not an independently-requestable stream.
  */
 async function collectSleep(
-	args: Omit<RunStreamArgs<OuraSleepSession>, "config">,
+	args: Omit<RunStreamArgs<OuraSleepSession>, "config"> & {
+		reportStreamFailure: CollectContext["reportStreamFailure"];
+	},
 ): Promise<void> {
 	const {
 		token,
@@ -409,6 +413,7 @@ async function collectSleep(
 		emit,
 		emitRecord,
 		progress,
+		reportStreamFailure,
 		maxPages,
 		governor,
 	} = args;
@@ -424,8 +429,28 @@ async function collectSleep(
 			token,
 			startDate,
 			maxPages,
-		),
+		).catch((error: unknown) => {
+			const message = error instanceof Error ? error.message : String(error);
+			// Keep account-wide authentication and throttling failures fatal.
+			if (message === "oura_auth_failed" || message === "oura_rate_limited") {
+				throw error;
+			}
+			return { error, message };
+		}),
 	]);
+	if ("error" in dailySleep) {
+		if (!reportStreamFailure) {
+			throw dailySleep.error;
+		}
+		// An unread helper is not an empty helper: emit neither sleep records
+		// nor its checkpoint, but allow independent streams to make progress.
+		await reportStreamFailure(
+			streamName,
+			"Could not read Oura daily sleep scores",
+			{ retryable: RETRYABLE_ERROR_PATTERN.test(dailySleep.message) },
+		);
+		return;
+	}
 	const truncated = sessions.truncated || dailySleep.truncated;
 	const streamState = state[streamName] as { last_day?: string } | undefined;
 	const priorDay: string | null = streamState?.last_day || null;
@@ -501,6 +526,7 @@ export async function collectOura(
 			emit,
 			emitRecord,
 			progress,
+			reportStreamFailure: ctx.reportStreamFailure,
 			maxPages,
 			governor,
 		});
@@ -547,7 +573,7 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "oura",
 		validateRecord,
-		retryablePattern: /rate_limited|ECONN|fetch failed/i,
+		retryablePattern: RETRYABLE_ERROR_PATTERN,
 		auth: { kind: "env", required: ["OURA_PERSONAL_ACCESS_TOKEN"] },
 		collect: (ctx) => collectOura(ctx),
 	});

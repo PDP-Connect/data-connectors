@@ -14,8 +14,7 @@
 // run.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { arch, platform } from "node:process";
+import { platform } from "node:process";
 import { fileURLToPath } from "node:url";
 
 export const isTruthyEnv = (value) => {
@@ -23,32 +22,6 @@ export const isTruthyEnv = (value) => {
 		return false;
 	}
 	return !["", "0", "false", "off"].includes(value.toLowerCase());
-};
-
-const readOsRelease = () => {
-	try {
-		return readFileSync("/etc/os-release", "utf8");
-	} catch {
-		return "";
-	}
-};
-
-const UBUNTU_2604_VERSION_ID_PATTERN =
-	/(^|\n)(VERSION_ID="26\.04"|VERSION_ID=26\.04)(\n|$)/;
-const UBUNTU_ID_PATTERN = /(^|\n)ID=ubuntu(\n|$)/;
-
-export const isUnsupportedPatchrightHost = (
-	platformName,
-	archName,
-	osRelease,
-) => {
-	if (platformName !== "linux" || archName !== "x64") {
-		return false;
-	}
-	return (
-		UBUNTU_2604_VERSION_ID_PATTERN.test(osRelease) &&
-		UBUNTU_ID_PATTERN.test(osRelease)
-	);
 };
 
 // spawnSync resolves a bare command name via PATH lookup only; on win32 that
@@ -76,20 +49,6 @@ const main = () => {
 		console.log(
 			"Skipping Patchright browser download because a browser-download skip env variable is set.",
 		);
-		process.exit(0);
-	}
-
-	if (isUnsupportedPatchrightHost(platform, arch, readOsRelease())) {
-		const message =
-			"Patchright does not currently publish a Chromium browser for ubuntu26.04-x64. " +
-			"Skipping the optional browser download for dependency installation.";
-		if (isTruthyEnv(process.env.PDPP_REQUIRE_PATCHRIGHT_BROWSER_DOWNLOAD)) {
-			console.error(
-				`${message} PDPP_REQUIRE_PATCHRIGHT_BROWSER_DOWNLOAD is set, so failing.`,
-			);
-			process.exit(1);
-		}
-		console.log(message);
 		process.exit(0);
 	}
 

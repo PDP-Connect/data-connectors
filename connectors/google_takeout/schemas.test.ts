@@ -265,3 +265,40 @@ test("photos schema rejects an unrecognized hydration_status", () => {
 	};
 	assert.equal(photosSchema.safeParse(rec).success, false);
 });
+
+test("an exact photo sidecar wins even when a plausible supplemental copy appears first", () => {
+	const filename = "synthetic-image.jpg";
+	assert.equal(
+		matchSidecarFilename(filename, [
+			"synthetic-image.jpg.supplemental-metadata.json",
+			"synthetic-image.jpg.json",
+		]),
+		"synthetic-image.jpg.json",
+	);
+});
+
+test("photo metadata keeps EXIF coordinates as a source group and preserves zero", () => {
+	const record = buildPhotoRecord(
+		"synthetic.jpg",
+		"2026-01-02T00:00:00Z",
+		null,
+		{
+			geoDataExif: { latitude: 0 },
+			geoData: { latitude: 1, longitude: 2, altitude: 3 },
+		},
+	);
+	assert.equal(record.latitude, 0);
+	assert.equal(record.longitude, null);
+	assert.equal(record.altitude, null);
+});
+
+test("search identity normalizes the Takeout prefix without merging different query text", () => {
+	const time = "2026-01-02T00:00:00Z";
+	const prefixed = buildSearchRecord({ time, title: "Searched for sample" });
+	const plain = buildSearchRecord({ time, title: "sample" });
+	const different = buildSearchRecord({ time, title: "other sample" });
+	assert.ok(prefixed && plain && different);
+	assert.equal(prefixed.query, "sample");
+	assert.equal(prefixed.id, plain.id);
+	assert.notEqual(prefixed.id, different.id);
+});

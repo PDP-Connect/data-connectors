@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -257,6 +257,71 @@ test("requested missing Takeout stores emit redacted coverage progress", async (
 		}
 		assertUserFacingProgress(result.messages);
 		assert.equal(skipResults(result.messages).length, 4);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("a malformed location store skips its stream without advancing its cursor or dropping search", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-malformed-"));
+	try {
+		const locationDir = join(importRoot, "Location History (Timeline)");
+		const searchDir = join(importRoot, "My Activity", "Search");
+		await mkdir(locationDir, { recursive: true });
+		await mkdir(searchDir, { recursive: true });
+		await writeFile(join(locationDir, "Records.json"), '{"locations":[');
+		const time = "2026-01-15T12:00:00.000Z";
+		await writeFile(
+			join(searchDir, "MyActivity.json"),
+			JSON.stringify([{ time, title: "Searched for example flowers" }]),
+		);
+
+		const { messages } = await runTakeoutImport(importRoot, [
+			"location_history",
+			"search_history",
+		]);
+
+		assert.deepEqual(
+			skipResults(messages).map(({ stream, reason }) => [stream, reason]),
+			[["location_history", "records_not_found"]],
+		);
+		assert.deepEqual(records(messages, "location_history"), []);
+		assert.equal(
+			messages.some(
+				(m) => m.type === "STATE" && m.stream === "location_history",
+			),
+			false,
+		);
+		assert.deepEqual(
+			records(messages, "search_history").map(({ query, timestamp }) => [
+				query,
+				timestamp,
+			]),
+			[["example flowers", time]],
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("an unreadable photo sidecar preserves the photo and uses its file timestamp", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-bad-sidecar-"));
+	try {
+		const photosDir = join(importRoot, "Photos");
+		await mkdir(photosDir, { recursive: true });
+		const photoPath = join(photosDir, "sample.jpg");
+		const mtime = new Date("2026-01-15T12:00:00.000Z");
+		await writeFile(photoPath, TINY_JPEG_A);
+		await utimes(photoPath, mtime, mtime);
+		await writeFile(join(photosDir, "sample.jpg.json"), '{"title":');
+
+		const { messages, photos } = await runPhotosImport(importRoot);
+
+		assert.deepEqual(skipResults(messages), []);
+		assert.equal(photos.length, 1);
+		assert.equal(photos[0]?.filename, "sample.jpg");
+		assert.equal(photos[0]?.event_time, mtime.toISOString());
+		assert.equal(photos[0]?.title, null);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
 	}

@@ -29,6 +29,16 @@ const NUMERIC_ID_RE = /^\d+$/;
 const PAYMENT_ID_RE = /^[A-Za-z0-9]+$/;
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
+function isRealUtcSecond(value: string): boolean {
+	// Compare only whole-second fields; preserve the source fractional digits.
+	const second = value.slice(0, 19);
+	const date = new Date(`${second}Z`);
+	return (
+		Number.isFinite(date.getTime()) &&
+		date.toISOString().slice(0, 19) === second
+	);
+}
+
 // Core source fields are required, even when nullable. Optional observations
 // may be absent, but explicit null is preserved rather than synthesized.
 export const profileSchema = z.object({
@@ -82,7 +92,8 @@ export const transactionsSchema = z.object({
 		.nullable(),
 	date_created: z
 		.string()
-		.regex(ISO_DATETIME_RE, "date_created must be ISO-8601 datetime"),
+		.regex(ISO_DATETIME_RE, "date_created must be ISO-8601 datetime")
+		.refine(isRealUtcSecond, "date_created must be a real UTC datetime"),
 	date_updated: z
 		.string()
 		.regex(ISO_DATETIME_RE, "date_updated must be ISO-8601 datetime")

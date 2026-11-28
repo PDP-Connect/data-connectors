@@ -8,6 +8,7 @@ import {
 	buildAccountPlanRecord,
 	buildMessageRecord,
 	buildUsageLimitRecords,
+	flattenMessageText,
 	paymentCountryOf,
 	planTypeOf,
 } from "./parsers.ts";
@@ -472,6 +473,31 @@ test("parsers: plan family, usage fallback and message edge cases", () => {
 	assert.deepEqual(
 		[plain?.content, plain?.model, plain?.model_source, plain?.attachments],
 		["flat", null, null, null],
+	);
+});
+
+test("text projection keeps a nonempty plain value ahead of block metadata", () => {
+	assert.equal(
+		flattenMessageText({
+			text: "Fixture A",
+			content: [{ type: "text", text: "Fixture B" }],
+		}),
+		"Fixture A",
+	);
+});
+
+test("text projection joins only nonempty text blocks in their source order", () => {
+	assert.equal(
+		flattenMessageText({
+			text: "",
+			content: [
+				{ type: "text", text: "Fixture A" },
+				{ type: "other", text: "Ignored fixture" },
+				{ type: "text", text: "" },
+				{ type: "text", text: "Fixture B" },
+			],
+		}),
+		"Fixture A\nFixture B",
 	);
 });
 

@@ -114,6 +114,20 @@ for (const command of ["install", "verify"]) {
   });
 }
 
+test("a value option followed by another option names the missing value", async () => {
+  const result = await runCli(["verify", "--lock", "--install-root", "unused", "--layout", "snapshot"]);
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.trim(), "Missing value for --lock");
+});
+
+test("an explicitly empty option value names the missing value", async () => {
+  const result = await runCli(["verify", "--lock", "", "--install-root", "unused", "--layout", "snapshot"]);
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr.trim(), "Missing value for --lock");
+});
+
 for (const command of ["lock", "updates"]) {
   test(`\`${command}\` is not a command`, async () => {
     const result = await runCli([command]);
@@ -121,6 +135,33 @@ for (const command of ["lock", "updates"]) {
     assert.match(result.stderr, /^Usage:/);
   });
 }
+
+test("verify requires an explicit layout before reading the supplied lock", async () => {
+  await withTempDir(async (dir) => {
+    const result = await runCli([
+      "verify", "--lock", join(dir, "missing.json"), "--install-root", join(dir, "install"),
+    ]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /^Usage:/);
+    assert.equal(result.stdout, "");
+    assert.equal(existsSync(join(dir, "install")), false);
+  });
+});
+
+test("verify rejects malformed local JSON without success output or filesystem writes", async () => {
+  await withTempDir(async (dir) => {
+    const lockPath = join(dir, "invalid.json");
+    writeFileSync(lockPath, "{");
+    const installRoot = join(dir, "install");
+    const result = await runCli([
+      "verify", "--lock", lockPath, "--install-root", installRoot, "--layout", "snapshot",
+    ]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /JSON/i);
+    assert.equal(result.stdout, "");
+    assert.equal(existsSync(installRoot), false);
+  });
+});
 
 test("verify of an empty lock reports ok and exits 0", async () => {
   await withTempDir(async (dir) => {
@@ -136,6 +177,7 @@ test("verify of an empty lock reports ok and exits 0", async () => {
     ]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /"ok": true/);
+    assert.equal(existsSync(join(dir, "install")), false, "verify must not create an install tree");
   });
 });
 

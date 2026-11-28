@@ -1919,18 +1919,16 @@ export async function collectYoutubeBrowser(
 		if (result.verifiedEmpty)
 			await emitVerifiedEmptyState(ctx, stream, capturedAt);
 	}
-	if (requested.has("watch_history")) {
-		if (requested.get("watch_history")?.time_range) {
-			await ctx.emit({
-				type: "SKIP_RESULT",
-				stream: "watch_history",
-				reason: "scope_not_supported",
-				message:
-					"Watch history provides dates without watch times, so a time_range cannot be applied.",
-				recovery_hint: { action: "not_retriable", retryable: false },
-			});
-			return;
-		}
+	if (requested.get("watch_history")?.time_range) {
+		await ctx.emit({
+			type: "SKIP_RESULT",
+			stream: "watch_history",
+			reason: "scope_not_supported",
+			message:
+				"Watch history provides dates without watch times, so a time_range cannot be applied.",
+			recovery_hint: { action: "not_retriable", retryable: false },
+		});
+	} else if (requested.has("watch_history")) {
 		const priorCursor =
 			ctx.collectionMode === "full_refresh"
 				? undefined

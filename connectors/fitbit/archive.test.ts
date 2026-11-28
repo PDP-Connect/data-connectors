@@ -1501,3 +1501,14 @@ test("errorCode passes on only a plain identifier, never text that could carry a
 	assert.equal(errorCode({ code: 13 }), null);
 	assert.equal(errorCode(new Error("EIO")), null);
 });
+
+test("mtimeIso preserves the epoch and a valid time before it", () => {
+	assert.equal(mtimeIso(0), "1970-01-01T00:00:00.000Z");
+	assert.equal(mtimeIso(-1), "1969-12-31T23:59:59.999Z");
+});
+
+test("mtimeIso enforces the lower four-digit year boundary", () => {
+	const firstFourDigitYear = Date.parse("0000-01-01T00:00:00.000Z");
+	assert.equal(mtimeIso(firstFourDigitYear), "0000-01-01T00:00:00.000Z");
+	assert.equal(mtimeIso(firstFourDigitYear - 1), null);
+});

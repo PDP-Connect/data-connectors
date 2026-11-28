@@ -22,7 +22,7 @@ import type {
  * display string like `"$12.34"`; parse that as a last resort. Never guess a
  * value from a display string that doesn't parse cleanly — return null.
  */
-const DOLLAR_STRING_RE = /^\$?(\d[\d,]*)\.(\d{2})$/;
+const DOLLAR_STRING_RE = /^\$?(\d+|\d{1,3}(?:,\d{3})+)\.(\d{2})$/;
 
 export function centsFromMonetary(
 	value: DoorDashMonetaryFields | string | number | null | undefined,

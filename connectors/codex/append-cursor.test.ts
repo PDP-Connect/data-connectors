@@ -46,7 +46,15 @@ import { test } from "node:test";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { scanRollouts } from "./index.ts";
+import { epochToIso } from "./parsers.ts";
 import type { RolloutJsonlGap, RolloutSourceGap } from "./types.ts";
+
+test("unrepresentable Codex thread epochs are treated as missing timestamps", () => {
+	assert.equal(epochToIso(Number.MAX_SAFE_INTEGER), null);
+	assert.equal(epochToIso(Number.MAX_VALUE), null);
+	assert.equal(epochToIso(0), null);
+	assert.equal(epochToIso(1_700_000_000.125), "2023-11-14T22:13:20.125Z");
+});
 
 const QUIET_OFF = { PDPP_CODEX_ACTIVE_ROLLOUT_QUIET_MS: "0" } as const;
 const SESSION_ID = "019d922d-c38b-7e11-ae99-9187af386148";

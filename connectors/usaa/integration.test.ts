@@ -1741,6 +1741,36 @@ test("statement PDF download diagnostics keep only allowlisted menu and response
 	);
 });
 
+test("hydrateStatementPdfs: failed Documents navigation stops before row lookup", async () => {
+	let rowLookups = 0;
+	const page = {
+		goto: async (): Promise<never> => {
+			throw new Error("fixture navigation failed");
+		},
+		locator: () => {
+			rowLookups += 1;
+			return { count: async () => 0 };
+		},
+		url: () => "https://fixture.invalid/elsewhere",
+	} as never;
+	await assert.rejects(
+		hydrateStatementPdfs({
+			page,
+			statements: [
+				{
+					account_id: null,
+					date_delivered: "2026-04-01",
+					id: "fixture-statement",
+					rowIndex: 0,
+					title: null,
+				},
+			],
+		}),
+		/Unable to open the Documents page for statement downloads/,
+	);
+	assert.equal(rowLookups, 0);
+});
+
 test("hydrateStatementPdfs: missing Download menuitem emits structural menu facts only", async () => {
 	const locator = (count: number) => ({
 		click: async (): Promise<void> => undefined,
