@@ -670,11 +670,13 @@ async function finishSegments(
 			{ stream: "timeline_segments" },
 		);
 	}
-	await ctx.emit({
-		type: "STATE",
-		stream: "timeline_segments",
-		cursor: { last_start_time: summary.latestSegment },
-	});
+	if (summary.segmentsUnaccounted === 0) {
+		await ctx.emit({
+			type: "STATE",
+			stream: "timeline_segments",
+			cursor: { last_start_time: summary.latestSegment },
+		});
+	}
 	// Same artifact reconciliation as `finishPoints`. `buildFullScanCoverageMessage`
 	// is deliberately NOT used when an element went unaccounted: it forces
 	// `covered === considered`, which would re-hide the very drop this counts.

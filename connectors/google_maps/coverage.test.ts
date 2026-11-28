@@ -699,6 +699,44 @@ test("unaccounted points do not advance their cursor, and malformed prior marks 
 	}
 });
 
+test("unaccounted segments withhold their cursor, then a complete re-import checkpoints", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-maps-segment-cursor-"));
+	try {
+		const file = join(root, "Timeline.json");
+		const valid = {
+			activity: { activityType: "WALKING" },
+			duration: { startTimestamp: "2024-06-05T13:45:22.000Z" },
+		};
+		await writeFile(
+			file,
+			JSON.stringify({ semanticSegments: [valid, { startTime: "bad-date" }] }),
+		);
+		const partial = await runImport(root, {}, ["timeline_segments"]);
+		assert.ok(
+			partial.messages.some(
+				(m) =>
+					m.type === "SKIP_RESULT" &&
+					m.stream === "timeline_segments" &&
+					m.reason === "element_unaccounted",
+			),
+		);
+		assert.ok(
+			!partial.messages.some(
+				(m) => m.type === "STATE" && m.stream === "timeline_segments",
+			),
+		);
+		await writeFile(file, JSON.stringify({ semanticSegments: [valid] }));
+		const complete = await runImport(root, {}, ["timeline_segments"]);
+		assert.ok(
+			complete.messages.some(
+				(m) => m.type === "STATE" && m.stream === "timeline_segments",
+			),
+		);
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
 test("google_maps still declares full coverage when the incremental cursor suppresses every point", async () => {
 	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-steady-"));
 	try {
