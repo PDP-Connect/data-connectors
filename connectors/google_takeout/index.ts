@@ -158,6 +158,13 @@ function resolveLocationFile(importDir: string): string | null {
 
 type LocationTimestampState = StreamTimestampState & { last_timestamp_ids?: unknown };
 
+function canonicalCursor(state: StreamTimestampState | undefined): string | undefined {
+	const value = state?.last_timestamp;
+	if (typeof value !== "string") return undefined;
+	const parsed = Date.parse(value);
+	return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined;
+}
+
 async function collectLocationHistory(
 	ctx: CollectContext,
 	importDir: string,
@@ -201,7 +208,7 @@ async function collectLocationHistory(
 		status: "collected",
 		stream,
 	});
-	const since = streamState?.last_timestamp;
+	const since = canonicalCursor(streamState);
 	const storedIds = streamState?.last_timestamp_ids;
 	// Without boundary IDs (legacy state), replay rows at the boundary once.
 	const knownAtSince = new Set<string>(
@@ -286,7 +293,7 @@ async function collectYoutubeWatchHistory(
 		status: "collected",
 		stream,
 	});
-	const since = streamState?.last_timestamp;
+	const since = canonicalCursor(streamState);
 	let latest: string | undefined = since;
 	diagnoseEmitStart(stream, json.length);
 	let itemOrdinal = 0;
@@ -340,7 +347,7 @@ async function collectSearchHistory(
 		status: "collected",
 		stream,
 	});
-	const since = streamState?.last_timestamp;
+	const since = canonicalCursor(streamState);
 	let latest: string | undefined = since;
 	diagnoseEmitStart(stream, json.length);
 	let itemOrdinal = 0;
@@ -558,7 +565,7 @@ async function collectPhotos(
 		return;
 	}
 
-	const since = streamState?.last_timestamp;
+	const since = canonicalCursor(streamState);
 	const maxBytes = maxPhotoBytes();
 
 	try {
