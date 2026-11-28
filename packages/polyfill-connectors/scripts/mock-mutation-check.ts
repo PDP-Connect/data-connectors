@@ -20,10 +20,11 @@
  * `.includes("/foo")` — the shapes real fake-HTTP-server routing and
  * request-path assertions use in this repo). For each literal found,
  * write a scratch copy of the test file with that ONE literal corrupted
- * (a suffix appended, so it can never match a real request again), and
- * run the scratch file with `node --test`. If the suite still exits 0,
- * the literal was decorative — nothing in the suite actually depended on
- * it matching. If the suite fails, the literal is load-bearing.
+ * (a leading slash replaced by a fragment marker), and
+ * run the scratch file with `node --test`. The unmodified file must pass
+ * first. The mutation is load-bearing only if a previously passing test
+ * fails with an assertion. A passing mutation is decorative. A failed
+ * baseline, timeout, or other error leaves the trial inconclusive.
  *
  * Honesty contract:
  *   - A connector with zero detected path-literal matchers reports
@@ -53,22 +54,26 @@
  *   node --import tsx scripts/mock-mutation-check.ts --connector=jellyfin
  */
 
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { z } from "zod";
 import {
-	connectorsDir as CONNECTORS_DIR,
+	connectorDir,
 	packageRoot as PACKAGE_ROOT,
+	repoRoot,
 } from "../src/connector-paths.ts";
 
 const TEST_TIMEOUT_MS = 20_000;
+const REPORTER = join(PACKAGE_ROOT, "scripts", "mock-mutation-reporter.ts");
 
 // Matches the request-path-matcher shapes actually used across this repo's
 // connector tests: `identifier === "/foo"`, `identifier.startsWith("/foo")`,
@@ -88,13 +93,19 @@ export interface ConnectorMutationResult {
 	readonly connector: string;
 	readonly decorative: readonly PathLiteralSite[];
 	readonly detail: string;
+	readonly inconclusive: readonly InconclusiveTrial[];
 	readonly loadBearing: number;
 	readonly sites: readonly PathLiteralSite[];
 	readonly verdict: "PASS" | "WEAK" | "UNKNOWN";
 }
 
+interface InconclusiveTrial {
+	readonly site: PathLiteralSite;
+	readonly reason: string;
+}
+
 function listConnectors(): string[] {
-	return readdirSync(CONNECTORS_DIR, { withFileTypes: true })
+	return readdirSync(connectorDir("."), { withFileTypes: true })
 		.filter((e) => e.isDirectory())
 		.map((e) => e.name)
 		.sort();
@@ -116,7 +127,7 @@ const SCRATCH_PREFIX = "__mutation_scratch_";
 function sweepOrphanedScratchFiles(): number {
 	let removed = 0;
 	for (const connector of listConnectors()) {
-		const dir = join(CONNECTORS_DIR, connector);
+		const dir = connectorDir(connector);
 		for (const entry of readdirSync(dir)) {
 			if (entry.startsWith(SCRATCH_PREFIX)) {
 				rmSync(join(dir, entry), { force: true });
@@ -128,7 +139,7 @@ function sweepOrphanedScratchFiles(): number {
 }
 
 function listTestFiles(connector: string): string[] {
-	const dir = join(CONNECTORS_DIR, connector);
+	const dir = connectorDir(connector);
 	if (!existsSync(dir)) {
 		return [];
 	}
@@ -193,7 +204,8 @@ export function findPathLiteralSites(
  */
 function mutateSource(source: string, literal: string): string {
 	const quoted = `"${literal}"`;
-	const mutated = `"${literal}__MUTATED__"`;
+	// Keep columns stable for tests registered on the same line as a matcher.
+	const mutated = `"#${literal.slice(1)}"`;
 	if (!source.includes(quoted)) {
 		throw new Error(
 			`literal ${quoted} not found for mutation (source may have changed since detection)`,
@@ -202,28 +214,73 @@ function mutateSource(source: string, literal: string): string {
 	return source.split(quoted).join(mutated);
 }
 
-function runTestFile(filePath: string): { passed: boolean; output: string } {
+const testReceipt = z.object({
+	success: z.boolean(),
+	passedTests: z.array(z.string()),
+	failedAssertions: z.array(z.string()),
+	problem: z.string().optional(),
+});
+
+type TestRun =
+	| { readonly receipt: z.infer<typeof testReceipt> }
+	| { readonly problem: string };
+
+function runTestFile(filePath: string): TestRun {
+	let entryFile: string;
 	try {
-		const output = execFileSync(
-			process.execPath,
-			[
-				"--test",
-				"--import",
-				"tsx",
-				`--test-timeout=${TEST_TIMEOUT_MS}`,
-				filePath,
-			],
-			{
-				cwd: PACKAGE_ROOT,
-				encoding: "utf8",
-				stdio: "pipe",
-				timeout: TEST_TIMEOUT_MS * 4,
+		// The source map resolves aliases such as /var to /private/var on macOS.
+		entryFile = realpathSync(filePath);
+	} catch {
+		return { problem: "could not resolve the test file" };
+	}
+	const result = spawnSync(
+		process.execPath,
+		[
+			"--enable-source-maps",
+			"--test",
+			"--import",
+			"tsx",
+			`--test-timeout=${TEST_TIMEOUT_MS}`,
+			"--test-reporter",
+			REPORTER,
+			entryFile,
+		],
+		{
+			cwd: PACKAGE_ROOT,
+			encoding: "utf8",
+			env: {
+				...process.env,
+				NODE_TEST_CONTEXT: undefined,
+				NODE_TEST_WORKER_ID: undefined,
 			},
-		);
-		return { passed: true, output };
-	} catch (err) {
-		const e = err as { stdout?: string; stderr?: string };
-		return { passed: false, output: `${e.stdout ?? ""}\n${e.stderr ?? ""}` };
+			timeout: TEST_TIMEOUT_MS * 4,
+		},
+	);
+	if (result.error) {
+		const code = "code" in result.error ? result.error.code : undefined;
+		return {
+			problem:
+				code === "ETIMEDOUT"
+					? "test process timed out"
+					: `test process error: ${result.error.message}`,
+		};
+	}
+	if (result.signal) {
+		return { problem: `test process stopped by ${result.signal}` };
+	}
+	try {
+		const receipt = testReceipt.parse(JSON.parse(result.stdout));
+		if (result.status !== (receipt.success ? 0 : 1)) {
+			return {
+				problem: `test process exited unexpectedly with status ${result.status}`,
+			};
+		}
+		if (receipt.problem) {
+			return { problem: receipt.problem };
+		}
+		return { receipt };
+	} catch {
+		return { problem: "test process did not produce a complete result" };
 	}
 }
 
@@ -234,10 +291,7 @@ function runTestFile(filePath: string): { passed: boolean; output: string } {
  * The scratch file is written ALONGSIDE the original (not in system tmp)
  * because the connector's relative imports (`../../src/...`) must resolve.
  */
-function runMutationTrial(site: PathLiteralSite): {
-	loadBearing: boolean;
-	output: string;
-} {
+function runMutationTrial(site: PathLiteralSite): TestRun {
 	const original = readFileSync(site.file, "utf8");
 	const mutated = mutateSource(original, site.literal);
 	const dir = dirname(site.file);
@@ -247,11 +301,31 @@ function runMutationTrial(site: PathLiteralSite): {
 	);
 	writeFileSync(scratchPath, mutated);
 	try {
-		const result = runTestFile(scratchPath);
-		return { loadBearing: !result.passed, output: result.output };
+		return runTestFile(scratchPath);
 	} finally {
 		rmSync(scratchPath, { force: true });
 	}
+}
+
+function runBaseline(file: string): TestRun {
+	const run = runTestFile(file);
+	if ("problem" in run) return run;
+	if (!run.receipt.success) {
+		return { problem: "unmodified test file failed" };
+	}
+	if (run.receipt.passedTests.length === 0) {
+		return { problem: "no tests ran and passed" };
+	}
+	return run;
+}
+
+function describeSite(site: PathLiteralSite): string {
+	return `${relative(repoRoot, site.file)}:${site.line} "${site.literal}"`;
+}
+
+function hasUniqueCase(cases: readonly string[], key: string): boolean {
+	const first = cases.indexOf(key);
+	return first !== -1 && first === cases.lastIndexOf(key);
 }
 
 function checkConnector(connector: string): ConnectorMutationResult {
@@ -283,6 +357,7 @@ function checkConnector(connector: string): ConnectorMutationResult {
 			sites: [],
 			loadBearing: 0,
 			decorative: [],
+			inconclusive: [],
 			detail:
 				testFiles.length === 0
 					? "no test files found"
@@ -290,28 +365,66 @@ function checkConnector(connector: string): ConnectorMutationResult {
 		};
 	}
 
+	const baselines = new Map<string, TestRun>();
 	const decorative: PathLiteralSite[] = [];
+	const inconclusive: InconclusiveTrial[] = [];
 	let loadBearing = 0;
 	for (const site of uniqueSites) {
-		const { loadBearing: isLoadBearing } = runMutationTrial(site);
-		if (isLoadBearing) {
-			loadBearing += 1;
-		} else {
-			decorative.push(site);
+		const baseline = baselines.get(site.file) ?? runBaseline(site.file);
+		baselines.set(site.file, baseline);
+		if ("problem" in baseline) {
+			inconclusive.push({ site, reason: `baseline: ${baseline.problem}` });
+			continue;
 		}
+		const result = runMutationTrial(site);
+		if ("problem" in result) {
+			inconclusive.push({ site, reason: result.problem });
+			continue;
+		}
+		const { receipt } = result;
+		if (receipt.success) {
+			if (receipt.passedTests.length > 0) {
+				decorative.push(site);
+			} else {
+				inconclusive.push({
+					site,
+					reason: "no tests ran and passed after mutation",
+				});
+			}
+			continue;
+		}
+		const assertions = receipt.failedAssertions;
+		if (
+			assertions.length > 0 &&
+			assertions.every(
+				(key) =>
+					hasUniqueCase(baseline.receipt.passedTests, key) &&
+					hasUniqueCase(assertions, key) &&
+					!receipt.passedTests.includes(key),
+			)
+		) {
+			loadBearing += 1;
+			continue;
+		}
+		inconclusive.push({
+			site,
+			reason: "no failing assertion from a test that passed the baseline",
+		});
 	}
 
-	const verdict: ConnectorMutationResult["verdict"] =
-		decorative.length === 0 ? "PASS" : "WEAK";
-	const detail =
-		verdict === "PASS"
-			? `${loadBearing}/${uniqueSites.length} path literal(s) are load-bearing — mutating any of them breaks the suite`
-			: `${decorative.length}/${uniqueSites.length} path literal(s) are decorative — the suite still passes when they're corrupted, at ${decorative
-					.map(
-						(d) =>
-							`${d.file.replace(`${PACKAGE_ROOT}/`, "")}:${d.line} "${d.literal}"`,
-					)
-					.join("; ")}`;
+	let verdict: ConnectorMutationResult["verdict"] = "PASS";
+	let detail = `${loadBearing}/${uniqueSites.length} path literal(s) are load-bearing — each mutation failed a previously passing assertion`;
+	if (inconclusive.length > 0) {
+		verdict = "UNKNOWN";
+		detail = `${inconclusive.length}/${uniqueSites.length} path literal(s) are inconclusive: ${inconclusive
+			.map(({ site, reason }) => `${describeSite(site)} (${reason})`)
+			.join("; ")}`;
+	} else if (decorative.length > 0) {
+		verdict = "WEAK";
+		detail = `${decorative.length}/${uniqueSites.length} path literal(s) are decorative — the suite still passes when they're corrupted, at ${decorative
+			.map(describeSite)
+			.join("; ")}`;
+	}
 
 	return {
 		connector,
@@ -319,6 +432,7 @@ function checkConnector(connector: string): ConnectorMutationResult {
 		sites: uniqueSites,
 		loadBearing,
 		decorative,
+		inconclusive,
 		detail,
 	};
 }

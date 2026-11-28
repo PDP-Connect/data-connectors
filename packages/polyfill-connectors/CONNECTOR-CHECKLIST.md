@@ -38,13 +38,13 @@ Each new promotion to `preview` needs all three rules below. A connector that wa
 |---|---|
 | The author recorded a run against their own account. The replay claim stores digests of the connector source and manifest, and they match the current files | The `evidence` step of `conformance <connector>` is PASS. The claim is `connectors/<connector>/evidence/claim.json`, which `bin/scenario-verify.ts --json` writes (see [AUTHORING.md](../../AUTHORING.md)) |
 | A pilot fixture exists and locks the emitted record format against drift | The `pilot fixture` step of `conformance <connector>`. It looks for `connectors/<connector>/fixtures/scrubbed/pilot-real-shape/` |
-| The mock-mutation verdict is `PASS`, meaning the test suite fails when any one request-path literal in it is corrupted | `node --import tsx scripts/mock-mutation-check.ts --connector=<connector>` from `packages/polyfill-connectors/`, or the `mock mutation` step of `conformance` |
+| The mock-mutation verdict is `PASS`, meaning every detected request-path mutation causes a previously passing test to fail with an assertion | `node --import tsx scripts/mock-mutation-check.ts --connector=<connector>` from `packages/polyfill-connectors/`, or the `mock mutation` step of `conformance` |
 
 1. The claim rule applies to every connector. CI does not re-run the capture, so read the claim's limitations. Commit only `claim.json`. The scenario and HAR files stay private.
 2. The pilot fixture rule applies to any connector that has a schema. The rows are synthetic with real field formats, and `connector-init` writes a starter set. Never commit real account rows there.
 3. The mock-mutation rule applies to any connector with a mock that asserts request paths.
 
-A connector that makes no HTTP requests, such as a file import like WhatsApp or Google Takeout, is exempt from the mock-mutation rule. Its `mock mutation` step reports `UNKNOWN`. Write that reason in the connector's leading header comment as `* @conformance-no-http <reason>` and in the PR. The JSON report preserves this author assertion; it exempts only UNKNOWN, never WEAK or FAIL. An optional network binding does not establish this exemption. `UNKNOWN` with a written reason is the correct final state for such a connector. Do not try to silence it.
+A connector that makes no HTTP requests, such as a file import like WhatsApp or Google Takeout, is exempt from the mock-mutation rule. Its `mock mutation` step reports `UNKNOWN` because it has no request-path matchers. Write that reason in the connector's leading header comment as `* @conformance-no-http <reason>` and in the PR. The exemption applies to that result. A failed baseline, timeout or import error requires a rerun after repair. An optional network binding does not establish this exemption.
 
 ## Supported, a maintainer ran it against a real account
 

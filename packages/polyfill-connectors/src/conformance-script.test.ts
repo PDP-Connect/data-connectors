@@ -288,6 +288,13 @@ test("JSON no-HTTP note only qualifies UNKNOWN and PASS mock mutation findings",
 			detail: "synthetic mutation detail",
 			advisory: true,
 		}));
+		steps.push({
+			name: "mock mutation",
+			verdict: "UNKNOWN",
+			detail: "unmodified mock test timed out",
+			mockMutationInconclusive: true,
+			advisory: true,
+		});
 		const report = jsonReport(
 			connector,
 			false,
@@ -301,6 +308,11 @@ test("JSON no-HTTP note only qualifies UNKNOWN and PASS mock mutation findings",
 			steps,
 		);
 		for (const step of report.steps) {
+			if (step.mockMutationInconclusive) {
+				assert.equal(step.detail, "unmodified mock test timed out");
+				assert.equal(step.required_for_review, true);
+				continue;
+			}
 			assert.equal(
 				step.detail,
 				step.verdict === "UNKNOWN" || step.verdict === "PASS"
