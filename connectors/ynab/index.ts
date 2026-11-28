@@ -427,7 +427,7 @@ export function createYnabRequest(
 					});
 					const retryAfter = res.headers.get("retry-after");
 					return {
-						body: await res.text().catch((): string => ""),
+						body: res.ok ? await res.text() : await res.text().catch((): string => ""),
 						...(retryAfter === null
 							? {}
 							: { headers: { "retry-after": retryAfter } }),
