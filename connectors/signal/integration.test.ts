@@ -255,6 +255,50 @@ test("signal cursor carries forward: a second run with prior STATE only emits ne
 	}
 });
 
+test("legacy incremental messages cursor does not claim a complete emitted-ID inventory", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-signal-legacy-"));
+	try {
+		const t0 = Date.parse("2024-06-05T13:00:00.000Z");
+		const scriptPath = setupMockSigtop(dir, {
+			messages: [
+				{
+					body: "old",
+					conversationId: CONV_A,
+					id: "22222222-2222-2222-2222-222222222222",
+					sentAt: t0,
+				},
+				{
+					body: "new",
+					conversationId: CONV_A,
+					id: "55555555-5555-5555-5555-555555555555",
+					sentAt: t0 + 2_000,
+				},
+			],
+		});
+		const first = await runSignal(
+			scriptPath,
+			["messages"],
+			{},
+			{ messages: { last_sent_at_ms: t0 + 1_000 } },
+		);
+		const cursor = states(first.messages).find(
+			(message) => message.stream === "messages",
+		)?.cursor;
+		assert.ok(cursor);
+		const next = await runSignal(
+			scriptPath,
+			["messages"],
+			{},
+			{ messages: cursor },
+		);
+		const reasons = skips(next.messages).map((message) => message.reason);
+		assert.ok(reasons.includes("backfill_check_unproven_legacy_cursor"));
+		assert.ok(!reasons.includes("source_rows_below_watermark_unreachable"));
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
 test("signal skips a message with no usable sent_at/received_at_ms deterministically instead of stamping the run clock", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-signal-"));
 	try {
@@ -418,7 +462,17 @@ test("signal derives reactions when only the reactions stream is requested (mess
 			],
 		});
 
-		const result = await runSignal(scriptPath, ["reactions"]);
+		const result = await runSignal(
+			scriptPath,
+			["reactions"],
+			{},
+			{
+				messages: { last_sent_at_ms: t0 + 1_000 },
+			},
+		);
+		assert.ok(
+			states(result.messages).every((message) => message.stream !== "messages"),
+		);
 		// messages was never requested: no messages RECORD/SKIP_RESULT traffic.
 		assert.equal(records(result.messages, "messages").length, 0);
 		assert.equal(

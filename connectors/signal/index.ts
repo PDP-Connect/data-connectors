@@ -1272,7 +1272,7 @@ async function emitMessageAnchorEvidence(
 			reason: "backfill_check_unproven_legacy_cursor",
 			message:
 				"Below-watermark backfill could not be checked this run: the messages cursor predates the emitted-id set. " +
-				"This run seeds that set; the next run checks properly.",
+				"A full refresh can establish that set from emitted records.",
 			diagnostics: {
 				source_total: anchor.sourceTotal,
 				below_watermark: anchor.belowWatermark,
@@ -1391,6 +1391,7 @@ async function collectMessagesAndReactions({
 				// count: without it there is no way to tell a below-watermark row
 				// we already have from one a re-link just introduced.
 				emitted_ids: mergeEmittedIds(priorEmittedIds, result.emittedIds),
+				emitted_ids_complete: proveBackfill,
 			},
 		});
 	}
@@ -1453,23 +1454,25 @@ async function collectMessagesConversationsReactions(
 		if (emitMessages || emitReactions) {
 			const messagesState = (state.messages ?? {}) as {
 				emitted_ids?: unknown;
+				emitted_ids_complete?: unknown;
 				last_sent_at_ms?: number;
 			};
-			const since = parseCursorMs(messagesState.last_sent_at_ms ?? 0);
+			// Reactions derive from the full local source independently of a
+			// messages checkpoint unless messages are part of this same run.
+			const since = emitMessages
+				? parseCursorMs(messagesState.last_sent_at_ms ?? 0)
+				: 0;
 			const priorEmittedIds = parseEmittedIds(messagesState.emitted_ids);
-			// A legacy cursor carries a watermark but no emitted-id set. Every
-			// below-watermark id would then look "never emitted" — a false gap
-			// for rows prior runs genuinely did emit. Treat that first
-			// post-deploy run as unproven (skip the check, seed the set) rather
-			// than alarming. The run after it has a real set and checks properly.
-			const hasEmittedIdCursor = Array.isArray(messagesState.emitted_ids);
+			const hasCompleteEmittedIds =
+				messagesState.emitted_ids_complete === true &&
+				Array.isArray(messagesState.emitted_ids);
 			await collectMessagesAndReactions({
 				ctx,
 				db,
 				emitMessages,
 				emitReactions,
 				priorEmittedIds,
-				proveBackfill: since === 0 || hasEmittedIdCursor,
+				proveBackfill: since === 0 || hasCompleteEmittedIds,
 				since,
 			});
 		}
