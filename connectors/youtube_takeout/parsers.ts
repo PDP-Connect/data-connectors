@@ -211,8 +211,8 @@ export function buildProfileRecordFromChannelCsvRow(
 	columns: ReadonlyMap<string, number>,
 	email: string | null,
 ): ProfileRecord | null {
-	const id = trimmedOrNull(cell(row, columns, "Channel Id"));
-	if (!id) {
+	const id = cell(row, columns, "Channel Id");
+	if (id === undefined || id.trim() === "") {
 		return null;
 	}
 	return {

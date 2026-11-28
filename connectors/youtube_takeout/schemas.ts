@@ -26,7 +26,10 @@ const isoTimestampSchema = z
 const urlSchema = z.url().max(4096).nullable();
 
 export const profileSchema = z.object({
-	id: pdppSafeText.min(1).max(200),
+	id: pdppSafeText
+		.min(1)
+		.max(200)
+		.refine((id) => id.trim().length > 0, "must not be blank"),
 	channel_url: urlSchema,
 	title: pdppSafeText.max(500).nullable(),
 	handle: pdppSafeText.max(200).nullable(),
