@@ -253,7 +253,7 @@ function tableExists(db: DatabaseSync, table: string): boolean {
 // `imessage_db_query_failed` failure contract.
 //
 // `OR m.date IS NULL` is deliberate: SQLite's `NULL > ?` is NULL (falsy), so
-// a plain `WHERE m.date > ?` silently excludes null-date rows from every
+// a plain `WHERE m.date >= ?` silently excludes null-date rows from every
 // run — the caller would never even see them to report a diagnostic. Making
 // them visible here lets emitMessageRows() surface a SKIP_RESULT instead of
 // the row vanishing from the connector's output with no trace. The
@@ -275,7 +275,7 @@ function queryMessageRows(
         FROM message m
         LEFT JOIN handle h ON m.handle_id = h.ROWID
         ${hasChatJoin ? "LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID" : ""}
-        WHERE m.date > ? OR m.date IS NULL
+        WHERE m.date >= ? OR m.date IS NULL
         ORDER BY m.date ASC
       `,
 		)
@@ -339,20 +339,25 @@ function queryAttachmentRows(
 		.iterate() as IterableIterator<AttachmentRow>;
 }
 
+type MessageCursor = { last_apple_date: number; boundary_message_ids: string[] };
+
 async function emitMessageRows({
 	emit,
 	emitRecord,
 	progress,
 	rows,
 	since,
+	priorBoundaryIds,
 }: {
 	emit: (msg: EmittedMessage) => Promise<void>;
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
 	progress: (message: string, extra?: Record<string, unknown>) => Promise<void>;
 	rows: Iterable<MessageRow>;
 	since: number;
-}): Promise<number> {
+	priorBoundaryIds: ReadonlySet<string>;
+}): Promise<MessageCursor> {
 	let latestApple = since;
+	const boundaryIds = new Set(priorBoundaryIds);
 	let itemOrdinal = 0;
 	let skippedNullDate = 0;
 	for (const r of rows) {
@@ -369,8 +374,11 @@ async function emitMessageRows({
 			skippedNullDate += 1;
 			continue;
 		}
+		const date = Number(r.date), id = r.guid || String(r.id);
+		// An old date-only cursor has an empty ID set and replays this boundary once.
+		if (date === since && priorBoundaryIds.has(id)) continue;
 		await emitRecord("messages", {
-			id: r.guid || String(r.id),
+			id,
 			chat_id: r.chat_id ? String(r.chat_id) : null,
 			handle: r.handle ?? null,
 			service: r.service ?? null,
@@ -380,9 +388,11 @@ async function emitMessageRows({
 			date_read: appleDateToIso(r.date_read),
 			has_attachments: Boolean(r.cache_has_attachments),
 		});
-		if (r.date && Number(r.date) > latestApple) {
-			latestApple = Number(r.date);
+		if (date > latestApple) {
+			latestApple = date;
+			boundaryIds.clear();
 		}
+		if (date === latestApple) boundaryIds.add(id);
 		if (itemOrdinal % PROGRESS_INTERVAL_ROWS === 0) {
 			connectorDiagnostic("imessage", "stage_progress", {
 				phase: "emit",
@@ -403,7 +413,7 @@ async function emitMessageRows({
 			message: `Skipped ${skippedNullDate} message(s) with a missing or unusable date; they cannot be placed on the date cursor without fabricating a timestamp.`,
 		});
 	}
-	return latestApple;
+	return { last_apple_date: latestApple, boundary_message_ids: [...boundaryIds].sort() };
 }
 
 async function emitParticipantRows({
@@ -767,8 +777,12 @@ if (isMainModule(import.meta.url)) {
 			if (requested.has("messages")) {
 				const messagesState = (state.messages ?? {}) as {
 					last_apple_date?: number;
+					boundary_message_ids?: unknown;
 				};
 				const since = messagesState.last_apple_date ?? 0;
+				const priorBoundaryIds = new Set<string>(Array.isArray(messagesState.boundary_message_ids)
+					? messagesState.boundary_message_ids.filter((id): id is string => typeof id === "string" && id.length > 0)
+					: []);
 				connectorDiagnostic("imessage", "stage_progress", {
 					phase: "index",
 					pass: "index",
@@ -782,7 +796,7 @@ if (isMainModule(import.meta.url)) {
 				// Row iteration is lazy: query errors surface while stepping the iterator,
 				// so the emit loop runs inside the failure boundary that maps any query
 				// failure to `imessage_db_query_failed` (and leaves STATE unemitted).
-				let latestApple: number;
+				let messageCursor: MessageCursor;
 				try {
 					const rows = queryMessageRows(db, since);
 					connectorDiagnostic("imessage", "stage_progress", {
@@ -794,12 +808,13 @@ if (isMainModule(import.meta.url)) {
 					await progress("Importing your iMessage messages", {
 						stream: "messages",
 					});
-					latestApple = await emitMessageRows({
+					messageCursor = await emitMessageRows({
 						emit,
 						emitRecord,
 						progress,
 						rows,
 						since,
+						priorBoundaryIds,
 					});
 				} catch (err: unknown) {
 					const msg = err instanceof Error ? err.message : String(err);
@@ -809,7 +824,7 @@ if (isMainModule(import.meta.url)) {
 				await emit({
 					type: "STATE",
 					stream: "messages",
-					cursor: { last_apple_date: latestApple },
+					cursor: messageCursor,
 				});
 			}
 

@@ -322,10 +322,8 @@ test("iMessage cursor carries forward: a second run with prior STATE only emits 
 			],
 		});
 
-		// First run's scope only requests message 1 by using its own date as the
-		// carried-forward cursor, then rerunning against the full fixture proves
-		// the cursor genuinely gates the query rather than the fixture happening
-		// to only contain new rows.
+		// The first cursor predates both messages. An established boundary ID
+		// in the second run proves the saved cursor suppresses the earlier row.
 		const first = await runImessage(
 			dbPath,
 			["messages"],
@@ -346,11 +344,50 @@ test("iMessage cursor carries forward: a second run with prior STATE only emits 
 			dbPath,
 			["messages"],
 			{},
-			{ messages: { last_apple_date: t0 } },
+			{ messages: { last_apple_date: t0, boundary_message_ids: ["MSG-1"] } },
 		);
 		const secondMsgs = records(second.messages, "messages");
 		assert.equal(secondMsgs.length, 1);
 		assert.equal(secondMsgs[0]?.id, "MSG-2");
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("iMessage emits a newly visible message at the saved timestamp exactly once", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-boundary-"));
+	const dbPath = join(dir, "chat.db");
+	const t0 = appleSecFromUnixMs(Date.UTC(2026, 0, 1));
+	const firstId = "MSG-FIRST", lateId = "MSG-LATE";
+	function insert(guid: string, create = false) {
+		const db = new DatabaseSync(dbPath);
+		try {
+			if (create) db.exec(`
+				CREATE TABLE handle (id TEXT);
+				CREATE TABLE message (guid TEXT, handle_id INTEGER, service TEXT, is_from_me INTEGER,
+					text TEXT, date INTEGER, date_read INTEGER, cache_has_attachments INTEGER);
+				INSERT INTO handle (rowid, id) VALUES (1, 'fixture-handle');
+			`);
+			db.prepare("INSERT INTO message VALUES (?, 1, 'iMessage', 0, 'fixture text', ?, NULL, 0)").run(guid, t0);
+		} finally {
+			db.close();
+		}
+	}
+	try {
+		insert(firstId, true);
+		const first = await runImessage(dbPath, ["messages"]);
+		assert.deepEqual(records(first.messages, "messages").map(row => row.id), [firstId]);
+		const saved = states(first.messages).find(row => row.stream === "messages");
+		assert.ok(saved);
+		insert(lateId);
+		const second = await runImessage(dbPath, ["messages"], {}, { messages: saved.cursor });
+		assert.deepEqual(records(second.messages, "messages").map(row => row.id), [lateId]);
+		const updated = states(second.messages).find(row => row.stream === "messages");
+		assert.ok(updated);
+		const third = await runImessage(dbPath, ["messages"], {}, { messages: updated.cursor });
+		assert.deepEqual(records(third.messages, "messages"), []);
+		const legacy = await runImessage(dbPath, ["messages"], {}, { messages: { last_apple_date: t0 } });
+		assert.deepEqual(records(legacy.messages, "messages").map(row => row.id).sort(), [firstId, lateId]);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
@@ -1559,7 +1596,7 @@ test("iMessage emits messages without the optional chat join table", async () =>
 		);
 		assert.deepEqual(
 			states(result.messages).find((row) => row.stream === "messages")?.cursor,
-			{ last_apple_date: 1 },
+			{ last_apple_date: 1, boundary_message_ids: ["fixture-1"] },
 		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
