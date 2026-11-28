@@ -119,6 +119,8 @@ export const MAX_SEARCH_PAGES = 100;
 export const DEFAULT_CONCURRENCY = 3;
 const MAX_PAGES_PER_THREAD = 200;
 const MAX_OTHER_LIST_PAGES = 500;
+/** Hard stop for the channel inventory, which otherwise follows Slack to the end. */
+const DEFAULT_INVENTORY_PAGE_BUDGET = 2000;
 /** Slack allows up to 999 per history page; fewer round trips on busy channels. */
 const HISTORY_PAGE_LIMIT = "999";
 const LIST_PAGE_LIMIT = "200";
@@ -186,11 +188,14 @@ export interface SlackBrowserServices {
 	/** Conversations read at once; defaults to DEFAULT_CONCURRENCY. */
 	concurrency?: number;
 	now: () => Date;
+	/** Lower page bound for the channel inventory; capped at DEFAULT_INVENTORY_PAGE_BUDGET. */
+	inventoryPageBudget?: number;
 }
 
 interface Run {
 	api: SlackApiClient;
 	concurrency: number;
+	inventoryPageBudget: number;
 	ctx: SlackBrowserCollectContext;
 	cursors: Map<FingerprintedStream, FingerprintCursor>;
 	/** Optional streams that ended in a SKIP_RESULT this run. */
@@ -358,8 +363,8 @@ function countFullScan(
  * Every page of a cursor-paginated list method. A `"to_end"` listing (the
  * channel inventory) follows fresh cursors until Slack stops returning one:
  * Slack filters these pages server-side, so a page can be empty and still
- * carry a new cursor. It refuses only a repeated cursor. Other listings keep
- * a page bound.
+ * carry a new cursor. It refuses a repeated cursor and stops at the inventory
+ * page budget. Other listings keep their own page bound.
  */
 async function listAll<
 	T extends {
@@ -376,11 +381,9 @@ async function listAll<
 	const pages: T[] = [];
 	const seenCursors = new Set<string>();
 	let cursor = "";
-	for (
-		let pageNo = 0;
-		extent === "to_end" || pageNo < MAX_OTHER_LIST_PAGES;
-		pageNo += 1
-	) {
+	const maxPages =
+		extent === "to_end" ? run.inventoryPageBudget : MAX_OTHER_LIST_PAGES;
+	for (let pageNo = 0; pageNo < maxPages; pageNo += 1) {
 		const answer = parseAnswer(
 			schema,
 			method,
@@ -402,8 +405,16 @@ async function listAll<
 			seenCursors.add(cursor);
 		}
 	}
-	// Other list methods retain their existing bound; no partial checkpoint.
+	// The page bound ran out: never publish a partial checkpoint.
 	throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
+}
+
+function boundedInventoryBudget(configured: number | undefined): number {
+	return configured !== undefined &&
+		Number.isSafeInteger(configured) &&
+		configured > 0
+		? Math.min(configured, DEFAULT_INVENTORY_PAGE_BUDGET)
+		: DEFAULT_INVENTORY_PAGE_BUDGET;
 }
 
 /**
@@ -1689,6 +1700,7 @@ export async function collectSlackBrowser(
 		api: services.api,
 		concurrency: services.concurrency ?? DEFAULT_CONCURRENCY,
 		ctx,
+		inventoryPageBudget: boundedInventoryBudget(services.inventoryPageBudget),
 		cursors: new Map(),
 		failed: new Set(),
 		fullScanConsidered: new Map(),
