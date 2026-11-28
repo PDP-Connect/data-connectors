@@ -26862,7 +26862,7 @@
 				},
 				"connector_key": "steam",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-				"version": "0.1.26",
+				"version": "0.1.27",
 				"display_name": "Steam",
 				"brand": {
 					"icon": "icon.svg",
@@ -32628,7 +32628,7 @@
 				},
 				"connector_key": "ynab",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-				"version": "0.3.27",
+				"version": "0.3.28",
 				"display_name": "YNAB",
 				"brand": {
 					"icon": "icon.svg",

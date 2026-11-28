@@ -14,6 +14,7 @@ import {
 	DEFAULT_PACING_STALENESS_MS,
 	readPersistedPacingInterval,
 } from "./connector-http-governor.ts";
+import { requestText } from "./governed-text-request.ts";
 import { RetryBudget } from "./provider-budget.ts";
 import { PreflightWaitProbe } from "./send-governor.ts";
 
@@ -74,6 +75,39 @@ test("connector governor: recovers a 429-then-200 and returns the parsed value",
 	assert.deepEqual(result.value, { ok: true });
 	// Retry-After honored exactly (7000), no extra backoff stacked on top.
 	assert.deepEqual(slept, [7000]);
+});
+
+test("requestText forwards Retry-After and keeps the status when the body is unreadable", async () => {
+	const slept: number[] = [];
+	const governor = createConnectorHttpGovernor({
+		maxAttempts: 2,
+		name: "test",
+		pacingInitialIntervalMs: 0,
+		profile: TEST_PROFILE,
+		retrySleep: (ms) => {
+			slept.push(ms);
+		},
+	});
+	const responses = [
+		new Response(null, { headers: { "Retry-After": "7" }, status: 429 }),
+		new Response(
+			new ReadableStream({
+				start(controller) {
+					controller.error(new Error("fixture body interrupted"));
+				},
+			}),
+			{ status: 401 },
+		),
+	];
+
+	const result = await requestText(governor, () => {
+		const response = responses.shift();
+		assert.ok(response);
+		return Promise.resolve(response);
+	});
+
+	assert.deepEqual(slept, [7000]);
+	assert.deepEqual(result, { status: 401, value: "" });
 });
 
 test("connector governor: request retry observer receives the resolved delay and status", async () => {
