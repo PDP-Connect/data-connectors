@@ -23,8 +23,9 @@ export function applyRequestedScopeEntries(
 	requested: Map<string, StreamScope>,
 	rawEntries: unknown,
 	platform: string,
+	options: { acceptFullDate?: boolean } = { acceptFullDate: true },
 ): void {
-	applyRequestedTimeRanges(requested, rawEntries, platform, { acceptFullDate: true });
+	applyRequestedTimeRanges(requested, rawEntries, platform, options);
 	if (rawEntries === undefined) return;
 	for (const raw of rawEntries as Array<string | StreamScope>) {
 		if (typeof raw === "string") continue;

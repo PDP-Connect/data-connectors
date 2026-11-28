@@ -1115,7 +1115,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.25",
+				"version": "0.3.26",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -3788,7 +3788,7 @@
 				},
 				"connector_key": "character-ai",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/character-ai",
-				"version": "0.1.11",
+				"version": "0.1.12",
 				"display_name": "Character.AI",
 				"brand": {
 					"icon": "icon.svg",
@@ -4666,7 +4666,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.3.22",
+				"version": "0.3.23",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -9481,7 +9481,7 @@
 				},
 				"connector_key": "facebook",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/facebook",
-				"version": "0.1.15",
+				"version": "0.1.16",
 				"display_name": "Facebook",
 				"brand": {
 					"icon": "icon.svg",
@@ -16522,7 +16522,7 @@
 				},
 				"connector_key": "instinct",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/instinct",
-				"version": "0.1.12",
+				"version": "0.1.13",
 				"display_name": "Instinct",
 				"brand": {
 					"icon": "icon.svg",
@@ -17693,7 +17693,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.47",
+				"version": "0.3.48",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -18323,7 +18323,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.45",
+				"version": "0.4.46",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -18675,7 +18675,7 @@
 				},
 				"connector_key": "mountain-project",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/mountain-project",
-				"version": "0.1.4",
+				"version": "0.1.5",
 				"display_name": "Mountain Project",
 				"brand": {
 					"icon": "icon.svg",
@@ -19100,7 +19100,7 @@
 				},
 				"connector_key": "muse",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/muse",
-				"version": "0.1.16",
+				"version": "0.1.17",
 				"display_name": "Muse (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -20451,7 +20451,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.56",
+				"version": "0.1.57",
 				"display_name": "Oura (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -20789,7 +20789,7 @@
 				},
 				"connector_key": "perplexity",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
-				"version": "0.1.13",
+				"version": "0.1.14",
 				"display_name": "Perplexity (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -21189,7 +21189,7 @@
 				},
 				"connector_key": "polar-flow",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/polar-flow",
-				"version": "0.1.4",
+				"version": "0.1.5",
 				"display_name": "Polar Flow",
 				"brand": {
 					"icon": "icon.svg",
@@ -22314,7 +22314,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.11",
+				"version": "0.4.12",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
@@ -25161,7 +25161,7 @@
 				},
 				"connector_key": "slack-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/slack-browser",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Slack (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -26357,7 +26357,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.62",
+				"version": "0.1.63",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -27661,7 +27661,7 @@
 				},
 				"connector_key": "tiktok",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/tiktok",
-				"version": "0.3.17",
+				"version": "0.3.18",
 				"display_name": "TikTok (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -30186,7 +30186,7 @@
 				},
 				"connector_key": "whatsapp-web",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
-				"version": "0.1.13",
+				"version": "0.1.14",
 				"display_name": "WhatsApp (web)",
 				"brand": {
 					"icon": "icon.svg",
@@ -34040,7 +34040,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.52",
+				"version": "0.2.53",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",

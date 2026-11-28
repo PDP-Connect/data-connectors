@@ -5935,33 +5935,27 @@ test("runConversationsAndMessagesStreams: one run budget bounds the recovery pas
 	// reset between passes.
 	const harness = makeRecordingEmit(validateRecord);
 	const fetchedIds: string[] = [];
+	const etaMessages: string[] = [];
+	const forwardList = [
+		makeConvo({ id: "fwd-1", title: "f1", update_time: 1_700_000_300 }),
+		makeConvo({ id: "fwd-2", title: "f2", update_time: 1_700_000_200 }),
+	];
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
 		fetch: async (path: string): Promise<ChatGptFetchResult> => {
 			await Promise.resolve();
-			if (path.startsWith("/conversations/search?")) {
-				// List walk: two new forward conversations, newest first.
+			if (
+				path.startsWith("/conversations/search?") ||
+				path.startsWith("/conversations?")
+			) {
+				// Both inventories agree. There is still no combined recovery and
+				// forward denominator, because the recovery pass happened first.
+				const params = new URL(path, "https://fixture.invalid").searchParams;
+				const start = Number(params.get("cursor") ?? params.get("offset"));
 				return {
 					status: 200,
-					json: {
-						items: [
-							{
-								id: "fwd-1",
-								title: "f1",
-								create_time: 1_700_000_300,
-								update_time: 1_700_000_300,
-								current_node: "a1",
-							},
-							{
-								id: "fwd-2",
-								title: "f2",
-								create_time: 1_700_000_200,
-								update_time: 1_700_000_200,
-								current_node: "a1",
-							},
-						],
-					} as ChatGptJson,
+					json: { items: forwardList.slice(start) },
 				};
 			}
 			fetchedIds.push(path);
@@ -5990,7 +5984,9 @@ test("runConversationsAndMessagesStreams: one run budget bounds the recovery pas
 		] as NonNullable<StreamDeps["detailGaps"]>,
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
-		progress: (): Promise<void> => Promise.resolve(),
+		progress: async (message) => {
+			etaMessages.push(message);
+		},
 		requested: new Map(
 			["conversations", "messages"].map((name) => [name, { name }]),
 		),
@@ -6021,6 +6017,14 @@ test("runConversationsAndMessagesStreams: one run budget bounds the recovery pas
 		true,
 		"the recovery pass spends budget before the forward pass",
 	);
+	assert.deepEqual(
+		progressTexts(harness.protocolMessages).filter((text) =>
+			text.startsWith("Synced "),
+		),
+		["Synced 1 conversation", "Synced 2 conversations"],
+		"recovery and forward detail completion produce one run-wide count",
+	);
+	assert.ok(etaMessages.every((text) => !/\d+ of \d+/.test(text)));
 
 	const gaps = harness.protocolMessages.filter(
 		(m): m is Extract<EmittedMessage, { type: "DETAIL_GAP" }> =>

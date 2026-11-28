@@ -616,9 +616,9 @@ export async function runHarness({
 			}
 			return route.abort("blockedbyclient");
 		});
-		await context.route(fixtures.hosts, (route) => {
+		await context.route(fixtures.hosts, async (route) => {
 			const request = route.request();
-			const f = fixtures.resolve(request.url(), {
+			const f = await fixtures.resolve(request.url(), {
 				method: request.method(),
 				postData: request.postData(),
 				headers: request.headers(),
