@@ -403,8 +403,17 @@ function currentPositionReads(dash: unknown): {
  * Field reads for the owner's profile. Name, headline, and picture fall back
  * to `/me`. Fields only a full decoration carries (summary, industry,
  * location, current position) are unavailable from the basic fallback.
- * These dash-only fields must be present, even as `null`: the decoration
- * omitting them is not proof of an empty value.
+ *
+ * Summary and industry are optional in the decoration: LinkedIn leaves the
+ * key out for a member who has no About text or no industry (the legacy
+ * connector read `profileEl.summary || ''`; it never read industry). Within a
+ * full decoration an absent key is empty only when no key of the same family
+ * is present (`multiLocaleSummary`; `industryUrn`, `industryV2...`): then the
+ * value may live there, and the field stays unavailable. A present but
+ * malformed value still withholds the row. (Prod, 0.3.43-0.3.44, 2026-11-05..18:
+ * 203 of about 250 collected runs withheld the whole profile row for
+ * `summary:absent` and/or `industry:absent`; a profile-only request then
+ * failed outright.) Location and the current position stay strict.
  */
 export function profileFieldReads(src: ProfileSources): FieldReads {
 	const hasDash = isRecord(src.dash);
@@ -441,7 +450,7 @@ export function profileFieldReads(src: ProfileSources): FieldReads {
 		),
 		id: read(src.publicIdentifier),
 		industry: decoration(() =>
-			firstOf([textAt(src.dash, ["industry", "name"])], "unavailable"),
+			optionalDecorationText(src.dash, ["industry", "name"], /^industry/u),
 		),
 		location: decoration(() => locationRead(src.dash)),
 		profile_picture_url: firstOf(
@@ -464,9 +473,23 @@ export function profileFieldReads(src: ProfileSources): FieldReads {
 		),
 		public_url: read(profileUrlFor(src.publicIdentifier)),
 		summary: decoration(() =>
-			firstOf([textAt(src.dash, ["summary"])], "unavailable"),
+			optionalDecorationText(src.dash, ["summary"], /^(summary|multiLocaleSummary)$/u),
 		),
 	};
+}
+
+/** An optional decoration field: read when present; empty only when the
+ *  profile carries no key of its family at all. A sibling key alone (an
+ *  `industryUrn`, an `industryV2...`, a `multiLocaleSummary`) means the value
+ *  may live elsewhere, so the field stays unavailable rather than null. */
+function optionalDecorationText(dash: unknown, path: Path, family: RegExp): FieldRead<string> {
+	const value = textAt(dash, path);
+	if (value.kind !== "unavailable" || value.reason !== "absent") return value;
+	if (!isRecord(dash)) return value;
+	const top = path[0];
+	const siblings = Object.keys(dash).filter((key) => family.test(key) && key !== top);
+	if (Object.hasOwn(dash, top ?? "") || siblings.length > 0) return value;
+	return EMPTY;
 }
 
 const PROFILE_ROW = rowSpec(profileSchema, ["id"]);

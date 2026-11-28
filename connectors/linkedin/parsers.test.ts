@@ -363,13 +363,27 @@ test("profileFieldReads: location joins preferredGeoPlace and countryCode, else 
 	);
 });
 
-test("profileFieldReads: dash-only fields the decoration omits are unavailable, not null", () => {
+test("profileFieldReads: location and current position the decoration omits are unavailable; omitted summary and industry are empty", () => {
 	const reads = profileFieldReads({
 		...profileSources({}),
 		dash: { firstName: "Alex" },
 	});
-	for (const field of ["industry", "location", "summary", "current_company"]) {
+	for (const field of ["location", "current_company"]) {
 		assert.equal(reads[field]?.kind, "unavailable", field);
+	}
+	// LinkedIn leaves both keys out for a member without About text or an
+	// industry (prod 2026-11-05..18, 203 of about 250 runs).
+	for (const field of ["industry", "summary"]) {
+		assert.equal(reads[field]?.kind, "empty", field);
+	}
+	// From the basic fallback (no decoration) they are still unknown.
+	const basic = profileFieldReads({
+		...profileSources({}),
+		dash: { firstName: "Alex" },
+		dashSource: "basic",
+	});
+	for (const field of ["industry", "summary"]) {
+		assert.equal(basic[field]?.kind, "unavailable", field);
 	}
 });
 
