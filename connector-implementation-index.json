@@ -34632,6 +34632,7 @@
 								"id": {
 									"type": "string",
 									"minLength": 1,
+									"pattern": "\\S",
 									"description": "Google's channel id."
 								},
 								"channel_url": {
