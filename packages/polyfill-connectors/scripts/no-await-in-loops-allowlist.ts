@@ -5656,14 +5656,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/ynab/index.ts",
-			line: 2204,
+			line: 2212,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "trackAndEmit(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/ynab/index.ts",
-			line: 2506,
+			line: 2513,
 			column: 17,
 			category: "dependent_pagination",
 			note: "collectForBudget(): next request depends on the prior page's cursor/offset/response",

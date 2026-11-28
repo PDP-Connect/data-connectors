@@ -2188,10 +2188,18 @@ export async function emitBudgetsStream(
 ): Promise<void> {
 	const { budgets, state, newState, emit, trackAndEmit } = deps;
 	const cursor = openBudgetCursor(state);
+	const priorOfUnreadable = new Map<string, string>();
 	let covered = 0;
 	for (const b of budgets) {
 		const record = budgetRecord(b);
 		if (!validateRecord("budgets", record).ok) {
+			const id = b.id;
+			if (typeof id === "string" && id.length > 0) {
+				const prior = cursor.priorFingerprint(id);
+				if (typeof prior === "string" && prior.length > 0) {
+					priorOfUnreadable.set(id, prior);
+				}
+			}
 			continue;
 		}
 		if (!cursor.shouldEmit(record)) {
@@ -2215,14 +2223,13 @@ export async function emitBudgetsStream(
 			covered,
 		},
 	);
-	// `/budgets` is a full-collection endpoint, so any id known to the prior
-	// cursor but absent this run was deleted at the source. Prune so a future
-	// re-creation triggers a fresh emit instead of silently no-opping against a
-	// stale fingerprint.
+	// A listed but unreadable budget is not absent. Preserve its prior digest
+	// without fingerprinting malformed data; any validated duplicate still wins.
+	// A genuinely absent id is pruned so a later re-creation can emit again.
 	cursor.dropUnseenIds();
 	const budgetsCursor = {
 		fetched_at: nowIso(),
-		fingerprints: cursor.toState(),
+		fingerprints: { ...Object.fromEntries(priorOfUnreadable), ...cursor.toState() },
 	};
 	await emit({ type: "STATE", stream: "budgets", cursor: budgetsCursor });
 	newState.budgets = budgetsCursor;

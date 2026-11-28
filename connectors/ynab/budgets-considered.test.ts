@@ -356,3 +356,27 @@ test("budgets considered: a currency locale edit produces a new summary", async 
 	);
 	assert.equal(budgetsSelfCoverage(edited.messages)?.covered, 1);
 });
+
+test("a malformed listed budget retains its prior fingerprint without counting as covered", async () => {
+	const listed = "11111111-1111-4111-8111-111111111111";
+	const absent = "22222222-2222-4222-8222-222222222222";
+	const prior = "a".repeat(64);
+	const h = makeHarness();
+	await emitBudgetsStream({
+		budgets: [makeBudget({ id: listed, name: 42 as unknown as string })],
+		state: {
+			budgets: { fingerprints: { [listed]: prior, [absent]: "b".repeat(64) } },
+		},
+		newState: {},
+		emit: h.emit,
+		trackAndEmit: h.trackAndEmit,
+	});
+	assert.deepEqual(h.emitted, []);
+	const coverage = budgetsSelfCoverage(h.messages);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
+	const next = nextStateFrom(h.messages).budgets as {
+		fingerprints: Record<string, string>;
+	};
+	assert.deepEqual(next.fingerprints, { [listed]: prior });
+});
