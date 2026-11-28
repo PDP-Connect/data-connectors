@@ -4,7 +4,7 @@
 import { ensureOuraApiAccess, OURA_LOGIN_URL, probeOuraCachedApiAccess, probeOuraPortalSession, probeOuraSignInInProgress } from "../../../connectors/oura_browser/api-access.ts";
 import { collectOuraBrowser } from "../../../connectors/oura_browser/index.ts";
 import { validateRecord } from "../../../connectors/oura_browser/schemas.ts";
-import { applyRequestedScopeEntries } from "../requested-scope-entries.ts";
+import { applyRequestedScopeEntries, readRequestedScopeEntries } from "../requested-scope-entries.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 import type { Page } from "playwright";
 
@@ -12,12 +12,6 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 
 const streams = PAGESHIM_CONNECTOR_STREAMS;
-
-function requestedScopeEntries(page: ShimPage): unknown {
-	try {
-		return (page as ShimPage & { requestedScopeEntries?: () => unknown }).requestedScopeEntries?.();
-	} catch { return undefined; }
-}
 
 function withOuraTokenPost(page: ShimPage, pw: Page): Page {
 	return Object.assign(Object.create(pw) as Page, {
@@ -59,7 +53,7 @@ function withOuraTokenPost(page: ShimPage, pw: Page): Page {
 	validateRecord,
 	probe: async (pw) => Boolean(await probeOuraCachedApiAccess(withOuraTokenPost(page, pw as Page))) ||
 		await probeOuraSignInInProgress(pw as Page) || await probeOuraPortalSession(pw as Page),
-	prepareRequested: (requested) => applyRequestedScopeEntries(requested, requestedScopeEntries(page), "oura"),
+	prepareRequested: (requested) => applyRequestedScopeEntries(requested, readRequestedScopeEntries(page), "oura"),
 	collect: async (ctx) => {
 		const pw = withOuraTokenPost(page, ctx.page as Page);
 		const access = await ensureOuraApiAccess(pw, async (url, message, ready) => {

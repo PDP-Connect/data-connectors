@@ -57,6 +57,7 @@ const PAGE_SHIM_SHARED_INPUTS = [
 	"scripts/pageshim/shims/process.js",
 	"scripts/pageshim/shims/url.js",
 ];
+const PAGE_SHIM_GENERATED_SCOPE_INPUT = "scripts/pageshim/requested-scope-entries.ts";
 // Rendering policy for the consent slices, as it exists at the commit being
 // compared. It decides whether a slice is current; it is not itself shipped,
 // so the PageShim builder's import of it is not an artifact input. The slice
@@ -585,6 +586,12 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs", CONSENT_RENDERER]), consentRemap ?? undefined);
     }
     if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options, new Set(), consentRemap ?? undefined);
+    // The generated entry interpolates this import, so walking literal imports
+    // in build.mjs cannot see it. Older generated entries predate this module.
+    if (profile.mobile?.pageshim && !profile.mobile.pageshim.entry &&
+        readFileAtCommit(commit, PAGE_SHIM_GENERATED_SCOPE_INPUT, options) !== null) {
+      addLocalImportClosure(commit, PAGE_SHIM_GENERATED_SCOPE_INPUT, files, options, new Set(), consentRemap ?? undefined);
+    }
   }
 
   const hash = createHash("sha256");

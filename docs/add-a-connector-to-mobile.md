@@ -17,6 +17,12 @@ You have a working browser connector and want it in the mobile app build. You wi
 
 The harness runs the bundle against fixture responses. It does not show that the site behaves the same on a real device.
 
+## Read the host's requested scope
+
+The runtime reads `page.requestedScopes()` for the selected streams. The generated adapter also reads the optional structured entries and applies supported time ranges. Each stream's manifest consent field determines which range bounds it accepts.
+
+In a custom entry that uses structured scope, call `readRequestedScopeEntries(page)` from `scripts/pageshim/requested-scope-entries.ts` inside `prepareRequested`. Older hosts can omit the method or throw on lookup. A present method runs with `page` as its receiver, and a failure ends the run before collection. Use `applyRequestedScopeEntries(requested, entries, prefix)` for the same interpretation as the generated adapter, including refusal of resource and field selectors. Select the platform's streams, interpret any provider-specific constraints, and shape the result in the adapter.
+
 ## Declare runtime binding features
 
 A binding is a broad service that the connector needs from its host, such as `browser`, `network`, `filesystem` or `desktop_session`. A feature is one capability inside a binding. `runtime_requirements.bindings.<binding>.features` lists the features the connector uses. This example is the declaration in `connectors/character_ai/manifest.json`, shortened.

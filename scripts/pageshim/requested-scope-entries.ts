@@ -3,6 +3,20 @@
 
 import type { StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { applyRequestedTimeRanges } from "./requested-time-range.ts";
+import type { ShimPage } from "./runtime.ts";
+
+/** Read optional scope metadata from the host before collection. */
+export function readRequestedScopeEntries(page: ShimPage): unknown {
+	let read: ShimPage["requestedScopeEntries"];
+	try {
+		read = page.requestedScopeEntries;
+	} catch {
+		// Older host proxies throw when an optional member is absent.
+		return undefined;
+	}
+	// A present reader's failure must end the run before collection starts.
+	return read?.call(page);
+}
 
 /** Apply host ranges by name; never silently broaden unsupported selection. */
 export function applyRequestedScopeEntries(

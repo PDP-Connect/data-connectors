@@ -68,6 +68,21 @@ export const pageshimCase = {
 	emptyExportSummary: { count: 0, label: "records", details: { sleep: 0, readiness: 0, activity: 0 } },
 };
 
+export const scopeReaderFixtures = {
+	...ouraBrowserFixtures,
+	resolve(raw) {
+		const url = new URL(raw);
+		if (url.origin !== "https://api.ouraring.com" || !url.pathname.endsWith("/daily_readiness"))
+			return resolveFixture(raw);
+		// Return all three rows even when the requested window is narrower.
+		return json({ data: [
+			{ id: id(302), day: "2026-09-22", score: 81 },
+			...DATA.daily_readiness,
+			{ id: id(303), day: "2026-09-24", score: 83 },
+		], next_token: null });
+	},
+};
+
 /** Deterministic API v2 replay, with an optional incomplete endpoint window. */
 export function recordingDailyFixture({ failWindow = -1, extraDays = [] } = {}) {
 	const windows = [];
