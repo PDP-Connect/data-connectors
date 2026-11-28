@@ -157,8 +157,11 @@ test("a failed conversation read stops before attempting remaining conversations
 	});
 	assert.deepEqual(seen, ["fixture_a", "fixture_b"]);
 	assert.equal(outcome.reason, "gmcli_query_failed");
-	assert.equal(outcome.message, "Synthetic conversation interruption");
-	assert.equal(outcome.parsed, undefined);
+	assert.equal(
+		outcome.message,
+		"Google Messages could not read one conversation. Readable messages were kept; the rest will be retried.",
+	);
+	assert.deepEqual(outcome.parsed, []);
 });
 
 function buildEmptyChatsJsonFixtureAsMessages(): string {

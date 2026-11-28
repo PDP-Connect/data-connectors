@@ -418,6 +418,7 @@ test("ynabCollect: established zero streams prove empty only after a fresh provi
 	const { request, knowledgeSeenFor, requestsFor } = fakeRequest(fixtures);
 	const priorState = {
 		categories: { [BUDGET_A]: { server_knowledge: 10 } },
+		category_groups: { [BUDGET_A]: { server_knowledge: 10 } },
 		payees: { [BUDGET_A]: { server_knowledge: 20 } },
 		transactions: {
 			[BUDGET_A]: { server_knowledge: 30, since_date: "2026-01-01" },
