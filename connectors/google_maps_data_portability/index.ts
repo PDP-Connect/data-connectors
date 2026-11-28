@@ -6,6 +6,7 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import {
 	type CollectContext,
+	createConnectorFailure,
 	emitDetailCoverage,
 	nowIso,
 	type RecordData,
@@ -297,7 +298,10 @@ export async function collectGoogleMapsDataPortability(
 			considered: selected.length,
 			covered: 0,
 		});
-		throw new Error("google_dataportability_no_authorized_resource_groups");
+		throw createConnectorFailure(
+			"google_dataportability_no_authorized_resource_groups",
+			"None of the requested Google Maps data groups are covered by the current grant. Choose groups that are already covered, then try again.",
+		);
 	}
 
 	const nextJobs: Record<string, ArchiveJobCursor> = {

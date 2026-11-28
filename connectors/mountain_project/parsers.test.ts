@@ -44,6 +44,30 @@ test("parseCsv keeps empty trailing fields and refuses an unterminated quote", (
 	assert.throws(() => parseCsv('a,"b\n'), /unterminated/);
 });
 
+test("parseCsv keeps the final row after CR-only line endings", () => {
+	assert.deepEqual(parseCsv("Label,Note\rAlpha,first\rBeta,last"), [
+		["Label", "Note"],
+		["Alpha", "first"],
+		["Beta", "last"],
+	]);
+});
+
+test("parseExportTable trims reordered headers and leaves an absent cell empty", () => {
+	assert.deepEqual(
+		parseExportTable(" Label , Quantity \nAlpha,2\nBeta", [
+			"Quantity",
+			"Label",
+		]),
+		{
+			ok: true,
+			rows: [
+				{ Label: "Alpha", Quantity: "2" },
+				{ Label: "Beta", Quantity: "" },
+			],
+		},
+	);
+});
+
 test("parseExportTable keys rows by header and fails when a required column is missing", () => {
 	assert.equal(tickRows().length, 7);
 	const missing = parseExportTable("Date,Route\n2026-01-01,x\n", TICK_COLUMNS);
@@ -363,4 +387,61 @@ test("parseProfilePage leaves counts null when the profile shows none", () => {
 	assert.ok(parsed.ok);
 	assert.equal(parsed.record.tick_count, null);
 	assert.equal(parsed.record.todo_count, null);
+});
+
+test("export columns can move and an extra provider column cannot shift known fields", () => {
+	const result = parseExportTable(
+		" Extra , Date , URL , Route \rSynthetic,2024-02-29,https://www.mountainproject.com/route/123/fixture,Fixture\r",
+		["Route", "URL", "Date"],
+	);
+	assert.ok(result.ok);
+	assert.equal(result.rows.length, 1);
+	assert.deepEqual(
+		[result.rows[0]?.Route, result.rows[0]?.Date, result.rows[0]?.URL],
+		[
+			"Fixture",
+			"2024-02-29",
+			"https://www.mountainproject.com/route/123/fixture",
+		],
+	);
+});
+
+test("invalid calendar rows do not consume a tick ordinal between valid leap-day ticks", () => {
+	const route = {
+		Route: "Fixture",
+		URL: "https://www.mountainproject.com/route/123/fixture",
+	};
+	const { records, unreadable } = buildTickRecords([
+		{ ...route, Date: "2024-02-29", Notes: "first" },
+		{ ...route, Date: "2025-02-29", Notes: "not a leap year" },
+		{ ...route, Date: "2024-02-29", Notes: "second" },
+	]);
+	assert.equal(unreadable, 1);
+	assert.deepEqual(
+		records.map(({ id, notes }) => [id, notes]),
+		[
+			["123:2024-02-29:1", "first"],
+			["123:2024-02-29:2", "second"],
+		],
+	);
+});
+
+test("invalid saved-route rows do not displace the first valid record for a route", () => {
+	const URL = "https://www.mountainproject.com/route/123/fixture";
+	const { records, unreadable, duplicates } = buildSavedRouteRecords([
+		{ URL, Route: " " },
+		{
+			URL,
+			Route: "First complete name",
+			Pitches: "0",
+			Length: "9007199254740992",
+		},
+		{ URL, Route: "Second complete name", Pitches: "4", Length: "100" },
+	]);
+	assert.equal(unreadable, 1);
+	assert.equal(duplicates, 1);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.route_name, "First complete name");
+	assert.equal(records[0]?.pitches, 0);
+	assert.equal(records[0]?.length_ft, null);
 });

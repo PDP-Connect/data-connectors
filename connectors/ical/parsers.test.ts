@@ -115,6 +115,25 @@ test("parseIcsLine: ORGANIZER;CN=Boss:mailto:boss@x.com → params.CN preserved"
 	assert.equal(got.value, "mailto:boss@x.com");
 });
 
+test("parseIcs preserves an attendee with delimiters inside a quoted common name", () => {
+	const source = [
+		"BEGIN:VCALENDAR",
+		"BEGIN:VEVENT",
+		"UID:fixture",
+		'ATTENDEE;CN="Example: Planning; Group=West";ROLE=REQ-PARTICIPANT:mailto:fixture@example.invalid',
+		"END:VEVENT",
+		"END:VCALENDAR",
+	].join("\r\n");
+	const [event] = parseIcs(source, "Fixture Calendar");
+	assert.deepEqual(event?.attendees, [
+		{
+			email: "fixture@example.invalid",
+			name: "Example: Planning; Group=West",
+			role: "REQ-PARTICIPANT",
+		},
+	]);
+});
+
 test("parseIcsLine: line without ':' → null", () => {
 	assert.equal(parseIcsLine("BEGIN_NOT_A_PROPERTY"), null);
 });
@@ -307,4 +326,68 @@ test("hashId: deterministic 24-char hex", () => {
 	assert.match(id, /^[0-9a-f]{24}$/);
 	assert.equal(id, hashId("a|b|c"));
 	assert.notEqual(id, hashId("a|b|d"));
+});
+
+// ─── Partial and malformed calendar input ───────────────────────────────
+
+test("parseIcs: a truncated trailing event does not erase a completed event", () => {
+	const source = [
+		"BEGIN:VCALENDAR",
+		"BEGIN:VEVENT",
+		"UID:complete-event",
+		"DTSTART:20260110T090000Z",
+		"END:VEVENT",
+		"BEGIN:VEVENT",
+		"UID:unfinished-event",
+		"DTSTART:20260111T090000Z",
+	].join("\n");
+
+	assert.deepEqual(
+		parseIcs(source, "Fixture calendar").map((event) => event.uid),
+		["complete-event"],
+	);
+});
+
+test("buildEventRecord: malformed start skips only the affected event", () => {
+	const calendar = "Fixture calendar";
+	const source = [
+		"BEGIN:VEVENT",
+		"UID:bad-start",
+		"DTSTART:not-a-date",
+		"END:VEVENT",
+		"BEGIN:VEVENT",
+		"UID:good-start",
+		"DTSTART:20260110T090000Z",
+		"END:VEVENT",
+	].join("\n");
+
+	const records = parseIcs(source, calendar).map((event) =>
+		buildEventRecord(event, calendar),
+	);
+	assert.equal(records[0], null);
+	assert.equal(records[1]?.uid, "good-start");
+	assert.equal(records[1]?.start, "2026-01-10T09:00:00Z");
+});
+
+test("buildEventRecord: invalid optional end and attendee do not discard the event", () => {
+	const calendar = "Fixture calendar";
+	const source = [
+		"BEGIN:VEVENT",
+		"UID:optional-fields",
+		"DTSTART:20260110T090000Z",
+		"DTEND:not-a-date",
+		"ATTENDEE;CN=Missing address:urn:example:none",
+		"ATTENDEE;CN=Fictional attendee:mailto:fictional@example.test",
+		"END:VEVENT",
+	].join("\n");
+
+	const [event] = parseIcs(source, calendar);
+	assert.ok(event);
+	const record = buildEventRecord(event, calendar);
+	assert.ok(record);
+	assert.equal(record.end, null);
+	assert.deepEqual(
+		record.attendees.map((attendee) => attendee.email),
+		["fictional@example.test"],
+	);
 });

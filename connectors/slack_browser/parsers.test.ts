@@ -150,6 +150,17 @@ test("a reply is not a thread parent; an edited message keeps who edited it", ()
 	assert.equal(editedRecord.edited_ts, "1790300100.000000");
 });
 
+test("timestamp display parsing falls back to zero when a value is missing or blank", () => {
+	assert.equal(slackTsSeconds(undefined), 0);
+	assert.equal(slackTsSeconds(""), 0);
+});
+
+test("timestamp display parsing falls back to zero for non-finite text", () => {
+	assert.equal(slackTsSeconds("Infinity"), 0);
+	assert.equal(slackTsSeconds("not-a-timestamp"), 0);
+	assert.equal(slackTsSeconds("20.125"), 20.125);
+});
+
 test("thread activity is judged by the latest reply, not the parent's own time", () => {
 	const [active, quiet, plain] = history(
 		"conversations.history-C0123456789-threads",
@@ -161,6 +172,23 @@ test("thread activity is judged by the latest reply, not the parent's own time",
 	assert.equal(slackTsSeconds("1790450000.000200"), 1_790_450_000.0002);
 	assert.equal(slackTsSeconds(undefined), 0);
 	assert.equal(slackTsSeconds("nope"), 0);
+});
+
+test("a reply timestamp exactly on the incremental cutoff keeps its thread eligible", () => {
+	const message = {
+		ts: "100.000000",
+		reply_count: 1,
+		latest_reply: "200.000000",
+	} as Parameters<typeof threadActiveSince>[0];
+	assert.equal(threadActiveSince(message, 200), true);
+	assert.equal(threadActiveSince(message, 200.000001), false);
+});
+
+test("an unmeasured latest reply does not put a thread into a positive time window", () => {
+	const message = { ts: "100.000000", reply_count: 1 } as Parameters<
+		typeof threadActiveSince
+	>[0];
+	assert.equal(threadActiveSince(message, 100), false);
 });
 
 test("the workspace record comes from auth.test and team.info, and needs a team id", () => {
@@ -249,6 +277,25 @@ test("channels and users keep every field the archive profile reads", () => {
 	assert.equal(botRecord.is_bot, true);
 });
 
+test("group display metadata distinguishes missing text from a blank description", () => {
+	const absent = buildUserGroup({ id: "SFixture" });
+	const blank = buildUserGroup({ id: "SFixture", description: "" });
+	assert.equal(absent.description, null);
+	assert.equal(blank.description, "");
+});
+
+test("group status metadata distinguishes unspecified, active, and deleted", () => {
+	assert.equal(buildUserGroup({ id: "SFixture" }).deleted, null);
+	assert.equal(
+		buildUserGroup({ id: "SFixture", date_delete: 0 }).deleted,
+		false,
+	);
+	assert.equal(
+		buildUserGroup({ id: "SFixture", date_delete: 1 }).deleted,
+		true,
+	);
+});
+
 test("user groups, reminders and stars build the archive profile's records", () => {
 	const [group] =
 		userGroupsListSchema.parse(fixture("usergroups.list")).usergroups ?? [];
@@ -294,4 +341,20 @@ test("user groups, reminders and stars build the archive profile's records", () 
 	valid("stars", channelStarRecord);
 	assert.equal(channelStarRecord.id, "channel:C0987654321");
 	assert.equal(channelStarRecord.target_id, "C0987654321");
+});
+
+test("blank file identities are counted as gaps, not emitted as keys", () => {
+	const family = buildMessageFamily(
+		"CSYNTHETIC",
+		{
+			ts: "1790400000.000100",
+			files: [{ id: "" }, { id: " " }, {}, { id: "FSYNTHETIC" }],
+		},
+		EMITTED_AT,
+	);
+	assert.equal(family.fileGaps, 3);
+	assert.deepEqual(
+		family.files.map((file) => file.id),
+		["FSYNTHETIC"],
+	);
 });

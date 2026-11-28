@@ -279,6 +279,9 @@ export class GooglePeopleClient {
 			}
 			throw error;
 		}
+		if (body.connections !== undefined && !Array.isArray(body.connections)) {
+			throw new Error("google_people_invalid_connections");
+		}
 		const people = asArray(body.connections)
 			.map(toPerson)
 			.filter((person): person is Person => person !== null);

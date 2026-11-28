@@ -35,6 +35,7 @@ import {
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { runAllMailPasses } from "./index.ts";
+import { bigintToCursor } from "./parsers.ts";
 import type { StreamRequest } from "./types.ts";
 
 const FROZEN_NOW = "2026-04-21T00:00:00.000Z";
@@ -400,4 +401,15 @@ test("gmail all mail: the messages page coverage denominator stays per-page", as
 		1200,
 		"the mailbox total must not be substituted here",
 	);
+});
+
+test("Gmail cursor metadata preserves precision across the safe-integer boundary", () => {
+	const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
+	assert.equal(bigintToCursor(maxSafe), Number.MAX_SAFE_INTEGER);
+	assert.equal(bigintToCursor(maxSafe + 1n), (maxSafe + 1n).toString());
+});
+
+test("Gmail cursor metadata leaves an existing decimal string untouched", () => {
+	assert.equal(bigintToCursor("9007199254740993"), "9007199254740993");
+	assert.equal(bigintToCursor(undefined), null);
 });

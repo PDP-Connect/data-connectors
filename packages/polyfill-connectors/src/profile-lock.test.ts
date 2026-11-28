@@ -125,16 +125,41 @@ test("withProfileLockMutex: serializes concurrent callers against the same profi
 test("withProfileLockMutex: different profileDirs run concurrently", async () => {
 	const dirA = tempProfileDir();
 	const dirB = tempProfileDir();
-	const log: string[] = [];
-	const work = (dir: string, label: string, ms: number) =>
-		withProfileLockMutex(dir, async () => {
-			log.push(`${label}-enter`);
-			await new Promise((r) => setTimeout(r, ms));
-			log.push(`${label}-exit`);
-		});
-	await Promise.all([work(dirA, "A", 30), work(dirB, "B", 10)]);
-	// B (different dir) must complete before A — they were not serialized.
-	assert.deepEqual(log, ["A-enter", "B-enter", "B-exit", "A-exit"]);
+	let enteredA!: () => void;
+	const aEntered = new Promise<void>((resolve) => {
+		enteredA = resolve;
+	});
+	let releaseA!: () => void;
+	const bEntered = new Promise<void>((resolve) => {
+		releaseA = resolve;
+	});
+	let deadline: ReturnType<typeof setTimeout> | undefined;
+	const a = withProfileLockMutex(dirA, async () => {
+		enteredA();
+		await bEntered;
+	});
+	const b = aEntered.then(() =>
+		withProfileLockMutex(dirB, () => {
+			releaseA();
+		}),
+	);
+	const joined = Promise.all([a, b]);
+	try {
+		await Promise.race([
+			joined,
+			new Promise<never>((_, reject) => {
+				deadline = setTimeout(
+					() =>
+						reject(new Error("different profile directories were serialized")),
+					2_000,
+				);
+			}),
+		]);
+	} finally {
+		clearTimeout(deadline);
+		releaseA(); // let a same-directory mutation unwind rather than leave a lock queued
+		await Promise.allSettled([a, b]);
+	}
 });
 
 test("withProfileLockMutex: a throwing critical section does not poison the queue", async () => {

@@ -34,6 +34,42 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { archivePathEnumerationIncomplete, pickResumeTarget } from "./index.ts";
+import { buildWorkspaceRecord } from "./parsers.ts";
+
+const displayMetadataRow = {
+	DATA: null,
+	ENTERPRISE_ID: null,
+	ID: 1,
+	TEAM: null,
+	TEAM_ID: null,
+	URL: null,
+	USER_ID: null,
+	USERNAME: null,
+};
+
+test("workspace display metadata prefers the row name and falls back to the smaller icon", () => {
+	const row = {
+		...displayMetadataRow,
+		TEAM: "Fixture workspace",
+		DATA: JSON.stringify({
+			team: "Fixture fallback",
+			icon: { image_102: "fixture-icon-small" },
+		}),
+	};
+	const record = buildWorkspaceRecord(row, "2026-01-01T00:00:00Z");
+	assert.equal(record.name, "Fixture workspace");
+	assert.equal(record.icon_url, "fixture-icon-small");
+});
+
+test("workspace display metadata falls back to the source name without inventing an icon", () => {
+	const row = {
+		...displayMetadataRow,
+		DATA: JSON.stringify({ team: "Fixture fallback" }),
+	};
+	const record = buildWorkspaceRecord(row, "2026-01-01T00:00:00Z");
+	assert.equal(record.name, "Fixture fallback");
+	assert.equal(record.icon_url, null);
+});
 
 // ─── Archive fixtures ────────────────────────────────────────────────────
 
@@ -203,6 +239,41 @@ test("pickResumeTarget refuses to resume when the enumeration is still owed", as
 			);
 		},
 	);
+});
+
+test("pickResumeTarget prefers the stream cursor over the legacy cursor and discovery", async () => {
+	await withArchive(seedSessionSchema, async (_file, discovered) => {
+		await withArchive(seedSessionSchema, (_other, named) => {
+			const legacy = { archive_dir: discovered };
+			const state = { ...legacy, messages: { archive_dir: named } };
+			assert.deepEqual(pickResumeTarget(state, discovered), {
+				resumeTarget: named,
+				priorArchive: named,
+			});
+			assert.deepEqual(pickResumeTarget(legacy, named), {
+				resumeTarget: discovered,
+				priorArchive: discovered,
+			});
+		});
+	});
+});
+
+test("pickResumeTarget disallows a state location without discarding its provenance", async () => {
+	await withArchive(seedSessionSchema, async (_file, discovered) => {
+		await withArchive(seedSessionSchema, (_other, named) => {
+			const state = { messages: { archive_dir: named } };
+			assert.deepEqual(
+				pickResumeTarget(state, discovered, { allowStateArchive: false }),
+				{ resumeTarget: discovered, priorArchive: named },
+			);
+			assert.deepEqual(
+				pickResumeTarget(state, join(discovered, "not-created"), {
+					allowStateArchive: false,
+				}),
+				{ resumeTarget: null, priorArchive: named },
+			);
+		});
+	});
 });
 
 test("pickResumeTarget still reports priorArchive when it forces a full archive", async () => {
