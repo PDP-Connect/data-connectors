@@ -2615,15 +2615,15 @@ export function readPriorFileCursors(
 	startMsg: StartMessage,
 ): Record<string, RolloutFileCursor> {
 	const state = startMsg.state || {};
-	const raw =
-		state.messages?.file_cursors ||
-		state.function_calls?.file_cursors ||
-		state.sessions?.file_cursors ||
-		null;
+	const raw = [
+		state.messages?.file_cursors,
+		state.function_calls?.file_cursors,
+		state.sessions?.file_cursors,
+	].find((value): value is Record<string, unknown> =>
+		value !== null && typeof value === "object" && !Array.isArray(value),
+	);
 	const out: Record<string, RolloutFileCursor> = {};
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-		return out;
-	}
+	if (!raw) return out;
 	for (const [path, value] of Object.entries(raw)) {
 		const cursor = coerceRolloutFileCursor(value);
 		if (cursor) {

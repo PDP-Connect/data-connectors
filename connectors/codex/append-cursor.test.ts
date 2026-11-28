@@ -45,7 +45,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { scanRollouts } from "./index.ts";
+import { readPriorFileCursors, scanRollouts } from "./index.ts";
 import { epochToIso } from "./parsers.ts";
 import type { RolloutJsonlGap, RolloutSourceGap } from "./types.ts";
 
@@ -1437,4 +1437,27 @@ test("Codex skips external and dangling rollout links and retains prior gaps", a
 		[{ path: root, target_path: join(codexHome, "missing-root") }],
 	);
 	assert.equal(recordsFor(danglingRoot.messages, "messages").length, 0);
+});
+
+test("rollout cursor lookup skips a malformed stream envelope before falling back", () => {
+	const session = "fixture-session-id";
+	const cursor = {
+		offset_bytes: 42,
+		size_bytes: 42,
+		mtime_ms: 1,
+		line_count: 2,
+		guard_bytes: 8,
+		head_sha256: "a".repeat(64),
+	};
+	const result = readPriorFileCursors({
+		type: "START",
+		scope: { streams: [{ name: "function_calls" }] },
+		state: {
+			messages: { file_cursors: [] },
+			function_calls: { file_cursors: { [session]: cursor } },
+			sessions: { file_cursors: { unused: cursor } },
+		},
+	});
+	assert.deepEqual(Object.keys(result), [session]);
+	assert.equal(result[session]?.offset_bytes, 42);
 });
