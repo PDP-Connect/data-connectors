@@ -28,6 +28,7 @@ import type { EmittedMessage } from "../../packages/polyfill-connectors/src/conn
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { SIGNAL_DEFAULT_STREAMS } from "./collector-definition.ts";
 import { buildSignalExportFixture, setupMockSigtop } from "./fixtures.ts";
+import { listExportedAttachmentFiles } from "./index.ts";
 
 const ENTRYPOINT = connectorEntrypoint("signal");
 
@@ -94,6 +95,15 @@ const SENDER = "33333333-3333-3333-3333-333333333333";
 // `LEFT JOIN conversations AS c ON m.sourceServiceId = c.serviceId`,
 // selecting c.id, matching sigtop's own sender resolution.
 const SENDER_CONV_ID = "66666666-6666-6666-6666-666666666666";
+
+test("attachment enumeration refuses an unreadable export directory instead of returning empty", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-signal-enumeration-"));
+	await rm(dir, { force: true, recursive: true });
+	await assert.rejects(
+		listExportedAttachmentFiles(dir),
+		/signal_attachment_enumeration_failed/u,
+	);
+});
 
 test("signal reports a failed DONE when sigtop is not on PATH / SIGTOP_BIN is wrong", async () => {
 	const result = await runConnectorProtocolSubprocess({

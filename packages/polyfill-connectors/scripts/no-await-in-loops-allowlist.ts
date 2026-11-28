@@ -4298,14 +4298,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/signal/index.ts",
-			line: 1055,
+			line: 1059,
 			column: 5,
 			category: "dependent_file_cursor",
 			note: "walk(): sequential file/dir walk, incremental byte-offset read, or one-way fs mutation",
 		},
 		{
 			path: "connectors/signal/index.ts",
-			line: 1133,
+			line: 1137,
 			column: 18,
 			category: "dependent_pagination",
 			note: "resolveAttachmentHydration(): next request depends on the prior page's cursor/offset/response",
