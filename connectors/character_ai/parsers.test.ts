@@ -1498,6 +1498,17 @@ test("the latest time is chosen at full fractional precision, offsets normalized
 	);
 });
 
+test("latestTime returns null when there is no timestamp to select", () => {
+	assert.equal(latestTime([]), null);
+	assert.equal(latestTime([null, null]), null);
+});
+
+test("latestTime preserves the first spelling when two timestamps represent the same instant", () => {
+	const first = "2026-01-01T01:00:00.500+01:00";
+	const second = "2026-01-01T00:00:00.5Z";
+	assert.equal(latestTime([first, second]), first);
+});
+
 // ─── Later gap pages, page interruptions, session handoff ───────────────
 
 function gap(gapId: string, chatId: string, leaseId?: string) {
@@ -2488,4 +2499,48 @@ test("a leased gap that fails again is reported as attempted, by its lease", asy
 			.length,
 		0,
 	);
+});
+
+test("a completed token walk preserves first-seen keyed rows and all unkeyed counts", async () => {
+	const tokens: Array<string | null> = [];
+	const first = { id: "a", title: "first-seen" };
+	const other = { id: "b", title: "another row" };
+	const result = await walkTokenPages({
+		maxPages: 2,
+		keyOf: (row: typeof first) => row.id,
+		fetchPage: async (token) => {
+			tokens.push(token);
+			return token === null
+				? { items: [first], nextToken: "continue", unkeyed: 2 }
+				: {
+						items: [{ ...first, title: "later copy" }, other],
+						nextToken: null,
+						unkeyed: 3,
+					};
+		},
+	});
+	assert.deepEqual(tokens, [null, "continue"]);
+	assert.deepEqual(result, {
+		complete: true,
+		items: [first, other],
+		unkeyed: 5,
+	});
+});
+
+test("an unkeyed-only continuation cannot produce another request or discard prior evidence", async () => {
+	const tokens: Array<string | null> = [];
+	const result = await walkTokenPages({
+		maxPages: 4,
+		keyOf: (value: string) => value,
+		fetchPage: async (token) => {
+			tokens.push(token);
+			return token === null
+				? { items: ["a"], nextToken: "continue", unkeyed: 1 }
+				: { items: [], nextToken: "unverified", unkeyed: 2 };
+		},
+	});
+	assert.deepEqual(tokens, [null, "continue"]);
+	assert.equal(result.complete, false);
+	assert.deepEqual(result.items, ["a"]);
+	assert.equal(result.unkeyed, 3);
 });

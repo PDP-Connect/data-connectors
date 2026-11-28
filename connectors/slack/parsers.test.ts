@@ -311,6 +311,59 @@ test("buildMessageRecord: pulls counts + thread + reactions from blob", () => {
 	assert.equal(rec.edited_ts, "1713999991.000000");
 });
 
+function messageRecordWithReactions(reactions: unknown) {
+	const row: MessageRow = {
+		CHANNEL_ID: "C-invented",
+		TS: "1714000000.000100",
+		THREAD_TS: null,
+		IS_PARENT: 0,
+		TXT: "synthetic reaction test",
+		NUM_FILES: null,
+		DATA: JSON.stringify({ reactions }),
+	};
+	return buildMessageRecord(parseMessageRow(row, "2026-04-22T00:00:00.000Z"));
+}
+
+test("buildMessageRecord: null reactions do not discard the message", () => {
+	const rec = messageRecordWithReactions([
+		null,
+		{ count: 2 },
+		{ users: ["invented-a", "invented-b"] },
+	]);
+	assert.equal(rec.id, "C-invented:1714000000.000100");
+	assert.equal(rec.text, "synthetic reaction test");
+	assert.equal(rec.reaction_count, 4);
+});
+
+test("buildMessageRecord: ignores non-object reaction entries", () => {
+	const rec = messageRecordWithReactions([
+		false,
+		true,
+		7,
+		"invented-reaction",
+		{ count: 2 },
+		{ users: ["invented-a", "invented-b"] },
+	]);
+	assert.equal(rec.reaction_count, 4);
+});
+
+test("buildMessageRecord: empty or non-array reactions count as zero", () => {
+	for (const reactions of [undefined, null, [], {}, "invented", 7, false]) {
+		assert.equal(messageRecordWithReactions(reactions).reaction_count, 0);
+	}
+});
+
+test("buildMessageRecord: preserves counts, zero and users fallback", () => {
+	const rec = messageRecordWithReactions([
+		{ count: 3, users: ["invented-a"] },
+		{ count: 0, users: ["invented-b", "invented-c"] },
+		{ users: ["invented-d", "invented-e"] },
+		{},
+	]);
+	assert.equal(rec.reaction_count, 5);
+	assert.equal(messageRecordWithReactions([{ count: 0 }]).reaction_count, 0);
+});
+
 test("buildReactionRecords: expands (emoji, user) into per-user rows", () => {
 	const parsed = parseMessageRow(
 		messageRowFromFixture(),

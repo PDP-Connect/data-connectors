@@ -100,7 +100,7 @@ export const JellyfinItemSchema = z.object({
 		.nullable()
 		.optional(),
 	Genres: z.array(z.string()).optional(),
-	PremiereDate: z.string().optional(),
+	PremiereDate: z.string().nullable().optional(),
 	PrimaryImageTag: z.string().nullable().optional(),
 	ProviderIds: z.record(z.string(), z.any()).optional(),
 	ProductionYear: z.number().int().nullable().optional(),

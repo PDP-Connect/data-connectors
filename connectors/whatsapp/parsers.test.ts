@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	occurrenceKey,
 	type ParsedWhatsAppMessage,
 	parseWhatsAppDateTime,
 	scanWhatsAppChatIdentity,
@@ -20,6 +21,37 @@ import {
 } from "./parsers.ts";
 
 process.env.TZ = "America/Chicago";
+
+test("occurrenceKey bounds retained keys for long message content", () => {
+	const key = occurrenceKey(
+		"Fixture author",
+		"2024-05-06T14:15:22.000Z",
+		"x".repeat(100_000),
+	);
+	assert.equal(key.length, 64);
+	assert.match(key, /^[a-f0-9]{64}$/);
+});
+
+test("occurrenceKey is deterministic and distinguishes changed content", () => {
+	const author = "Fixture author";
+	const sentAt = "2024-05-06T14:15:22.000Z";
+	assert.equal(
+		occurrenceKey(author, sentAt, "first"),
+		occurrenceKey(author, sentAt, "first"),
+	);
+	assert.notEqual(
+		occurrenceKey(author, sentAt, "first"),
+		occurrenceKey(author, sentAt, "second"),
+	);
+});
+
+test("occurrenceKey hashes exactly the existing concatenation", () => {
+	assert.equal(
+		occurrenceKey("a", "b", "c"),
+		"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+	);
+	assert.equal(occurrenceKey("a", "b", "c"), occurrenceKey("ab", "", "c"));
+});
 
 /**
  * Test-only convenience: drives the real two-pass streaming API

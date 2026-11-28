@@ -128,8 +128,10 @@ test("the runtime schema agrees with the JSON schema's shared corpus", () => {
 });
 
 test("connector_defect reasons are exactly the spec's closed set", () => {
+	// The runtime implements profile 0.2.0, the version every shipped manifest
+	// declares, so check against the frozen 0.2.0 text rather than 0.3.0.
 	const profile = readFileSync(
-		join(REPO_ROOT, "docs", "spec", "collection-profile.md"),
+		join(REPO_ROOT, "docs", "spec", "collection-profile-0.2.0.md"),
 		"utf8",
 	);
 	const section = profile.split("#### 5.10.2 Provenance")[1]?.split("####")[0];

@@ -18,6 +18,7 @@ import {
 	readOrderHistoryConnection,
 } from "./order-history-api.ts";
 import {
+	canonicalShopUrl,
 	extractOrdersWithCoverage,
 	hasNextOrdersPage,
 	hasOrderCountMismatch,
@@ -25,6 +26,17 @@ import {
 } from "./parsers.ts";
 
 const ORDER_A = "11111111-aaaa-4aaa-8aaa-111111111111";
+test("Shop display URLs preserve the path, query and fragment across domains", () => {
+	assert.equal(
+		canonicalShopUrl("https://shop.com/example?view=compact#section"),
+		"https://shop.app/example?view=compact#section",
+	);
+});
+
+test("Shop display normalization leaves a non-URL label unchanged", () => {
+	assert.equal(canonicalShopUrl("example-label"), "example-label");
+});
+
 const ORDER_B = "22222222-bbbb-4bbb-8bbb-222222222222";
 const ORDER_C = "33333333-cccc-4ccc-8ccc-333333333333";
 
@@ -83,6 +95,17 @@ test("one order with a terminal pageInfo is read and proves the end of the list"
 	assert.equal(coverage.discardedRows, 0);
 	assert.equal(hasVerifiedOrdersEnd(cache), true);
 	assert.equal(hasNextOrdersPage(cache), false);
+});
+
+test("order coverage rejects an impossible source calendar date but keeps a leap day with an offset", () => {
+	const impossible = orderNode(ORDER_A, { createdAt: "2026-02-29T10:00:00Z" });
+	const leapDay = "2028-02-29T23:30:00-08:00";
+	const valid = orderNode(ORDER_B, { createdAt: leapDay });
+	const cache = orderHistoryPagesToCache(pagesOf(reply([impossible, valid], { hasNextPage: false })));
+	const coverage = extractOrdersWithCoverage(cache);
+
+	assert.equal(coverage.discardedRows, 1);
+	assert.deepEqual(coverage.orders.map((order) => [order.id, order.placedAt]), [[ORDER_B, leapDay]]);
 });
 
 test("a cursor chain from the first page to a terminal page proves the end", () => {
@@ -158,6 +181,22 @@ test("only a 200 reply with a readable connection and no error is a usable page"
 		status: 200,
 		body: { deliveriesOrdersList: { nodes, pageInfo: { hasNextPage: "no" } } },
 	}), null);
+});
+
+test("a nested partial or malformed error field cannot prove an empty history", () => {
+	const terminal = { hasNextPage: false };
+	assert.ok(readOrderHistoryConnection(reply([], terminal, { errors: [], partial: false })));
+	for (const extra of [{ partial: true }, { errors: { message: "synthetic failure" } }]) {
+		assert.equal(readOrderHistoryConnection(reply([], terminal, extra)), null);
+	}
+});
+
+test("a terminal page with missing or non-array nodes is not an empty result", () => {
+	const terminal = { hasNextPage: false };
+	assert.ok(readOrderHistoryConnection(reply([], terminal)));
+	for (const nodes of [undefined, null, {}]) {
+		assert.equal(readOrderHistoryConnection(reply([], terminal, { nodes })), null);
+	}
 });
 
 test("the reader pages from the first page by cursor and stops at the terminal page", async () => {
@@ -317,4 +356,37 @@ test("HTTP 200 error and partial envelopes cannot add nodes or close a valid ear
 			assert.equal(hasVerifiedOrdersEnd(cache), false);
 		}
 	}
+});
+
+test("explicitly empty error annotations do not invalidate a complete reply", () => {
+	const nodes = [orderNode(ORDER_A)];
+	const pageInfo = { hasNextPage: false, endCursor: null };
+	const absentError = { error: null, errors: [], partial: false };
+	const decoded = readOrderHistoryConnection({
+		status: 200,
+		body: {
+			...absentError,
+			deliveriesOrdersList: { nodes, pageInfo, ...absentError },
+		},
+	});
+	assert.deepEqual(decoded?.nodes, nodes);
+	assert.deepEqual(decoded?.pageInfo, pageInfo);
+});
+
+test("numeric and string order IDs normalize to the same cache entity", () => {
+	const cache = orderHistoryPagesToCache([
+		{
+			after: null,
+			connection: {
+				nodes: [
+					orderNode("42", { id: 42 }),
+					{ __typename: "Delivery", order: { id: "42" } },
+				],
+				pageInfo: { hasNextPage: false },
+			},
+		},
+	]);
+	assert.deepEqual(Object.keys(cache).filter((key) => key.startsWith("Order:")), ["Order:42"]);
+	assert.equal((cache["Order:42"] as Record<string, unknown>).createdAt, "2026-01-15T10:00:00Z");
+	assert.equal((cache["Order:42"] as Record<string, unknown>).displayStatus, "paid");
 });

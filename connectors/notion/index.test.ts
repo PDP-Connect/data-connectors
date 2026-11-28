@@ -11,6 +11,37 @@ import { pathToFileURL } from "node:url";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildFullScanCoverageMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { databasesSchema } from "./schemas.ts";
+
+const toyDatabaseMetadata = {
+	id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+	title: "Invented table",
+	parent_type: null,
+	parent_id: null,
+	url: null,
+	archived: null,
+	created_time: null,
+	last_edited_time: null,
+	property_names: [],
+};
+
+test("Notion database metadata preserves dashed and compact ID spellings", () => {
+	for (const id of [
+		toyDatabaseMetadata.id,
+		toyDatabaseMetadata.id.replaceAll("-", ""),
+	]) {
+		assert.equal(databasesSchema.parse({ ...toyDatabaseMetadata, id }).id, id);
+	}
+});
+
+test("Notion database metadata preserves property label order and Unicode", () => {
+	const labels = ["Zebra", "Café", "alpha"];
+	const row = databasesSchema.parse({
+		...toyDatabaseMetadata,
+		property_names: labels,
+	});
+	assert.deepEqual(row.property_names, labels);
+});
 
 test("Notion full-scan coverage records the enumerated boundary, including empty", () => {
 	assert.deepEqual(buildFullScanCoverageMessage("pages", 0), {
@@ -68,6 +99,8 @@ async function runRealNotionConnector(
 		| "complete"
 		| "provider_failure"
 		| "contradictory_pagination"
+		| "malformed_success"
+		| "verified_empty"
 		| "terminal_page_with_cursor",
 ) {
 	const harnessDir = await mkdtemp(join(tmpdir(), "pdpp-notion-protocol-"));
@@ -84,6 +117,10 @@ globalThis.fetch = async (_input, init) => {
   const body = JSON.parse(init?.body ?? "{}");
   const object = body.filter?.value;
   const isPage = object === "page";
+  if (mode === "malformed_success" || mode === "verified_empty") {
+    const page = mode === "verified_empty" ? { results: [], has_more: false, next_cursor: null } : {};
+    return new Response(JSON.stringify(page), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (mode === "contradictory_pagination" && isPage) {
     return new Response(JSON.stringify({
       has_more: true,
@@ -165,6 +202,25 @@ await import(${JSON.stringify(entrypointUrl)});
 	}
 }
 
+test("real Notion connector distinguishes malformed success from verified empty search", async () => {
+	const malformed = await runRealNotionConnector("malformed_success");
+	assert.equal(malformed.code, 1);
+	assert.equal(lastDone(malformed.messages).status, "failed");
+	assert.equal(
+		protocolMessagesFor(malformed.messages, "DETAIL_COVERAGE").length,
+		0,
+	);
+	assert.equal(protocolMessagesFor(malformed.messages, "STATE").length, 0);
+
+	const empty = await runRealNotionConnector("verified_empty");
+	assert.equal(empty.code, 0);
+	assert.equal(
+		protocolMessagesFor(empty.messages, "DETAIL_COVERAGE").length,
+		2,
+	);
+	assert.equal(protocolMessagesFor(empty.messages, "STATE").length, 2);
+});
+
 test("real Notion connector fails closed when has_more is true without a cursor", async () => {
 	const result = await runRealNotionConnector("contradictory_pagination");
 	assert.equal(
@@ -244,4 +300,52 @@ test("real Notion connector protocol emits no coverage proof or STATE when provi
 	);
 	assert.equal(protocolMessagesFor(result.messages, "STATE").length, 0);
 	assert.equal(lastDone(result.messages).status, "failed");
+});
+
+const fictionalSummary = {
+	id: "00000000-0000-4000-8000-000000000001",
+	parent_type: null,
+	parent_id: null,
+	title: "Fixture notebook",
+	url: null,
+	archived: null,
+	created_time: null,
+	last_edited_time: "2026-10-01T12:00:00.000Z",
+};
+
+test("Notion page validation identifies a malformed edit timestamp", async () => {
+	const { validateRecord } = await import("./schemas.ts");
+	const page = {
+		...fictionalSummary,
+		object: "page",
+		created_by_id: null,
+		last_edited_by_id: null,
+	};
+	assert.ok(validateRecord("pages", page).ok);
+
+	const result = validateRecord("pages", {
+		...page,
+		last_edited_time: "not-a-timestamp",
+	});
+	if (result.ok) assert.fail("expected malformed timestamp to be rejected");
+	assert.deepEqual(
+		result.issues.map((issue) => issue.path),
+		["last_edited_time"],
+	);
+});
+
+test("Notion database validation identifies a scalar property-name list", async () => {
+	const { validateRecord } = await import("./schemas.ts");
+	const database = { ...fictionalSummary, property_names: ["Fixture column"] };
+	assert.ok(validateRecord("databases", database).ok);
+
+	const result = validateRecord("databases", {
+		...database,
+		property_names: "Fixture column",
+	});
+	if (result.ok) assert.fail("expected scalar property names to be rejected");
+	assert.deepEqual(
+		result.issues.map((issue) => issue.path),
+		["property_names"],
+	);
 });

@@ -1,9 +1,8 @@
 # Claude Code local-collector source-home fixtures
 
 These directories are committed, fully-synthetic Claude Code source homes used
-by `connectors/claude_code/source-inventory.fixture.test.ts` to exercise the
-local source-inventory classification contract from
-`openspec/changes/complete-local-agent-collectors`.
+by [the multi-device binding fixture test](../../multidevice-binding.fixture.test.ts)
+to verify that records from two source homes stay associated with the right device.
 
 No real local user data, secrets, tokens, cookies, or machine identifiers are
 present. Every file that stands in for a sensitive store contains an obvious
