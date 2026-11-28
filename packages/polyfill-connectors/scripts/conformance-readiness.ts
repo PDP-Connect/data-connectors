@@ -20,6 +20,8 @@ export interface Step {
 	readonly advisory?: boolean;
 	readonly detail: string;
 	readonly name: string;
+	/** A trial could not establish its result. A no-HTTP claim cannot exempt it. */
+	readonly mockMutationInconclusive?: boolean;
 	/** The specific command or edit that moves this step off its current verdict. Absent only for PASS. */
 	readonly nextAction?: string;
 	readonly verdict: Verdict;
@@ -60,7 +62,11 @@ export function requiredForReview(
 	return (
 		["evidence", "pilot fixture"].includes(step.name) ||
 		(step.name === "mock mutation" &&
-			!(step.verdict === "UNKNOWN" && context.noHttpExemption))
+			!(
+				step.verdict === "UNKNOWN" &&
+				context.noHttpExemption &&
+				!step.mockMutationInconclusive
+			))
 	);
 }
 

@@ -69,6 +69,7 @@ import {
 	type Verdict,
 } from "./conformance-readiness.ts";
 import { evaluateConnectorEvidence } from "./connector-evidence-summary.ts";
+import type { ConnectorMutationResult } from "./mock-mutation-check.ts";
 
 export function checkManifest(connector: string): Step {
 	const file = manifestPath(connector);
@@ -220,22 +221,23 @@ function checkMockMutation(connector: string): Step {
 			],
 			{ cwd: PACKAGE_ROOT, encoding: "utf8", stdio: "pipe", timeout: 600_000 },
 		);
-		const parsed = JSON.parse(out) as Array<{
-			detail: string;
-			verdict: string;
-		}>;
+		const parsed = JSON.parse(out) as ConnectorMutationResult[];
 		const [first] = parsed;
 		if (!first) {
 			return {
 				advisory: true,
 				detail: "no result",
+				mockMutationInconclusive: true,
 				name: "mock mutation",
 				verdict: "UNKNOWN",
 			};
 		}
-		const verdict = first.verdict as Verdict;
+		const { verdict } = first;
+		const inconclusive = first.inconclusive.length > 0;
 		let nextAction: string | undefined;
-		if (verdict === "UNKNOWN") {
+		if (inconclusive) {
+			nextAction = `fix the failed or incomplete test in the detail above and rerun \`node --import tsx scripts/mock-mutation-check.ts --connector=${connector}\``;
+		} else if (verdict === "UNKNOWN") {
 			nextAction = `this connector's test(s) have no request-path-matching literal (identifier === "/foo", .startsWith("/foo"), .includes("/foo")) — if it makes real HTTP requests, add a fake-server/route assertion that checks the actual path, not just query params or headers`;
 		} else if (verdict === "WEAK") {
 			nextAction =
@@ -244,6 +246,7 @@ function checkMockMutation(connector: string): Step {
 		return {
 			advisory: true,
 			detail: first.detail,
+			...(inconclusive ? { mockMutationInconclusive: true } : {}),
 			name: "mock mutation",
 			...(nextAction ? { nextAction } : {}),
 			verdict,
@@ -252,6 +255,7 @@ function checkMockMutation(connector: string): Step {
 		return {
 			advisory: true,
 			detail: `could not run: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`,
+			mockMutationInconclusive: true,
 			name: "mock mutation",
 			nextAction: `run \`node --import tsx scripts/mock-mutation-check.ts --connector=${connector}\` directly to see the underlying error`,
 			verdict: "UNKNOWN",
@@ -524,6 +528,7 @@ export function jsonReport(
 		...step,
 		...(step.name === "mock mutation" &&
 		noHttpReason &&
+		!step.mockMutationInconclusive &&
 		(step.verdict === "UNKNOWN" || step.verdict === "PASS")
 			? {
 					detail: `${step.detail}; author declares no HTTP requests: ${noHttpReason}`,
