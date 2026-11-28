@@ -779,3 +779,70 @@ test("new-reader compatibility: the committed pre-binding-instances schema fixtu
     assert.equal(validate(manifest), true, `${path}: expected the new schema to still accept this unmodified manifest`);
   }
 });
+
+// Corpus policy belongs beside the shipped manifests, independent of any client.
+test("every shipped manifest declares a refresh policy, mode and rationale", () => {
+  const manifests = connectorManifests();
+  assert.ok(manifests.length > 0, "expected shipped manifests");
+  for (const { path, manifest } of manifests) {
+    const policy = manifest.capabilities?.refresh_policy;
+    assert.ok(policy && typeof policy === "object" && !Array.isArray(policy), `${path}: refresh_policy is required`);
+    assert.ok(["automatic", "manual"].includes(policy.recommended_mode), `${path}: recommended_mode must be automatic or manual`);
+    assert.equal(typeof policy.rationale, "string", `${path}: rationale must be a string`);
+    assert.ok(policy.rationale.trim().length > 0, `${path}: rationale must not be empty`);
+    if (policy.interaction_posture !== undefined) {
+      assert.ok(["none", "credentials", "otp_likely", "manual_action_likely"].includes(policy.interaction_posture), `${path}: unknown interaction_posture`);
+    }
+  }
+});
+
+test("automatic shipped manifests declare cadence, background safety and a staleness window", () => {
+  for (const { path, manifest } of connectorManifests()) {
+    const policy = manifest.capabilities?.refresh_policy;
+    if (policy?.recommended_mode !== "automatic") continue;
+    assert.ok(Number.isFinite(policy.recommended_interval_seconds) && policy.recommended_interval_seconds > 0, `${path}: recommended_interval_seconds must be a positive finite number`);
+    assert.ok(Number.isFinite(policy.minimum_interval_seconds) && policy.minimum_interval_seconds > 0, `${path}: minimum_interval_seconds must be a positive finite number`);
+    assert.ok(policy.recommended_interval_seconds >= policy.minimum_interval_seconds, `${path}: cadence must be at least minimum_interval_seconds`);
+    assert.equal(policy.background_safe, true, `${path}: automatic policy must be background_safe`);
+    assert.ok(Number.isFinite(policy.maximum_staleness_seconds) && policy.maximum_staleness_seconds > 0, `${path}: maximum_staleness_seconds must be a positive finite number`);
+    assert.ok(policy.maximum_staleness_seconds >= policy.minimum_interval_seconds, `${path}: staleness window must be at least minimum_interval_seconds`);
+  }
+});
+
+test("shipped interaction postures agree with human_interaction", () => {
+  for (const { path, manifest } of connectorManifests()) {
+    const policy = manifest.capabilities?.refresh_policy;
+    if (!policy) continue;
+    const interactions = manifest.capabilities?.human_interaction ?? [];
+    assert.ok(Array.isArray(interactions), `${path}: human_interaction must be an array`);
+    for (const interaction of interactions) {
+      assert.ok(["otp", "manual_action", "credentials"].includes(interaction), `${path}: unknown human_interaction ${interaction}`);
+    }
+    const posture = policy.interaction_posture;
+    if (interactions.includes("otp")) {
+      assert.equal(posture, "otp_likely", `${path}: otp requires otp_likely posture`);
+    } else if (interactions.includes("manual_action") || interactions.includes("credentials")) {
+      assert.ok(["credentials", "manual_action_likely"].includes(posture), `${path}: credentials or manual_action requires a matching posture`);
+    } else {
+      assert.ok(posture === undefined || ["none", "manual_action_likely"].includes(posture), `${path}: empty human_interaction has an inconsistent posture`);
+    }
+  }
+});
+
+test("no shipped manifest uses paused refresh mode", () => {
+  const paused = connectorManifests()
+    .filter(({ manifest }) => manifest.capabilities?.refresh_policy?.recommended_mode === "paused")
+    .map(({ path }) => path);
+  assert.deepEqual(paused, [], "paused refresh mode is reserved, not a shipped policy");
+});
+
+test("shipped OTP interaction and posture sets are equal", () => {
+  const manifests = connectorManifests();
+  const declared = manifests
+    .filter(({ manifest }) => manifest.capabilities?.human_interaction?.includes("otp"))
+    .map(({ path }) => path).sort();
+  const fromPosture = manifests
+    .filter(({ manifest }) => manifest.capabilities?.refresh_policy?.interaction_posture === "otp_likely")
+    .map(({ path }) => path).sort();
+  assert.deepEqual(fromPosture, declared, "OTP signals must identify the same shipped manifests");
+});
