@@ -810,25 +810,41 @@ test(`overlapping contribution views ${countConflict ? "withhold conflicting cou
 // unauthenticated REST rate limit, transport) never read the inventory. It is
 // a failed read reported through reportStreamFailure, not an unproven
 // enumeration (Collection Profile 5.5).
-for (const { stream, services } of [
+for (const { stream, sourceStatus, label, services } of [
 	{
 		stream: "events",
+		sourceStatus: "http_429",
+		label: "wrapped",
 		services: {
 			fetchPublicJson: async (): Promise<never> => {
-				throw new Error("github_browser_http_429");
+				throw new Error("page.evaluate: Error: github_browser_http_429\n    at eval");
 			},
 		},
 	},
 	{
 		stream: "history",
+		sourceStatus: "http_403",
+		label: "wrapped",
 		services: {
 			fetchPublicJson: async (): Promise<never> => {
-				throw new Error("github_browser_http_403");
+				throw new Error("page.evaluate: Error: github_browser_http_403");
+			},
+		},
+	},
+	{
+		stream: "events",
+		sourceStatus: "http_429",
+		label: "structured",
+		services: {
+			fetchPublicJson: async (): Promise<never> => {
+				throw { status: 429 };
 			},
 		},
 	},
 	{
 		stream: "contributions",
+		sourceStatus: undefined,
+		label: "transport",
 		services: {
 			openContributionPage: async (): Promise<never> => {
 				throw new Error("net::ERR_TIMED_OUT at https://github.com/sample-user");
@@ -836,7 +852,7 @@ for (const { stream, services } of [
 		},
 	},
 ] as const) {
-	test(`a ${stream} request that throws is a reported stream failure, not an unproven inventory`, async () => {
+	test(`a ${stream} request (${label}) that throws is a reported stream failure, not an unproven inventory`, async () => {
 		const profile = await readFixture("profile.html");
 		const messages: Array<{ type: string; stream?: string; reason?: string }> = [];
 		const reports: Array<{ stream: string; message: string; options: unknown }> = [];
@@ -883,11 +899,33 @@ for (const { stream, services } of [
 		assert.equal(options.diagnostics.reason, "source_request_failed");
 		assert.equal(
 			options.diagnostics.source_error,
-			stream === "events" ? "http_429" : stream === "history" ? "http_403" : undefined,
+			sourceStatus,
 		);
 		assert.doesNotMatch(JSON.stringify(reports), /https:\/\/github\.com/u);
 	});
 }
+
+test("an ordinary 200 history response still publishes the proven empty snapshot", async () => {
+	const profile = await readFixture("profile.html");
+	const messages: Array<{ type: string; stream?: string }> = [];
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => { messages.push(message); },
+			emitRecord: async () => {},
+			progress: async () => {},
+			reportStreamFailure: async () => { assert.fail("unexpected stream failure"); },
+			requested: new Set(["history"]),
+			state: {},
+		},
+		{
+			fetchPublicJson: async (url) => apiObservation(url, { items: [], total_count: 0, incomplete_results: false }),
+			now: () => new Date("2026-01-01T00:00:00Z"),
+			openPage: async (url) => pageObservation(url, profile),
+			sleep: async () => {},
+		},
+	);
+	assert.equal(messages.filter((message) => message.type === "STATE" && message.stream === "history").length, 1);
+});
 
 for (const [field, container, brokenEntry] of [
 	["pinnedRepositories", '<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><li><a href="/sponsors/sample-user">Sponsor</a></li></div>'],

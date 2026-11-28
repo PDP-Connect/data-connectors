@@ -166,9 +166,9 @@ export async function collect({
 				resetEpochSeconds: header("x-ratelimit-reset"),
 				retryAfterSeconds: header("retry-after"),
 			};
-			// The collector classifies on the message; the pacer reads the headers.
+			// Carry status for the collector and backoff hints for the pacer.
 			if (!response.ok)
-				throw Object.assign(new Error(`github_browser_http_${response.status}`), { rateLimit });
+				throw Object.assign(new Error(`github_browser_http_${response.status}`), { status: response.status, rateLimit });
 			return {
 				requestedUrl: url,
 				responseUrl: response.url,

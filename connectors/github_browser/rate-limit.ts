@@ -55,8 +55,14 @@ function resourceOf(url: string): "search" | "core" {
 	}
 }
 
-function failureStatus(error: unknown): number | undefined {
-	const match = error instanceof Error ? /^github_browser_http_(\d{3})$/u.exec(error.message) : null;
+/** Extract only the numeric status; bridge wrappers may prepend text to the connector marker. */
+export function githubHttpStatus(error: unknown): number | undefined {
+	const value = typeof error === "object" && error !== null
+		? (error as { status?: unknown }).status
+		: undefined;
+	if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) return value;
+	const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+	const match = /(?:^|[^\w])github_browser_http_([1-5]\d{2})(?![\w])/u.exec(message);
 	return match === null ? undefined : Number(match[1]);
 }
 
@@ -121,7 +127,7 @@ export function createRateLimitPacer({ now, sleep, maxTotalWaitMs = MAX_TOTAL_RA
 			}
 			const rateLimit = result === undefined ? rateLimitOf(failure) : result.rateLimit;
 			const refused = observe(resource, rateLimit);
-			const status = result === undefined ? failureStatus(failure) : result.status;
+			const status = result === undefined ? githubHttpStatus(failure) : result.status;
 			const waitMs = status !== undefined && LIMIT_STATUSES.has(status) ? refusalWaitMs(rateLimit) : null;
 			if (attempt === 0 && waitMs !== null && (await spend(waitMs))) {
 				// Clear the refusal's own window; a newer spent one, if stored,
