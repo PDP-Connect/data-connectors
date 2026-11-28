@@ -19,7 +19,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { collectAllStreams, type UberPageFetch } from "./index.ts";
+import {
+	collectAllStreams,
+	fetchAllActivities,
+	UBER_RETRYABLE_PATTERN,
+	type UberPageFetch,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T00:00:00.000Z";
@@ -293,20 +298,26 @@ test("collectAllStreams: trips DETAIL_COVERAGE is self-mapped (state_stream === 
 
 test("collectAllStreams: an activity with no usable trip id is dropped, not emitted with a fabricated id", async () => {
 	const { fetchPath } = makeScriptedFetch({
-		activitiesPages: [{ body: activitiesBody([{ title: "no id" }]) }],
+		activitiesPages: [
+			{ body: activitiesBody([{ title: "no id" }, { uuid: "trip-1" }]) },
+		],
+		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
 	});
 	const { ctx, emitted, messages } = makeCtx(["trips"]);
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
-	assert.equal(emitted.length, 0);
+	assert.equal(emitted.length, 1);
 	const coverage = messages.find(
 		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "trips",
 	);
 	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
-	assert.equal(
-		coverage.considered,
-		0,
-		"the id-less activity was never buffered",
+	assert.equal(coverage.considered, 1, "only the valid trip was buffered");
+	assert.equal(coverage.covered, 1);
+	assert.deepEqual(coverage.required_keys, ["trip-1"]);
+	assert.deepEqual(
+		emitted.map((record) => record.data.id),
+		["trip-1"],
 	);
+	assert.deepEqual(coverage.hydrated_keys, ["trip-1"]);
 });
 
 // ─── Real pagination (nextPageToken) ────────────────────────────────────────
@@ -338,6 +349,89 @@ test("collectAllStreams: a page with no nextPageToken stops even with a full pag
 	await collectAllStreams(ctx, fetchPath, NO_DELAY);
 	assert.equal(emitted.length, 1);
 	assert.equal(calls.filter((c) => c === "Activities").length, 1);
+});
+
+test("fetchAllActivities: duplicate-only pages with fresh continuations retain later trips", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t1") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t2") },
+			{ body: activitiesBody([{ uuid: "trip-b" }], null) },
+		],
+	});
+	const delays: number[] = [];
+	const result = await fetchAllActivities(fetchPath, async (ms) => {
+		delays.push(ms);
+	});
+	assert.deepEqual(result, {
+		activities: [{ uuid: "trip-a" }, { uuid: "trip-b" }],
+		truncated: false,
+		incomplete: false,
+	});
+	assert.deepEqual(calls, ["Activities", "Activities", "Activities"]);
+	assert.equal(delays.length, 2);
+});
+
+test("fetchAllActivities: duplicate terminal page without continuation is exhausted", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-a" }], "t1") },
+			{ body: activitiesBody([{ uuid: "trip-a" }], null) },
+		],
+	});
+	assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+		activities: [{ uuid: "trip-a" }],
+		truncated: false,
+		incomplete: false,
+	});
+	assert.deepEqual(calls, ["Activities", "Activities"]);
+});
+
+for (const continuations of [
+	["t1", "t1"],
+	["t1", "t2", "t1"],
+]) {
+	test(`fetchAllActivities: retains the prefix and truncates a cursor loop ${continuations.join("/")}`, async () => {
+		const activities = continuations.map((_, i) => ({ uuid: `trip-${i}` }));
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: continuations.map((continuation, i) => ({
+				body: activitiesBody([{ uuid: `trip-${i}` }], continuation),
+			})),
+		});
+		const delays: number[] = [];
+		const result = await fetchAllActivities(fetchPath, async (ms) => {
+			delays.push(ms);
+		});
+		assert.deepEqual(result, {
+			activities,
+			truncated: false,
+			incomplete: true,
+		});
+		assert.deepEqual(
+			calls,
+			continuations.map(() => "Activities"),
+		);
+		assert.equal(delays.length, continuations.length - 1);
+	});
+}
+
+test("fetchAllActivities: fresh duplicate-only continuations still honor the page ceiling", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: Array.from({ length: 200 }, (_, i) => ({
+			body: activitiesBody([{ uuid: "trip-a" }], `fresh-${i}`),
+		})),
+	});
+	const delays: number[] = [];
+	const result = await fetchAllActivities(fetchPath, async (ms) => {
+		delays.push(ms);
+	});
+	assert.deepEqual(result, {
+		activities: [{ uuid: "trip-a" }],
+		truncated: true,
+		incomplete: false,
+	});
+	assert.equal(calls.length, 200);
+	assert.equal(delays.length, 199);
 });
 
 // ─── Records-before-DETAIL_COVERAGE ordering ────────────────────────────────
@@ -401,4 +495,563 @@ test("collectAllStreams: never calls globalThis.fetch — every read goes throug
 	} finally {
 		globalThis.fetch = original;
 	}
+});
+
+test("fetchAllActivities: keeps partial GraphQL data and continues to the last page", async () => {
+	const good = JSON.parse(activitiesBody([{ uuid: "trip-a" }], "fresh-token"));
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{
+				body: JSON.stringify({
+					...good,
+					errors: [{ message: "a field is temporarily unavailable" }],
+				}),
+			},
+			{ body: activitiesBody([{ uuid: "trip-b" }]) },
+		],
+	});
+	assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+		activities: [{ uuid: "trip-a" }, { uuid: "trip-b" }],
+		truncated: false,
+		incomplete: true,
+	});
+	assert.deepEqual(calls, ["Activities", "Activities"]);
+});
+
+test("fetchAllActivities: HTTP 200 GraphQL failures reject instead of certifying empty history", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{
+				body: JSON.stringify({
+					errors: [{ message: "temporarily unavailable" }],
+					data: null,
+				}),
+			},
+		],
+	});
+	await assert.rejects(fetchAllActivities(fetchPath, NO_DELAY), {
+		message:
+			"uber_graphql_error [endpoint Activities]: temporarily unavailable",
+	});
+	assert.deepEqual(calls, ["Activities"]);
+	assert.equal(
+		UBER_RETRYABLE_PATTERN.test("uber_graphql_error [endpoint Activities]"),
+		false,
+	);
+	assert.equal(
+		UBER_RETRYABLE_PATTERN.test("uber_http_503 [endpoint Activities]"),
+		false,
+	);
+});
+
+[{ data: null }, {}, { errors: [{ message: "failed" }], data: {} }].forEach(
+	(body) => {
+		test(`fetchAllActivities: rejects failed envelope ${JSON.stringify(body)}`, async () => {
+			const { fetchPath } = makeScriptedFetch({
+				activitiesPages: [{ body: JSON.stringify(body) }],
+			});
+			await assert.rejects(
+				fetchAllActivities(fetchPath, NO_DELAY),
+				/uber_graphql_error/,
+			);
+		});
+	},
+);
+
+[
+	{},
+	{ activities: null },
+	{ activities: {} },
+	{ activities: { past: null } },
+	{ activities: { past: {} } },
+	{ activities: { past: { activities: {} } } },
+	{ activities: [] },
+	{ activities: "invalid" },
+	{ activities: { past: [] } },
+	{ activities: { past: "invalid" } },
+	{ activities: { past: { activities: "invalid" } } },
+].forEach((data) => {
+	test(`fetchAllActivities: rejects malformed Activities data ${JSON.stringify(data)}`, async () => {
+		const { fetchPath } = makeScriptedFetch({
+			activitiesPages: [{ body: JSON.stringify({ data }) }],
+		});
+		await assert.rejects(fetchAllActivities(fetchPath, NO_DELAY), {
+			message:
+				"uber_graphql_error [endpoint Activities]: Malformed Activities data",
+		});
+	});
+});
+
+[
+	{ activities: { past: { activities: [] } } },
+	{ activities: { past: { activities: null } } },
+].forEach((data) => {
+	test(`fetchAllActivities: preserves empty history ${JSON.stringify(data)}`, async () => {
+		const { fetchPath } = makeScriptedFetch({
+			activitiesPages: [{ body: JSON.stringify({ data }) }],
+		});
+		assert.deepEqual(await fetchAllActivities(fetchPath, NO_DELAY), {
+			activities: [],
+			truncated: false,
+			incomplete: false,
+		});
+	});
+});
+
+[
+	{
+		name: "errors without data",
+		bodies: [JSON.stringify({ errors: [{ message: "unavailable" }] })],
+	},
+	{
+		name: "missing Activities containers",
+		bodies: [JSON.stringify({ data: {} })],
+	},
+].forEach(({ name, bodies }) => {
+	test(`collectAllStreams: ${name} refuses before records, state, coverage or detail reads`, async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: bodies.map((body) => ({ body })),
+		});
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await assert.rejects(
+			collectAllStreams(ctx, fetchPath, NO_DELAY),
+			/uber_graphql_error/,
+		);
+		assert.deepEqual(emitted, []);
+		assert.deepEqual(messages, []);
+		assert.deepEqual(
+			calls,
+			bodies.map(() => "Activities"),
+		);
+	});
+});
+
+test("collectAllStreams: a genuinely empty feed emits zero-key coverage", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([]) }],
+	});
+	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.deepEqual(emitted, []);
+	assert.deepEqual(calls, ["Activities"]);
+	assert.equal(messages.length, 1);
+	const coverage = messages[0];
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.stream, "trips");
+	assert.equal(coverage.state_stream, "trips");
+	assert.equal(coverage.considered, 0);
+	assert.equal(coverage.covered, 0);
+	assert.deepEqual(coverage.required_keys, []);
+	assert.deepEqual(coverage.hydrated_keys, []);
+});
+
+test("collectAllStreams: a partial GraphQL page keeps its trips and reports a retryable incomplete skip", async () => {
+	const good = JSON.parse(activitiesBody([{ uuid: "trip-1" }]));
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [
+			{
+				body: JSON.stringify({
+					...good,
+					errors: [{ message: "a field is temporarily unavailable" }],
+				}),
+			},
+		],
+		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
+	});
+	const { ctx, emitted, messages } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.equal(emitted.length, 1);
+	const skips = messages.filter((message) => message.type === "SKIP_RESULT");
+	assert.deepEqual(
+		skips.map((skip) => [skip.reason, skip.recovery_hint]),
+		[
+			[
+				"trips_source_incomplete",
+				{ action: "retry_by_runtime", retryable: true },
+			],
+		],
+	);
+});
+
+[
+	{
+		name: "errors without data",
+		body: JSON.stringify({ errors: [{ message: "temporarily unavailable" }] }),
+	},
+	{ name: "a missing Activities container", body: JSON.stringify({ data: {} }) },
+	{ name: "an empty body", body: "" },
+	{ name: "truncated JSON", body: '{"data":' },
+].forEach(({ name, body }) => {
+	test(`collectAllStreams: a later page with ${name} keeps the good prefix and reports a retryable skip`, async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [
+				{ body: activitiesBody([{ uuid: "good-trip" }], "page-2") },
+				{ body },
+			],
+			getTrip: { "good-trip": { body: getTripBody({ status: "COMPLETED" }) } },
+			getReceipt: {
+				"good-trip": { body: getReceiptBody(RECEIPT_HTML("$10.00")) },
+			},
+		});
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await collectAllStreams(ctx, fetchPath, NO_DELAY);
+		assert.deepEqual(calls, [
+			"Activities",
+			"Activities",
+			"GetTrip:good-trip",
+			"GetReceipt:good-trip",
+		]);
+		assert.deepEqual(
+			emitted.map((record) => record.stream),
+			["trips", "receipts"],
+		);
+		assert.deepEqual(
+			messages
+				.filter((message) => message.type === "SKIP_RESULT")
+				.map((skip) => [skip.stream, skip.reason, skip.recovery_hint]),
+			["trips", "receipts"].map((stream) => [
+				stream,
+				"trips_source_incomplete",
+				{ action: "retry_by_runtime", retryable: true },
+			]),
+		);
+	});
+});
+
+const activitiesWithInvalidCursor = (token: unknown) =>
+	JSON.stringify({
+		data: { activities: { past: { activities: [], nextPageToken: token } } },
+	});
+
+[
+	{ name: "HTTP 503", status: 503, body: "" },
+	{ name: "rejected transport", rejects: true, body: "" },
+	{ name: "malformed continuation", body: activitiesWithInvalidCursor(0) },
+].forEach(({ name, status, rejects, body }) => {
+	test("collectAllStreams: later " + name + " keeps the prefix and emits a retryable gap", async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [
+				{ body: activitiesBody([{ uuid: "good-trip" }], "page-2") },
+				{ ...(status === undefined ? {} : { status }), body },
+			],
+			getTrip: { "good-trip": { body: getTripBody({ status: "COMPLETED" }) } },
+			getReceipt: { "good-trip": { body: getReceiptBody(RECEIPT_HTML("$10.00")) } },
+		});
+		let pages = 0;
+		const fetch: UberPageFetch = (operation, query, variables) => {
+			if (operation === "Activities" && ++pages === 2 && rejects) {
+				return Promise.reject(new Error("uber_transport_error fixture"));
+			}
+			return fetchPath(operation, query, variables);
+		};
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await collectAllStreams(ctx, fetch, NO_DELAY);
+		assert.equal(pages, 2);
+		assert.ok(calls.includes("GetTrip:good-trip"));
+		assert.deepEqual(emitted.map((item) => item.stream), ["trips", "receipts"]);
+		assert.deepEqual(
+			messages.filter((item) => item.type === "SKIP_RESULT").map((item) =>
+				[item.stream, item.reason, item.recovery_hint],
+			),
+			["trips", "receipts"].map((stream) => [
+				stream, "trips_source_incomplete", { action: "retry_by_runtime", retryable: true },
+			]),
+		);
+	});
+});
+
+[
+	{ status: 401, prefix: "uber_session_expired" },
+	{ status: 403, prefix: "uber_session_expired" },
+	{ status: 429, prefix: "uber_rate_limited" },
+].forEach(({ status, prefix }) => {
+	[false, true].forEach((later) => {
+		test("collectAllStreams: Activities HTTP " + status + " before details, later=" + later, async () => {
+			const { fetchPath, calls } = makeScriptedFetch({
+				activitiesPages: [
+					...(later ? [{ body: activitiesBody([{ uuid: "good-trip" }], "page-2") }] : []),
+					{ status, body: "" },
+				],
+			});
+			const { ctx, emitted, messages } = makeCtx(["trips"]);
+			await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), {
+				message: prefix + " [endpoint Activities]",
+			});
+			assert.deepEqual(calls, later ? ["Activities", "Activities"] : ["Activities"]);
+			assert.deepEqual(emitted, []);
+			assert.deepEqual(messages, []);
+		});
+	});
+});
+
+[
+	{ status: 503, body: "", prefix: /uber_http_503 \[endpoint Activities\]/ },
+	{ body: activitiesWithInvalidCursor(0), prefix: /uber_graphql_error .* malformed continuation/i },
+	{ body: activitiesWithInvalidCursor({ fixture: true }), prefix: /uber_graphql_error .* malformed continuation/i },
+].forEach(({ status, body, prefix }) => {
+	test("collectAllStreams: rejects unusable first Activities response: " + (status ?? body), async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: [{ ...(status === undefined ? {} : { status }), body }],
+		});
+		const { ctx, emitted, messages } = makeCtx(["trips"]);
+		await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), prefix);
+		assert.deepEqual(calls, ["Activities"]);
+		assert.deepEqual(emitted, []);
+		assert.deepEqual(messages, []);
+	});
+});
+
+test("collectAllStreams: truncated JSON on the first page refuses before emitting anything", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({ activitiesPages: [{ body: '{"data":' }] });
+	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+	await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), /uber_graphql_error .* malformed JSON/i);
+	assert.deepEqual(calls, ["Activities"]);
+	assert.deepEqual(emitted, []);
+	assert.deepEqual(messages, []);
+});
+
+[
+	{
+		name: "a partial page",
+		pages: [
+			{
+				body: JSON.stringify({
+					...JSON.parse(activitiesBody([{ uuid: "trip-1" }])),
+					errors: [{ message: "a field is temporarily unavailable" }],
+				}),
+			},
+		],
+		reason: "trips_source_incomplete",
+		tripIds: ["trip-1"],
+		fetched: ["trip-1"],
+	},
+	{
+		name: "the page ceiling",
+		pages: Array.from({ length: 200 }, (_, i) => ({
+			body: activitiesBody([{ uuid: "trip-1" }], `fresh-${i}`),
+		})),
+		reason: "trips_deferred_page_budget",
+		tripIds: ["trip-1"],
+		fetched: ["trip-1"],
+	},
+	{
+		name: "the detail-fetch ceiling",
+		pages: [
+			{
+				body: activitiesBody(
+					Array.from({ length: 201 }, (_, i) => ({ uuid: `trip-${i}` })),
+				),
+			},
+		],
+		reason: "trips_deferred_detail_budget",
+		tripIds: Array.from({ length: 201 }, (_, i) => `trip-${i}`),
+		fetched: Array.from({ length: 200 }, (_, i) => `trip-${i}`),
+	},
+].forEach(({ name, pages, reason, tripIds, fetched }) => {
+	test(`collectAllStreams: a receipts-only run reports ${name} on receipts`, async () => {
+		const { fetchPath, calls } = makeScriptedFetch({
+			activitiesPages: pages,
+			getReceipt: Object.fromEntries(
+				tripIds.map((id) => [id, { body: getReceiptBody("") }]),
+			),
+		});
+		const { ctx, messages } = makeCtx(["receipts"]);
+		await collectAllStreams(ctx, fetchPath, NO_DELAY);
+		assert.equal(
+			calls.some((call) => call.startsWith("GetTrip")),
+			false,
+		);
+		assert.deepEqual(
+			calls.filter((call) => call.startsWith("GetReceipt")),
+			fetched.map((id) => `GetReceipt:${id}`),
+		);
+		assert.deepEqual(
+			messages
+				.filter((message) => message.type === "SKIP_RESULT")
+				.map((skip) => [skip.stream, skip.reason]),
+			[["receipts", reason]],
+		);
+		assert.equal(
+			messages.some(
+				(message) =>
+					message.type === "STATE" || message.type === "DETAIL_COVERAGE",
+			),
+			false,
+		);
+	});
+});
+
+test("collectAllStreams: id-less-only activity history refuses without emitting", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ title: "no id" }]) }],
+	});
+	const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+	await assert.rejects(collectAllStreams(ctx, fetchPath, NO_DELAY), {
+		message:
+			"uber_graphql_error [endpoint Activities]: no activity carried a trip id",
+	});
+	assert.deepEqual(calls, ["Activities"]);
+	assert.deepEqual(emitted, []);
+	assert.deepEqual(messages, []);
+});
+
+const detailFailureFetch = (operation: string, status: number, transport: boolean) => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-1" }, { uuid: "trip-2" }]) },
+		],
+		getTrip: {
+			"trip-1": {
+				status: operation === "GetTrip" ? status : 200,
+				body: getTripBody({ status: "COMPLETED" }),
+			},
+			"trip-2": { body: getTripBody({ status: "COMPLETED" }) },
+		},
+		getReceipt: {
+			"trip-1": {
+				status: operation === "GetReceipt" ? status : 200,
+				body: getReceiptBody(RECEIPT_HTML("$10.00")),
+			},
+			"trip-2": { body: getReceiptBody(RECEIPT_HTML("$20.00")) },
+		},
+	});
+	const scripted: UberPageFetch = async (name, query, variables) => {
+		const response = await fetchPath(name, query, variables);
+		if (transport && name === operation) {
+			throw new Error(`uber_transport_error [endpoint ${name}]: synthetic offline`);
+		}
+		return response;
+	};
+	return { calls, scripted };
+};
+
+[
+	{ operation: "GetTrip", status: 401 },
+	{ operation: "GetReceipt", status: 403 },
+].forEach(({ operation, status }) => {
+	test(`collectAllStreams: ${operation} uber_session_expired stops the run before the next trip`, async () => {
+		const { calls, scripted } = detailFailureFetch(operation, status, false);
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await assert.rejects(
+			collectAllStreams(ctx, scripted, NO_DELAY),
+			/^Error: uber_session_expired/,
+		);
+		assert.deepEqual(
+			calls,
+			operation === "GetTrip"
+				? ["Activities", "GetTrip:trip-1"]
+				: ["Activities", "GetTrip:trip-1", "GetReceipt:trip-1"],
+		);
+		assert.equal(emitted.length, operation === "GetTrip" ? 0 : 1);
+		assert.deepEqual(messages, []);
+	});
+});
+
+[
+	{ operation: "GetTrip", status: 429, transport: false, attempts: 3 },
+	{ operation: "GetReceipt", status: 429, transport: false, attempts: 3 },
+	{ operation: "GetTrip", status: 200, transport: true, attempts: 1 },
+	{ operation: "GetReceipt", status: 200, transport: true, attempts: 1 },
+].forEach(({ operation, status, transport, attempts }) => {
+	const failure = transport ? "a dropped request" : "a rate limit past its retries";
+	test(`collectAllStreams: ${operation} with ${failure} keeps emitted trips and reports a retryable gap`, async () => {
+		const { calls, scripted } = detailFailureFetch(operation, status, transport);
+		const { ctx, emitted, messages } = makeCtx(["trips", "receipts"]);
+		await collectAllStreams(ctx, scripted, NO_DELAY);
+		const failedCalls = Array(attempts).fill(`${operation}:trip-1`);
+		assert.deepEqual(
+			calls,
+			operation === "GetTrip"
+				? ["Activities", ...failedCalls]
+				: ["Activities", "GetTrip:trip-1", ...failedCalls],
+			"no request for the next trip",
+		);
+		assert.deepEqual(
+			emitted.map((record) => record.stream),
+			operation === "GetTrip" ? [] : ["trips"],
+		);
+		assert.deepEqual(
+			messages
+				.filter((message) => message.type === "SKIP_RESULT")
+				.map((skip) => [skip.stream, skip.reason, skip.recovery_hint]),
+			["trips", "receipts"].map((stream) => [
+				stream,
+				"trips_detail_interrupted",
+				{ action: "retry_by_runtime", retryable: true },
+			]),
+		);
+		const coverage = messages.find((message) => message.type === "DETAIL_COVERAGE");
+		assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+		assert.equal(coverage.considered, 2);
+		assert.equal(coverage.covered, operation === "GetTrip" ? 0 : 1);
+	});
+});
+
+test("collectAllStreams: a rate-limited GetTrip is retried and hydrates the trip", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
+		getTrip: { "trip-1": { body: getTripBody({ status: "COMPLETED" }) } },
+	});
+	let attempts = 0;
+	const scripted: UberPageFetch = (name, query, variables) => {
+		if (name === "GetTrip" && ++attempts === 1) {
+			return Promise.resolve({ status: 429, body: "fixture rate limit" });
+		}
+		return fetchPath(name, query, variables);
+	};
+	const delays: number[] = [];
+	const { ctx, emitted } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, scripted, async (ms) => {
+		delays.push(ms);
+	});
+	assert.equal(attempts, 2);
+	assert.equal(delays.length, 1);
+	assert.ok((delays[0] ?? 0) > 0);
+	assert.equal(emitted.length, 1);
+	assert.equal(emitted[0]?.stream, "trips");
+});
+
+test("collectAllStreams: GetReceipt recovers on attempt three with growing waits", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
+		getReceipt: { "trip-1": { body: getReceiptBody(RECEIPT_HTML("$10.00")) } },
+	});
+	let attempts = 0;
+	const waits: number[] = [];
+	const scripted: UberPageFetch = (name, query, variables) => {
+		if (name === "GetReceipt" && ++attempts < 3) {
+			return Promise.resolve({ status: 429, body: "fixture rate limit" });
+		}
+		return fetchPath(name, query, variables);
+	};
+	const { ctx, emitted } = makeCtx(["receipts"]);
+	await collectAllStreams(ctx, scripted, async (ms) => { waits.push(ms); });
+	assert.equal(attempts, 3);
+	assert.equal(waits.length, 2);
+	assert.ok((waits[0] ?? 0) > 0);
+	assert.ok((waits[1] ?? 0) > (waits[0] ?? 0));
+	assert.deepEqual(emitted.map(record => record.stream), ["receipts"]);
+});
+
+test("collectAllStreams: GetTrip HTTP 404 remains a per-trip coverage gap", async () => {
+	const { fetchPath, calls } = makeScriptedFetch({
+		activitiesPages: [
+			{ body: activitiesBody([{ uuid: "trip-1" }, { uuid: "trip-2" }]) },
+		],
+		getTrip: {
+			"trip-1": { status: 404, body: "not found" },
+			"trip-2": { body: getTripBody({ status: "COMPLETED" }) },
+		},
+	});
+	const { ctx, emitted, messages } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	assert.deepEqual(calls, ["Activities", "GetTrip:trip-1", "GetTrip:trip-2"]);
+	assert.equal(emitted.length, 1);
+	const coverage = messages.find(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+	assert.equal(coverage.considered, 2);
+	assert.equal(coverage.covered, 1);
+	assert.deepEqual(coverage.hydrated_keys, ["trip-2"]);
 });

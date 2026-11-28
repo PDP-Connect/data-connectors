@@ -9,7 +9,7 @@
 	},
 	"connector_key": "uber",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-	"version": "1.0.29",
+	"version": "1.0.31",
 	"display_name": "Uber",
 	"brand": {
 		"icon": "icon.svg",
@@ -207,6 +207,8 @@
 	],
 	"reason_display_messages": {
 		"trips_deferred_page_budget": "Uber trip history stopped early to stay within a safety limit",
-		"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit"
+		"trips_deferred_detail_budget": "Uber trip detail stopped early to stay within a safety limit",
+		"trips_source_incomplete": "Uber returned only part of the trip history; the next run tries again",
+		"trips_detail_interrupted": "Uber slowed or dropped trip detail requests; the next run reads the rest"
 	}
 }

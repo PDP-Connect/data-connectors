@@ -318,6 +318,43 @@ function assertUberOk(
 	}
 }
 
+/** Only a detail request's explicit rate-limit response gets a bounded retry. */
+async function retryTripDetail<T>(
+	run: () => Promise<T>,
+	delay: (ms: number) => Promise<void>,
+): Promise<T> {
+	for (let retry = 0; ; retry += 1) {
+		try {
+			return await run();
+		} catch (error) {
+			if (
+				retry >= 2 ||
+				!(error instanceof Error) ||
+				!error.message.startsWith("uber_rate_limited [endpoint ")
+			) {
+				throw error;
+			}
+			await delay(DETAIL_DELAY_MS * 2 ** retry);
+		}
+	}
+}
+
+/** An expired session needs the owner, so it must reach the runtime. */
+function isSessionExpiredError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return message.startsWith("uber_session_expired");
+}
+
+/**
+ * A rate limit that outlasts its retries, or a dropped request, stops the
+ * detail loop: the trips already emitted stay, and the rest are a
+ * retryable gap instead of a failed run.
+ */
+function stopsDetailLoop(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /^(uber_rate_limited|uber_transport_error)/.test(message);
+}
+
 /**
  * Fetch the Activities GraphQL feed page by page via the real
  * `nextPageToken` cursor (live-verified 2026-09-22). Dedupes by trip id
@@ -328,37 +365,133 @@ function assertUberOk(
 export async function fetchAllActivities(
 	fetchPath: UberPageFetch,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ activities: UberActivity[]; truncated: boolean }> {
+): Promise<{
+	activities: UberActivity[];
+	truncated: boolean;
+	incomplete: boolean;
+}> {
+	const seenContinuations = new Set<string>();
+	let incomplete = false;
 	const all: UberActivity[] = [];
 	const seenIds = new Set<string>();
+	let rawItemsSeen = 0;
 	let nextPageToken: string | undefined;
 	const walk = await walkPagesWithCeiling({
 		maxPages: MAX_ACTIVITY_PAGES,
 		fetchPage: async (pageNumber) => {
-			const { status, body } = await fetchPath("Activities", ACTIVITIES_QUERY, {
-				includePast: true,
-				includeUpcoming: false,
-				limit: ACTIVITIES_PAGE_SIZE,
-				orderTypes: ["RIDES", "TRAVEL"],
-				profileType: "PERSONAL",
-				...(nextPageToken ? { nextPageToken } : {}),
-			});
+			let reply: Awaited<ReturnType<UberPageFetch>>;
+			try {
+				reply = await fetchPath("Activities", ACTIVITIES_QUERY, {
+					includePast: true,
+					includeUpcoming: false,
+					limit: ACTIVITIES_PAGE_SIZE,
+					orderTypes: ["RIDES", "TRAVEL"],
+					profileType: "PERSONAL",
+					...(nextPageToken ? { nextPageToken } : {}),
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (
+					all.length === 0 ||
+					/^(uber_session_expired|uber_rate_limited)/.test(message)
+				) {
+					throw error;
+				}
+				incomplete = true;
+				return false;
+			}
+			const { status, body } = reply;
+			if (
+				all.length > 0 &&
+				status !== 401 &&
+				status !== 403 &&
+				status !== 429 &&
+				(status < 200 || status >= 300)
+			) {
+				incomplete = true;
+				return false;
+			}
 			assertUberOk(status, body, "Activities");
-			const parsed = JSON.parse(body) as UberActivitiesResponse;
-			const page = parsed.data?.activities?.past?.activities ?? [];
-			let newOnPage = 0;
+			let parsed:
+				| (UberActivitiesResponse & { errors?: { message?: unknown }[] })
+				| null;
+			try {
+				parsed = JSON.parse(body);
+			} catch (error) {
+				if (!(error instanceof SyntaxError)) throw error;
+				// A bad later page does not invalidate the usable prefix.
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
+				throw new Error("uber_graphql_error [endpoint Activities]: malformed JSON");
+			}
+			const hasErrors =
+				Array.isArray(parsed?.errors) && parsed.errors.length > 0;
+			if (parsed?.data == null) {
+				// The usable prefix is still evidence; its coverage is incomplete.
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
+				const message = Array.isArray(parsed?.errors)
+					? parsed.errors[0]?.message
+					: undefined;
+				const detail =
+					typeof message === "string" ? message : "Missing Activities data";
+				throw new Error(
+					`uber_graphql_error [endpoint Activities]: ${redactTransportDetail(detail).slice(0, 200)}`,
+				);
+			}
+			const activities = parsed.data.activities;
+			const past = activities?.past;
+			if (
+				typeof activities !== "object" ||
+				activities === null ||
+				Array.isArray(activities) ||
+				typeof past !== "object" ||
+				past === null ||
+				Array.isArray(past) ||
+				(past.activities !== null && !Array.isArray(past.activities)) ||
+				(hasErrors && !Array.isArray(past.activities))
+			) {
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
+				throw new Error(
+					"uber_graphql_error [endpoint Activities]: Malformed Activities data",
+				);
+			}
+			const token: unknown = past.nextPageToken;
+			if (token != null && (typeof token !== "string" || token.length === 0)) {
+				if (all.length > 0) {
+					incomplete = true;
+					return false;
+				}
+				throw new Error(
+					"uber_graphql_error [endpoint Activities]: malformed continuation token",
+				);
+			}
+			incomplete ||= hasErrors;
+			const page = past.activities ?? [];
 			for (const activity of page) {
+				rawItemsSeen += 1;
 				const id = activityTripId(activity);
 				if (id && !seenIds.has(id)) {
 					seenIds.add(id);
 					all.push(activity);
-					newOnPage += 1;
 				}
 			}
-			const token = parsed.data?.activities?.past?.nextPageToken;
-			if (!token || newOnPage === 0) {
+			if (token == null) {
 				return false;
 			}
+			// Duplicate records do not prove exhaustion; only cursor progress does.
+			if (seenContinuations.has(token)) {
+				incomplete = true;
+				return false;
+			}
+			seenContinuations.add(token);
 			nextPageToken = token;
 			if (pageNumber < MAX_ACTIVITY_PAGES) {
 				await delay(PAGE_DELAY_MS);
@@ -366,7 +499,12 @@ export async function fetchAllActivities(
 			return true;
 		},
 	});
-	return { activities: all, truncated: walk.truncated };
+	if (rawItemsSeen > 0 && seenIds.size === 0) {
+		throw new Error(
+			"uber_graphql_error [endpoint Activities]: no activity carried a trip id",
+		);
+	}
+	return { activities: all, truncated: walk.truncated, incomplete };
 }
 
 /** One trip's raw GetTrip result, kept as-is so the caller decides how to turn it into a trips RECORD. */
@@ -382,7 +520,7 @@ async function fetchGetTrip(
 	return parsed.data?.getTrip;
 }
 
-/** One trip's fare-breakdown lines from GetReceipt. Never throws; an empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
+/** One trip's fare-breakdown lines from GetReceipt. An empty array is the honest "not hydrated" signal `receiptRecord` treats as absent evidence. */
 async function fetchFareBreakdown(
 	fetchPath: UberPageFetch,
 	tripId: string,
@@ -417,7 +555,10 @@ export async function collectAllStreams(
 		return;
 	}
 
-	const { activities, truncated } = await fetchAllActivities(fetchPath, delay);
+	const { activities, truncated, incomplete } = await fetchAllActivities(
+		fetchPath,
+		delay,
+	);
 	const tripIds = activities
 		.map((a) => activityTripId(a))
 		.filter((id): id is string => Boolean(id))
@@ -426,6 +567,7 @@ export async function collectAllStreams(
 
 	const tripsRequired: string[] = [];
 	const tripsHydrated: string[] = [];
+	let detailStopped = false;
 	for (const [index, tripId] of tripIds.entries()) {
 		if (wantTrips) {
 			tripsRequired.push(tripId);
@@ -434,8 +576,18 @@ export async function collectAllStreams(
 		let getTrip: UberGetTripResult | undefined;
 		if (wantTrips) {
 			try {
-				getTrip = await fetchGetTrip(fetchPath, tripId);
-			} catch {
+				getTrip = await retryTripDetail(
+					() => fetchGetTrip(fetchPath, tripId),
+					delay,
+				);
+			} catch (error) {
+				if (isSessionExpiredError(error)) {
+					throw error;
+				}
+				if (stopsDetailLoop(error)) {
+					detailStopped = true;
+					break;
+				}
 				getTrip = undefined;
 			}
 			const record = getTrip
@@ -450,8 +602,18 @@ export async function collectAllStreams(
 		if (wantReceipts) {
 			let fareBreakdown: ReturnType<typeof parseFareBreakdown> = [];
 			try {
-				fareBreakdown = await fetchFareBreakdown(fetchPath, tripId);
-			} catch {
+				fareBreakdown = await retryTripDetail(
+					() => fetchFareBreakdown(fetchPath, tripId),
+					delay,
+				);
+			} catch (error) {
+				if (isSessionExpiredError(error)) {
+					throw error;
+				}
+				if (stopsDetailLoop(error)) {
+					detailStopped = true;
+					break;
+				}
 				fareBreakdown = [];
 			}
 			const receipt = receiptRecord(tripId, fareBreakdown);
@@ -466,11 +628,24 @@ export async function collectAllStreams(
 		}
 	}
 
-	if (wantTrips) {
+	if (detailStopped && wantTrips) {
+		// Trips the loop never reached still count as considered, not covered.
+		for (const tripId of tripIds) {
+			if (!tripsRequired.includes(tripId)) {
+				tripsRequired.push(tripId);
+			}
+		}
+	}
+
+	// Trips and receipts both come from the one Activities walk and the one
+	// detail loop, so each requested stream reports where either stopped short.
+	const emitStoppedShortSkips = async (
+		stream: "trips" | "receipts",
+	): Promise<void> => {
 		if (truncated) {
 			await emit({
 				type: "SKIP_RESULT",
-				stream: "trips",
+				stream,
 				reason: "trips_deferred_page_budget",
 				recovery_hint: {
 					action: "retry_on_connector_upgrade",
@@ -480,10 +655,30 @@ export async function collectAllStreams(
 				diagnostics: { page_limit: MAX_ACTIVITY_PAGES },
 			});
 		}
+		if (incomplete) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "trips_source_incomplete",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message:
+					"Uber answered part of the trip history with errors or repeated a page; the next run reads it again",
+			});
+		}
+		if (detailStopped) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "trips_detail_interrupted",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message:
+					"Uber rate-limited or dropped a trip detail request, so the remaining trips were not read; the next run tries again",
+			});
+		}
 		if (detailTruncated) {
 			await emit({
 				type: "SKIP_RESULT",
-				stream: "trips",
+				stream,
 				reason: "trips_deferred_detail_budget",
 				recovery_hint: {
 					action: "retry_on_connector_upgrade",
@@ -496,6 +691,10 @@ export async function collectAllStreams(
 				},
 			});
 		}
+	};
+
+	if (wantTrips) {
+		await emitStoppedShortSkips("trips");
 		// `trips` is full_inventory / incremental: false (no source-side date
 		// or stop-at-seen filter is proven — see the manifest and this
 		// connector's header comment): it emits no STATE, matching the
@@ -516,6 +715,9 @@ export async function collectAllStreams(
 				covered: tripsHydrated.length,
 			}),
 		);
+	}
+	if (wantReceipts) {
+		await emitStoppedShortSkips("receipts");
 	}
 }
 
