@@ -1676,9 +1676,10 @@ async function collectTransactions(ctx: BudgetCtx): Promise<CoverageFact> {
 		(newState.transactions as
 			| Record<string, { server_knowledge: number; since_date?: string }>
 			| undefined) ?? {};
+	const cursorSinceDate = knowledge === undefined ? sinceDate : priorSinceDate;
 	txns[budgetId] = {
 		server_knowledge: res.data.server_knowledge,
-		...(sinceDate === undefined ? {} : { since_date: sinceDate }),
+		...(cursorSinceDate === undefined ? {} : { since_date: cursorSinceDate }),
 	};
 	newState.transactions = txns;
 	await emit({

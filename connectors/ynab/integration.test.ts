@@ -10,9 +10,11 @@ import {
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	type BudgetCtx,
+	type YnabRequest,
 	collectMonthCategories,
 	monthCategoryRecord,
 	rewindOneMonth,
+	ynabCollect,
 } from "./index.ts";
 
 type MonthCategoryInput = Parameters<typeof monthCategoryRecord>[0];
@@ -58,6 +60,36 @@ function makeCtx(overrides: Partial<BudgetCtx> = {}): {
 	};
 	return { ctx, emitted: harness.emitted, messages: harness.protocolMessages };
 }
+
+test("ynabCollect preserves transaction history floor across an empty incremental delta", async () => {
+	const harness = makeRecordingEmit();
+	const requestOptions: Array<{ knowledge?: number; sinceDate?: string }> = [];
+	const request: YnabRequest = <T>(path: string, _token: string, options = {}): Promise<T> => {
+		if (path === "/budgets") return Promise.resolve({ data: { budgets: [{ id: "budget-main" }] } } as T);
+		if (path === "/budgets/budget-main/accounts") return Promise.resolve({ data: { accounts: [] } } as T);
+		assert.equal(path, "/budgets/budget-main/transactions");
+		requestOptions.push(options);
+		return Promise.resolve({ data: { transactions: [], server_knowledge: 8 } } as T);
+	};
+	const seed = {
+		state: { transactions: { "budget-main": { server_knowledge: 7, since_date: "2026-01-01" } } },
+		requested: new Map([["transactions", {}]]),
+		credentials: { YNAB_PERSONAL_ACCESS_TOKEN: "fixture-token" },
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+	} as Parameters<typeof ynabCollect>[0];
+	await ynabCollect(seed, request);
+	assert.deepEqual(requestOptions[0], { knowledge: 7 });
+	assert.ok(requestOptions.every(options => !Object.hasOwn(options, "sinceDate")));
+	const message = harness.protocolMessages.find(
+		(item): item is Extract<EmittedMessage, { type: "STATE" }> =>
+			item.type === "STATE" && item.stream === "transactions",
+	);
+	assert.deepEqual(message?.cursor, {
+		"budget-main": { server_knowledge: 8, since_date: "2026-01-01" },
+	});
+});
 
 test("monthCategoryRecord: uses stable budget/month/category primary key", () => {
 	const record = monthCategoryRecord(
