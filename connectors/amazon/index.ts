@@ -1079,7 +1079,7 @@ async function recoverPendingOrderItemDetailGapPage(
 	let recovered = 0;
 	let reDeferred = 0;
 	let skipped = 0;
-	for (const gap of gaps) {
+	recoverGaps: for (const gap of gaps) {
 		const locator = readRecoverableAmazonOrderDetailGap(gap);
 		if (!locator) {
 			if (gap.stream === "order_items" && gap.status === "pending") {
@@ -1111,17 +1111,19 @@ async function recoverPendingOrderItemDetailGapPage(
 							),
 						};
 			for (const item of result.detail.items) {
-				await deps.emitRecord(
-					"order_items",
-					cleanEmittedOrderItem(
-						buildOrderItemRecord(
-							locator.orderId,
-							locator.orderDate,
-							item,
-							orderContext,
-						),
-					),
+				const record = cleanEmittedOrderItem(
+					buildOrderItemRecord(locator.orderId, locator.orderDate, item, orderContext),
 				);
+				let emitted = false;
+				await deps.emitRecord("order_items", record, {
+					beforeEmit: async () => {
+						emitted = true;
+					},
+				});
+				if (!emitted) {
+					reDeferred += 1;
+					continue recoverGaps;
+				}
 			}
 			await deps.emit({
 				type: "DETAIL_GAP_RECOVERED",

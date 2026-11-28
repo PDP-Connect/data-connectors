@@ -4211,3 +4211,42 @@ test("an incomplete rescan of a frozen year stores it as not frozen", async () =
 	assert.equal(years["2024"]?.order_count, 2);
 	assert.deepEqual(planIncrementalYears([2024], years, 2027).planned, [2024]);
 });
+
+test("recoverPendingOrderItemDetailGaps leaves an unselected child pending", async () => {
+	const { deps, protocolMessages } = makeRecordingDeps();
+	const orderId = "111-1234567-8901234";
+	let attempted = 0;
+	const result = await recoverPendingOrderItemDetailGaps(
+		makeDetailPageStub(makeDetailHtml()),
+		{
+			capture: null,
+			detailGaps: [
+				{
+					detail_locator: {
+						kind: "amazon.order_detail",
+						order_date: "2025-01-02",
+						order_id: orderId,
+					},
+					gap_id: "gap_fixture_filtered",
+					record_key: orderId,
+					reference_only: true,
+					status: "pending",
+					stream: "order_items",
+				},
+			],
+			emit: deps.emit,
+			emitRecord: async () => {
+				attempted += 1;
+				// Like an SDK filter rejection: resolve without calling beforeEmit.
+			},
+		},
+		makeRunFlags(),
+	);
+
+	assert.equal(attempted, 1, "the detail fixture contained one valid item");
+	assert.deepEqual(result, { recovered: 0, stoppedWithPending: true });
+	assert.equal(
+		protocolMessages.some((message) => message.type === "DETAIL_GAP_RECOVERED"),
+		false,
+	);
+});
