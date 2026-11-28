@@ -89,7 +89,7 @@ features it needs, and describes the streams it can emit.
 {
   "protocol_version": "0.3.0",
   "connector_key": "example",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "display_name": "Example",
   "runtime_requirements": {
     "bindings": {
