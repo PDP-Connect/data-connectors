@@ -165,7 +165,7 @@ async function collectLocationHistory(
 	const stream = "location_history";
 	const file = resolveLocationFile(importDir);
 	const json = (file ? await readJsonIf(file) : null) as LocationFile | null;
-	if (!json?.locations) {
+	if (!json || !Object.hasOwn(json, "locations")) {
 		await emitCoverageProgress(emit, {
 			reason: "records_not_found",
 			status: "missing",
@@ -177,6 +177,19 @@ async function collectLocationHistory(
 			reason: "records_not_found",
 			message:
 				"Google Takeout location records were not found in the configured import directory",
+		});
+		return;
+	}
+	if (!Array.isArray(json.locations)) {
+		connectorDiagnostic("google_takeout", "invalid_location_records", {
+			stream,
+		});
+		await emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: "invalid_location_records",
+			message:
+				"Google Takeout location records do not contain a list of locations",
 		});
 		return;
 	}
