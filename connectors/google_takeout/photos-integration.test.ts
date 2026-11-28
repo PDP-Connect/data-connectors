@@ -587,3 +587,37 @@ test("Takeout location resumes distinct observations at the same timestamp", asy
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
+test("Takeout location uses the saved instant, not the cursor's offset spelling", async () => {
+	const root = await mkdtemp(join(tmpdir(), "takeout-location-offset-"));
+	const stream = "location_history";
+	const timestamp = "2025-01-01T12:00:00.000Z";
+	try {
+		const dir = join(root, "Location History (Timeline)");
+		await mkdir(dir, { recursive: true });
+		await writeFile(
+			join(dir, "Records.json"),
+			JSON.stringify({
+				locations: [{ timestamp, latitudeE7: 10_000_001, longitudeE7: 20_000_001 }],
+			}),
+		);
+
+		const check = async (savedTimestamp: string): Promise<void> => {
+			const { messages } = await runTakeoutImport(root, [stream], {}, {
+				[stream]: { last_timestamp: savedTimestamp },
+			});
+			assert.equal(records(messages, stream).length, 1);
+			const state = messages.find(
+				(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
+					message.type === "STATE" && message.stream === stream,
+			);
+			assert.ok(state);
+			assert.equal(Reflect.get(state.cursor ?? {}, "last_timestamp"), timestamp);
+		};
+
+		await check("2025-01-01T13:00:00+02:00");
+		await check("not-a-timestamp");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
