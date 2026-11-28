@@ -33,6 +33,8 @@ import type {
  * 1970-01-01 — returning null keeps "unknown" falsifiable downstream instead
  * of sorting a timeless record to the beginning of time.
  */
+const UNZONED_ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/i;
+
 export function tsToIso(v: unknown): string | null {
 	if (v === null || v === undefined) {
 		return null;
@@ -46,7 +48,9 @@ export function tsToIso(v: unknown): string | null {
 			return Number.isNaN(d.getTime()) ? null : d.toISOString();
 		}
 		if (typeof v === "string") {
-			const d = new Date(v);
+			const value = v.trim();
+			// Unzoned ISO date-times are source UTC, not the collector host zone.
+			const d = new Date(UNZONED_ISO_TIME.test(value) ? `${value}Z` : v);
 			return Number.isNaN(d.getTime()) ? null : d.toISOString();
 		}
 	} catch {
