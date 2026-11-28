@@ -1098,15 +1098,14 @@ async function emitUsage({
 		await emitRecord("usage", buildUsageRecord(null));
 		return;
 	}
-	if (markFileContentAndShouldSkip(fileMtimes, newMtimes, statsPath, raw)) {
-		return;
-	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
-		// Malformed JSON is a shape anomaly, not a missing-file case: don't
-		// claim stats-cache-missing for a file that exists but doesn't parse.
+		connectorDiagnostic("claude_code", "usage_cache_invalid_json", { stream: "usage" });
+		throw new Error("Malformed Claude Code usage cache");
+	}
+	if (markFileContentAndShouldSkip(fileMtimes, newMtimes, statsPath, raw)) {
 		return;
 	}
 	await emitRecord("usage", buildUsageRecord(parsed));

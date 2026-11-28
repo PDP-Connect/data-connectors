@@ -31,6 +31,11 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { connectorEntrypoint, packageRoot } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import type { StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type EmittedRecord,
@@ -50,6 +55,27 @@ import {
 	SKILL_BODY_MAX_CHARS,
 } from "./parsers.ts";
 import type { JsonlObject, SessionAccumulator } from "./types.ts";
+
+test("malformed usage cache is reported twice and never checkpointed", async () => {
+	const home = await mkdtemp(join(tmpdir(), "pdpp-claude-invalid-usage-"));
+	const marker = "synthetic-cache-content-must-not-be-reported";
+	try {
+		await writeFile(join(home, "stats-cache.json"), `{"usage": ${marker}`);
+		for (let run = 0; run < 2; run++) {
+			const result = await runConnectorProtocolSubprocess({
+				cwd: packageRoot,
+				entrypoint: connectorEntrypoint("claude_code"),
+				env: { CLAUDE_CODE_HOME: home, CLAUDE_CODE_PROJECTS_DIR: join(home, "projects"), PDPP_OWNER_TOKEN: "", PDPP_RS_URL: "", RS_URL: "" },
+				start: { scope: { streams: [{ name: "usage" }] }, type: "START" },
+			});
+			assert.match(result.stderr, /usage_cache_invalid_json/);
+			assert.doesNotMatch(result.stderr + JSON.stringify(result.messages), new RegExp(marker));
+			assert.equal(result.messages.some(message => (message.type === "STATE" || message.type === "RECORD") && message.stream === "usage"), false);
+		}
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});
 
 interface RecordingHarness {
 	deps: LineEmitDeps;
