@@ -16276,7 +16276,7 @@
 				},
 				"connector_key": "imessage",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/imessage",
-				"version": "0.1.27",
+				"version": "0.1.28",
 				"display_name": "iMessage (macOS)",
 				"brand": {
 					"icon": "icon.svg",
@@ -32629,7 +32629,7 @@
 				},
 				"connector_key": "ynab",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/ynab",
-				"version": "0.3.30",
+				"version": "0.3.31",
 				"display_name": "YNAB",
 				"brand": {
 					"icon": "icon.svg",

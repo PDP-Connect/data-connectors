@@ -78,7 +78,7 @@ test("ynabCollect preserves transaction history floor across an empty incrementa
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		progress: (): Promise<void> => Promise.resolve(),
-	} as Parameters<typeof ynabCollect>[0];
+	} as unknown as Parameters<typeof ynabCollect>[0];
 	await ynabCollect(seed, request);
 	assert.deepEqual(requestOptions[0], { knowledge: 7 });
 	assert.ok(requestOptions.every(options => !Object.hasOwn(options, "sinceDate")));
