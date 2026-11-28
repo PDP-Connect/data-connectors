@@ -127,6 +127,40 @@ test("one messages list invocation per chat, in the order chats were listed", as
 	assert.deepEqual(seenConvIds, ["chat_a", "chat_b"]);
 });
 
+test("an interrupted chat listing stops before any message invocation", async () => {
+	const calls: string[][] = [];
+	const outcome = await fetchAndParseGmcliMessages(async (args) => {
+		calls.push([...args]);
+		throw new Error("Synthetic chat listing interruption");
+	});
+	assert.equal(outcome.reason, "gmcli_query_failed");
+	assert.equal(outcome.message, "Synthetic chat listing interruption");
+	assert.equal(outcome.parsed, undefined);
+	assert.equal(calls.length, 1);
+	assert.deepEqual(calls[0]?.slice(2, 4), ["chats", "list"]);
+});
+
+test("a failed conversation read stops before attempting remaining conversations", async () => {
+	const chats = JSON.stringify(
+		["fixture_a", "fixture_b", "fixture_c"].map((conversation_id) => ({
+			conversation_id,
+		})),
+	);
+	const seen: string[] = [];
+	const outcome = await fetchAndParseGmcliMessages(async (args) => {
+		if (args[0] === "--json") return ok(chats);
+		const id = args[args.indexOf("--conv") + 1] ?? "";
+		seen.push(id);
+		if (id === "fixture_b")
+			throw new Error("Synthetic conversation interruption");
+		return ok("[]");
+	});
+	assert.deepEqual(seen, ["fixture_a", "fixture_b"]);
+	assert.equal(outcome.reason, "gmcli_query_failed");
+	assert.equal(outcome.message, "Synthetic conversation interruption");
+	assert.equal(outcome.parsed, undefined);
+});
+
 function buildEmptyChatsJsonFixtureAsMessages(): string {
 	return "[]";
 }

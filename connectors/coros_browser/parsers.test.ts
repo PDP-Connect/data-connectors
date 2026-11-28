@@ -65,6 +65,18 @@ test("sport names follow Training Hub's tables; workouts read categories first",
 	assert.equal(regionKey(101), null);
 });
 
+test("sport metadata: the custom label covers both ends of its reserved range", () => {
+	assert.equal(sportName(9800), "Custom_Sport");
+	assert.equal(sportName(9930), "Custom_Sport");
+	assert.equal(sportName(9799), null);
+	assert.equal(sportName(9931), null);
+});
+
+test("plan metadata: custom and unknown labels use the sport fallback", () => {
+	assert.equal(planSportName(9800), "Custom_Sport");
+	assert.equal(planSportName(12345), null);
+});
+
 test("profileRecord: account and dashboard into one validated profile, no email", () => {
 	const record = profileRecord(
 		dataOf(fixture("account.json")),
@@ -139,6 +151,20 @@ test("activityRecord: without a zone the row's own date is the local day; withou
 	);
 });
 
+test("activityRecord ignores an offset outside the published range", () => {
+	const row = {
+		labelId: "synthetic-activity",
+		startTime: Date.parse("2026-01-15T23:45:00Z") / 1000,
+		sportType: 1,
+		date: 20260115,
+	};
+	for (const startTimezone of [-99, 99]) {
+		const record = activityRecord({ ...row, startTimezone });
+		assert.equal(record?.utc_offset_minutes, null);
+		assert.equal(record?.start_date, "2026-01-15");
+	}
+});
+
 test("activityPage and dayList and schedule refuse a shape that is not theirs", () => {
 	assert.deepEqual(activityPage({ count: 0, totalPage: 0 }), {
 		rows: [],
@@ -175,6 +201,50 @@ test("dailyRecord: HRV's normal range and zero readings", () => {
 	assert.equal(dailyRecord({ rhr: 50 }), null);
 });
 
+test("planned workouts report unreadable rows without discarding a readable sibling", () => {
+	const results = plannedRecords({
+		entities: [
+			null,
+			{ happenDay: 20250230, idInPlan: 1 },
+			{ happenDay: 20250228 },
+			{ happenDay: 20250228, idInPlan: 2 },
+		],
+		programs: [],
+	});
+	assert.deepEqual(
+		results.map(({ ok }) => ok),
+		[false, false, false, true],
+	);
+	const last = results.at(-1);
+	assert.ok(last?.ok);
+	assert.equal(last.record.id, "2025-02-28::2");
+});
+
+test("a calendar entry with no matching program does not borrow another workout's details", () => {
+	const [result] = plannedRecords({
+		entities: [{ happenDay: 20250228, idInPlan: 1, planId: 8 }],
+		programs: [
+			{
+				idInPlan: 1,
+				planId: 9,
+				name: "Other fixture workout",
+				sportType: 1,
+				trainingLoad: 73,
+			},
+		],
+	});
+	assert.ok(result?.ok);
+	assert.equal(result.record.id, "2025-02-28:8:1");
+	assert.deepEqual(
+		[
+			result.record.name,
+			result.record.sport,
+			result.record.planned_training_load,
+		],
+		[null, null, null],
+	);
+});
+
 test("plannedRecords joins entries to workouts by place in plan and plan id", () => {
 	const value = schedule(fixture("schedule.json"));
 	assert.ok(value);
@@ -205,4 +275,55 @@ test("plannedRecords joins entries to workouts by place in plan and plan id", ()
 	assert.equal(orphan[0]?.ok && orphan[0].record.name, null);
 	assert.equal(orphan[0]?.ok && orphan[0].record.id, "2026-11-01:77:9");
 	assert.equal(orphan[1]?.ok, false);
+});
+
+test("plannedRecords keeps the same slot on the same day separate across plans", () => {
+	const result = plannedRecords({
+		entities: [
+			{ happenDay: 20261101, planId: "11", idInPlan: 2 },
+			{ happenDay: 20261101, planId: "22", idInPlan: 2 },
+		],
+		programs: [
+			{ planId: 22, idInPlan: "2", name: "Restorative ride" },
+			{ planId: 11, idInPlan: "2", name: "Easy run" },
+		],
+	});
+	assert.deepEqual(
+		result.map((row) => row.ok && [row.record.id, row.record.name]),
+		[
+			["2026-11-01:11:2", "Easy run"],
+			["2026-11-01:22:2", "Restorative ride"],
+		],
+	);
+});
+
+test("plannedRecords joins the missing and zero plan markers and keeps zero completion", () => {
+	const result = plannedRecords({
+		entities: [{ happenDay: 20261101, idInPlan: "2", completeRate: "0.00" }],
+		programs: [{ planId: 0, idInPlan: 2, name: "Standalone workout" }],
+	});
+	assert.deepEqual(
+		result.map(
+			(row) =>
+				row.ok && [row.record.id, row.record.name, row.record.completion_rate],
+		),
+		[["2026-11-01::2", "Standalone workout", 0]],
+	);
+});
+
+test("dailyRecord distinguishes a zero training load from an unavailable threshold", () => {
+	const record = dailyRecord({
+		happenDay: 20261101,
+		trainingLoad: 0,
+		ati: 0,
+		cti: 0,
+		rhr: 0,
+		vo2max: 0,
+	});
+	assert.ok(record);
+	assert.equal(record.training_load, 0);
+	assert.equal(record.acute_load, 0);
+	assert.equal(record.chronic_load, 0);
+	assert.equal(record.resting_heart_rate_bpm, null);
+	assert.equal(record.vo2max, null);
 });

@@ -192,6 +192,32 @@ test("getArchiveState calls the documented archive state endpoint", async () => 
 	assert.equal(transport.calls[0]?.method, "GET");
 });
 
+test("blank resource selection rejects before contacting the archive service", async () => {
+	const transport = makeFetch([]);
+	const client = new GoogleDataPortabilityClient({
+		accessToken: "synthetic-portability-test",
+		fetch: transport.fetch,
+	});
+	await assert.rejects(
+		() => client.initiateArchive({ resources: ["", "  "] }),
+		/^Error: google_data_portability_resources_missing$/,
+	);
+	assert.equal(transport.calls.length, 0);
+});
+
+test("blank archive job id rejects before polling", async () => {
+	const transport = makeFetch([]);
+	const client = new GoogleDataPortabilityClient({
+		accessToken: "synthetic-portability-test",
+		fetch: transport.fetch,
+	});
+	await assert.rejects(
+		() => client.getArchiveState("  "),
+		/^Error: google_data_portability_archive_job_id_missing$/,
+	);
+	assert.equal(transport.calls.length, 0);
+});
+
 test("API errors preserve status without exposing bearer token", async () => {
 	const transport = makeFetch([
 		new Response('{"error":"denied"}', { status: 403 }),

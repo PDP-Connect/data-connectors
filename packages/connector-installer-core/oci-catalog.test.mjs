@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isCatalogTimestamp } from "./catalog-schema.mjs";
 import { CATALOG_MEDIA_TYPE, CATALOG_REPOSITORY, fetchCatalog } from "./oci-catalog.mjs";
 import { FixtureRegistry, PINNED_IDENTITY, canonicalJson, cosignSignatureAnnotations, createFixtureVerifier, createSigner } from "./oci-fixture.mjs";
 
@@ -160,4 +161,15 @@ test("catalog rejects malformed rollback input before network access", async () 
   for (const lastAcceptedGeneratedAt of ["not-a-date", "2026-02-30T00:00:00Z", "September 15, 2026", null, 1]) {
     await assert.rejects(fetchCatalog({ lastAcceptedGeneratedAt, fetchImpl() { assert.fail("unexpected network request"); } }), { reason: "invalid-reference" });
   }
+});
+
+test("catalog timestamps accept valid fractional seconds and explicit offsets", () => {
+  for (const timestamp of ["2026-09-15T12:00:00.123456Z", "2026-09-15T12:00:00+05:30", "2026-09-15T12:00:00-03:30"]) {
+    assert.equal(isCatalogTimestamp(timestamp), true, timestamp);
+  }
+});
+
+test("catalog timestamps distinguish leap days from rolled-over calendar dates", () => {
+  assert.equal(isCatalogTimestamp("2024-02-29T00:00:00Z"), true);
+  assert.equal(isCatalogTimestamp("2025-02-29T00:00:00Z"), false);
 });

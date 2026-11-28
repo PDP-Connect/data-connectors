@@ -24,6 +24,11 @@ import {
 	resolveContributionWindows,
 	type StreamCtx,
 } from "./index.ts";
+import {
+	contributionDayRecord,
+	eventRecord,
+	flattenContributionDays,
+} from "./parsers.ts";
 
 // Same rationale as index.test.ts: resolve pacing waits instantly so these
 // fetch-stubbing tests don't pay real wall-clock for the adaptive governor's
@@ -497,4 +502,45 @@ test("collectOrganizations: empty membership emits no records", async (t: TestCo
 	assert.equal(records.length, 0);
 	const cov = coverages.find((c) => c.stream === "organizations");
 	assert.equal(cov?.considered, 0);
+});
+
+test("event projection preserves explicit non-public evidence", () => {
+	const base = {
+		id: "fixture-1",
+		type: "PushEvent",
+		created_at: "2026-01-02T00:00:00Z",
+		repo: { name: "sample/example" },
+	};
+	assert.equal(eventRecord({ ...base, public: false })?.is_public, false);
+	assert.equal(eventRecord(base)?.is_public, true);
+});
+
+test("calendar projection keeps zero days and a stable identity when a day changes", () => {
+	const days = flattenContributionDays({
+		contributionCalendar: {
+			weeks: [
+				{
+					contributionDays: [
+						{ contributionCount: 9 },
+						{ date: "2026-01-02", contributionCount: 0 },
+					],
+				},
+				{},
+				{ contributionDays: [{ date: "2026-01-03", contributionCount: 4 }] },
+			],
+		},
+	});
+	assert.deepEqual(days, [
+		{ date: "2026-01-02", count: 0 },
+		{ date: "2026-01-03", count: 4 },
+	]);
+	const before = contributionDayRecord("fixture-user", "2026-01-02", 0);
+	const after = contributionDayRecord("fixture-user", "2026-01-02", 3);
+	assert.equal(before.id, "fixture-user:2026-01-02");
+	assert.equal(before.id, after.id);
+	assert.equal(after.contribution_count, 3);
+	assert.notEqual(
+		after.id,
+		contributionDayRecord("other-user", "2026-01-02", 3).id,
+	);
 });

@@ -67,6 +67,23 @@ test("videos schema rejects a negative view_count", () => {
 	);
 });
 
+test("videos schema preserves explicit zero duration and view count", () => {
+	const parsed = videosSchema.parse({
+		...VIDEO_RECORD,
+		duration_seconds: 0,
+		view_count: 0,
+	});
+	assert.equal(parsed.duration_seconds, 0);
+	assert.equal(parsed.view_count, 0);
+});
+
+test("videos schema rejects fractional duration rather than rounding it", () => {
+	assert.equal(
+		videosSchema.safeParse({ ...VIDEO_RECORD, duration_seconds: 1.5 }).success,
+		false,
+	);
+});
+
 test("videos schema rejects a non-URL share_url", () => {
 	assert.equal(
 		videosSchema.safeParse({ ...VIDEO_RECORD, share_url: "not a url" }).success,
