@@ -271,7 +271,7 @@ runConnector({
 		let fileCount = 0;
 		const unsupported = new Map<string, number>();
 		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
-
+		let holdFrontier = false;
 		connectorDiagnostic("apple_photos", "emit_start", {
 			pass: "emit",
 			phase: "emit",
@@ -294,7 +294,7 @@ runConnector({
 			const record = buildPhotoRecord(file, filename, hydration);
 			latest = advanceCursor(latest, file.mtimeIso);
 			await emitRecord("photos", { ...record });
-
+			holdFrontier ||= record.hydration_status === "unavailable";
 			if (fileCount % PROGRESS_INTERVAL_FILES === 0) {
 				connectorDiagnostic("apple_photos", "emit_scan", {
 					files_scanned: fileCount,
@@ -334,7 +334,7 @@ runConnector({
 		await emit({
 			type: "STATE",
 			stream: "photos",
-			cursor: { last_modified: latest },
+			cursor: { last_modified: holdFrontier ? since : latest },
 		});
 	},
 });

@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -77,6 +80,7 @@ function runApplePhotos(
 	exportDir: string,
 	streams: string[],
 	state: Record<string, unknown> = {},
+	uploader: Record<string, string> = {},
 ) {
 	return runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
@@ -86,6 +90,7 @@ function runApplePhotos(
 			PDPP_OWNER_TOKEN: "",
 			PDPP_RS_URL: "",
 			RS_URL: "",
+			...uploader,
 		},
 		start: {
 			scope: { streams: streams.map((name) => ({ name })) },
@@ -93,6 +98,49 @@ function runApplePhotos(
 			type: "START",
 		},
 	});
+}
+
+/**
+ * A local blob store that accepts every upload. The cursor advances only when
+ * every photo is hydrated, so tests about cursor advancement need one; without
+ * it the connector correctly keeps the prior cursor.
+ */
+async function withFixtureUploader<T>(
+	fn: (uploader: Record<string, string>) => Promise<T>,
+): Promise<T> {
+	const server = createServer((req, res) => {
+		const chunks: Buffer[] = [];
+		req.on("data", (chunk: Buffer) => chunks.push(chunk));
+		req.on("end", () => {
+			const bytes = Buffer.concat(chunks);
+			const hash = createHash("sha256").update(bytes).digest("hex");
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					blob_id: `blob_sha256_${hash}`,
+					mime_type: "application/octet-stream",
+					object: "blob",
+					sha256: hash,
+					size_bytes: bytes.byteLength,
+				}),
+			);
+		});
+	});
+	await new Promise<void>((done, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => done());
+	});
+	try {
+		const { port } = server.address() as AddressInfo;
+		return await fn({
+			PDPP_OWNER_TOKEN: "fixture-owner",
+			PDPP_RS_URL: `http://127.0.0.1:${port}`,
+		});
+	} finally {
+		await new Promise<void>((done, reject) =>
+			server.close((err) => (err ? reject(err) : done())),
+		);
+	}
 }
 
 test("apple_photos SKIP_RESULTs export_not_found when the export dir does not exist", async () => {
@@ -264,27 +312,32 @@ test("apple_photos does not repeat an unsupported skip at or before its returned
 		},
 	]);
 	try {
-		const first = await runApplePhotos(dir, ["photos"]);
-		assert.equal(
-			skips(first.messages)[0]?.message,
-			"Skipped 2 files with unsupported extensions: .dng 1, .xyz 1",
-		);
-		const checkpoint = states(first.messages).find(
-			(s) => s.stream === "photos",
-		);
-		assert.ok(checkpoint);
-		assert.deepEqual(checkpoint.cursor, {
-			last_modified: cursorTime.toISOString(),
+		await withFixtureUploader(async (uploader) => {
+			const first = await runApplePhotos(dir, ["photos"], {}, uploader);
+			assert.equal(
+				skips(first.messages)[0]?.message,
+				"Skipped 2 files with unsupported extensions: .dng 1, .xyz 1",
+			);
+			const checkpoint = states(first.messages).find(
+				(s) => s.stream === "photos",
+			);
+			assert.ok(checkpoint);
+			assert.deepEqual(checkpoint.cursor, {
+				last_modified: cursorTime.toISOString(),
+			});
+			const second = await runApplePhotos(
+				dir,
+				["photos"],
+				{ photos: checkpoint.cursor },
+				uploader,
+			);
+			assert.equal(records(second.messages, "photos").length, 0);
+			assert.deepEqual(skips(second.messages), []);
+			assert.match(
+				second.stderr,
+				/coverage \{"files_scanned":1,"reason":"collected","status":"collected","stream":"photos"\}/,
+			);
 		});
-		const second = await runApplePhotos(dir, ["photos"], {
-			photos: checkpoint.cursor,
-		});
-		assert.equal(records(second.messages, "photos").length, 0);
-		assert.deepEqual(skips(second.messages), []);
-		assert.match(
-			second.stderr,
-			/coverage \{"files_scanned":1,"reason":"collected","status":"collected","stream":"photos"\}/,
-		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
@@ -356,26 +409,31 @@ test("apple_photos cursor carries forward: a second run with prior STATE only em
 		{ relPath: "new.jpg", contents: Buffer.from("new"), mtime: newer },
 	]);
 	try {
-		const first = await runApplePhotos(dir, ["photos"]);
-		const firstPhotos = records(first.messages, "photos");
-		assert.equal(firstPhotos.length, 2);
-		const firstState = states(first.messages).find(
-			(s) => s.stream === "photos",
-		);
-		assert.ok(firstState, "expected a photos STATE checkpoint");
-		assert.equal(
-			(firstState.cursor as { last_modified: string }).last_modified,
-			newer.toISOString(),
-		);
+		await withFixtureUploader(async (uploader) => {
+			const first = await runApplePhotos(dir, ["photos"], {}, uploader);
+			const firstPhotos = records(first.messages, "photos");
+			assert.equal(firstPhotos.length, 2);
+			const firstState = states(first.messages).find(
+				(s) => s.stream === "photos",
+			);
+			assert.ok(firstState, "expected a photos STATE checkpoint");
+			assert.equal(
+				(firstState.cursor as { last_modified: string }).last_modified,
+				newer.toISOString(),
+			);
 
-		// Second run seeded with a cursor between old and new mtimes should
-		// only re-emit the newer file.
-		const second = await runApplePhotos(dir, ["photos"], {
-			photos: { last_modified: older.toISOString() },
+			// Second run seeded with a cursor between old and new mtimes should
+			// only re-emit the newer file.
+			const second = await runApplePhotos(
+				dir,
+				["photos"],
+				{ photos: { last_modified: older.toISOString() } },
+				uploader,
+			);
+			const secondPhotos = records(second.messages, "photos");
+			assert.equal(secondPhotos.length, 1);
+			assert.equal(secondPhotos[0]?.filename, "new.jpg");
 		});
-		const secondPhotos = records(second.messages, "photos");
-		assert.equal(secondPhotos.length, 1);
-		assert.equal(secondPhotos[0]?.filename, "new.jpg");
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}

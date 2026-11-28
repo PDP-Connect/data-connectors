@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -88,6 +88,7 @@ async function withBlobServer<T>(
 async function runApplePhotos(
 	exportDir: string,
 	env: Record<string, string> = {},
+	state: Record<string, unknown> = {},
 ): Promise<{ messages: EmittedMessage[]; photos: Record<string, unknown>[] }> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
@@ -101,7 +102,7 @@ async function runApplePhotos(
 		},
 		start: {
 			scope: { streams: [{ name: "photos" }] },
-			state: {},
+			state,
 			type: "START",
 		},
 	});
@@ -151,6 +152,63 @@ test("photos stream hydrates bytes through the reference blob endpoint", async (
 				});
 			},
 		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
+});
+
+test("photos stream retries every unchanged file after an unavailable uploader", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-apple-photos-retry-"));
+	try {
+		const older = join(dir, "older.jpg");
+		const newer = join(dir, "newer.jpg");
+		const olderMtime = new Date("2026-05-01T00:00:00Z");
+		const newerMtime = new Date("2026-05-02T00:00:00Z");
+		const prior = "2026-04-30T00:00:00.000Z";
+		const secondImage = Buffer.concat([TINY_JPEG_A, Buffer.from([1])]);
+		await writeFile(older, TINY_JPEG_A);
+		await writeFile(newer, secondImage);
+		await utimes(older, olderMtime, olderMtime);
+		await utimes(newer, newerMtime, newerMtime);
+
+		const first = await runApplePhotos(dir, {}, { photos: { last_modified: prior } });
+		assert.equal(first.photos.length, 2);
+		assert.ok(first.photos.every((row) => row.hydration_status === "unavailable" && row.blob_ref === null));
+		const checkpoint = first.messages.find((message) => message.type === "STATE" && message.stream === "photos");
+		assert.ok(checkpoint && checkpoint.type === "STATE");
+
+		await withBlobServer(
+			async (req) => {
+				const bytes = await readRequestBody(req);
+				const hash = createHash("sha256").update(bytes).digest("hex");
+				return {
+					body: {
+						blob_id: `blob_sha256_${hash}`,
+						mime_type: "image/jpeg",
+						object: "blob",
+						sha256: hash,
+						size_bytes: bytes.byteLength,
+					},
+					status: 200,
+				};
+			},
+			async (baseUrl) => {
+				const second = await runApplePhotos(dir, {
+					PDPP_OWNER_TOKEN: "fixture-owner",
+					PDPP_RS_URL: baseUrl,
+				}, { photos: checkpoint.cursor });
+				assert.equal(second.photos.length, 2);
+				const firstIds = first.photos.map((row) => String(row.id)).sort();
+				assert.equal(new Set(firstIds).size, 2);
+				assert.deepEqual(second.photos.map((row) => String(row.id)).sort(), firstIds);
+				for (const row of second.photos) {
+					assert.equal(row.hydration_status, "hydrated");
+					const ref = row.blob_ref as { blob_id?: unknown } | null;
+					assert.equal(ref?.blob_id, `blob_sha256_${row.content_sha256}`);
+				}
+			},
+		);
+		assert.deepEqual(checkpoint.cursor, { last_modified: prior });
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
