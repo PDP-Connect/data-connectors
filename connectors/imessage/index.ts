@@ -264,16 +264,17 @@ function queryMessageRows(
 	db: DatabaseSync,
 	since: number,
 ): IterableIterator<MessageRow> {
+	const hasChatJoin = tableExists(db, "chat_message_join");
 	return db
 		.prepare(
 			`
         SELECT m.ROWID as id, m.guid, m.handle_id, m.service, m.is_from_me,
                m.text, m.date, m.date_read, m.cache_has_attachments,
                h.id as handle,
-               cmj.chat_id as chat_id
+               ${hasChatJoin ? "cmj.chat_id" : "NULL"} as chat_id
         FROM message m
         LEFT JOIN handle h ON m.handle_id = h.ROWID
-        LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+        ${hasChatJoin ? "LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID" : ""}
         WHERE m.date > ? OR m.date IS NULL
         ORDER BY m.date ASC
       `,
