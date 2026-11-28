@@ -81,7 +81,7 @@ function makeContext({
 /** Minimal Jellyfin-shaped fake server: System/Info, Users, one library's Views, and a
  *  paginated Items endpoint driven by an injected page-producing function. */
 function startPagedServer(
-	pageForStartIndex: (startIndex: number) => {
+	pageForStartIndex: (startIndex: number, limit: number) => {
 		items: { Id: string; Name: string }[];
 		total: number;
 	},
@@ -123,7 +123,8 @@ function startPagedServer(
 					url.searchParams.get("StartIndex") || "0",
 					10,
 				);
-				const { items, total } = pageForStartIndex(startIndex);
+				const limit = Number.parseInt(url.searchParams.get("Limit") || "0", 10);
+				const { items, total } = pageForStartIndex(startIndex, limit);
 				res.writeHead(200);
 				res.end(JSON.stringify({ Items: items, TotalRecordCount: total }));
 				return;
@@ -278,13 +279,44 @@ test("regression: repeated identical page must fail (pagination doesn't advance)
 	}
 });
 
-test("regression: distinct pages that happen to share a first item ID must still succeed", async () => {
+test("regression: overlapping pages emit unique items without claiming full coverage", async () => {
+	const source = Array.from({ length: 501 }, (_, i) => ({
+		Id: `item-${i}`, Name: `Item ${i}`,
+	}));
+	const requests: Array<[number, number]> = [];
+	const server = await startPagedServer((startIndex, limit) => {
+		requests.push([startIndex, limit]);
+		const items = startIndex === 500
+			? source.slice(0, 1)
+			: source.slice(startIndex, startIndex + limit);
+		return { items, total: source.length };
+	});
+	try {
+		const { ctx, messages, records } = makeContext({
+			credentials: { base_url: await server.url, secret: "test-key" },
+			streams: [{ name: "items" }],
+		});
+		await collect(ctx);
+		assert.deepEqual(requests, [[0, 500], [500, 500]]);
+		assert.deepEqual(
+			records.filter((r) => r.stream === "items").map((r) => r.data.id),
+			source.slice(0, 500).map((item) => item.Id),
+		);
+		assert.equal(messages.some((m) => m.type === "STATE" && m.stream === "items"), false);
+		assert.ok(messages.some((m) => m.type === "SKIP_RESULT" &&
+			m.stream === "items" && m.reason === "jellyfin_pagination_overlap"));
+	} finally {
+		await server.stop();
+	}
+});
+
+test("regression: overlapping nonidentical pages keep the unique items they read", async () => {
 	// Page 1 = [shared, page1-0, page1-1, ..., page1-498] (500 distinct items)
 	// Page 2 = [shared, page2-0, page2-1, ..., page2-498] (shares only the first item's
 	//           ID — 499/500 items are genuinely different). A first-item-only guard
 	//           would wrongly reject this page as non-advancing since it compares only
-	//           the shared first item. A full ordered-ID fingerprint correctly accepts
-	//           it, since the full sequences differ. This is the discriminating case:
+	//           the shared first item. A full ordered-ID fingerprint correctly treats it as
+	//           overlap, not as an identical non-advancing page. This is the discriminating case:
 	//           it is the one place first-item-only and full-sequence-fingerprint
 	//           genuinely disagree — see index.ts's `pageFingerprint`.
 	const server = await startPagedServer((startIndex) => {
@@ -337,8 +369,8 @@ test("regression: distinct pages that happen to share a first item ID must still
 		const itemRecords = records.filter((r) => r.stream === "items");
 		assert.equal(
 			itemRecords.length,
-			1000,
-			`Should emit all 1000 items, got ${itemRecords.length}`,
+			999,
+			`Should emit the 999 unique items, got ${itemRecords.length}`,
 		);
 	} finally {
 		await server.stop();

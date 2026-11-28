@@ -903,7 +903,7 @@ async function collectItemsForLibrary(
 	conn: JellyfinConn,
 	libraryId: string,
 	ctx: Pick<CollectContext, "emitRecord">,
-): Promise<{ considered: number; covered: number }> {
+): Promise<{ considered: number; covered: number; overlap: boolean }> {
 	const { emitRecord } = ctx;
 	let startIndex = 0;
 	const pageSize = 500;
@@ -912,6 +912,8 @@ async function collectItemsForLibrary(
 	let priorTotal: number | undefined;
 	let lastPageFingerprint: string | undefined; // Full ordered-ID fingerprint of the previous page
 	let covered = 0;
+	const seenIds = new Set<string>();
+	let overlap = false;
 
 	while (hasMore) {
 		// Guard against infinite pagination (max pages configurable for testing)
@@ -961,6 +963,13 @@ async function collectItemsForLibrary(
 
 		for (const item of pageItems) {
 			const rec = itemRecord(item as Record<string, unknown>, libraryId);
+			if (typeof rec.id === "string" && rec.id.trim().length > 0) {
+				if (seenIds.has(rec.id)) {
+					overlap = true;
+					continue;
+				}
+				seenIds.add(rec.id);
+			}
 			if (validateRecord("items", rec).ok) {
 				covered += 1;
 			}
@@ -984,7 +993,7 @@ async function collectItemsForLibrary(
 	// stop above. A library that paginated at least once always has it; the
 	// `?? 0` only covers the unreachable no-page case (the loop runs at least
 	// once and throws when the field is missing).
-	return { considered: priorTotal ?? 0, covered };
+	return { considered: priorTotal ?? 0, covered, overlap };
 }
 
 async function collectItems(
@@ -1002,6 +1011,7 @@ async function collectItems(
 	const views = await fetchLibraries(conn);
 	let totalItemsCovered = 0;
 	let totalItemsConsidered = 0;
+	let overlap = false;
 
 	for (const view of views) {
 		const libraryId = (view as Record<string, string>)?.Id;
@@ -1013,29 +1023,43 @@ async function collectItems(
 		const library = await collectItemsForLibrary(conn, libraryId, ctx);
 		totalItemsCovered += library.covered;
 		totalItemsConsidered += library.considered;
+		overlap ||= library.overlap;
 
 		(state.items as Record<string, Record<string, unknown>>)[libraryId] = {
 			last_fetched_at: now,
 		};
 	}
 
-	await emit({ type: "STATE", stream: "items", cursor: state.items });
+	// An overlapping inventory is unproved even if the unique count happens
+	// to match the last advertised total. Keep emitted items but no checkpoint.
+	if (overlap) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: "items",
+			reason: "jellyfin_pagination_overlap",
+			message: "Jellyfin repeated items across pages; some items may not have been read.",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+	} else {
+		await emit({ type: "STATE", stream: "items", cursor: state.items });
+	}
 	// The denominator is the sum of each library's source-reported
 	// `TotalRecordCount`, measured at the pagination site and independent of what
 	// was emitted. `items` has no unchanged-suppression lane — every paged item is
-	// emitted — so the schema-valid count is the honest covered numerator, and a
-	// library that reported more items than it served reads partial rather than
-	// complete.
-	await emit(
-		buildDetailCoverageMessage({
-			stream: "items",
-			stateStream: "items",
-			requiredKeys: [],
-			hydratedKeys: [],
-			considered: totalItemsConsidered,
-			covered: totalItemsCovered,
-		}),
-	);
+	// emitted once per library — so the schema-valid unique count is the honest
+	// numerator. Do not emit a full count as proof when overlap was observed.
+	if (!overlap || totalItemsCovered < totalItemsConsidered) {
+		await emit(
+			buildDetailCoverageMessage({
+				stream: "items",
+				stateStream: "items",
+				requiredKeys: [],
+				hydratedKeys: [],
+				considered: totalItemsConsidered,
+				covered: totalItemsCovered,
+			}),
+		);
+	}
 	await progress(
 		`Fetched ${totalItemsCovered} valid items across all libraries`,
 		{
