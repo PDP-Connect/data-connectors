@@ -42,10 +42,10 @@ function isBase64(value: string): boolean {
 		return false;
 	}
 	try {
-		return (
-			btoa(atob(value.replace(/=+$/, ""))).replace(/=+$/, "") ===
-			value.replace(/=+$/, "")
-		);
+		const normalized = btoa(atob(value.replace(/=+$/, "")));
+		return value.includes("=")
+			? normalized === value
+			: normalized.replace(/=+$/, "") === value;
 	} catch {
 		return false;
 	}

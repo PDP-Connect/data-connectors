@@ -117,11 +117,17 @@ export function durationTextToSeconds(
 		return null;
 	}
 	const nums = parts.map((p) => Number.parseInt(p, 10));
+	if (
+		nums.some((n) => !Number.isSafeInteger(n)) ||
+		nums.slice(1).some((n) => n >= 60)
+	) {
+		return null;
+	}
 	let seconds = 0;
 	for (const n of nums) {
 		seconds = seconds * 60 + n;
 	}
-	return seconds;
+	return Number.isSafeInteger(seconds) ? seconds : null;
 }
 
 // ── Minimal RFC 4180 CSV row reader ─────────────────────────────────────────

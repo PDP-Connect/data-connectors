@@ -760,9 +760,15 @@ test("flattenContributionDays: drops days missing a date rather than guessing on
 	assert.deepEqual(flattenContributionDays(collection), []);
 });
 
-test("flattenContributionDays: tolerates a null/undefined collection", () => {
-	assert.deepEqual(flattenContributionDays(null), []);
-	assert.deepEqual(flattenContributionDays(undefined), []);
+test("flattenContributionDays: rejects a missing collection", () => {
+	assert.throws(
+		() => flattenContributionDays(null),
+		/github_contribution_calendar_unavailable/,
+	);
+	assert.throws(
+		() => flattenContributionDays(undefined),
+		/github_contribution_calendar_unavailable/,
+	);
 });
 
 // ─── pinnedRepositoryRecord / flattenPinnedRepositories ────────────────────

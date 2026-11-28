@@ -128,11 +128,14 @@ const maxRunWallClockMs = () =>
 const maxRunBytes = () =>
 	positiveEnv("PDPP_ANTHROPIC_LIVE_MAX_RUN_BYTES", DEFAULT_MAX_RUN_BYTES);
 /** Opt-in; unset means no count cap. */
-const maxConversationsPerRun = () =>
-	positiveEnv(
-		"PDPP_ANTHROPIC_LIVE_MAX_CONVERSATIONS_PER_RUN",
-		Number.POSITIVE_INFINITY,
+const maxConversationsPerRun = () => {
+	const value = Number(
+		process.env.PDPP_ANTHROPIC_LIVE_MAX_CONVERSATIONS_PER_RUN,
 	);
+	return Number.isSafeInteger(value) && value >= 1
+		? value
+		: Number.POSITIVE_INFINITY;
+};
 // Read per call so tests can shorten it (the repo's timeout-override
 // convention; see connectors/anthropic/index.ts).
 const detailDelayMs = () =>
