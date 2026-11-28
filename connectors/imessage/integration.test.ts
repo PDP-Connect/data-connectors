@@ -15,6 +15,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
@@ -1528,4 +1529,39 @@ test("imessage.json declares incremental:false for attachments and participants,
 		true,
 		"messages IS genuinely incremental via the date cursor — unlike attachments/participants",
 	);
+});
+
+test("iMessage emits messages without the optional chat join table", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-no-chat-join-"));
+	const dbPath = join(dir, "chat.db");
+	try {
+		const db = new DatabaseSync(dbPath);
+		try {
+			db.exec(`
+				CREATE TABLE handle (id TEXT);
+				CREATE TABLE message (guid TEXT, handle_id INTEGER, service TEXT, is_from_me INTEGER,
+					text TEXT, date INTEGER, date_read INTEGER, cache_has_attachments INTEGER);
+				INSERT INTO handle (ROWID, id) VALUES (1, 'fixture-handle');
+				INSERT INTO message VALUES ('fixture-1', 1, 'iMessage', 0, 'fixture text', 1, NULL, 0);
+			`);
+		} finally {
+			db.close();
+		}
+		const result = await runImessage(
+			dbPath,
+			["messages"],
+			{},
+			{ messages: { last_apple_date: 0 } },
+		);
+		assert.deepEqual(
+			records(result.messages, "messages").map((row) => [row.id, row.chat_id]),
+			[["fixture-1", null]],
+		);
+		assert.deepEqual(
+			states(result.messages).find((row) => row.stream === "messages")?.cursor,
+			{ last_apple_date: 1 },
+		);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
 });
