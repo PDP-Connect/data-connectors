@@ -11,7 +11,7 @@ import type {
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { CalendarEvent, CalendarListEntry, EventsPage } from "./api.ts";
-import { CalendarSyncTokenExpiredError } from "./api.ts";
+import { CalendarApiError, CalendarSyncTokenExpiredError } from "./api.ts";
 import { collectGoogleCalendar } from "./index.ts";
 import { calendarsSchema } from "./schemas.ts";
 
@@ -384,6 +384,169 @@ test("carries forward the prior syncToken cursor on an incremental run", async (
 	const args = call.args as { options: { syncToken?: string } };
 	assert.equal(args.options.syncToken, "sync-1");
 });
+
+for (const mode of ["incremental", "initial", "expired"] as const) {
+	test(`a fresh Calendar sync resumes page two with the same one-page limit (${mode})`, async () => {
+		const original = mode === "initial" ? undefined : "old-sync";
+		const calls: Array<{ pageToken?: string; syncToken?: string }> = [];
+		const client = new FakeCalendarClient({
+			calendars: [
+				{
+					id: "work",
+					summary: null,
+					primary: true,
+					accessRole: "owner",
+					timeZone: null,
+				},
+			],
+			onListEvents(_, tokens) {
+				calls.push({ ...tokens });
+				if (mode === "expired" && tokens.syncToken === "old-sync")
+					throw new CalendarSyncTokenExpiredError();
+				assert.equal(
+					tokens.syncToken,
+					mode === "incremental" ? original : undefined,
+				);
+				if (!tokens.pageToken)
+					return {
+						events: [makeEvent({ id: "A" })],
+						nextPageToken: "page-B",
+						nextSyncToken: null,
+					};
+				assert.equal(tokens.pageToken, "page-B");
+				return {
+					events: [makeEvent({ id: "B" })],
+					nextPageToken: null,
+					nextSyncToken: "new-sync",
+				};
+			},
+		});
+		async function run(events: unknown) {
+			const { ctx, messages, records } = makeContext({
+				state: { events },
+				streams: [{ name: "events" }],
+			});
+			await collectGoogleCalendar(ctx, {
+				...FAKE_TOKEN,
+				clientFactory: () => client,
+				maxPagesPerCalendar: 1,
+			});
+			const state = lastStateCursor(messages, "events") as Record<
+				string,
+				{
+					sync_token?: string;
+					fingerprints: Record<string, string>;
+					continuation?: { page_token: string };
+				}
+			>;
+			assert.ok(state.work);
+			return {
+				state: structuredClone(state),
+				ids: records.map(({ data }) => data.id),
+				deferred: messages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" &&
+						message.reason === "older_pages_deferred_page_budget",
+				),
+			};
+		}
+		const first = await run({
+			work: { sync_token: original, fingerprints: { previous: "unchanged" } },
+		});
+		assert.deepEqual(first.ids, ["A"]);
+		assert.equal(first.deferred, true);
+		assert.equal(
+			first.state.work?.sync_token,
+			mode === "incremental" ? original : undefined,
+		);
+		assert.equal(first.state.work?.fingerprints.previous, "unchanged");
+		calls.length = 0;
+		const second = await run(first.state);
+		assert.deepEqual(second.ids, ["B"]);
+		assert.deepEqual(calls, [
+			mode === "incremental"
+				? { syncToken: original, pageToken: "page-B" }
+				: { pageToken: "page-B" },
+		]);
+		assert.equal(second.deferred, false);
+		assert.equal(second.state.work?.sync_token, "new-sync");
+		assert.equal(second.state.work?.continuation, undefined);
+		assert.ok(
+			second.state.work?.fingerprints.A && second.state.work?.fingerprints.B,
+		);
+		if (mode === "expired")
+			assert.equal(second.state.work?.fingerprints.previous, undefined);
+		if (mode === "incremental")
+			assert.equal(second.state.work?.fingerprints.previous, "unchanged");
+	});
+}
+
+for (const status of [400, 410]) {
+	test(`Calendar restarts the listing when the saved continuation gets HTTP ${status}`, async () => {
+		const calls: Array<{ pageToken?: string; syncToken?: string }> = [];
+		const client = new FakeCalendarClient({
+			calendars: [
+				{
+					id: "work",
+					summary: null,
+					primary: true,
+					accessRole: "owner",
+					timeZone: null,
+				},
+			],
+			onListEvents(_, tokens) {
+				calls.push({ ...tokens });
+				if (tokens.pageToken === "expired-page") {
+					if (status === 410) throw new CalendarSyncTokenExpiredError();
+					throw new CalendarApiError(400, "Invalid value");
+				}
+				return {
+					events: [makeEvent({ id: "tail" })],
+					nextPageToken: null,
+					nextSyncToken: "earned",
+				};
+			},
+		});
+		const { ctx, messages, records } = makeContext({
+			streams: [{ name: "events" }],
+			state: {
+				events: {
+					work: {
+						sync_token: "original",
+						continuation: { page_token: "expired-page" },
+						fingerprints: { prior: "known" },
+					},
+				},
+			},
+		});
+		await collectGoogleCalendar(ctx, {
+			...FAKE_TOKEN,
+			clientFactory: () => client,
+			maxPagesPerCalendar: 1,
+		});
+		assert.deepEqual(calls, [
+			{ syncToken: "original", pageToken: "expired-page" },
+			status === 410 ? {} : { syncToken: "original" },
+		]);
+		assert.deepEqual(
+			records.map((r) => r.data.id),
+			["tail"],
+		);
+		const state = lastStateCursor(messages, "events") as {
+			work: {
+				sync_token: string;
+				fingerprints: Record<string, string>;
+				continuation?: unknown;
+			};
+		};
+		assert.equal(state.work.sync_token, "earned");
+		assert.equal(state.work.continuation, undefined);
+		assert.equal(
+			state.work.fingerprints.prior,
+			status === 410 ? undefined : "known",
+		);
+	});
+}
 
 test("unchanged event does not re-emit (fingerprint gate) but does not drop the cursor", async () => {
 	const event = makeEvent({ id: "evt1", updated: "2026-08-01T00:00:00Z" });

@@ -2842,14 +2842,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_calendar/index.ts",
-			line: 356,
+			line: 354,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "ctx.emitRecord(): Collection Profile protocol emission requiring in-order delivery",
 		},
 		{
 			path: "connectors/google_calendar/index.ts",
-			line: 382,
+			line: 380,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "ctx.progress(): Collection Profile protocol emission requiring in-order delivery",
