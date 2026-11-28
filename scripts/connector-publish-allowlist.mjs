@@ -5,6 +5,7 @@
 
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
 
 /**
  * The complete Collection Profile manifest inventory and its publish policy.
@@ -13,6 +14,14 @@ import { fileURLToPath } from "node:url";
  * the public OCI identity declared inside that manifest. They intentionally
  * differ for connectors whose source names use underscores.
  */
+function publishExclusionReason({ manifest, exclusionReason }) {
+  if (exclusionReason !== null && exclusionReason !== undefined) return exclusionReason;
+  if (!KNOWN_SCAFFOLD_CONNECTORS.includes(manifest)) return null;
+  return manifest === "pocket"
+    ? "Pocket's service has shut down; its connector is retired."
+    : "collects no owner data yet";
+}
+
 export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
   [
     ["readwise", "readwise"],
@@ -100,13 +109,16 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["ynab", "ynab"],
     ["youtube", "youtube"],
     ["youtube_takeout", "youtube-takeout", "Optional Takeout profile is retained for review and must not be published with the browser-first Vana cutover."],
-  ].map(([manifest, connectorKey, exclusionReason = null]) =>
-    Object.freeze({ manifest, connectorKey, exclusionReason }),
-  ),
+  ].map(([manifest, connectorKey, exclusionReason = null]) => {
+    const row = { manifest, connectorKey, exclusionReason };
+    return Object.freeze({ ...row, exclusionReason: publishExclusionReason(row) });
+  }),
 );
 
 export const PUBLISHABLE_CONNECTORS = Object.freeze(
-  CONNECTOR_PUBLISH_INVENTORY.filter(({ exclusionReason }) => exclusionReason === null),
+  CONNECTOR_PUBLISH_INVENTORY.filter(({ exclusionReason }) =>
+    exclusionReason === null,
+  ),
 );
 
 export const PUBLISH_EXCLUSIONS = Object.freeze(

@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
+import { buildSourceDeclaration, serializeSourceDeclaration } from "../packages/connector-installer-core/source-declaration.mjs";
 import {
   filterAbsentVersions,
   PublishSelectionError,
@@ -296,6 +297,46 @@ test("sibling runtime metadata does not change shared SourceDeclaration identity
     repo.write("connectors/oura_browser/manifest.json", JSON.stringify(sibling));
     const afterCommit = repo.commit("add sibling runtime metadata");
     const after = await artifactInputHash({ commit: afterCommit, manifest: "oura", cwd: repo.dir });
+    assert.equal(after, before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test("adding an excluded same-source scaffold preserves a published sibling's artifact hash", async () => {
+  const repo = makeRepo();
+  try {
+    const initialRows = CONNECTORS.map((connector) => ({ ...connector, exclusionReason: null }));
+    const declarationFor = (rows) => {
+      const members = rows
+        .filter(({ exclusionReason }) => exclusionReason === null)
+        .map(({ manifest }) => JSON.parse(readFileSync(join(repo.dir, `connectors/${manifest}/manifest.json`), "utf8")))
+        .filter(({ source }) => source?.id === SOURCES.oura)
+        .map((profile) => ({
+          ...profile,
+          source: { ...profile.source, display: { name: "Oura" } },
+        }));
+      return serializeSourceDeclaration(buildSourceDeclaration(members));
+    };
+    const declarationBefore = declarationFor(initialRows);
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write(
+      "connectors/loom/manifest.json",
+      JSON.stringify({
+        connector_key: "loom",
+        source: { id: SOURCES.oura },
+        version: "0.1.0",
+        streams: [{ name: "loom_records", schema: { type: "object" } }],
+      }),
+    );
+    const nextRows = [
+      ...initialRows,
+      { manifest: "loom", connectorKey: "loom", exclusionReason: "collects no owner data yet" },
+    ];
+    repo.writeAllowlist(nextRows);
+    const afterCommit = repo.commit("add excluded same-source scaffold");
+    const after = await artifactInputHash({ commit: afterCommit, manifest: "oura", cwd: repo.dir });
+    assert.deepEqual(declarationFor(nextRows), declarationBefore);
     assert.equal(after, before);
   } finally {
     rmSync(repo.dir, { recursive: true, force: true });

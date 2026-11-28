@@ -3,7 +3,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -289,10 +289,20 @@ async function publishInventoryAtCommit(commit, options) {
   const path = "scripts/connector-publish-allowlist.mjs";
   const allowlist = readFileAtCommit(commit, path, options);
   if (allowlist === null) throw new ArtifactInputError(`cannot read ${path} at ${commit}`);
+  const rosterPath = `${PACKAGE_ROOT}/src/connector-conformance-roster.ts`;
+  const needsRoster = allowlist.includes("connector-conformance-roster.ts");
+  const roster = needsRoster ? readFileAtCommit(commit, rosterPath, options) : null;
+  if (needsRoster && roster === null) {
+    throw new ArtifactInputError(`cannot read ${rosterPath} at ${commit}`);
+  }
   const dir = mkdtempSync(join(tmpdir(), "connector-publish-allowlist-"));
   try {
-    const file = join(dir, "connector-publish-allowlist.mjs");
+    const file = join(dir, path);
+    const rosterFile = join(dir, rosterPath);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    if (roster !== null) mkdirSync(join(dir, PACKAGE_ROOT, "src"), { recursive: true });
     writeFileSync(file, allowlist);
+    if (roster !== null) writeFileSync(rosterFile, roster);
     return (await import(pathToFileURL(file).href)).CONNECTOR_PUBLISH_INVENTORY;
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -438,8 +448,8 @@ function sourceDeclarationMember(member) {
 
 /**
  * The allowlist data at `commit` that can affect `profile`'s artifact: the
- * rows of every connector with the same `source.id`, and the manifests of the
- * publishable ones. Membership follows source-declaration-members.mjs. A
+ * publishable rows with the same `source.id`, and their manifests. Membership
+ * follows source-declaration-members.mjs. A
  * change to a member changes the declaration every member ships, so it must
  * select every member. Rows for other sources, and the allowlist's comments
  * and formatting, are not inputs: adding a connector for a new source does not
@@ -455,12 +465,13 @@ async function sourceSliceInputs(commit, profile, options) {
   const rows = [];
   const inputs = [];
   for (const { manifest, connectorKey, exclusionReason } of inventory) {
+    if (exclusionReason !== null) continue;
     const own = connectorKey === profile.connector_key;
     const path = `connectors/${manifest}/manifest.json`;
     const member = own ? profile : readManifestAtCommit(commit, path, options);
     if (member.source?.id !== profile.source?.id) continue;
     rows.push({ connectorKey, manifest, exclusionReason });
-    if (own || declaresAlone || exclusionReason !== null) continue;
+    if (own || declaresAlone) continue;
     inputs.push([
       `${path}#declaration-member`,
       Buffer.from(JSON.stringify(sourceDeclarationMember(member))),

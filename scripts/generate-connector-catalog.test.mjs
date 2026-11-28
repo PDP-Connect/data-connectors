@@ -189,6 +189,15 @@ test("catalog generation is deterministic, follows anonymous auth, and sorts sem
   }
 });
 
+test("catalog generation refuses a scaffold supplied through an override row", async () => {
+  await assert.rejects(
+    generate(undefined, "127.0.0.1:1", {
+      connectors: [{ manifest: "loom", connectorKey: "loom" }],
+    }),
+    /collects no owner data yet/,
+  );
+});
+
 test("latest metadata comes from the published artifact, not an unpublished source manifest", async () => {
   const root = fixtureDirectory();
   const registry = new FixtureRegistry({ challenge: true });
@@ -765,17 +774,16 @@ test("the installer-side catalog schema accepts the real github_browser and stra
   }
 });
 
-test("catalog metadata keeps Loom and Whole Foods at Development", async () => {
+test("catalog metadata keeps real Development collectors at Development", async () => {
   const registry = new FixtureRegistry({ challenge: true });
   const rows = [
-    { manifest: "loom", connectorKey: "loom" },
     { manifest: "wholefoods", connectorKey: "wholefoods" },
   ];
   for (const { connectorKey } of rows) {
-    const version = connectorKey === "loom" ? "0.1.0" : "0.1.1";
+    const version = "0.1.1";
     publishArtifact(registry, {
       connectorKey,
-      displayName: connectorKey === "loom" ? "Loom" : "Whole Foods",
+      displayName: "Whole Foods",
       version,
       tier: "development",
     });
@@ -787,30 +795,27 @@ test("catalog metadata keeps Loom and Whole Foods at Development", async () => {
     assert.equal(assertCatalog(catalog), catalog);
     assert.deepEqual(
       catalog.connectors.map(({ connector_key, tier }) => ({ connector_key, tier })),
-      [
-        { connector_key: "loom", tier: "development" },
-        { connector_key: "wholefoods", tier: "development" },
-      ],
+      [{ connector_key: "wholefoods", tier: "development" }],
     );
   } finally {
     await registry.stop();
   }
 });
 
-test("catalog refuses a Development connector whose published artifact claims Supported", async () => {
+test("catalog refuses a real Development connector whose artifact claims Supported", async () => {
   const registry = new FixtureRegistry({ challenge: true });
   publishArtifact(registry, {
-    connectorKey: "loom",
-    displayName: "Loom",
+    connectorKey: "wholefoods",
+    displayName: "Whole Foods",
     version: "0.1.0",
     tier: "supported",
   });
-  registry.tagLists.set("acme/connector/loom", { tags: ["0.1.0"] });
+  registry.tagLists.set("acme/connector/wholefoods", { tags: ["0.1.0"] });
   try {
     await registry.start();
     await assert.rejects(
-      generate(null, registry.registry, { connectors: [{ manifest: "loom", connectorKey: "loom" }] }),
-      /refusing to list Development connector 'loom'/,
+      generate(null, registry.registry, { connectors: [{ manifest: "wholefoods", connectorKey: "wholefoods" }] }),
+      /refusing to list Development connector 'wholefoods'/,
     );
   } finally {
     await registry.stop();
@@ -867,33 +872,40 @@ test("ordinary and unknown synthetic identities pass the publish guard", async (
   }
 });
 
-test("a refresh drops a previously published scaffold entry and the next run is stable", async () => {
+test("a refresh drops each previously published scaffold from the default selection", async () => {
   const root = fixtureDirectory();
   const registry = await startRegistry({ publishedVersions: ["1.0.0"] });
   try {
     fixtureManifest(root);
     const current = await generate(root, registry.registry);
     const [synthetic] = current.connectors;
+    const scaffolds = [
+      ["google-maps-data-portability", "Google Maps Data Portability"],
+      ["loom", "Loom"],
+      ["pocket", "Pocket"],
+    ];
     const previous = {
       ...structuredClone(current),
-      connectors: [
-        structuredClone(synthetic),
-        {
-          ...structuredClone(synthetic),
-          connector_key: "loom",
-          connector_id: "https://registry.pdpp.dev/connectors/loom",
-          display_name: "Loom",
-        },
-      ],
+      connectors: scaffolds.map(([connector_key, display_name]) => ({
+        ...structuredClone(synthetic), connector_key,
+        connector_id: `https://registry.pdpp.dev/connectors/${connector_key}`,
+        display_name,
+      })),
     };
 
-    const refreshed = await generate(root, registry.registry, { previousCatalog: previous });
-    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), ["public-name"]);
-    assert.deepEqual(refreshed.connectors[0].latest, synthetic.latest);
-    assert.equal(refreshed.generated_at, "2026-09-15T16:34:18.001Z");
-
-    const retry = await generate(root, registry.registry, { previousCatalog: refreshed });
-    assert.equal(serializeConnectorCatalog(retry), serializeConnectorCatalog(refreshed));
+    const refreshed = await generateConnectorCatalog({
+      registry: registry.registry,
+      namespace: "acme",
+      sourceCommit: SOURCE_COMMIT,
+      generatedAt: GENERATED_AT,
+      previousCatalog: previous,
+      scheme: "http",
+      allowInsecureLoopback: true,
+    });
+    assert.deepEqual(refreshed.connectors.map((connector) => connector.connector_key), []);
+    for (const [connectorKey] of scaffolds) {
+      assert.equal(refreshed.connectors.some((connector) => connector.connector_key === connectorKey), false);
+    }
   } finally {
     await registry.stop();
     rmSync(root, { recursive: true, force: true });

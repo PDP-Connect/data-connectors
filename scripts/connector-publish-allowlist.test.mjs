@@ -9,15 +9,26 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { KNOWN_SCAFFOLD_CONNECTORS } from "../packages/polyfill-connectors/src/connector-conformance-roster.ts";
 
-test("Loom and Whole Foods remain in the catalog inventory as Development entries", () => {
-  for (const manifest of ["loom", "wholefoods"]) {
+test("scaffold connectors stay out of publication with explicit exclusion reasons", () => {
+  for (const manifest of ["google_maps_data_portability", "loom", "pocket"]) {
+    assert.equal(PUBLISHABLE_CONNECTORS.some((entry) => entry.manifest === manifest), false, manifest);
+    const exclusion = PUBLISH_EXCLUSIONS.find((entry) => entry.manifest === manifest);
+    assert.ok(exclusion?.exclusionReason, manifest);
+    const profile = JSON.parse(readFileSync(join(manifests, manifest, "manifest.json"), "utf8"));
+    assert.equal(profile.capabilities.public_listing.tier, "development", manifest);
+  }
+  assert.match(PUBLISH_EXCLUSIONS.find((entry) => entry.manifest === "pocket").exclusionReason, /service has shut down/);
+  assert.deepEqual(KNOWN_SCAFFOLD_CONNECTORS, ["google_maps_data_portability", "loom", "pocket"]);
+});
+
+test("real Development collectors remain in the catalog inventory", () => {
+  for (const manifest of ["wholefoods"]) {
     const row = PUBLISHABLE_CONNECTORS.find((entry) => entry.manifest === manifest);
     assert.ok(row, manifest);
     assert.equal(row.exclusionReason, null, manifest);
     const profile = JSON.parse(readFileSync(join(manifests, manifest, "manifest.json"), "utf8"));
     assert.equal(profile.capabilities.public_listing.tier, "development", manifest);
   }
-  assert.deepEqual(KNOWN_SCAFFOLD_CONNECTORS, ["loom"]);
   assert.equal(PUBLISHABLE_CONNECTORS.some((row) => row.manifest === "slack"), false);
   assert.ok(PUBLISH_EXCLUSIONS.find((row) => row.manifest === "slack")?.exclusionReason);
 });
@@ -36,8 +47,8 @@ test("actual CLI matrices include Development catalog entries and keep excluded 
     assert.deepEqual([...rows].sort((a, b) => a.manifest.localeCompare(b.manifest)),
       [...expected].sort((a, b) => a.manifest.localeCompare(b.manifest)));
     assert.deepEqual(
-      rows.filter(({ manifest }) => ["loom", "wholefoods"].includes(manifest)).map(({ manifest }) => manifest).sort(),
-      ["loom", "wholefoods"],
+      rows.filter(({ manifest }) => ["wholefoods"].includes(manifest)).map(({ manifest }) => manifest).sort(),
+      ["wholefoods"],
     );
     assert.equal(rows.some(({ manifest }) => manifest === "slack"), false);
   }
@@ -69,7 +80,7 @@ test("C-T2 every non-allowlisted manifest has a recorded exclusion reason", () =
     }
   }
   assert.deepEqual(PUBLISH_EXCLUSIONS.map((row) => row.manifest).sort(),
-    ["github", "google_messages", "signal", "slack", "youtube_takeout"]);
+    ["github", "google_maps_data_portability", "google_messages", "loom", "pocket", "signal", "slack", "youtube_takeout"]);
 });
 
 function workflow(name) {
