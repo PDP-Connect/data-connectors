@@ -1299,6 +1299,20 @@ async function finishMessages(
 	listed: number,
 ) {
 	const { tally } = deps;
+	if (
+		listed > 0 &&
+		!messagesNarrowed(deps.scope) &&
+		tally.hydratedKeys.length > 0 &&
+		tally.turnsRead === 0
+	) {
+		await failStream(
+			ctx,
+			"messages",
+			`Character.AI listed ${listed} chat(s) but returned no turns for any of them.`,
+			RETRY_BY_RUNTIME,
+		);
+		return;
+	}
 	await emitDetailCoverage(ctx, {
 		stream: "messages",
 		stateStream: "chats",
@@ -1312,19 +1326,6 @@ async function finishMessages(
 		await ctx.progress(
 			`${String(tally.gapKeys.length)} Character.AI chat(s) could not be read completely; they will be read again next time`,
 			{ stream: "messages" },
-		);
-	}
-	if (
-		listed > 0 &&
-		!messagesNarrowed(deps.scope) &&
-		tally.hydratedKeys.length > 0 &&
-		tally.turnsRead === 0
-	) {
-		await failStream(
-			ctx,
-			"messages",
-			`Character.AI listed ${listed} chat(s) but returned no turns for any of them.`,
-			RETRY_BY_RUNTIME,
 		);
 	}
 }

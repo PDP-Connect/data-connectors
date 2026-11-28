@@ -2544,3 +2544,47 @@ test("an unkeyed-only continuation cannot produce another request or discard pri
 	assert.deepEqual(result.items, ["a"]);
 	assert.equal(result.unkeyed, 3);
 });
+
+test("unbounded empty history reports a retry before any messages coverage", async () => {
+	const [chat] = CHATS.chats as Array<{ chat_id: string }>;
+	assert.ok(chat);
+	const h = harness(
+		fakePage(
+			defaultRoute({
+				chats: () =>
+					json({ ...CHATS, chats: [chat], meta: { next_token: "" } }),
+				[chat.chat_id]: () => json(fixture("get-neo-turns-uuid-end.json")),
+			}),
+			[],
+		),
+	);
+	const events: unknown[][] = [];
+	const ctx: BrowserCollectContext = {
+		...h.ctx,
+		emit: async (message) => {
+			if (message.type === "DETAIL_COVERAGE" && message.stream === "messages") {
+				events.push([
+					"coverage",
+					message.stream,
+					message.considered,
+					message.covered,
+				]);
+			}
+			await h.ctx.emit(message);
+		},
+		reportStreamFailure: async (stream, message, options) => {
+			if (stream === "messages") {
+				events.push([
+					"failure",
+					stream,
+					options?.recoveryHint?.action,
+					options?.retryable,
+				]);
+			}
+			await h.ctx.reportStreamFailure?.(stream, message, options);
+		},
+	};
+	await collectCharacterAi(ctx);
+	assert.ok(h.records.some((record) => record.stream === "chats"));
+	assert.deepEqual(events, [["failure", "messages", "retry_by_runtime", true]]);
+});
