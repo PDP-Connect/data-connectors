@@ -1040,14 +1040,18 @@ function buildAttachmentMetadataIndex(
  * regardless, but skipping them here avoids walking into an
  * attacker-controlled subtree during enumeration itself.
  */
-async function listExportedAttachmentFiles(dir: string): Promise<string[]> {
+export async function listExportedAttachmentFiles(
+	dir: string,
+): Promise<string[]> {
 	const out: string[] = [];
 	async function walk(current: string): Promise<void> {
 		let entries: Dirent[];
 		try {
 			entries = await readdir(current, { withFileTypes: true });
 		} catch {
-			return;
+			throw new Error(
+				"signal_attachment_enumeration_failed: the attachment export directory could not be read",
+			);
 		}
 		for (const entry of entries) {
 			const full = join(current, entry.name);
