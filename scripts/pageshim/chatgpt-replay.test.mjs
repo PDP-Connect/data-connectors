@@ -10,6 +10,10 @@ import {
 	projectChatGptExport,
 	syntheticChatGptExport,
 } from "./chatgpt-replay.mjs";
+import {
+	chatGptProgressScenarios,
+	runChatGptProgressScenario,
+} from "./fixtures/chatgpt-progress.mjs";
 import { createChatGptReplayFixtures } from "./fixtures/chatgpt-replay.mjs";
 import { runHarness } from "./harness.mjs";
 
@@ -18,6 +22,111 @@ mkdirSync(out, { recursive: true });
 // Keep a failed run's bundle for debugging; remove it after a passing run.
 process.on("exit", (code) => {
 	if (code === 0) rmSync(out, { recursive: true, force: true });
+});
+
+test("chatgpt: PageShim counts selected details in completion order", {
+	timeout: 45_000,
+}, async () => {
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		entryPoint: new URL(
+			"./test-fixtures/chatgpt-progress-entry.ts",
+			import.meta.url,
+		).pathname,
+		outfile: join(out, "chatgpt-progress.js"),
+	});
+	const syncPackets = (scenario) =>
+		scenario.packets.filter(({ message }) => message.startsWith("Synced "));
+	const concurrent = await runChatGptProgressScenario(
+		built.outfile,
+		chatGptProgressScenarios.outOfOrder,
+	);
+	assert.deepEqual([...new Set(concurrent.detailRequests)].sort(), [
+		"conv-0",
+		"conv-1",
+		"conv-2",
+	]);
+	assert.equal(
+		concurrent.inventory.at(-1),
+		"conv-2",
+		"the held detail was last in the provider queue",
+	);
+	assert.equal(
+		concurrent.completedIds[0],
+		"conv-2",
+		"the last queued detail must be first to finish",
+	);
+	const first = concurrent.packets.findIndex(({ message }) =>
+		message.startsWith("Synced "),
+	);
+	assert.deepEqual(concurrent.packetObservations[first].detailIds, ["conv-2"]);
+	assert.deepEqual(
+		syncPackets(concurrent).map(({ message }) => message),
+		["Synced 1 / 3 conversations", "Synced 3 / 3 conversations"],
+	);
+	for (const name of [
+		"replacement",
+		"capped",
+		"partial",
+		"mismatched",
+		"restricted",
+		"failedDetail",
+	]) {
+		const scenario = await runChatGptProgressScenario(
+			built.outfile,
+			chatGptProgressScenarios[name],
+		);
+		const expected = {
+			replacement: ["Synced 1 / 1 conversations"],
+			capped: ["Synced 1 / 3 conversations"],
+			partial: ["Synced 1 conversation", "Synced 3 conversations"],
+			mismatched: ["Synced 1 conversation", "Synced 3 conversations"],
+			restricted: ["Synced 1 conversation", "Synced 2 conversations"],
+			failedDetail: ["Synced 1 / 3 conversations"],
+		};
+		assert.deepEqual(
+			syncPackets(scenario).map(({ message }) => message),
+			expected[name],
+			name,
+		);
+		if (["partial", "mismatched", "restricted"].includes(name)) {
+			assert.ok(
+				scenario.packets.every(
+					({ message, total }) =>
+						!/(?:^|\s)\d+\s+(?:of|\/)\s+\d+/.test(message) &&
+						total === undefined,
+				),
+				`${name} leaks a denominator through a sibling progress message`,
+			);
+		}
+		if (name === "restricted") {
+			assert.deepEqual(
+				scenario.detailRequests,
+				["conv-1", "conv-2"],
+				"conversation-only date grant must restrict provider detail requests",
+			);
+			assert.deepEqual(scenario.emittedConversationIds, ["conv-1", "conv-2"]);
+		}
+		if (name === "capped") {
+			assert.deepEqual(scenario.completedIds, ["conv-0"]);
+			assert.ok(
+				scenario.packets.some(({ message }) =>
+					message.startsWith("Reached the limit for this run"),
+				),
+			);
+		}
+		if (name === "failedDetail") {
+			assert.deepEqual(scenario.completedIds, ["conv-2"]);
+			assert.equal(syncPackets(scenario)[0].stream, "conversations");
+		}
+	}
+	const unsupported = await runChatGptProgressScenario(
+		built.outfile,
+		chatGptProgressScenarios.unsupportedResource,
+	);
+	assert.deepEqual(unsupported.completedIds, []);
+	assert.deepEqual(unsupported.packets, []);
+	assert.match(JSON.stringify(unsupported.errors), /scope_not_supported/);
 });
 
 test("reverse-projects retained ChatGPT records into list pages and details", () => {

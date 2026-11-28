@@ -1576,21 +1576,28 @@ async function emitChatGptCollectionRateOnChange(
 	lastEmittedIntervalMs: number | null,
 	progress: CollectContext["progress"] | undefined,
 	completed: number,
-	total: number,
+	total: number | undefined,
 	elapsedMs: number,
 ): Promise<number | null> {
 	if (!progress) {
 		return lastEmittedIntervalMs;
 	}
 	const rate = buildChatGptCollectionRateProgress(providerBudget);
-	const minutes = estimateChatGptDetailMinutesRemaining(
-		completed,
-		total,
-		elapsedMs,
-	);
+	const minutes =
+		total === undefined
+			? null
+			: estimateChatGptDetailMinutesRemaining(completed, total, elapsedMs);
+	const extra = {
+		stream: "messages",
+		phase: "collect",
+		...(completed > 0 ? { count: completed } : {}),
+		...(total === undefined ? {} : { total }),
+	};
 	await progress(
-		`Fetching conversation details: ${completed} of ${total}${minutes === null ? " (estimating…)" : ` (about ${minutes} min left)`}`,
-		{ stream: "messages", count: completed, total },
+		total === undefined
+			? "Fetching conversation details"
+			: `Fetching conversation details: ${completed} of ${total}${minutes === null ? " (estimating…)" : ` (about ${minutes} min left)`}`,
+		extra,
 	);
 	if (!rate || rate.current_interval_ms === lastEmittedIntervalMs) {
 		return lastEmittedIntervalMs;
@@ -2425,6 +2432,7 @@ export interface StreamDeps {
 	emittedMessageParentsThisRun?: Map<string, string | null>;
 	/** The run's 404/410 detail answers and the obligations it inherited; see detail-not-found.ts. */
 	detailNotFound?: DetailNotFoundTracker;
+	detailSyncProgress?: { completed: Set<string>; passes: number };
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -3198,7 +3206,31 @@ export async function processConversationDetail(
 		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 		return SOURCE_UNREPRESENTABLE_OUTCOME;
 	}
-	return { complete: true };
+	const conversations = deps.requested.get("conversations");
+	const messages = emitMessages ? deps.requested.get("messages") : undefined;
+	const conversationSelected =
+		conversations !== undefined &&
+		(!isNarrowedConversationGrant(conversations) ||
+			deps.isRecordSelected?.(
+				"conversations",
+				buildConversationRecord(c, conversationDetail),
+			) === true);
+	const messageSelected =
+		messages !== undefined &&
+		(!isNarrowedConversationGrant(messages) ||
+			(deps.isRecordSelected !== undefined && candidates.length > 0));
+	return {
+		complete: true,
+		...(!conversationSelected && !messageSelected
+			? { outsideGrant: true }
+			: {}),
+	};
+}
+
+function isNarrowedConversationGrant(
+	scope: ReturnType<StreamDeps["requested"]["get"]>,
+): boolean {
+	return scope?.resources !== undefined || scope?.time_range !== undefined;
 }
 
 const PAGINATION_SAFETY_LIMIT = 5000;
@@ -3680,6 +3712,7 @@ interface ConversationListResult {
 	verifiedSuffixProgress?: ConversationBackfill;
 	items: ConversationListItem[];
 	truncated: boolean;
+	confirmedInventory?: boolean;
 }
 
 /** A position hint is safe only when tied to the time and IDs at its boundary. */
@@ -5205,6 +5238,7 @@ async function selectConversationListsForRequestedStreams({
 	// coverage this run.
 	conversationsListTruncated: boolean;
 	messagesListTruncated: boolean;
+	confirmedInventory: boolean;
 	// Rows only a resumed list continuation reached: no run has emitted them.
 	conversationsBackfillIds: ReadonlySet<string>;
 }> {
@@ -5231,6 +5265,7 @@ async function selectConversationListsForRequestedStreams({
 			backfill: sharedList.backfill,
 			conversationsListTruncated: sharedList.truncated,
 			messagesListTruncated: sharedList.truncated,
+			confirmedInventory: sharedList.confirmedInventory === true,
 			conversationsBackfillIds: backfillIds,
 		};
 	}
@@ -5247,6 +5282,7 @@ async function selectConversationListsForRequestedStreams({
 			backfill: list.backfill,
 			conversationsListTruncated: list.truncated,
 			messagesListTruncated: false,
+			confirmedInventory: list.confirmedInventory === true,
 			conversationsBackfillIds: backfillIds,
 		};
 	}
@@ -5263,6 +5299,7 @@ async function selectConversationListsForRequestedStreams({
 			backfill: list.backfill,
 			conversationsListTruncated: false,
 			messagesListTruncated: list.truncated,
+			confirmedInventory: list.confirmedInventory === true,
 			conversationsBackfillIds: new Set(),
 		};
 	}
@@ -5272,6 +5309,7 @@ async function selectConversationListsForRequestedStreams({
 		backfill: null,
 		conversationsListTruncated: false,
 		messagesListTruncated: false,
+		confirmedInventory: false,
 		conversationsBackfillIds: new Set(),
 	};
 }
@@ -5796,7 +5834,7 @@ export type ConversationDetailIncompleteReason =
 
 /** What `processConversationDetail` proved about one conversation's messages. */
 export type ConversationDetailOutcome =
-	| { complete: true }
+	| { complete: true; outsideGrant?: true }
 	| { complete: false; reason: ConversationDetailIncompleteReason }
 	// The source cannot represent a body (unknown-shape fallback cut): a refetch
 	// returns the same bytes, so no retryable gap is owed.
@@ -6125,9 +6163,14 @@ export async function runMessagesAndConversationsWithDetail(
 		detail: ConversationDetail | null,
 	) => Promise<void>,
 	pacing: ConversationDetailPacingOptions = {},
+	inventoryTotal?: number,
 ): Promise<ConversationDetailCoverage> {
 	const detailStartedAt = Date.now();
-	let completedDetails = 0;
+	const detailSync = deps.detailSyncProgress ?? {
+		completed: new Set<string>(),
+		passes: 0,
+	};
+	if (convosToSync.length > 0) detailSync.passes += 1;
 	const detailDeps = deps.emittedMessageIdsThisRun
 		? deps
 		: {
@@ -6196,6 +6239,20 @@ export async function runMessagesAndConversationsWithDetail(
 			maxFetches: resolveChatGptMaxDetailFetchesPerRun(),
 			maxWallClockMs: resolveChatGptMaxRunWallClockMs(),
 		});
+	const plannedTotal =
+		inventoryTotal ??
+		(deps.detailSyncProgress === undefined &&
+		!isNarrowedConversationGrant(deps.requested.get("conversations")) &&
+		!isNarrowedConversationGrant(deps.requested.get("messages"))
+			? convosToSync.length
+			: undefined);
+	const progressTotal = plannedTotal;
+	let canEstimateTimeLeft =
+		plannedTotal !== undefined &&
+		plannedTotal <= runBudget.maxFetches - runBudget.count &&
+		!Number.isFinite(runBudget.maxWallClockMs) &&
+		!Number.isFinite(providerBudget?.runBudget?.maxRequests ?? Infinity) &&
+		!Number.isFinite(providerBudget?.runBudget?.maxWallClockMs ?? Infinity);
 	// Max per-key DETAIL_GAP rows a run-cap tail may materialize before folding
 	// the older remainder into one backlog gap. `pacing` wins for tests; otherwise
 	// env-resolved (Infinity = today's unbounded per-key behavior). This bounds the
@@ -6305,25 +6362,53 @@ export async function runMessagesAndConversationsWithDetail(
 		});
 	}
 
-	async function reportConversationDetailHydrated(): Promise<void> {
-		completedDetails += 1;
+	let lastReportedCount = detailSync.completed.size;
+	let progressWrites = Promise.resolve();
+	function sendConversationDetailProgress(count: number): Promise<void> {
+		lastReportedCount = count;
+		progressWrites = progressWrites.then(async () => {
+			lastEmittedRateIntervalMs = await emitChatGptCollectionRateOnChange(
+				providerBudget,
+				lastEmittedRateIntervalMs,
+				deps.progress,
+				count,
+				canEstimateTimeLeft ? progressTotal : undefined,
+				Date.now() - detailStartedAt,
+			);
+			const total = progressTotal;
+			const message =
+				total === undefined
+					? `Synced ${count} ${count === 1 ? "conversation" : "conversations"}`
+					: `Synced ${count} / ${total} conversations`;
+			const progress = {
+				type: "PROGRESS",
+				stream: "messages",
+				phase: "messages",
+				message,
+				count,
+				...(total === undefined ? {} : { total }),
+			} as const;
+			await deps.emit(progress);
+		});
+		return progressWrites;
+	}
+
+	function reportConversationDetailHydrated(
+		conversation: ConversationListItem,
+	): Promise<void> {
+		if (detailSync.completed.has(conversation.id)) return Promise.resolve();
+		detailSync.completed.add(conversation.id);
+		const count = detailSync.completed.size;
 		// One progress update per conversation costs a host round trip each on
 		// mobile; report the first, every 25th and the last instead.
 		if (
-			completedDetails !== 1 &&
-			completedDetails !== convosToSync.length &&
-			completedDetails % CHATGPT_DETAIL_PROGRESS_EVERY !== 0
+			count === 1 ||
+			count === progressTotal ||
+			count % CHATGPT_DETAIL_PROGRESS_EVERY === 0
 		) {
-			return;
+			return sendConversationDetailProgress(count);
 		}
-		lastEmittedRateIntervalMs = await emitChatGptCollectionRateOnChange(
-			providerBudget,
-			lastEmittedRateIntervalMs,
-			deps.progress,
-			completedDetails,
-			convosToSync.length,
-			Date.now() - detailStartedAt,
-		);
+		return Promise.resolve();
 	}
 
 	function conversationIdsWithinDetailBudget(): string[] {
@@ -6839,8 +6924,8 @@ export async function runMessagesAndConversationsWithDetail(
 				providerBudget,
 				lastEmittedRateIntervalMs,
 				deps.progress,
-				completedDetails,
-				convosToSync.length,
+				detailSync.completed.size,
+				undefined,
 				Date.now() - detailStartedAt,
 			);
 
@@ -7149,6 +7234,7 @@ export async function runMessagesAndConversationsWithDetail(
 							detail,
 							emitConversation,
 						);
+				if (!detailOutcome.complete) canEstimateTimeLeft = false;
 				// §10-D: suppress additive-decrease during the cooldown-exempt recovery
 				// lane so the shared pacer interval is not un-learned. Throttles still
 				// fire (recovery may decelerate, never accelerate the pacer).
@@ -7156,7 +7242,6 @@ export async function runMessagesAndConversationsWithDetail(
 				if (!servedFromBatchCache) {
 					await recordConversationDetailProviderSuccess();
 				}
-				await reportConversationDetailHydrated();
 				// Reset the progress-based give-up counter: any successful fetch proves the
 				// account is alive, so N consecutive no-progress waits restarts from 0.
 				consecutiveWaitOutsWithoutSuccess = 0;
@@ -7174,6 +7259,9 @@ export async function runMessagesAndConversationsWithDetail(
 					hydratedKeys.add(c.id);
 					coverage.hydratedKeys.push(c.id);
 					deps.detailNotFound?.recordRead(c.id);
+					if (!detailOutcome.outsideGrant) {
+						await reportConversationDetailHydrated(c);
+					}
 				} else if (isSourceUnrepresentable(detailOutcome)) {
 					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 					coverage.sourceUnrepresentableKeys.push(c.id);
@@ -7190,21 +7278,6 @@ export async function runMessagesAndConversationsWithDetail(
 				// next `reason()` check (this pass or the forward pass sharing the budget)
 				// sees the updated count.
 				runBudget.recordDetailFetch();
-				const synced = convosToSync.indexOf(c) + 1;
-				if (
-					synced === 1 ||
-					synced % CHATGPT_DETAIL_PROGRESS_EVERY === 0 ||
-					synced === convosToSync.length
-				) {
-					const progressMsg = {
-						type: "PROGRESS",
-						stream: "messages",
-						message: `Synced ${synced} / ${convosToSync.length} conversations`,
-						count: synced,
-						total: convosToSync.length,
-					} as const;
-					deps.emit(progressMsg);
-				}
 				return { status: detail.status, json: null };
 			} finally {
 				setTimingConversation?.(null);
@@ -7220,6 +7293,9 @@ export async function runMessagesAndConversationsWithDetail(
 			);
 		},
 	).finally(stopBatchRequests);
+	if (lastReportedCount < detailSync.completed.size) {
+		await sendConversationDetailProgress(detailSync.completed.size);
+	}
 	return coverage;
 }
 
@@ -7744,6 +7820,7 @@ async function walkConversationsAndMessages(
 		deps.searchRecovery ?? conversationSearchRecovery(deps);
 	const runDeps: StreamDeps = {
 		...deps,
+		detailSyncProgress: { completed: new Set<string>(), passes: 0 },
 		emittedMessageIdsThisRun: new Set<string>(),
 		emittedMessageParentsThisRun: new Map<string, string | null>(),
 		batchFallbackLog: deps.batchFallbackLog ?? { logged: false },
@@ -7880,11 +7957,21 @@ async function walkConversationsAndMessages(
 				return primaryCatchup || conversationIsAfterCursor(item, cursor);
 			});
 			const merged = new Map(primaryItems.map((item) => [item.id, item]));
+			// The offset and search listings can each stop short while appearing
+			// complete. A denominator needs agreement on the selected identities.
+			const confirmedInventory =
+				!search.truncated &&
+				!primaryList.truncated &&
+				savedBackfill === null &&
+				primaryBackfill === null &&
+				merged.size === search.items.length &&
+				search.items.every((item) => merged.has(item.id));
 			for (const item of search.items) {
 				merged.set(item.id, item);
 			}
 			return {
 				...search,
+				confirmedInventory,
 				items: [...merged.values()],
 				truncated: search.truncated || primaryList.truncated,
 				backfillItems: [
@@ -7954,11 +8041,12 @@ async function walkConversationsAndMessages(
 	}
 
 	const {
-		conversationsToSync,
+		conversationsToSync: listedForConversations,
 		messageDetailConversations,
 		backfill,
 		conversationsListTruncated,
 		messagesListTruncated,
+		confirmedInventory,
 		conversationsBackfillIds,
 	} = await selectConversationListsForRequestedStreams({
 		wantsConversations,
@@ -7970,6 +8058,34 @@ async function walkConversationsAndMessages(
 				: priorMessagesCursor,
 		listForCursor,
 	});
+	// The list already carries the conversation consent timestamp. Apply the
+	// runtime's selection gate before building either detail request path.
+	// Messages have their own timestamps, which only their detail can supply.
+	const selectConversation = runDeps.isRecordSelected;
+	const conversationsToSync =
+		!wantsMessages &&
+		deps.requested.get("conversations")?.time_range &&
+		selectConversation
+			? listedForConversations.filter((row) =>
+					selectConversation("conversations", buildConversationRecord(row, null)),
+				)
+			: listedForConversations;
+	const takenByMessages = new Set(messageDetailConversations.map((c) => c.id));
+	const plan = planDetailReads(conversationsToSync, priorDetailProgress, {
+		floorMs,
+		backfillLimit: options.detailBackfillLimit ?? CONVERSATION_BACKFILL_PER_RUN,
+		taken: takenByMessages,
+		newToStream: conversationsBackfillIds,
+	});
+	// Recovery and multiple detail passes can overlap or discover further work.
+	// Until the whole run has a single verified cohort, report completed reads
+	// without a total. A narrowed record grant cannot use the listing size.
+	const verifiedSinglePass =
+		confirmedInventory === true &&
+		runDeps.detailSyncProgress?.passes === 0 &&
+		(detailNotFound?.prior.size ?? 0) === 0 &&
+		!isNarrowedConversationGrant(runDeps.requested.get("conversations")) &&
+		!isNarrowedConversationGrant(runDeps.requested.get("messages"));
 	if (wantsConversations) {
 		const foundProgressMsg = {
 			type: "PROGRESS",
@@ -7996,6 +8112,9 @@ async function walkConversationsAndMessages(
 			messageDetailConversations,
 			emitConversation,
 			options.detailPacing,
+			verifiedSinglePass && plan.toRead.length === 0
+				? messageDetailConversations.length
+				: undefined,
 		);
 		const notFound = detailNotFound
 			? await readOwedNotFoundConversations(runDeps, detailNotFound, {
@@ -8020,9 +8139,6 @@ async function walkConversationsAndMessages(
 	if (wantsConversations) {
 		// Rows the message-detail pass already took are done: it read their detail,
 		// or left a durable `messages` DETAIL_GAP that recovery fills in.
-		const takenByMessages = new Set(
-			messageDetailConversations.map((c) => c.id),
-		);
 		const stateInput = {
 			rows: conversationsToSync,
 			backfill,
@@ -8033,13 +8149,6 @@ async function walkConversationsAndMessages(
 		// Fresh conversations first, then retries, then a bounded slice of history,
 		// newest first. A row already read is neither fetched nor emitted again, so
 		// a retry cannot overwrite its counts with null.
-		const plan = planDetailReads(conversationsToSync, priorDetailProgress, {
-			floorMs,
-			backfillLimit:
-				options.detailBackfillLimit ?? CONVERSATION_BACKFILL_PER_RUN,
-			taken: takenByMessages,
-			newToStream: conversationsBackfillIds,
-		});
 		// The rows get their detail here, so `conversations` carries the branch
 		// message count and model counts even when `messages` is not requested.
 		// A fresh row whose detail could not be fetched is still emitted list-only
@@ -8054,6 +8163,12 @@ async function walkConversationsAndMessages(
 				// A messages pass that deferred shared an account under pressure or a
 				// spent run budget; do not send a second pass into it.
 				fetchDetail: !messageDetailDeferred,
+				inventoryTotal:
+					verifiedSinglePass &&
+					messageDetailConversations.length === 0 &&
+					plan.toRead.length === conversationsToSync.length
+						? plan.toRead.length
+						: undefined,
 				checkpoint: (read, failed) =>
 					emitConversationsState(deps, {
 						...stateInput,
@@ -8191,7 +8306,11 @@ function conversationDetailOnlyDeps(
 		emit: (message) => {
 			if (message.type === "DETAIL_GAP") return Promise.resolve();
 			if (message.type === "PROGRESS" && message.stream === "messages") {
-				return deps.emit({ ...message, stream: "conversations" });
+				const progress =
+					"phase" in message && message.phase === "messages"
+						? { ...message, phase: "conversations" }
+						: message;
+				return deps.emit({ ...progress, stream: "conversations" });
 			}
 			return deps.emit(message);
 		},
@@ -8233,8 +8352,10 @@ async function emitConversationsWithDetail(
 	{
 		fetchDetail,
 		checkpoint,
+		inventoryTotal,
 	}: {
 		fetchDetail: boolean;
+		inventoryTotal: number | undefined;
 		checkpoint: (
 			settled: ReadonlySet<string>,
 			failed: ReadonlySet<string>,
@@ -8275,6 +8396,7 @@ async function emitConversationsWithDetail(
 			plan.toRead,
 			emitOnce,
 			pacing,
+			inventoryTotal,
 		);
 	}
 	for (const c of plan.listOnly) {
