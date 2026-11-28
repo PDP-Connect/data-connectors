@@ -25,6 +25,79 @@ import {
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { appleSecFromUnixMs, buildChatDbFixture } from "./fixtures.ts";
+import { validateRecord } from "./schemas.ts";
+
+const SYNTHETIC_MESSAGE_TIMES = {
+	id: "1",
+	chat_id: null,
+	handle: null,
+	service: null,
+	is_from_me: false,
+	text: null,
+	date: "2026-01-01T01:02:03.000Z",
+	date_read: null,
+	has_attachments: false,
+};
+
+test("iMessage record validation allows an unknown read time, not an unknown message time", () => {
+	assert.equal(validateRecord("messages", SYNTHETIC_MESSAGE_TIMES).ok, true);
+	assert.equal(
+		validateRecord("messages", { ...SYNTHETIC_MESSAGE_TIMES, date: null }).ok,
+		false,
+	);
+});
+
+test("iMessage record validation expects a normalized read time when present", () => {
+	assert.equal(
+		validateRecord("messages", {
+			...SYNTHETIC_MESSAGE_TIMES,
+			date_read: "2026-01-01T01:05:06.000Z",
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("messages", {
+			...SYNTHETIC_MESSAGE_TIMES,
+			date_read: "not observed",
+		}).ok,
+		false,
+	);
+});
+
+test("iMessage participant validation rejects a malformed chat identifier", () => {
+	const participant = {
+		id: "fixture-participant",
+		chat_id: "1",
+		handle: null,
+		is_from_me: false,
+	};
+	assert.equal(validateRecord("participants", participant).ok, true);
+	assert.equal(
+		validateRecord("participants", { ...participant, chat_id: "not-numeric" })
+			.ok,
+		false,
+	);
+});
+
+test("iMessage attachment validation rejects a fractional byte count", () => {
+	const attachment = {
+		id: "a".repeat(64),
+		message_id: null,
+		chat_id: null,
+		filename: "fixture.txt",
+		content_type: "text/plain",
+		size_bytes: 1,
+		content_sha256: null,
+		hydration_status: "deferred",
+		hydration_error: null,
+		blob_ref: null,
+	};
+	assert.equal(validateRecord("attachments", attachment).ok, true);
+	assert.equal(
+		validateRecord("attachments", { ...attachment, size_bytes: 1.5 }).ok,
+		false,
+	);
+});
 
 const ENTRYPOINT = connectorEntrypoint("imessage");
 

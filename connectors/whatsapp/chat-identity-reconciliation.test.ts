@@ -355,3 +355,20 @@ test("two distinct chats sharing participants, seen across SEPARATE runs (not on
 		await rm(importRootRun2, { force: true, recursive: true });
 	}
 });
+
+test("participant lookup key is order-independent without mutating the input", async () => {
+	const { deriveChatIdentityKey } = await import("./parsers.ts");
+	const participants = Object.freeze(["Example B", "Example A"]);
+	assert.equal(
+		deriveChatIdentityKey(participants),
+		deriveChatIdentityKey(["Example A", "Example B"]),
+	);
+	assert.deepEqual(participants, ["Example B", "Example A"]);
+});
+
+test("overlap sampling keeps all evidence below the cap and none at zero capacity", async () => {
+	const { sampleUniform } = await import("./parsers.ts");
+	const fingerprints = Object.freeze(["example-one", "example-two"]);
+	assert.deepEqual(sampleUniform(fingerprints, 3), fingerprints);
+	assert.deepEqual(sampleUniform(fingerprints, 0), []);
+});

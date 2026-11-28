@@ -194,6 +194,12 @@ test("WhatsApp attachments - media that fails to extract reads as a coverage sho
 			1,
 			"the missing upload credential is reported exactly once for the run",
 		);
+		assert.equal(
+			mediaSkips[0]?.type === "SKIP_RESULT"
+				? mediaSkips[0].reason
+				: undefined,
+			"media_exceeds_bounded_read_policy",
+		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
 	}
@@ -241,6 +247,24 @@ test("WhatsApp attachments - a fully readable export still proves full coverage"
 			coverage?.covered,
 			2,
 			"no media was dropped, so coverage stays complete",
+		);
+		assert.equal(
+			result.messages.filter(
+				(message) =>
+					message.type === "RECORD" && message.stream === "attachments",
+			).length,
+			2,
+		);
+		// The run-level blob_upload_unavailable gap is expected here: this run has
+		// no upload credential. No media file may be skipped.
+		assert.equal(
+			result.messages.some(
+				(message) =>
+					message.type === "SKIP_RESULT" &&
+					message.stream === "attachments" &&
+					message.reason !== "blob_upload_unavailable",
+			),
+			false,
 		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });

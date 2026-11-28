@@ -8796,6 +8796,166 @@ test("runConversationsAndMessagesStreams: recovers pending conversation detail g
 	);
 });
 
+/**
+ * A run whose only work is one pending `messages` gap, and whose detail
+ * answers 404. The forward listing is empty, so nothing but the recovery
+ * pass can account for the conversation in the run's coverage.
+ */
+async function runPendingGapAnswering404(
+	state: CollectContext["state"],
+	extra: Partial<StreamDeps> = {},
+): Promise<ReturnType<typeof makeRecordingEmit>> {
+	const harness = makeRecordingEmit(validateRecord);
+	const goneConvo = makeConvo({ id: "convo-gone", update_time: 1_700_000_100 });
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (path === "/conversation/convo-gone") {
+				return Promise.resolve({ status: 404, json: null });
+			}
+			if (path.startsWith("/conversations/search?")) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: [], has_missing_conversations: false, total: 0 },
+				});
+			}
+			return Promise.resolve(makeDetailOk());
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		detailGaps: [makeDetailGapFromConvo("gap_gone", goneConvo)],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+		...extra,
+	};
+	await runConversationsAndMessagesStreams(deps, state, {
+		detailPacing: { random: () => 0, sleep: () => undefined },
+	});
+	return harness;
+}
+
+/** Ids a messages cursor still owes a detail read after a 404. */
+function owedConversationIds(cursor: unknown): string[] {
+	const owed = (cursor as { detail_not_found?: unknown } | undefined)
+		?.detail_not_found;
+	if (Array.isArray(owed)) return owed.map(String);
+	return owed && typeof owed === "object" ? Object.keys(owed) : [];
+}
+
+function messagesCoverageOf(
+	harness: ReturnType<typeof makeRecordingEmit>,
+): Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> | undefined {
+	return harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			m.type === "DETAIL_COVERAGE" && m.stream === "messages",
+	);
+}
+
+test("runConversationsAndMessagesStreams: a pending gap whose conversation answers 404 stays owed and its messages are reported missing", async () => {
+	const harness = await runPendingGapAnswering404({});
+
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+		"one 404 does not settle the gap",
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+		"the pending gap is not written twice",
+	);
+	assert.equal(
+		harness.emitted.some((r) => r.stream === "messages"),
+		false,
+	);
+	const coverage = messagesCoverageOf(harness);
+	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 0);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor), ["convo-gone"]);
+});
+
+test("runConversationsAndMessagesStreams: a recovery-only run whose pending gap answers 404 emits a partial receipt and keeps the obligation", async () => {
+	const harness = await runPendingGapAnswering404({}, { recoveryOnly: true });
+
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+	);
+	const coverage = messagesCoverageOf(harness);
+	assert.deepEqual(coverage?.required_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.optional_skip_keys, ["convo-gone"]);
+	assert.deepEqual(coverage?.hydrated_keys, []);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor), ["convo-gone"]);
+});
+
+test("runConversationsAndMessagesStreams: two 404'd pending gaps that the forward listing also lists count once each for the account guard", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const gone = ["convo-gone-1", "convo-gone-2"].map((id, index) =>
+		makeConvo({ id, update_time: 1_700_000_100 + index }),
+	);
+	const detailFetches: string[] = [];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (path.startsWith("/conversations/search?")) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: gone, has_missing_conversations: false, total: 2 },
+				});
+			}
+			if (path.startsWith("/conversations?")) {
+				return Promise.resolve({ status: 200, json: { items: [], total: 0 } });
+			}
+			detailFetches.push(path);
+			return Promise.resolve({ status: 404, json: null });
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		detailGaps: gone.map((c, index) =>
+			makeDetailGapFromConvo(`gap_gone_${index}`, c),
+		),
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+	await runConversationsAndMessagesStreams(
+		deps,
+		{},
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+	assert.ok(detailFetches.length >= 2);
+	const messagesState = harness.protocolMessages.findLast(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+			m.type === "STATE" && m.stream === "messages",
+	);
+	assert.deepEqual(owedConversationIds(messagesState?.cursor).sort(), [
+		"convo-gone-1",
+		"convo-gone-2",
+	]);
+});
+
 test("runConversationsAndMessagesStreams: drains paged pending message gaps beyond the first 100 in one run", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const conversations = Array.from({ length: 125 }, (_, index) =>
@@ -9717,7 +9877,7 @@ test("runMessagesAndConversationsWithDetail: batch hydration ETA counts conversa
 
 test("runConversationsAndMessagesStreams: terminal detail http failure remains fail-closed", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const listItem = makeConvo({ id: "convo-terminal-404" });
+	const listItem = makeConvo({ id: "convo-terminal-400" });
 	const api: ChatGptApi = {
 		auth: (): Promise<never> =>
 			Promise.reject(new Error("fakeApi.auth() unused in this test")),
@@ -9732,7 +9892,9 @@ test("runConversationsAndMessagesStreams: terminal detail http failure remains f
 					},
 				});
 			}
-			return Promise.resolve({ status: 404, json: null });
+			// A 400 is a per-conversation failure that does not prove the
+			// conversation is gone (404/410 do, and are skipped).
+			return Promise.resolve({ status: 400, json: null });
 		},
 	};
 	const deps: StreamDeps = {
@@ -9747,7 +9909,7 @@ test("runConversationsAndMessagesStreams: terminal detail http failure remains f
 
 	await assert.rejects(
 		runConversationsAndMessagesStreams(deps, {}),
-		/required conversation detail convo-terminal-404/,
+		/required conversation detail convo-terminal-400 failed with http 400/,
 	);
 
 	assert.equal(

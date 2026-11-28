@@ -16,9 +16,20 @@ import {
 	buildEmptyExportDirFixture,
 	buildExportDirFixture,
 } from "./fixtures.ts";
+import { detectMimeType } from "./parsers.ts";
 import { photosSchema } from "./schemas.ts";
 
 const ENTRYPOINT = connectorEntrypoint("apple_photos");
+
+test("Apple Photos MIME parsing recognizes an uppercase suffix after multiple dots", () => {
+	assert.equal(detectMimeType("fixture.export.HEIC"), "image/heic");
+	assert.equal(detectMimeType("fixture.export.MOV"), "video/quicktime");
+});
+
+test("Apple Photos MIME parsing does not infer a type without a supported final suffix", () => {
+	assert.equal(detectMimeType("fixture"), "application/octet-stream");
+	assert.equal(detectMimeType("fixture.jpg.txt"), "application/octet-stream");
+});
 
 function records(
 	messages: readonly EmittedMessage[],

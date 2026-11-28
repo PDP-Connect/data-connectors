@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 
 import {
 	isTruthyEnv,
-	isUnsupportedPatchrightHost,
 	needsShellForPatchrightSpawn,
 } from "./install-patchright-browser.mjs";
 
@@ -34,29 +33,63 @@ test("isTruthyEnv treats any other string as true", () => {
 	}
 });
 
-test("isUnsupportedPatchrightHost is only true for ubuntu 26.04 x64", () => {
-	const ubuntu2604OsRelease = 'ID=ubuntu\nVERSION_ID="26.04"\n';
-	assert.equal(
-		isUnsupportedPatchrightHost("linux", "x64", ubuntu2604OsRelease),
-		true,
+for (const skip of [
+	null,
+	"PATCHRIGHT_SKIP_BROWSER_DOWNLOAD",
+	"PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD",
+]) {
+	test(
+		skip
+			? skip + " still skips the browser download"
+			: "Ubuntu 26.04 x64 follows the normal Patchright install path",
+		() => {
+			const script = fileURLToPath(
+				new URL("./install-patchright-browser.mjs", import.meta.url),
+			);
+			const result = spawnSync(
+				process.execPath,
+				[
+					"--input-type=module",
+					"--eval",
+					`
+      import childProcess from "node:child_process";
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      Object.defineProperty(process, "platform", { value: "linux" });
+      Object.defineProperty(process, "arch", { value: "x64" });
+      const originalRead = fs.readFileSync;
+      fs.readFileSync = function(path, ...args) {
+        return path === "/etc/os-release" ? 'ID=ubuntu\\nVERSION_ID="26.04"\\n' : originalRead.call(this, path, ...args);
+      };
+      childProcess.spawnSync = (command, args, options) => {
+        console.log(JSON.stringify({ command, args, options }));
+        return { status: 0 };
+      };
+      syncBuiltinESMExports();
+      delete process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD;
+      delete process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD;
+      delete process.env.PDPP_REQUIRE_PATCHRIGHT_BROWSER_DOWNLOAD;
+      if (${JSON.stringify(skip)}) process.env[${JSON.stringify(skip)}] = "1";
+      process.argv[1] = ${JSON.stringify(script)};
+      await import(${JSON.stringify(new URL("./install-patchright-browser.mjs", import.meta.url).href)});
+    `,
+				],
+				{ encoding: "utf8" },
+			);
+			assert.equal(result.status, 0, result.stderr);
+			if (skip) {
+				assert.match(result.stdout, /skip env variable/);
+				assert.doesNotMatch(result.stdout, /"command"/);
+			} else {
+				assert.deepEqual(JSON.parse(result.stdout), {
+					command: "patchright",
+					args: ["install", "chromium"],
+					options: { shell: false, stdio: "inherit" },
+				});
+			}
+		},
 	);
-	assert.equal(
-		isUnsupportedPatchrightHost("win32", "x64", ubuntu2604OsRelease),
-		false,
-	);
-	assert.equal(
-		isUnsupportedPatchrightHost("linux", "arm64", ubuntu2604OsRelease),
-		false,
-	);
-	assert.equal(
-		isUnsupportedPatchrightHost(
-			"linux",
-			"x64",
-			'ID=ubuntu\nVERSION_ID="24.04"\n',
-		),
-		false,
-	);
-});
+}
 
 test("macOS dependency installation skips bundled Chromium without needing a skip flag", () => {
 	const script = fileURLToPath(
