@@ -38,8 +38,34 @@ import {
 	type CheckpointEvidence,
 	classifyFailureEnvironment,
 	type LastState,
+	readLastState,
 	resolveCaptureOnFailureEnv,
 } from "./connector-dev.ts";
+
+test("readLastState rejects non-envelope seed data without reading a real run", () => {
+	const valid = {
+		connector: "fixture",
+		started_at: "2026-01-01T00:00:00.000Z",
+		state: { stream: { position: 1 } },
+	};
+	const read = (value: unknown) =>
+		readLastState("fixture", () => JSON.stringify(value));
+	assert.deepEqual(read(valid), valid);
+	for (const value of [
+		42,
+		[],
+		{},
+		{ ...valid, connector: "other" },
+		{ ...valid, state: [] },
+		{ ...valid, started_at: "unknown" },
+	]) {
+		assert.throws(
+			() => read(value),
+			/invalid saved-state envelope; run once without the flag/,
+		);
+	}
+	assert.throws(() => readLastState("fixture", () => "{"), /not valid JSON/);
+});
 
 const CLI_PATH = join(PACKAGE_ROOT, "bin", "connector-dev.ts");
 const fixturePath = (name: string): string =>

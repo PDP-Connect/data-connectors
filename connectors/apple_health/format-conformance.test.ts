@@ -34,8 +34,25 @@ import {
 	syntheticExportStartYear,
 } from "./__fixtures__/synthetic-export.ts";
 import { HEALTH_AREA_STREAMS } from "./areas.ts";
+import { isoDate } from "./parsers.ts";
 
 const ENTRYPOINT = connectorEntrypoint("apple_health");
+
+test("FORMAT-CONFORMANCE: invalid calendar dates do not become valid record timestamps", () => {
+	assert.equal(isoDate("2031-02-29 10:00:00 +0000"), null);
+	assert.equal(isoDate("2032-02-30 10:00:00 +0000"), null);
+	// Surrounding whitespace must not slip an impossible date past the check.
+	assert.equal(isoDate(" 2031-02-29 10:00:00 +0000"), null);
+	assert.equal(isoDate("2031-02-29 10:00:00 +0000 "), null);
+	assert.equal(
+		isoDate(" 2032-02-29 23:30:00 -0700"),
+		"2032-03-01T06:30:00.000Z",
+	);
+	assert.equal(
+		isoDate("2032-02-29 23:30:00 -0700"),
+		"2032-03-01T06:30:00.000Z",
+	);
+});
 
 function records(
 	messages: readonly EmittedMessage[],
@@ -86,6 +103,32 @@ function run(exportDir: string, opts: { peakRssPollIntervalMs?: number } = {}) {
 		timeoutMs: 60_000,
 	});
 }
+
+test("coverage still counts occurrences of a named unit after the label tally fills", async () => {
+	const { newGapCounts, tallyUnconvertibleUnit } = await import("./parsers.ts");
+	const gaps = newGapCounts();
+	for (let index = 0; index < 20; index += 1)
+		tallyUnconvertibleUnit(`unit-${index}`, gaps);
+	tallyUnconvertibleUnit("another-unit", gaps);
+	tallyUnconvertibleUnit("unit-0", gaps);
+	assert.equal(gaps.unrecognizedUnits.size, 20);
+	assert.equal(gaps.unrecognizedUnits.get("unit-0"), 2);
+	assert.equal(gaps.unrecognizedUnitsUnnamed, 1);
+});
+
+test("coverage keeps record-type and unit gaps separate when the labels match", async () => {
+	const { newGapCounts, tallyUnconvertibleUnit, tallyUnrecognizedType } =
+		await import("./parsers.ts");
+	const gaps = newGapCounts();
+	tallyUnrecognizedType("SyntheticFutureType", gaps);
+	tallyUnconvertibleUnit("SyntheticFutureType", gaps);
+	tallyUnconvertibleUnit("SyntheticFutureType", gaps);
+	assert.deepEqual(
+		[...gaps.unrecognizedRecordTypes],
+		[["SyntheticFutureType", 1]],
+	);
+	assert.deepEqual([...gaps.unrecognizedUnits], [["SyntheticFutureType", 2]]);
+});
 
 test("FORMAT-CONFORMANCE: synthetic multi-year, multi-source export.xml (~5k records) parses end to end with honest gap reporting", {
 	timeout: 60_000,
@@ -309,4 +352,26 @@ test("FORMAT-CONFORMANCE: memory stays bounded (streaming, not whole-document) o
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+test("XML tag parsing waits for a quoted attribute and closing delimiter", async () => {
+	const { nextTag, parseAttrs } = await import("./parsers.ts");
+	const partial = '<Record memo="synthetic >';
+	assert.equal(nextTag(partial, 0), null);
+	const complete = partial + ' text"/>';
+	const tag = nextTag(complete, 0);
+	assert.equal(tag?.end, complete.length);
+	assert.equal(tag?.selfClosing, true);
+	assert.deepEqual(parseAttrs(tag?.attrs ?? null), {
+		memo: "synthetic > text",
+	});
+});
+
+test("XML attribute decoding declines the whole element when one value is unreadable", async () => {
+	const { parseAttrs } = await import("./parsers.ts");
+	assert.equal(parseAttrs('label="synthetic" value="&#0;"'), null);
+	assert.deepEqual(parseAttrs('label="synthetic" value="&#65;"'), {
+		label: "synthetic",
+		value: "A",
+	});
 });

@@ -12,14 +12,40 @@ export const API_BASE = "https://api.venmo.com/v1";
 
 const ZONELESS_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
 
-/** Venmo's zone-less API timestamps are treated as UTC; preserve their fractional precision. */
+const OFFSET_DATETIME_RE =
+	/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?([+-]\d{2}:\d{2})$/;
+
+/**
+ * A Venmo timestamp in the stored form: UTC ending in Z, with the source's
+ * fractional digits. Zone-less values are already UTC. A value with an
+ * explicit offset is shifted on whole seconds, because Date keeps only
+ * milliseconds, and its fraction is kept as written. Anything else, including
+ * an impossible wall time that Date would roll over (February 30), is
+ * returned unchanged.
+ */
 export function normalizeVenmoDate(
 	value: string | null | undefined,
 ): string | null {
 	if (value == null) {
 		return null;
 	}
-	return ZONELESS_DATETIME_RE.test(value) ? `${value}Z` : value;
+	if (ZONELESS_DATETIME_RE.test(value)) {
+		return `${value}Z`;
+	}
+	const match = OFFSET_DATETIME_RE.exec(value);
+	if (!match) {
+		return value;
+	}
+	const [, wallClock, fraction = "", offset] = match;
+	const wall = Date.parse(`${wallClock}Z`);
+	if (
+		Number.isNaN(wall) ||
+		new Date(wall).toISOString().slice(0, 19) !== wallClock
+	) {
+		return value;
+	}
+	const utc = new Date(Date.parse(`${wallClock}${offset}`));
+	return `${utc.toISOString().slice(0, 19)}${fraction}Z`;
 }
 
 /** Venmo's `amount` is a float in major units (dollars); PDPP records integer cents. */

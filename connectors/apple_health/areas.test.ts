@@ -10,6 +10,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
 	HEALTH_AREA_BY_IDENTIFIER,
@@ -209,5 +210,28 @@ test("every table value is a declared area stream", () => {
 	const streams = new Set<string>(HEALTH_AREA_STREAMS);
 	for (const [id, stream] of Object.entries(HEALTH_AREA_BY_IDENTIFIER)) {
 		assert.ok(streams.has(stream), `${id} maps to undeclared ${stream}`);
+	}
+});
+
+test("declared area stream order matches the manifest prefix", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { streams: Array<{ name: string }> };
+	assert.deepEqual(
+		manifest.streams
+			.slice(0, HEALTH_AREA_STREAMS.length)
+			.map((stream) => stream.name),
+		[...HEALTH_AREA_STREAMS],
+	);
+});
+
+test("a fabricated classification alias cannot be added to the shared table", () => {
+	const alias = "FixtureUnknownIdentifier";
+	const added = Reflect.set(HEALTH_AREA_BY_IDENTIFIER, alias, "activity");
+	try {
+		assert.equal(added, false);
+		assert.equal(healthAreaOf(alias), "other");
+	} finally {
+		if (added) Reflect.deleteProperty(HEALTH_AREA_BY_IDENTIFIER, alias);
 	}
 });

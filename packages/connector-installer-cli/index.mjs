@@ -83,7 +83,11 @@ function parseArgs(argv) {
     if (!VALUE_FLAGS.has(key)) {
       throw new Error(`Unknown option ${arg}`);
     }
-    options[key] = rest[i + 1] ?? null;
+    const value = rest[i + 1];
+    if (!value || value.startsWith("--")) {
+      throw new Error(`Missing value for ${arg}`);
+    }
+    options[key] = value;
     i += 1;
   }
 

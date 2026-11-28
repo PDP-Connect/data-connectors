@@ -53,7 +53,16 @@ export function truncateBody(
 	body: string,
 	max: number = SKILL_BODY_MAX_CHARS,
 ): string {
-	return body.length > max ? body.slice(0, max) : body;
+	if (body.length <= max) {
+		return body;
+	}
+	const prefix = body.slice(0, max);
+	const last = prefix.charCodeAt(prefix.length - 1);
+	const next = body.charCodeAt(prefix.length);
+	// Keep the existing UTF-16 budget without splitting an astral character.
+	return last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff
+		? prefix.slice(0, -1)
+		: prefix;
 }
 
 // ─── Tool-block bodies ──────────────────────────────────────────────────

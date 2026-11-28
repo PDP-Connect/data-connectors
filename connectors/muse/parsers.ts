@@ -29,7 +29,7 @@ export const MEMORY_FILE_NAMES = [
 ] as const;
 
 const ZONED_ISO_RE =
-	/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+	/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
 // Epoch milliseconds between 2000-01-01 and 2200-01-01: anything else is not a
 // time this source would report.
 const MIN_MS = 946_684_800_000;

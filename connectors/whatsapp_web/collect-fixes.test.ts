@@ -48,10 +48,24 @@ import {
 import {
 	buildChat,
 	buildMessage,
+	chatKind,
 	parseChatWalk,
+	secondsToIso,
 	TextTally,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
+
+test("chat kind prefers explicit server metadata and falls back to the synthetic key", () => {
+	assert.equal(chatKind("example@g.us", "lid"), "user");
+	assert.equal(chatKind("example@g.us", ""), "group");
+	assert.equal(chatKind("example@unknown"), "other");
+});
+
+test("epoch normalization preserves fractions and rejects implausible dates", () => {
+	assert.equal(secondsToIso(946_684_800.125), "2000-01-01T00:00:00.125Z");
+	assert.equal(secondsToIso(946_684_799), null);
+	assert.equal(secondsToIso("946684800"), null);
+});
 
 const fixture = (name: string): unknown =>
 	JSON.parse(

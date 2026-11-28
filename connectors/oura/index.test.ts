@@ -33,7 +33,7 @@ function unpacedGovernor(): ReturnType<typeof createConnectorHttpGovernor> {
 }
 
 interface OuraPageFixture {
-	data: Array<{
+	data?: Array<{
 		average_breath?: number;
 		contributors?: Record<string, number>;
 		day: string;
@@ -79,6 +79,7 @@ function withOuraPages<T>(
 function withOuraEndpointPages<T>(
 	pagesByEndpoint: Record<string, OuraPageFixture[]>,
 	run: (requested: URL[]) => Promise<T>,
+	failureByEndpoint: Record<string, Error> = {},
 ): Promise<T> {
 	const original = globalThis.fetch;
 	const requested: URL[] = [];
@@ -87,6 +88,10 @@ function withOuraEndpointPages<T>(
 		const url = new URL(String(input));
 		requested.push(url);
 		const endpoint = url.pathname.split("/").at(-1) ?? "";
+		const failure = failureByEndpoint[endpoint];
+		if (failure) {
+			return Promise.reject(failure);
+		}
 		const queue = pagesByEndpoint[endpoint] ?? [];
 		const i = indexByEndpoint[endpoint] ?? 0;
 		indexByEndpoint[endpoint] = i + 1;
@@ -164,6 +169,27 @@ function truncationSkip(
 			message.type === "SKIP_RESULT" && message.stream === stream,
 	);
 }
+
+test("a malformed final page cannot advance the activity checkpoint", async () => {
+	const { ctx, messages, records } = makeContext({
+		state: { activity: { last_day: "2030-01-01" } },
+	});
+	await assert.rejects(
+		withOuraPages(
+			[
+				{
+					data: [{ id: "synthetic-page-row", day: "2030-01-02" }],
+					next_token: "synthetic-next",
+				},
+				{ next_token: null },
+			],
+			() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+		),
+		/oura_invalid_page: daily_activity response must contain a data array/,
+	);
+	assert.equal(records.length, 0);
+	assert.equal(lastStateCursor(messages, "activity"), undefined);
+});
 
 test("a walk that exhausts naturally advances the cursor and discloses no truncation", async () => {
 	// No `next_token` on the final page is the provider saying it has nothing
@@ -336,6 +362,104 @@ test("truncation is disclosed and the cursor withheld per stream, not once per r
 	);
 });
 
+test("same-day sleep sessions keep distinct ids and share the daily aggregate", async () => {
+	const { ctx, records } = makeContext({ streams: [{ name: "sleep" }] });
+	await withOuraEndpointPages(
+		{
+			sleep: [
+				{
+					data: [
+						{
+							id: "00000000-0000-4000-8000-000000000001",
+							day: "2026-08-05",
+							type: "long_sleep",
+						},
+						{
+							id: "00000000-0000-4000-8000-000000000002",
+							day: "2026-08-05",
+							type: "late_nap",
+						},
+					],
+					next_token: null,
+				},
+			],
+			daily_sleep: [
+				{
+					data: [
+						{
+							id: "aggregate-fixture",
+							day: "2026-08-05",
+							score: 81,
+							contributors: { efficiency: 88 },
+						},
+					],
+					next_token: null,
+				},
+			],
+		},
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+	);
+	assert.deepEqual(
+		records.map(({ stream, data }) => [
+			stream,
+			data.id,
+			data.type,
+			data.sleep_score,
+			data.contributors,
+		]),
+		[
+			[
+				"sleep",
+				"00000000-0000-4000-8000-000000000001",
+				"long_sleep",
+				81,
+				{ efficiency: 88 },
+			],
+			[
+				"sleep",
+				"00000000-0000-4000-8000-000000000002",
+				"late_nap",
+				81,
+				{ efficiency: 88 },
+			],
+		],
+	);
+});
+
+test("an exhausted activity response keeps the newest day when the last row is older", async () => {
+	const { ctx, records, messages } = makeContext({
+		state: { activity: { last_day: "2026-08-01" } },
+	});
+	await withOuraPages(
+		[
+			{
+				data: [
+					{
+						id: "00000000-0000-4000-8000-000000000003",
+						day: "2026-08-06",
+						score: 80,
+					},
+					{
+						id: "00000000-0000-4000-8000-000000000004",
+						day: "2026-08-03",
+						score: 79,
+					},
+				],
+				next_token: null,
+			},
+		],
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+	);
+	assert.deepEqual(
+		records.map(({ data }) => data.day),
+		["2026-08-06", "2026-08-03"],
+	);
+	assert.deepEqual(lastStateCursor(messages, "activity"), {
+		last_day: "2026-08-06",
+	});
+	assert.equal(truncationSkip(messages, "activity"), undefined);
+});
+
 test("sleep joins its per-session document with the same day's daily_sleep score and contributors", async () => {
 	const { ctx, records } = makeContext({ streams: [{ name: "sleep" }] });
 	await withOuraEndpointPages(
@@ -449,4 +573,49 @@ test("sleep emits no partial records when its daily_sleep helper walk is truncat
 		{ last_day: "2026-07-01" },
 		"the sleep cursor is held until both joined resources are complete",
 	);
+});
+
+test("a rejected daily_sleep walk holds sleep and lets readiness and activity finish", async () => {
+	const { ctx, messages, records } = makeContext({
+		state: { sleep: { last_day: "2026-07-01" } },
+		streams: [{ name: "sleep" }, { name: "readiness" }, { name: "activity" }],
+	});
+	const failures: Array<{
+		message: string;
+		retryable: boolean;
+		stream: string;
+	}> = [];
+	ctx.reportStreamFailure = (stream, message, options) => {
+		failures.push({ stream, message, retryable: options?.retryable === true });
+		return Promise.resolve();
+	};
+
+	await withOuraEndpointPages(
+		{
+			sleep: [{ data: [{ id: "s1", day: "2026-08-05" }] }],
+			daily_readiness: [{ data: [{ id: "r1", day: "2026-08-06" }] }],
+			daily_activity: [{ data: [{ id: "a1", day: "2026-08-07" }] }],
+		},
+		() => collectOura(ctx, { httpGovernor: unpacedGovernor() }),
+		{ daily_sleep: new Error("fetch failed: synthetic helper failure") },
+	);
+
+	assert.deepEqual(failures, [
+		{
+			stream: "sleep",
+			message: "Could not read Oura daily sleep scores",
+			retryable: true,
+		},
+	]);
+	assert.deepEqual(
+		records.map(({ stream }) => stream),
+		["readiness", "activity"],
+	);
+	assert.equal(lastStateCursor(messages, "sleep"), undefined);
+	assert.deepEqual(lastStateCursor(messages, "readiness"), {
+		last_day: "2026-08-06",
+	});
+	assert.deepEqual(lastStateCursor(messages, "activity"), {
+		last_day: "2026-08-07",
+	});
 });

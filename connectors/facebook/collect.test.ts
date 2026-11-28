@@ -13,6 +13,7 @@ import {
 	type PageDeadlines,
 	type PageGraphqlResult,
 	type PageSnapshot,
+	streamFailureHint,
 } from "./collect.ts";
 import {
 	evaluateInMainWorld,
@@ -25,7 +26,9 @@ import {
 	type CapturedOperation,
 	GRAPHQL_PATH,
 	type JsonRecord,
+	newTextCounter,
 	operationMatches,
+	parsePostNode,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import {
@@ -35,6 +38,29 @@ import {
 	TIMELINE,
 	TIMELINE_VIEWER,
 } from "./test-helpers.ts";
+
+describe("timeline post id parsing", () => {
+	it("uses a valid nested ID when the optional outer ID is not usable", () => {
+		const makePost = (outerId: unknown, nestedId: unknown) => ({
+			actors: [{ id: "1001" }],
+			creation_time: 1704067200,
+			post_id: outerId,
+			comet_sections: { content: { story: { post_id: nestedId } } },
+		});
+		const parse = (outerId: unknown, nestedId: unknown) =>
+			parsePostNode(makePost(outerId, nestedId), "1001", newTextCounter());
+
+		for (const outer of ["", 2002, "not-an-id"]) {
+			const parsed = parse(outer, "2002");
+			assert.equal(parsed.kind, "post");
+			if (parsed.kind === "post") assert.equal(parsed.record.id, "2002");
+		}
+		const primary = parse("2001", "2002");
+		assert.equal(primary.kind, "post");
+		if (primary.kind === "post") assert.equal(primary.record.id, "2001");
+		assert.deepEqual(parse("", "bad-id"), { kind: "unreadable" });
+	});
+});
 
 const VIEWER_SCRIPT = JSON.stringify({
 	define: [
@@ -2007,5 +2033,31 @@ describe("read ownership regressions", () => {
 		assert.equal(h.records[0]?.data.target_text, null);
 		assert.equal(h.records[1]?.data.target_text, "Healthy target");
 		assert.ok(stateFor(h, "reactions"));
+	});
+});
+
+describe("stream failure recovery directions", () => {
+	it("waits for a connector upgrade for an outdated query or explicitly refused operation", () => {
+		for (const message of [
+			"facebook_query_outdated: saved query is unavailable",
+			"facebook_mutation_refused: operation classified as non-read-only",
+		]) {
+			assert.deepEqual(streamFailureHint(message), {
+				action: "retry_on_connector_upgrade",
+				retryable: false,
+			});
+		}
+	});
+
+	it("keeps an incomplete or timed-out stream retryable even if details mention an outdated query", () => {
+		for (const message of [
+			"facebook_list_not_proven_complete: missing terminal evidence",
+			"facebook_page_timeout: diagnostic mentioned facebook_query_outdated",
+		]) {
+			assert.deepEqual(streamFailureHint(message), {
+				action: "retry_by_runtime",
+				retryable: true,
+			});
+		}
 	});
 });

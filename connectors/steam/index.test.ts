@@ -115,6 +115,36 @@ test("steam owned_games schema - validates game record", () => {
 	assert.strictEqual(result.ok, true, "owned game record should validate");
 });
 
+test("steam owned_games schema rejects string playtime and mixed descriptor IDs", () => {
+	const record = {
+		id: "synthetic-user:1",
+		steamid: "synthetic-user",
+		appid: 1,
+		name: "Invented Game",
+		playtime_forever: 0,
+		playtime_windows: null,
+		playtime_mac: null,
+		playtime_linux: null,
+		img_icon_url: null,
+		img_logo_url: null,
+		has_community_visible_stats: null,
+		rtime_last_played: null,
+		content_descriptorids: [1, 2],
+	};
+	assert.equal(validateRecord("owned_games", record).ok, true);
+	assert.equal(
+		validateRecord("owned_games", { ...record, playtime_forever: "0" }).ok,
+		false,
+	);
+	assert.equal(
+		validateRecord("owned_games", {
+			...record,
+			content_descriptorids: [1, "2"],
+		}).ok,
+		false,
+	);
+});
+
 test("steam owned_games schema - tolerates optional rtime_last_played", () => {
 	const recordWithRtime = {
 		id: "76561198012345678:570",
@@ -761,4 +791,27 @@ test("Steam protocol execution: required endpoint 401 remains a failed DONE", as
 	} finally {
 		await fixture.stop();
 	}
+});
+
+test("Steam HTTP classification accepts the full 2xx range, not neighboring statuses", () => {
+	for (const status of [200, 204, 299]) {
+		assert.deepEqual(classifySteamHttpResponse(status, ""), { kind: "ok" });
+	}
+	for (const status of [199, 300]) {
+		assert.deepEqual(classifySteamHttpResponse(status, ""), {
+			kind: "error",
+			message: `steam_http_${String(status)}`,
+			status,
+		});
+	}
+});
+
+test("Steam HTTP classification does not let response body text override status", () => {
+	const body = '{"message":"synthetic unauthorized text"}';
+	assert.deepEqual(classifySteamHttpResponse(200, body), { kind: "ok" });
+	assert.deepEqual(classifySteamHttpResponse(403, body), {
+		kind: "error",
+		message: "steam_forbidden_auth_or_visibility",
+		status: 403,
+	});
 });
