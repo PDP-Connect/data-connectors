@@ -332,8 +332,9 @@ export type RedditListingFetch = (path: string) => Promise<RedditFetchResult>;
 
 export interface RedditPaginationResult {
 	children: RedditChild[];
-	/** True only when MAX_PAGES stopped a walk that still had an `after` cursor. */
+	/** More pages were listed, but the budget or a cursor cycle stopped the walk. */
 	truncated: boolean;
+	incompleteReason?: "repeated_cursor";
 }
 
 /**
@@ -392,6 +393,8 @@ export async function paginate(
 ): Promise<RedditPaginationResult> {
 	const all: RedditChild[] = [];
 	let after: string | null = null;
+	const seenCursors = new Set<string>();
+	let repeatedCursor = false;
 	const streamExtra = streamName ? { stream: streamName } : {};
 
 	const walk = await walkPagesWithCeiling({
@@ -435,25 +438,26 @@ export async function paginate(
 			);
 
 			const { children } = json.data;
+			const next = nextAfter(json);
 			await progress?.("Fetched Reddit listing page", {
 				...streamExtra,
 				phase: "page",
 				page_index: pageNumber,
 				item_count: children.length,
 				total_seen: all.length + children.length,
-				cursor_present: Boolean(nextAfter(json)),
+				cursor_present: Boolean(next),
 			});
-			if (children.length === 0) {
-				return false;
-			}
 			if (appendNewChildren(children, sinceEpochUtc, all, order)) {
 				return false;
 			}
 
-			after = nextAfter(json);
-			if (!after) {
+			if (!next) return false;
+			if (seenCursors.has(next)) {
+				repeatedCursor = true;
 				return false;
 			}
+			seenCursors.add(next);
+			after = next;
 			await delay(PAGE_DELAY_MS);
 			return true;
 		},
@@ -464,7 +468,8 @@ export async function paginate(
 	return {
 		// Normal breaks mean the listing ended or supplied no continuation cursor.
 		children: order === "action" ? dedupeByFullname(all) : all,
-		truncated: walk.truncated,
+		truncated: walk.truncated || repeatedCursor,
+		...(repeatedCursor ? { incompleteReason: "repeated_cursor" as const } : {}),
 	};
 }
 
@@ -578,6 +583,7 @@ async function reportPageLimitFailure(
 	reportStreamFailure: CollectStreamArgs["reportStreamFailure"],
 	stream: string,
 	totalSeen: number,
+	reason?: RedditPaginationResult["incompleteReason"],
 ): Promise<void> {
 	if (!reportStreamFailure) {
 		throw new Error(
@@ -586,7 +592,9 @@ async function reportPageLimitFailure(
 	}
 	await reportStreamFailure(
 		stream,
-		`Reddit ${stream} stopped at the ${MAX_PAGES}-page limit (${totalSeen} items read) with more pages still listed`,
+		reason === "repeated_cursor"
+			? `Reddit ${stream} returned a repeated continuation; the listing is incomplete (${totalSeen} items read)`
+			: `Reddit ${stream} stopped at the ${MAX_PAGES}-page limit (${totalSeen} items read) with more pages still listed`,
 		{ retryable: false },
 	);
 }
@@ -671,7 +679,7 @@ export async function collectStream(
 
 	// Every requested output walks the full listing. A creation-time cursor cannot
 	// prove that stored payloads match the current schema.
-	const { children, truncated } = await paginate(
+	const { children, truncated, incompleteReason } = await paginate(
 		fetchPath,
 		stream.endpoint,
 		null,
@@ -701,6 +709,7 @@ export async function collectStream(
 				reportStreamFailure,
 				stream.name,
 				items.length,
+				incompleteReason,
 			);
 		}
 	}
@@ -719,6 +728,7 @@ export async function collectStream(
 				reportStreamFailure,
 				statsOutput.name,
 				children.length,
+				incompleteReason,
 			);
 		}
 	}

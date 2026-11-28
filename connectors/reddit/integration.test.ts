@@ -2026,3 +2026,41 @@ test("redditFetch does not re-navigate when the page is already on the JSON orig
 		"an already-correct origin must not be re-navigated on every listing page",
 	);
 });
+
+test("collectStream: follows a continuation on an empty Reddit listing page", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { fetch, calls } = makeScriptedFetch({
+		[`${USER_PATH}/submitted.json`]: [
+			okResult(listing([], "next")),
+			okResult(listing([makePost("t3_a", 100)], null)),
+		],
+	});
+	const stream = buildStreamTable(USER_PATH, EMITTED_AT).find((s) => s.name === "submitted");
+	assert.ok(stream);
+	await collectStream({ stream, fetchPath: fetch, state: {}, emit: harness.emit,
+		emitRecord: harness.emitRecord, progress: NO_DELAY, capture: null, delay: NO_DELAY });
+	assert.equal(calls.length, 2);
+	assert.match(calls[1] ?? "", /[?&]after=next(?:&|$)/);
+	assert.equal(harness.emitted.length, 1);
+});
+
+test("collectStream: repeating an empty Reddit continuation reports incomplete", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { fetch, calls } = makeScriptedFetch({
+		[`${USER_PATH}/submitted.json`]: [
+			okResult(listing([], "same")),
+			okResult(listing([], "same")),
+		],
+	});
+	const stream = buildStreamTable(USER_PATH, EMITTED_AT).find((s) => s.name === "submitted");
+	assert.ok(stream);
+	const failures: string[] = [];
+	await collectStream({ stream, fetchPath: fetch, state: {}, emit: harness.emit,
+		emitRecord: harness.emitRecord, progress: NO_DELAY, capture: null, delay: NO_DELAY,
+		reportStreamFailure: async (_stream, message) => { failures.push(message); } });
+	assert.equal(calls.length, 2);
+	assert.deepEqual(failures, [
+		"Reddit submitted returned a repeated continuation; the listing is incomplete (0 items read)",
+	]);
+	assert.equal(harness.protocolMessages.some((event) => event.type === "STATE"), false);
+});
