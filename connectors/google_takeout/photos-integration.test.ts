@@ -16,6 +16,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
@@ -458,6 +459,47 @@ test("photos stream reports directory-read failures without leaking the local pa
 			skips[0]?.message ?? "",
 			new RegExp(importRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
 		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("photos do not advance the cursor when a discovered file cannot be stat'd", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-stat-"));
+	try {
+		const photosDir = join(importRoot, "Photos");
+		const missingName = "private-fixture-photo.jpg";
+		const photoPath = join(photosDir, missingName);
+		const preload = join(importRoot, "stat-fault.mjs");
+		await mkdir(photosDir);
+		await writeFile(photoPath, Buffer.from("synthetic photo"));
+		// The child still sees a genuine Dirent during discovery. Fail only its
+		// subsequent timestamp stat, with the path-bearing error we must not surface.
+		await writeFile(preload, `
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+const originalStat = fs.stat;
+fs.stat = async (file, ...args) => {
+	if (file === ${JSON.stringify(photoPath)}) {
+		throw Object.assign(new Error(${JSON.stringify("fixture ENOENT " + photoPath)}), { code: "ENOENT" });
+	}
+	return originalStat(file, ...args);
+};
+syncBuiltinESMExports();
+`);
+		const { messages } = await runTakeoutImport(
+			importRoot,
+			["photos"],
+			{ NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` },
+			{ photos: { last_timestamp: "2024-01-01T00:00:00.000Z" } },
+		);
+		assert.equal(messages.some((m) => m.type === "STATE" && m.stream === "photos"), false);
+		const skips = skipResults(messages).filter((m) => m.stream === "photos");
+		assert.equal(skips.length, 1);
+		assert.equal(skips[0]?.reason, "directory_read_failed");
+		assert.ok(skips[0]?.message?.includes("A discovered photo could not be read for its timestamp."));
+		assert.ok(!skips[0]?.message?.includes(importRoot));
+		assert.ok(!skips[0]?.message?.includes(missingName));
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
 	}

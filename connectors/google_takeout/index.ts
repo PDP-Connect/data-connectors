@@ -394,10 +394,9 @@ async function resolveSidecarMetadata(
  * Resolve a media file's event timestamp. Prefers sidecar metadata; falls
  * back to filesystem mtime (stable across re-runs) rather than "now" when
  * no sidecar or usable timestamp exists — a missing sidecar is expected
- * (edited variants, export gaps), not an error. Returns null when the file
- * can't be stat'd either: `event_time` is the manifest's semantic-time
- * source, so the run clock would date the photo to the import, not the
- * moment it was taken. Caller skips the file.
+ * (edited variants, export gaps), not an error. A failed stat leaves the
+ * discovered photo unread and must prevent the scan from checkpointing.
+ * Return null only for an unusable mtime; never substitute the run clock.
  */
 async function resolvePhotoEventTimeMs(
 	file: DiscoveredPhotoFile,
@@ -407,8 +406,10 @@ async function resolvePhotoEventTimeMs(
 	if (fromMetadata) {
 		return fromMetadata;
 	}
-	const stats = await stat(join(file.dir, file.name)).catch(() => null);
-	return stats?.mtimeMs ?? null;
+	const stats = await stat(join(file.dir, file.name)).catch(() => {
+		throw new Error("A discovered photo could not be read for its timestamp.");
+	});
+	return Number.isFinite(stats.mtimeMs) ? stats.mtimeMs : null;
 }
 
 /**

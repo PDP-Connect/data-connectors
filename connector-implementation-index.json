@@ -14525,7 +14525,7 @@
 				},
 				"connector_key": "google-takeout",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/google-takeout",
-				"version": "0.1.31",
+				"version": "0.1.32",
 				"display_name": "Google Takeout",
 				"brand": {
 					"icon": "icon.svg",

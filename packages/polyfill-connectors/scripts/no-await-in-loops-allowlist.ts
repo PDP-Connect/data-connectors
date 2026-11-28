@@ -2982,7 +2982,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_takeout/index.ts",
-			line: 469,
+			line: 470,
 			column: 18,
 			category: "dependent_file_cursor",
 			note: "buildPhotoRecordForFile(): sequential file/dir walk, incremental byte-offset read, or one-way fs mutation",
