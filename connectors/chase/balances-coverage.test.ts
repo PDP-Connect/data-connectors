@@ -253,6 +253,35 @@ test("emitBalancesDetailCoverage: a transient QFX failure makes the balances pas
 	assert.equal(coverage.covered, 1);
 });
 
+test("emitBalancesDetailCoverage: a partial transaction parse keeps an accepted balance covered and a rejected one uncovered without a gap", async () => {
+	const { deps, messages } = makeDeps();
+	const outcomes: AccountDetailOutcome[] = [
+		{
+			kind: "gap",
+			accountId: "ACC-1",
+			reason: "temporary_unavailable",
+			errorClass: "qfx_partial_parse",
+			balanceEmitted: true,
+		},
+		{
+			kind: "gap",
+			accountId: "ACC-2",
+			reason: "temporary_unavailable",
+			errorClass: "qfx_partial_parse",
+			balanceEmitted: false,
+		},
+	];
+	await emitBalancesDetailCoverage(deps, outcomes);
+
+	const coverage = balancesCoverage(messages);
+	assert.ok(coverage);
+	assert.deepEqual(coverage.required_keys, ["ACC-1", "ACC-2"]);
+	assert.deepEqual(coverage.hydrated_keys, ["ACC-1"]);
+	assert.equal(coverage.gap_keys, undefined);
+	assert.equal(coverage.considered, 2);
+	assert.equal(coverage.covered, 1);
+});
+
 test("emitBalancesDetailCoverage: zero outcomes still emits an explicit considered:0/covered:0 report (known-zero, not unmeasured)", async () => {
 	// Reaching this function with zero outcomes means the caller
 	// (runTransactionsAndBalances) completed a real, non-empty account
