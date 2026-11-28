@@ -22314,7 +22314,7 @@
 				},
 				"connector_key": "reddit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-				"version": "0.4.9",
+				"version": "0.4.10",
 				"display_name": "Reddit",
 				"brand": {
 					"icon": "icon.svg",
