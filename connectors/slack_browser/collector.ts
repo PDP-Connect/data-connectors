@@ -119,7 +119,7 @@ export const MAX_SEARCH_PAGES = 100;
 export const DEFAULT_CONCURRENCY = 3;
 const MAX_PAGES_PER_THREAD = 200;
 const MAX_OTHER_LIST_PAGES = 500;
-// A channel inventory progress guard, not a listing-size limit.
+const DEFAULT_INVENTORY_PAGE_BUDGET = 2000;
 const NO_PROGRESS_PAGE_GUARD = 16;
 /** Slack allows up to 999 per history page; fewer round trips on busy channels. */
 const HISTORY_PAGE_LIMIT = "999";
@@ -188,9 +188,9 @@ export interface SlackBrowserServices {
 	/** Conversations read at once; defaults to DEFAULT_CONCURRENCY. */
 	concurrency?: number;
 	now: () => Date;
+	inventoryPageBudget?: number;
 }
-
-interface Run {
+interface Run extends Pick<SlackBrowserServices, "inventoryPageBudget"> {
 	api: SlackApiClient;
 	concurrency: number;
 	ctx: SlackBrowserCollectContext;
@@ -355,7 +355,6 @@ function countFullScan(
 		(run.fullScanConsidered.get(stream) ?? 0) + considered,
 	);
 }
-
 /** Every page of a cursor-paginated list method. */
 async function listAll<
 	T extends {
@@ -374,7 +373,8 @@ async function listAll<
 	const seenIds = new Set<string>();
 	let noProgress = 0;
 	let cursor = "";
-	for (let pageNo = 0; idsOf !== undefined || pageNo < MAX_OTHER_LIST_PAGES; pageNo += 1) {
+	const maxPages = idsOf === undefined ? MAX_OTHER_LIST_PAGES : boundedInventoryBudget(run.inventoryPageBudget);
+	for (let pageNo = 0; pageNo < maxPages; pageNo += 1) {
 		const answer = parseAnswer(
 			schema,
 			method,
@@ -399,7 +399,7 @@ async function listAll<
 			seenCursors.add(cursor);
 		}
 	}
-	// Other list methods retain their existing bound; no partial checkpoint.
+	// Never publish a partial checkpoint when the page budget is exhausted.
 	throw new SlackApiError(method, PAGE_CAP_REASON, true, null);
 }
 
@@ -1683,7 +1683,7 @@ export async function collectSlackBrowser(
 	options: SlackBrowserOptions,
 ): Promise<void> {
 	const run: Run = {
-		api: services.api,
+		...services,
 		concurrency: services.concurrency ?? DEFAULT_CONCURRENCY,
 		ctx,
 		cursors: new Map(),
@@ -1727,4 +1727,10 @@ export async function collectSlackBrowser(
 		abort = classifyAbort(error);
 	}
 	await finish(run, plan, abort);
+}
+
+function boundedInventoryBudget(configured: number | undefined): number {
+	return configured !== undefined && Number.isSafeInteger(configured) && configured > 0
+		? Math.min(configured, DEFAULT_INVENTORY_PAGE_BUDGET)
+		: DEFAULT_INVENTORY_PAGE_BUDGET;
 }

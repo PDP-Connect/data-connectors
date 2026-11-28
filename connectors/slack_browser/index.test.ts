@@ -2000,3 +2000,28 @@ test("an explicit 90-day max backfill still limits a 200-day cursor gap", async 
 		),
 	);
 });
+
+test("channel inventory exhausts the configured page budget without checkpointing", async () => {
+	const h = harness(["channels"]);
+	let pages = 0;
+	const api = fakeApi((call) => {
+		if (call.method !== "users.conversations") return undefined;
+		pages += 1;
+		assert.ok(pages <= 4, "finite fixture");
+		return {
+			ok: true,
+			channels: [],
+			response_metadata: { next_cursor: pages === 4 ? "" : String(pages + 1) },
+		};
+	});
+	await collectSlackBrowser(
+		h.ctx,
+		{ api, concurrency: 1, now: () => FIXTURE_NOW, inventoryPageBudget: 3 },
+		[TEAM],
+		DEFAULT_OPTIONS,
+	);
+	assert.equal(pages, 3);
+	assert.equal(h.state("channels"), undefined);
+	assert.equal(h.coverage().some((entry) => entry.stream === "channels"), false);
+	assert.ok(h.skips().some((entry) => entry.stream === "channels" && entry.reason === "collection_interrupted"));
+});
