@@ -538,7 +538,7 @@ export function mergeEmittedIds(
 	prior: ReadonlySet<string>,
 	current: readonly string[],
 ): string[] {
-	const merged = [...prior, ...current];
+	const merged = ((seen) => [...[...prior].filter((id) => !seen.has(id)), ...seen])(new Set(current)); // a re-offered id counts once, at the newest end
 	return merged.length > MAX_EMITTED_ID_CURSOR
 		? merged.slice(merged.length - MAX_EMITTED_ID_CURSOR)
 		: merged;

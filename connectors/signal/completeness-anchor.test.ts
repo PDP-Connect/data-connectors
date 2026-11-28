@@ -165,6 +165,13 @@ test("mergeEmittedIds truncates to the newest ids when the cursor cap binds", ()
 	);
 });
 
+test("mergeEmittedIds counts a re-offered id once, so a full refresh does not saturate the cursor", () => {
+	const ids = Array.from({ length: 150 }, (_, i) => `id${i}`);
+	const merged = mergeEmittedIds(new Set(ids), ids);
+	assert.equal(merged.length, 150);
+	assert.deepEqual(new Set(merged), new Set(ids));
+});
+
 test("mergeEmittedIds does not truncate below the cap", () => {
 	const merged = mergeEmittedIds(new Set(["a"]), ["b", "c"]);
 	assert.equal(merged.length, 3);
