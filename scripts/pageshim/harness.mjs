@@ -134,6 +134,7 @@ async function hostMain({
 	clockNowMs,
 	includeScopeEntries,
 	omitScopeEntries,
+	scopeEntriesError,
 	thinHost,
 }) {
 	// Deadline time must continue advancing when fixture calendar time is frozen.
@@ -162,8 +163,12 @@ async function hostMain({
 			scopes.map((scope) =>
 				typeof scope === "string" ? scope : scope.name,
 			),
-		requestedScopeEntries: () =>
-			includeScopeEntries ? scopes : undefined,
+		requestedScopeEntries() {
+			if (this !== page)
+				throw new Error("scope reader requires the PageShim receiver");
+			if (scopeEntriesError !== undefined) throw new Error(scopeEntriesError);
+			return includeScopeEntries ? scopes : undefined;
+		},
 		// Opaque run input from the web layer; null for catalog runs.
 		...(thinHost ? { input: () => null } : {}),
 		evaluate: (code) => call("evaluate", [String(code)]),
@@ -244,6 +249,8 @@ async function hostMain({
 	const page = new Proxy(impl, {
 		get(t, k) {
 			if (typeof k === "symbol" || k === "then") return undefined;
+			if (k === "requestedScopeEntries" && omitScopeEntries === "non-throwing")
+				return undefined;
 			if (!Object.hasOwn(t, k))
 				throw new Error(`page.${k} is not part of the PageShim API`);
 			return t[k];
@@ -506,7 +513,9 @@ function untilAborted(promise, signal) {
  * @param {object} o
  * @param {string} o.bundle path to the built bundle
  * @param {{ hosts: RegExp, resolve: (url: string) => {status:number, contentType:string, body:string|Buffer}, setLoggedIn: (v: boolean) => void, loginUrl: string, homeUrl: string }} o.fixtures
- * @param {string[]} o.scopes
+ * @param {Array<string | {name: string, time_range?: {since?: string, until?: string}}>} o.scopes
+ * @param {boolean | "non-throwing"} [o.missingScopeEntries] omit the optional reader; true makes lookup throw
+ * @param {string} [o.scopeEntriesError] error message thrown by an installed scope reader
  * @param {Record<string, unknown>} [o.initialState] state committed by an earlier run
  * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
  * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept only streamed results
@@ -553,6 +562,7 @@ export async function runHarness({
 	clockNowMs,
 	legacyScopeBridge = false,
 	missingScopeEntries = false,
+	scopeEntriesError,
 	acceptLegacyResult,
 	observeBridge,
 	signal,
@@ -890,6 +900,7 @@ export async function runHarness({
 			clockNowMs,
 			includeScopeEntries: !legacyScopeBridge,
 			omitScopeEntries: missingScopeEntries,
+			scopeEntriesError,
 			thinHost: resultStreaming,
 		});
 		const ret = await untilAborted(evaluated, signal);

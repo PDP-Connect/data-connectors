@@ -422,6 +422,32 @@ test("a PageShim entry's local helper is part of its connector artifact hash", a
   }
 });
 
+test("a generated PageShim scope dependency changes only the generated connector input hash", async () => {
+  const repo = makeRepo();
+  try {
+    for (const [name, pageshim] of [
+      ["github", { scope_prefix: "github" }],
+      ["oura_browser", { scope_prefix: "oura", entry: "oura_browser.ts" }],
+    ]) {
+      const path = `connectors/${name}/manifest.json`;
+      const profile = JSON.parse(readFileSync(join(repo.dir, path), "utf8"));
+      profile.mobile = { pageshim };
+      repo.write(path, JSON.stringify(profile));
+    }
+    repo.write("scripts/pageshim/capabilities.mjs", "export const isPageShimCapable = () => true;\n");
+    repo.write("scripts/pageshim/entries/oura_browser.ts", "export {};\n");
+    repo.write("scripts/pageshim/requested-scope-entries.ts", "export { range } from './requested-time-range.ts';\n");
+    const dependency = "scripts/pageshim/requested-time-range.ts";
+    repo.write(dependency, "export const range = 'before';\n");
+    const before = await fleetHashes(repo, repo.commit("add generated PageShim scope inputs"));
+    repo.write(dependency, "export const range = 'after';\n");
+    const after = await fleetHashes(repo, repo.commit("change generated PageShim scope input"));
+    assert.deepEqual(changedConnectors(before, after), ["github"]);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("a PageShim injected shim's local helper is part of its connector artifact hash", async () => {
   const repo = makeRepo();
   try {

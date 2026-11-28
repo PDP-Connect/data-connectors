@@ -292,6 +292,185 @@ for (const name of pageShimConnectors(
 	});
 }
 
+const characterAiChat = "character_ai.chats";
+const characterAiMessages = "character_ai.messages";
+const earlyMessageId = "00000000-0000-4000-8000-000000000b01";
+const lateMessageId = "00000000-0000-4000-8000-000000000b02";
+const youtubeLikes = "youtube.likes";
+const youtubeWatchLater = "youtube.watch_later";
+const youtubeVideos = ["VIDEO_SYNTHETIC_001", "VIDEO_SYNTHETIC_002"];
+const ouraReadiness = "oura.readiness";
+const ouraDayRange = { since: "2026-09-23", until: "2026-09-24" };
+const ouraReadinessId = "00000000-0000-4000-8000-000000000301";
+
+for (const scenario of [
+	{
+		connector: "character_ai", // No manifest entry override: build the generated adapter.
+		allScopes: [characterAiChat, characterAiMessages],
+		restrictedScopes: [
+			characterAiChat,
+			{
+				name: characterAiMessages,
+				time_range: { since: "2026-10-01T10:00:30Z" },
+			},
+		],
+		idField: "id",
+		full: {
+			[characterAiChat]: ["00000000-0000-4000-8000-000000000a01"],
+			[characterAiMessages]: [earlyMessageId, lateMessageId],
+		},
+		restricted: {
+			[characterAiChat]: ["00000000-0000-4000-8000-000000000a01"],
+			[characterAiMessages]: [lateMessageId],
+		},
+	},
+	{
+		connector: "youtube",
+		allScopes: [youtubeLikes, youtubeWatchLater],
+		// YouTube supports stream selection. Its manifest has no consent time field.
+		restrictedScopes: [{ name: youtubeLikes }],
+		idField: "video_id",
+		full: { [youtubeLikes]: youtubeVideos, [youtubeWatchLater]: youtubeVideos },
+		restricted: { [youtubeLikes]: youtubeVideos },
+	},
+	{
+		connector: "oura_browser",
+		allScopes: [ouraReadiness],
+		restrictedScopes: [{ name: ouraReadiness, time_range: ouraDayRange }],
+		idField: "id",
+		full: { [ouraReadiness]: [
+			"00000000-0000-4000-8000-000000000302",
+			ouraReadinessId,
+			"00000000-0000-4000-8000-000000000303",
+		] },
+		restricted: { [ouraReadiness]: [ouraReadinessId] },
+		clockNowMs: Date.parse("2026-10-16T12:00:00Z"),
+	},
+]) {
+	const { connector, allScopes, restrictedScopes, idField, full, restricted } = scenario;
+	test(`${connector}: optional mobile scope reader`, { timeout: 120_000 }, async (t) => {
+		const { pageshimCase, scopeReaderFixtures } = await import(`./fixtures/${connector}.mjs`);
+		const built = await buildPageshim({
+			connector,
+			outfile: join(out, `${connector}-scope-reader.js`),
+		});
+		const run = (options) => runHarness({
+			bundle: built.outfile,
+			fixtures: scopeReaderFixtures ?? pageshimCase.fixtures,
+			fixtureReady: true,
+			timerScale: 0.1,
+			clockNowMs: scenario.clockNowMs,
+			...options,
+		});
+		const emittedIds = (result) => Object.fromEntries(
+			Object.entries(result)
+				.filter(([, payload]) => Array.isArray(payload?.records))
+				.map(([scope, payload]) => [scope, payload.records.map((record) => record[idField])]),
+		);
+
+		for (const [label, options, expected] of [
+			[
+				"legacy host with a missing reader",
+				{ scopes: allScopes, missingScopeEntries: "non-throwing" },
+				full,
+			],
+			[
+				"legacy host that throws on missing members",
+				{ scopes: allScopes, missingScopeEntries: true },
+				full,
+			],
+			[
+				"restricted grant from a receiver-bound reader",
+				{ scopes: restrictedScopes },
+				restricted,
+			],
+		]) {
+			await t.test(label, async () => {
+				const r = await run(options);
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.equal(r.data.error, undefined);
+				assert.deepEqual(r.result.errors, []);
+				assert.deepEqual(emittedIds(r.result), expected);
+			});
+		}
+
+		for (const resultStreaming of connector === "oura_browser" ? [false, true] : [false]) {
+			const label = resultStreaming
+				? "a present reader failure streams no result on a thin host"
+				: "a present reader failure emits no records";
+			await t.test(label, async () => {
+				const scopeEntriesError = "Synthetic scope reader failure";
+				const initialState = connector === "oura_browser"
+					? { [ouraReadiness]: { next_day: "2026-09-20" } }
+					: {};
+				const options = {
+					scopes: restrictedScopes,
+					initialState,
+					resultStreaming,
+					resultSpoolDirectory: join(out, `${connector}-scope-reader-streamed`),
+				};
+				const r = await run({ ...options, scopeEntriesError });
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				if (resultStreaming) {
+					assert.deepEqual(r.streamScopeFiles, {}, "a failed scope reader streamed records");
+					assert.equal(r.streamResult, null);
+					assert.equal(r.result, null);
+				} else {
+					assert.deepEqual(emittedIds(r.result), {}, "a failed scope reader leaked records");
+					assert.deepEqual(
+						r.result.errors.map(({ reason, disposition }) => [reason, disposition]),
+						[[scopeEntriesError, "fatal"]],
+					);
+				}
+				assert.equal(r.data.error, scopeEntriesError);
+				assert.deepEqual(r.stateMessages, []);
+				assert.deepEqual(r.states, initialState);
+				assert.deepEqual(r.pageNavigations, []);
+
+				if (connector === "oura_browser") {
+					const recovered = await run({ ...options, initialState: r.states });
+					assert.deepEqual(recovered.ret, { ok: true }, recovered.log.slice(-20).join("\n"));
+					assertCleanRun(recovered);
+					assert.equal(recovered.data.error, undefined);
+					const result = resultStreaming ? recovered.streamDone : recovered.result;
+					assert.deepEqual(result.errors, []);
+					if (resultStreaming) {
+						assert.equal(recovered.streamResult.completed, true);
+						const scopes = Object.fromEntries(Object.entries(recovered.streamScopeFiles)
+							.map(([scope, file]) => [scope, JSON.parse(readFileSync(file, "utf8"))]));
+						assert.deepEqual(emittedIds(scopes), restricted);
+					} else {
+						assert.deepEqual(emittedIds(result), restricted);
+					}
+					assert.deepEqual(recovered.stateMessages.map(({ stream }) => stream), [ouraReadiness]);
+					assert.equal(recovered.states[ouraReadiness].next_day, ouraDayRange.until);
+					assert.equal(recovered.states[ouraReadiness].requested_since, ouraDayRange.since);
+				}
+			});
+		}
+
+		if (connector === "youtube") {
+			await t.test("a time range leaves only the supported sibling stream", async () => {
+				const r = await run({
+					scopes: [youtubeLikes, {
+						name: youtubeWatchLater,
+						time_range: { since: "2026-10-01T10:00:30Z" },
+					}],
+				});
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.deepEqual(emittedIds(r.result), restricted);
+				assert.equal(r.result.errors.length, 1);
+				assert.equal(r.result.errors[0].scope, youtubeWatchLater);
+				assert.equal(r.result.errors[0].disposition, "omitted");
+				assert.match(r.result.errors[0].reason, /no supported consent_time_field/);
+			});
+		}
+	});
+}
+
 test("oura_browser: a sign-in after 45 s outlives the 30 s bridge-call timeout", {
 	timeout: 180_000,
 }, async () => {

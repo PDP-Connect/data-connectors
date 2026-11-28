@@ -33,6 +33,7 @@ declare const PAGESHIM_CONNECTOR_MANIFEST: string | undefined;
 /** The subset of the PageShim page API this adapter calls. */
 export interface ShimPage {
 	requestedScopes: () => string[];
+	requestedScopeEntries?: () => unknown;
 	evaluate: (code: string) => Promise<unknown>;
 	goto: (url: string) => Promise<null>;
 	sleep: (ms: number) => Promise<void>;

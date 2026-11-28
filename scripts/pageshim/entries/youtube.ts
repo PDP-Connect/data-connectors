@@ -4,15 +4,10 @@ import { collectYoutubeBrowser, hasYoutubeSession } from "../../../connectors/yo
 import { youtubePageShimAdapter, collectYoutubeHistoryPageShim } from "../../../connectors/youtube/pageshim.ts";
 import { validateRecord } from "../../../connectors/youtube/schemas.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
-import { applyRequestedScopeEntries } from "../requested-scope-entries.ts";
+import { applyRequestedScopeEntries, readRequestedScopeEntries } from "../requested-scope-entries.ts";
 declare const PAGESHIM_CONNECTOR_VERSION: string;
 declare const PAGESHIM_CONNECTOR_STREAMS: string[];
 const streams = PAGESHIM_CONNECTOR_STREAMS;
-function scopeEntries(page: ShimPage): unknown {
-	let read: (() => unknown) | undefined;
-	try { read = (page as ShimPage & { requestedScopeEntries?: () => unknown }).requestedScopeEntries; } catch { return undefined; }
-	return read?.call(page);
-}
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage, initialState: Record<string, unknown>, supportsState: boolean,
 ) => runOnPageShim(page, {
@@ -24,7 +19,7 @@ function scopeEntries(page: ShimPage): unknown {
 	prepareProbe: async (facade) => { await facade.goto("https://www.youtube.com/"); },
 	probe: (facade) => hasYoutubeSession(youtubePageShimAdapter(facade as never)),
 	validateRecord,
-	prepareRequested: (requested) => applyRequestedScopeEntries(requested, scopeEntries(page), "youtube"),
+	prepareRequested: (requested) => applyRequestedScopeEntries(requested, readRequestedScopeEntries(page), "youtube"),
 	collect: async (raw) => {
 		const ctx = raw as unknown as Parameters<typeof collectYoutubeBrowser>[0];
 		const requested = new Map(ctx.requested);
