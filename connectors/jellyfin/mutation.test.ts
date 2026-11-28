@@ -257,7 +257,7 @@ test("mutation: repeated-page detection catches non-advancing pagination", async
 });
 
 test("mutation: max-pages guard is testable with injected config", async () => {
-	// Create server that returns empty pages with huge claimed total
+	// Create server that returns one item per page with huge claimed total
 	const emptyPagingServer = new (class {
 		private server: any;
 		private port = 0;
@@ -295,10 +295,23 @@ test("mutation: max-pages guard is testable with injected config", async () => {
 						}
 
 						if (path.includes("/Users/user-123/Items")) {
-							// Empty items but claim 1 million total (forces pagination loop)
+							// One new item per page but claim 1 million total (forces pagination loop)
+							const start = Number(
+								new URL(path, "http://x").searchParams.get("StartIndex") || "0",
+							);
 							res.writeHead(200);
 							res.end(
-								JSON.stringify({ Items: [], TotalRecordCount: 1_000_000 }),
+								JSON.stringify({
+									Items: [
+										{
+											Id: `item-${start}`,
+											Name: `Item ${start}`,
+											Type: "Movie",
+											UserData: { PlayCount: 0, Played: false },
+										},
+									],
+									TotalRecordCount: 1_000_000,
+								}),
 							);
 							return;
 						}

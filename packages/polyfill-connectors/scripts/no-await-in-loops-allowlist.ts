@@ -3458,14 +3458,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/jellyfin/index.ts",
-			line: 1007,
+			line: 1012,
 			column: 3,
 			category: "shared_mutable_accumulator",
 			note: "collectItems(): loop body mutates shared state.items/totalItemsEmitted accumulator the next iteration reads",
 		},
 		{
 			path: "connectors/jellyfin/index.ts",
-			line: 1083,
+			line: 1088,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitErrorSkipResults(): Collection Profile protocol emission requiring in-order delivery",

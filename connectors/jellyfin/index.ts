@@ -969,7 +969,12 @@ async function collectItemsForLibrary(
 
 		lastPageFingerprint = currentPageFingerprint;
 
-		startIndex += pageSize;
+		if (pageItems.length === 0 && startIndex < totalCount) {
+			throw new Error(
+				`jellyfin_pagination_non_advancing: library ${libraryId} returned an empty nonfinal page at offset ${startIndex}`,
+			);
+		}
+		startIndex += pageItems.length;
 		hasMore = startIndex < totalCount;
 		pageCount += 1;
 	}

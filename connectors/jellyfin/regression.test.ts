@@ -150,6 +150,46 @@ function startPagedServer(
 	});
 }
 
+test("regression: a short nonfinal page continues at the next returned position", async () => {
+	const offsets: number[] = [];
+	const server = await startPagedServer((offset) => {
+		offsets.push(offset);
+		const ids = offset === 0 ? ["a"] : offset === 1 ? ["b", "c"] : [];
+		return { items: ids.map((Id) => ({ Id, Name: Id })), total: 3 };
+	});
+	const baseUrl = await server.url;
+	try {
+		const { ctx, messages, records } = makeContext({
+			credentials: { base_url: baseUrl, secret: "test-key" },
+			streams: [{ name: "items" }],
+		});
+		await collect(ctx);
+		assert.deepEqual(offsets, [0, 1]);
+		assert.deepEqual(records.filter((record) => record.stream === "items")
+			.map((record) => record.data.id), ["a", "b", "c"]);
+		assert.equal(messages.filter((message) => message.type === "STATE" &&
+			message.stream === "items").length, 1);
+	} finally {
+		await server.stop();
+	}
+});
+
+test("regression: an empty nonfinal page does not commit items state", async () => {
+	const server = await startPagedServer(() => ({ items: [], total: 3 }));
+	const baseUrl = await server.url;
+	try {
+		const { ctx, messages } = makeContext({
+			credentials: { base_url: baseUrl, secret: "test-key" },
+			streams: [{ name: "items" }],
+		});
+		await assert.rejects(collect(ctx), /jellyfin_pagination_non_advancing/);
+		assert.equal(messages.filter((message) => message.type === "STATE" &&
+			message.stream === "items").length, 0);
+	} finally {
+		await server.stop();
+	}
+});
+
 test("regression: two distinct full pages of equal size must succeed (normal pagination)", async () => {
 	const server = await startPagedServer((startIndex) => {
 		if (startIndex === 0) {

@@ -271,29 +271,18 @@ class FakeJellyfinServer {
 							return;
 						}
 
-						// Normal mode
-						if (startIndex === 0) {
-							const items = Array.from({ length: 50 }, (_, i) => ({
-								Id: `item-${i}`,
-								Name: `Item ${i}`,
-								Type: "Movie",
-								UserData: { PlayCount: 0, Played: false },
-							}));
-							res.writeHead(200);
-							res.end(JSON.stringify({ Items: items, TotalRecordCount: 100 }));
-						} else if (startIndex === 500) {
-							const items = Array.from({ length: 50 }, (_, i) => ({
-								Id: `item-${500 + i}`,
-								Name: `Item ${500 + i}`,
-								Type: "Movie",
-								UserData: { PlayCount: 0, Played: false },
-							}));
-							res.writeHead(200);
-							res.end(JSON.stringify({ Items: items, TotalRecordCount: 100 }));
-						} else {
-							res.writeHead(200);
-							res.end(JSON.stringify({ Items: [], TotalRecordCount: 100 }));
-						}
+						// Normal mode: a real paginator over a 100 item inventory.
+						const limit = Number(url.searchParams.get("Limit") || "100");
+						const total = 100;
+						const count = Math.max(0, Math.min(limit, total - startIndex));
+						const items = Array.from({ length: count }, (_, i) => ({
+							Id: `item-${startIndex + i}`,
+							Name: `Item ${startIndex + i}`,
+							Type: "Movie",
+							UserData: { PlayCount: 0, Played: false },
+						}));
+						res.writeHead(200);
+						res.end(JSON.stringify({ Items: items, TotalRecordCount: total }));
 						return;
 					}
 
@@ -419,7 +408,7 @@ test("e2e: items coverage declares the server-reported TotalRecordCount as the d
 		assert.ok(coverage, "expected items DETAIL_COVERAGE");
 		assert.equal(coverage.state_stream, "items");
 		// The denominator is the server's own inventory size, not the emit count:
-		// the fake server reports 100 and serves 100 across two pages.
+		// the fake server reports 100 and serves all 100 it lists.
 		assert.equal(coverage.considered, 100);
 		assert.equal(
 			coverage.covered,
