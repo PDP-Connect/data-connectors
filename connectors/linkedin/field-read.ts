@@ -168,7 +168,7 @@ export function partialDate(value: unknown): FieldRead<string> {
  * is malformed rather than a thrown `RangeError`.
  */
 export function epochMillis(value: unknown): FieldRead<string> {
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
 		return unavailable("malformed");
 	}
 	if (value === 0) return EMPTY;
