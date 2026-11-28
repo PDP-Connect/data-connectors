@@ -19,6 +19,32 @@ import {
 } from "./oci-fixture.mjs";
 import { fetchResolvedArtifact, installFromLock, pruneInstalled, toPortableArtifactPath, verifyInstalled } from "./index.mjs";
 
+test("returns the exact final server failure when the retry budget runs out", async () => {
+  const terminal = new Response("synthetic unavailable", { status: 503 });
+  const first = new Response(null, { status: 503 });
+  const responses = [first, terminal];
+  const retries = [];
+  const { fetchWithRetry } = await import("./retry.mjs");
+  const result = await fetchWithRetry("https://registry.example.test/fixture", {
+    attempts: 2, fetchImpl: async () => responses.shift(), sleep: async () => {},
+    onRetry: ({ status }) => { retries.push(status); },
+  });
+  assert.strictEqual(result, terminal);
+  assert.deepEqual(retries, [503]);
+  assert.equal(responses.length, 0);
+});
+
+test("a failed response cleanup does not abort the next retry", async () => {
+  const recovered = new Response(null, { status: 200 });
+  const responses = [{ status: 503, body: { cancel: async () => { throw new Error("synthetic cleanup"); } } }, recovered];
+  const { fetchWithRetry } = await import("./retry.mjs");
+  const result = await fetchWithRetry("https://registry.example.test/fixture", {
+    attempts: 2, fetchImpl: async () => responses.shift(), sleep: async () => {}, onRetry: () => {},
+  });
+  assert.strictEqual(result, recovered);
+  assert.equal(responses.length, 0);
+});
+
 function fixtureOptions(registry, signer) {
   return {
     ociScheme: "http",

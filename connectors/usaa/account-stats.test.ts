@@ -39,7 +39,7 @@ import {
 	emitAccountsStream,
 	readPriorAccountFingerprints,
 } from "./index.ts";
-import { buildAccountStatsRecord } from "./parsers.ts";
+import { buildAccountRecord, buildAccountStatsRecord } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DashboardAccount } from "./types.ts";
 
@@ -104,6 +104,30 @@ test("account_stats: builder builds the date-scoped key and carries balances; en
 	assert.equal(stat.observed_on, DAY1);
 	assert.equal(stat.balance_cents, 123_456, "carries the balance");
 	assert.equal(stat.available_balance_cents, null);
+});
+
+test("account_stats: a missing tile identifier uses the same fallback in both streams", () => {
+	const tile = makeAccount({
+		account_id_raw: "",
+		raw_text: "Invented stable account tile",
+	});
+	const entity = buildAccountRecord(tile, RUN1_AT);
+	const observation = buildAccountStatsRecord(tile, DAY1);
+	assert.ok(entity.id);
+	assert.equal(observation.account_id, entity.id);
+	assert.equal(observation.id, entity.id + ":" + DAY1);
+});
+
+test("account_stats: an observed zero balance is distinct from an unknown balance", () => {
+	const zero = buildAccountStatsRecord(makeAccount({ balance_cents: 0 }), DAY1);
+	const unknown = buildAccountStatsRecord(
+		makeAccount({ balance_cents: null }),
+		DAY1,
+	);
+	assert.equal(zero.balance_cents, 0);
+	assert.equal(unknown.balance_cents, null);
+	assert.equal(zero.id, unknown.id);
+	assert.equal(zero.available_balance_cents, null);
 });
 
 test("account_stats: a balance-only change does not re-emit the entity but does emit a fresh stat", async () => {

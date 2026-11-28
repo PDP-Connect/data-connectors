@@ -13,6 +13,8 @@ import {
 	scrapeAdvertisers,
 	scrapeTargetingCategories,
 } from "./index.ts";
+import { buildAdRecordsWebCrypto } from "./mobile.ts";
+import { buildAdRecords } from "./parsers.ts";
 
 type ClassifierArgs = Parameters<typeof classifyAdsDialogInPage>[0];
 type Classification = ReturnType<typeof classifyAdsDialogInPage>;
@@ -931,3 +933,29 @@ for (const surface of ["advertisers", "categories"] as const) {
   });
  }
 }
+
+test("mobile and desktop Ads keep the same typed keys after trimming and dropping blank rows", async () => {
+ const input = {
+  advertisers: ["  Café  ", ""],
+  adTopics: ["Café", "   "],
+  categories: [{name: "Café", description: null}, {name: "\t", description: "not a row"}],
+ };
+ const mobile = await buildAdRecordsWebCrypto(input);
+ assert.deepEqual(mobile, buildAdRecords(input));
+ assert.deepEqual(mobile.map(({kind, name}) => [kind, name]),
+  [["advertiser", "Café"], ["ad_topic", "Café"], ["ad_category", "Café"]]);
+ assert.equal(new Set(mobile.map(({id}) => id)).size, 3);
+});
+
+test("changing category description updates data without re-keying the category on either platform", async () => {
+ const earlier = {advertisers: [], adTopics: [], categories: [{name: "Synthetic category", description: null}]};
+ const later = {...earlier, categories: [{name: "  Synthetic category ", description: "New description"}]};
+ const before = buildAdRecords(earlier);
+ const after = await buildAdRecordsWebCrypto(later);
+ assert.equal(before.length, 1);
+ assert.equal(after.length, 1);
+ assert.equal(before[0]?.id, after[0]?.id);
+ assert.equal(before[0]?.description, null);
+ assert.equal(after[0]?.description, "New description");
+ assert.deepEqual(after, buildAdRecords(later));
+});

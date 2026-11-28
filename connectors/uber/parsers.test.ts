@@ -72,6 +72,18 @@ test("parseIsoDateTime: returns null for unparseable input", () => {
 	assert.equal(parseIsoDateTime("not a date"), null);
 	assert.equal(parseIsoDateTime(null), null);
 });
+test("parseIsoDateTime: returns null for a missing or empty timestamp", () => {
+	assert.equal(parseIsoDateTime(undefined), null);
+	assert.equal(parseIsoDateTime(""), null);
+});
+
+test("parseIsoDateTime: rejects an out-of-range clock with an explicit offset", () => {
+	assert.equal(parseIsoDateTime("2026-04-15T12:60:00+01:30"), null);
+	assert.equal(
+		parseIsoDateTime("2026-04-15T12:59:00+01:30"),
+		"2026-04-15T11:29:00.000Z",
+	);
+});
 
 test("parseDistanceMeters: converts kilometers to meters", () => {
 	assert.equal(parseDistanceMeters("29.49", "kilometers"), 29_490);
@@ -222,6 +234,14 @@ test("tripRecord: returns null when GetTrip produced no trip at all", () => {
 	assert.equal(tripRecord("trip-4", undefined, undefined), null);
 });
 
+test("tripRecord preserves the sign of a fare padded with whitespace", () => {
+	const fare = " -$4.50 ";
+	const record = tripRecord("synthetic-trip", { fare }, undefined);
+	assert.ok(record);
+	assert.equal(record.fare_total, fare);
+	assert.equal(record.fare_total_cents, -450);
+});
+
 test("parseFareBreakdown: extracts label/amount pairs by data-testid, ignoring unrelated HTML", () => {
 	const html = `<div class="fare-breakdown-wrapper"><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_trip_fare" class="fare-breakdown-name">Trip fare</span><span data-testid="fare_line_item_amount_trip_fare" class="fare-breakdown-amount">€40.95</span></div><div class="fare-breakdown-item"><span data-testid="fare_line_item_label_promotion" class="fare-breakdown-name">Promotion</span><span data-testid="fare_line_item_amount_promotion" class="fare-breakdown-amount">-€6.44</span></div></div><div class="unrelated"><span>Not a fare line</span></div>`;
 	const lines = parseFareBreakdown(html);
@@ -287,4 +307,14 @@ test("receiptRecord: falls back to null fare_total when no fare_total line exist
 
 test("receiptRecord: returns null with no fare-breakdown evidence at all", () => {
 	assert.equal(receiptRecord("trip-3", []), null);
+});
+
+test("parseDistanceMeters: preserves an explicit zero in a supported unit", () => {
+	assert.equal(parseDistanceMeters("0", "kilometers"), 0);
+	assert.equal(parseDistanceMeters("0", "miles"), 0);
+});
+
+test("parseDurationSeconds: preserves zero minutes and accepts an hours-only display", () => {
+	assert.equal(parseDurationSeconds("0 minutes"), 0);
+	assert.equal(parseDurationSeconds("2 hours"), 7200);
 });

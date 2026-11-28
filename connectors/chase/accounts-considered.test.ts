@@ -230,3 +230,46 @@ test("accounts considered: legacy callers without a cursor declare no coverage",
 		"no fingerprint cursor → not the steady-state suppress shape → declare no considered/covered",
 	);
 });
+
+test("accounts considered: a verified empty inventory clears prior fingerprints", async () => {
+	const first = makeDeps(FROZEN_EMITTED_AT_1);
+	await emitAccountsStream(
+		first.deps,
+		[makeAccount({ internal_id: "synthetic-1" })],
+		openFingerprintCursor(undefined),
+	);
+	const current = makeDeps(FROZEN_EMITTED_AT_2);
+	await emitAccountsStream(
+		current.deps,
+		[],
+		openFingerprintCursor(nextStateFrom(first.messages).accounts),
+	);
+
+	const coverage = accountsSelfCoverage(current.messages);
+	assert.equal(current.emitted.length, 0);
+	assert.equal(coverage?.considered, 0);
+	assert.equal(coverage?.covered, 0);
+	const state = nextStateFrom(current.messages);
+	assert.deepEqual(state.accounts, { fetched_at: FROZEN_EMITTED_AT_2 });
+});
+
+test("accounts considered: a rejected write publishes neither coverage nor a successor cursor", async () => {
+	const run = makeDeps(FROZEN_EMITTED_AT_1);
+	const failure = new Error("synthetic sink failure");
+	run.deps.emitRecord = async () => {
+		throw failure;
+	};
+	await assert.rejects(
+		emitAccountsStream(
+			run.deps,
+			[makeAccount({ internal_id: "synthetic-1" })],
+			openFingerprintCursor(undefined),
+		),
+		{ message: failure.message },
+	);
+	assert.equal(accountsSelfCoverage(run.messages), undefined);
+	assert.equal(
+		run.messages.some((m) => m.type === "STATE" && m.stream === "accounts"),
+		false,
+	);
+});

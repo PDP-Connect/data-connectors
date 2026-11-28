@@ -116,3 +116,38 @@ test("validateRecord reports issues for a drifted events record", () => {
 		assert.ok(result.issues.some((i) => i.path === "id"));
 	}
 });
+
+test("validateRecord rejects a raw iCal end value while allowing an absent end", () => {
+	const malformed = validateRecord("events", {
+		...EVENT_RECORD,
+		end: "20240605T140000Z",
+	});
+	assert.equal(malformed.ok, false);
+	if (!malformed.ok) {
+		assert.deepEqual(
+			malformed.issues.map((issue) => issue.path),
+			["end"],
+		);
+	}
+	assert.equal(
+		validateRecord("events", { ...EVENT_RECORD, end: null }).ok,
+		true,
+	);
+});
+
+test("validateRecord identifies the attendee with a malformed address", () => {
+	const result = validateRecord("events", {
+		...EVENT_RECORD,
+		attendees: [
+			{ email: "participant@example.invalid", name: null, role: null },
+			{ email: "not-an-address", name: null, role: null },
+		],
+	});
+	assert.equal(result.ok, false);
+	if (!result.ok) {
+		assert.deepEqual(
+			result.issues.map((issue) => issue.path),
+			["attendees.1.email"],
+		);
+	}
+});

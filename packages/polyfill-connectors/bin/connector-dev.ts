@@ -594,19 +594,23 @@ export function writeLastState(
  * that case, and silently falling back to an empty-state full run would
  * contradict the flag the caller explicitly asked for.
  */
-export function readLastState(connector: string): LastState {
+export function readLastState(
+	connector: string,
+	read: (path: string, encoding: "utf8") => string = readFileSync,
+): LastState {
 	const path = lastStatePath(connector);
 	let raw: string;
 	try {
-		raw = readFileSync(path, "utf8");
+		raw = read(path, "utf8");
 	} catch (err) {
 		throw new Error(
 			`--seed-last-state: no prior run state at ${path}; run once without the flag first, then re-run with --seed-last-state.`,
 			{ cause: err },
 		);
 	}
+	let decoded: unknown;
 	try {
-		return JSON.parse(raw) as LastState;
+		decoded = JSON.parse(raw);
 	} catch (err) {
 		const reason = err instanceof Error ? err.message : String(err);
 		throw new Error(
@@ -614,6 +618,22 @@ export function readLastState(connector: string): LastState {
 			{ cause: err },
 		);
 	}
+	if (
+		!isStateObject(decoded) ||
+		decoded.connector !== connector ||
+		typeof decoded.started_at !== "string" ||
+		!Number.isFinite(Date.parse(decoded.started_at)) ||
+		!isStateObject(decoded.state)
+	) {
+		throw new Error(
+			`--seed-last-state: ${path} has an invalid saved-state envelope; run once without the flag to rewrite it.`,
+		);
+	}
+	return { connector, started_at: decoded.started_at, state: decoded.state };
+}
+
+function isStateObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ─── Failure-evidence retention (default-on) ──────────────────────────────
