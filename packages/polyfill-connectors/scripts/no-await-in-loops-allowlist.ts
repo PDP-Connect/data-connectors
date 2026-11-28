@@ -2926,7 +2926,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/google_maps/index.ts",
-			line: 565,
+			line: 588,
 			column: 3,
 			category: "dependent_file_cursor",
 			note: "loadExports(): sequential file progress follows the discovered source order",

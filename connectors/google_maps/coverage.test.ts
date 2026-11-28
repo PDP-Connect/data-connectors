@@ -659,6 +659,46 @@ test("google_maps fails closed when discovery misses the source boundary", async
 	}
 });
 
+test("unaccounted points do not advance their cursor, and malformed prior marks are ignored", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-maps-cursor-"));
+	try {
+		const file = join(root, "Records.json");
+		await writeFile(
+			file,
+			JSON.stringify({ locations: [...EXPORT_FIXTURE.locations, {}] }),
+		);
+		const partial = await runImport(root);
+		assert.equal(pointsCoverage(partial.messages).covered, 2);
+		assert.ok(
+			partial.messages.some(
+				(m) => m.type === "SKIP_RESULT" && m.reason === "element_unaccounted",
+			),
+		);
+		assert.ok(
+			!partial.messages.some(
+				(m) => m.type === "STATE" && m.stream === "timeline_points",
+			),
+		);
+		await writeFile(file, JSON.stringify(EXPORT_FIXTURE));
+		const recovered = await runImport(root, {
+			timeline_points: { last_timestamp: "not-a-timestamp" },
+		});
+		assert.equal(
+			recovered.messages.filter(
+				(m) => m.type === "RECORD" && m.stream === "timeline_points",
+			).length,
+			2,
+		);
+		assert.ok(
+			recovered.messages.some(
+				(m) => m.type === "STATE" && m.stream === "timeline_points",
+			),
+		);
+	} finally {
+		await rm(root, { force: true, recursive: true });
+	}
+});
+
 test("google_maps still declares full coverage when the incremental cursor suppresses every point", async () => {
 	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-steady-"));
 	try {
