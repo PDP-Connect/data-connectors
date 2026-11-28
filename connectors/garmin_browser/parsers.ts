@@ -166,10 +166,12 @@ export function summaryRangeDays(
 ): Map<string, Obj> | null {
 	if (!isObj(json) || !Array.isArray(json.data)) return null;
 	const days = new Map<string, Obj>();
+	const seen = new Set<string>();
 	for (const entry of json.data) {
 		if (!isObj(entry)) return null;
 		const day = entry.calendarDate;
-		if (!isDay(day) || !inWindow(day, window) || days.has(day)) return null;
+		if (!isDay(day) || !inWindow(day, window) || seen.has(day)) return null;
+		seen.add(day);
 		const movement = group(entry.movement);
 		const steps = group(movement?.steps);
 		const heart = group(entry.heartRate);
