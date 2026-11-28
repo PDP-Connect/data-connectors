@@ -8,16 +8,20 @@
  * Runs ONE connector's own entrypoint in a subprocess and drives the
  * Collection Profile protocol (START on stdin, JSONL
  * RECORD/STATE/SKIP_RESULT/PROGRESS/INTERACTION/ASSISTANCE/DONE on stdout)
- * over stdio — the exact spawn shape `runConnectorProtocolSubprocess`
- * (src/test-harness.ts) uses to prove connectors in tests, and the same
- * per-connector entrypoint `bin/orchestrate.ts` resolves via
- * `getConnectorPaths`/`readManifest` (src/orchestrator.ts). No parallel
- * runner: this file adds live human-readable streaming and a mechanical
- * run-summary artifact on top of that path, it does not reimplement it.
- * The dev subprocess uses Node's native TypeScript stripping. Production
- * connector artifacts use their own bundles. Native stripping keeps
- * serialized `page.evaluate` callbacks free of tsx's Node-only `__name`
- * helper without changing browser page globals.
+ * over stdio, using the same per-connector entrypoint `bin/orchestrate.ts`
+ * resolves via `getConnectorPaths`/`readManifest` (src/orchestrator.ts).
+ * No parallel runner: this file adds live human-readable streaming and a
+ * mechanical run-summary artifact on top of that path, it does not
+ * reimplement it.
+ *
+ * The dev subprocess runs the entrypoint with Node's native TypeScript
+ * stripping, which keeps serialized `page.evaluate` callbacks free of
+ * tsx's Node-only `__name` helper. Only connector-dev does this: the
+ * scenario recorder (bin/scenario-record.ts), the scenario verifier
+ * (bin/scenario-verify.ts) and `runConnectorProtocolSubprocess`
+ * (src/test-harness.ts) still spawn with `--import tsx`, so a callback
+ * that runs here can still throw `__name is not defined` under those.
+ * Production connector artifacts use their own bundles.
  *
  * Deliberately does NOT start the embedded personal server or register a
  * manifest the way `orchestrate.ts run` does — this is a local dev loop for
