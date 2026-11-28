@@ -262,6 +262,45 @@ test("requested missing Takeout stores emit redacted coverage progress", async (
 	}
 });
 
+test("invalid location shape does not stop a valid photos stream", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-takeout-invalid-location-"));
+	try {
+		const locations = join(root, "Location History (Timeline)");
+		const photos = join(root, "Photos", "Photos from 2024");
+		await mkdir(locations, { recursive: true });
+		await mkdir(photos, { recursive: true });
+		await writeFile(
+			join(locations, "Records.json"),
+			JSON.stringify({ locations: { fixture: true } }),
+		);
+		await writeFile(join(photos, "IMG_0001.jpg"), TINY_JPEG_A);
+		const result = await runTakeoutImport(root, ["location_history", "photos"]);
+		assert.ok(
+			skipResults(result.messages).some(
+				(item) =>
+					item.stream === "location_history" &&
+					item.reason === "invalid_location_records",
+			),
+		);
+		assert.equal(records(result.messages, "photos").length, 1);
+		assert.equal(
+			progressMessages(result.messages, "location_history").some((message) =>
+				message.startsWith("Found "),
+			),
+			false,
+		);
+		assert.equal(
+			result.messages.some(
+				(message) =>
+					message.type === "STATE" && message.stream === "location_history",
+			),
+			false,
+		);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("photos stream collapses duplicate album copies of the same photo to one record via content hash", async () => {
 	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-takeout-dup-"));
 	try {
