@@ -37,6 +37,7 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import {
 	type EmitDeps,
 	emitAccountsStream,
+	filterAccountsByScope,
 	readPriorAccountFingerprints,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -241,5 +242,56 @@ test("accounts: connector fingerprint (excludes fetched_at) == compaction finger
 		recordFingerprint(body, ["fetched_at"]),
 		recordFingerprint(later, ["fetched_at"]),
 		"fetched_at must not participate; both runs hash identically",
+	);
+});
+
+test("accounts: a scoped emission preserves the fingerprint for an unselected account", async () => {
+	const all = [
+		makeAccount({ internal_id: "A1" }),
+		makeAccount({ internal_id: "B1", name: "Unselected" }),
+	];
+	const initial = makeDeps(FROZEN_EMITTED_AT_1);
+	await emitAccountsStream(
+		initial.deps,
+		all,
+		openFingerprintCursor(undefined, {
+			excludeFromFingerprint: ["fetched_at"],
+		}),
+	);
+	const prior = nextStateFrom(initial.messages);
+	const fps = readPriorAccountFingerprints(prior);
+	assert.ok(fps.get("B1"));
+	const scoped = makeDeps(FROZEN_EMITTED_AT_2);
+	scoped.deps.resFilters.set("accounts", new Set(["A1"]));
+	const { filteredAccounts } = filterAccountsByScope(
+		all,
+		scoped.deps.resFilters,
+	);
+	await emitAccountsStream(
+		scoped.deps,
+		filteredAccounts,
+		openFingerprintCursor(prior.accounts, {
+			excludeFromFingerprint: ["fetched_at"],
+			priorFingerprints: fps,
+		}),
+		false,
+	);
+	assert.deepEqual(scoped.emitted, []);
+	assert.equal(
+		scoped.messages.filter((m) => m.type === "STATE" && m.stream === "accounts")
+			.length,
+		1,
+	);
+	assert.equal(
+		readPriorAccountFingerprints(nextStateFrom(scoped.messages)).get("B1"),
+		fps.get("B1"),
+	);
+	assert.deepEqual(
+		scoped.messages.flatMap((m) =>
+			m.type === "DETAIL_COVERAGE" && m.stream === "accounts"
+				? [m.considered]
+				: [],
+		),
+		[1],
 	);
 });

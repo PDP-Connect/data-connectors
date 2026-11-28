@@ -1587,6 +1587,7 @@ export async function emitAccountsStream(
 	deps: EmitDeps,
 	filteredAccounts: readonly ChaseAccount[],
 	fingerprintCursor?: FingerprintCursor,
+	fullInventory = true,
 ): Promise<void> {
 	// `covered` is the in-boundary accounts this run accounted for: emitted plus
 	// suppressed-because-unchanged. Counted independently at the loop site from
@@ -1642,9 +1643,10 @@ export async function emitAccountsStream(
 			covered,
 		}),
 	);
-	// Accounts enumeration is a full dashboard scan: prune fingerprints for
-	// accounts no longer present so a re-added account re-emits.
-	fingerprintCursor.dropUnseenIds();
+	// A scoped subset does not prove that an unselected account is absent.
+	if (fullInventory) {
+		fingerprintCursor.dropUnseenIds();
+	}
 	const cursor: Record<string, unknown> = { fetched_at: deps.emittedAt };
 	if (fingerprintCursor.size() > 0) {
 		cursor.fingerprints = fingerprintCursor.toState();
@@ -3346,6 +3348,7 @@ if (isMainModule(import.meta.url)) {
 						deps,
 						filteredAccounts,
 						accountsFingerprintCursor,
+						filteredAccounts.length === accounts.length,
 					);
 				}
 
