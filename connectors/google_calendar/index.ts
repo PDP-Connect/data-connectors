@@ -20,7 +20,7 @@
  *   {
  *     calendars: { fingerprints: { [calendarId]: sha1 } },
  *     events: {
- *       [calendarId]: { sync_token?: string, fingerprints: { [eventId]: sha1 } }
+ *       [calendarId]: { sync_token?, continuation?: { page_token, pending_prune? }, fingerprints }
  *     }
  *   }
  *
@@ -50,31 +50,20 @@ import {
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import { google_calendarPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import {
+	CalendarApiError,
 	type CalendarEvent,
 	type CalendarListEntry,
 	CalendarSyncTokenExpiredError,
+	type EventsPage,
 	GoogleCalendarClient,
 } from "./api.ts";
 import { validateRecord } from "./schemas.ts";
 
-/**
- * `httpGovernor.request` runs `send()` through `retryHttp`, which wraps a
- * thrown, non-retryable error in `RetryExhaustedError` (with the real error
- * on `.originalCause`) once its bounded attempts are exhausted. `maxAttempts:
- * 1` means that wrapping happens on the very first throw, so a direct
- * `instanceof CalendarSyncTokenExpiredError` check on the caught error never
- * matches — it must also check `.originalCause`.
- */
-function isSyncTokenExpired(error: unknown): boolean {
-	if (error instanceof CalendarSyncTokenExpiredError) {
-		return true;
-	}
-	return (
-		error instanceof Error &&
-		"originalCause" in error &&
-		(error as { originalCause?: unknown }).originalCause instanceof
-			CalendarSyncTokenExpiredError
-	);
+// The HTTP governor wraps provider errors in RetryExhaustedError.
+function providerCause(error: unknown): unknown {
+	return error instanceof Error && "originalCause" in error
+		? error.originalCause
+		: error;
 }
 
 const REFRESH_TOKEN_ENV_VAR = "GOOGLE_CALENDAR_REFRESH_TOKEN";
@@ -86,7 +75,14 @@ const httpGovernor = createConnectorHttpGovernor({
 	profile: google_calendarPacingProfile(),
 });
 
+interface EventsContinuation {
+	readonly page_token: string;
+	/** Prior fingerprint IDs still unseen in a replacement inventory. */
+	readonly pending_prune?: readonly string[];
+}
+
 interface EventsCalendarState {
+	readonly continuation?: EventsContinuation;
 	readonly fingerprints?: Record<string, string>;
 	readonly sync_token?: string;
 }
@@ -150,103 +146,94 @@ function eventRecord(calendarId: string, event: CalendarEvent): RecordData {
  *  bookkeeping); the rest of the record is the real content signal. */
 const EVENT_FINGERPRINT_EXCLUDE = ["updated"] as const;
 
-interface EventsSyncResult {
-	readonly fullResync: boolean;
-	readonly nextSyncToken: string | null;
-	readonly truncated: boolean;
-}
-
-/**
- * Page through one calendar's events once, either incrementally (`syncToken`
- * set) or as a full listing (`syncToken` absent). Shared by both the
- * incremental attempt and the expired-token full-resync fallback in
- * {@link syncCalendarEvents} — those two passes differ only in whether a
- * syncToken is sent, so factoring the loop out keeps each call site's own
- * cognitive complexity within the lint ceiling.
- */
-async function pageThroughEvents(args: {
+interface CalendarWalk {
 	readonly calendarId: string;
 	readonly client: CalendarClientLike;
 	readonly ctx: CollectContext;
 	readonly cursor: FingerprintCursor;
 	readonly maxPages: number;
-	readonly syncToken: string | undefined;
-}): Promise<{ nextSyncToken: string | null; truncated: boolean }> {
-	const { calendarId, client, ctx, cursor, maxPages, syncToken } = args;
-	let pageToken: string | undefined;
+}
+
+async function pageThroughEvents(
+	{ calendarId, client, ctx, cursor, maxPages }: CalendarWalk,
+	syncToken: string | undefined,
+	pageToken?: string,
+	pendingIds?: readonly string[],
+) {
+	let pendingPrune = pendingIds ? new Set(pendingIds) : undefined;
+	let nextPageToken = pageToken ?? null;
 	let nextSyncToken: string | null = null;
-	const walk = await walkPagesWithCeiling({
+	const readPage = (continuation: string | null) =>
+		httpGovernor.request(
+			() =>
+				client.listEventsPage(calendarId, {
+					...(syncToken ? { syncToken } : {}),
+					...(continuation ? { pageToken: continuation } : {}),
+				}),
+			(value) => ({ status: 200, value }),
+		);
+	const { truncated } = await walkPagesWithCeiling({
 		maxPages,
 		fetchPage: async (pageNumber) => {
-			const page = await httpGovernor.request(
-				() =>
-					client.listEventsPage(calendarId, {
-						...(syncToken ? { syncToken } : {}),
-						...(pageToken ? { pageToken } : {}),
-					}),
-				(value) => ({ status: 200, value }),
-			);
+			const page = await readPage(nextPageToken).catch((error: unknown) => {
+				const cause = providerCause(error);
+				if (
+					pageNumber !== 1 ||
+					!pageToken ||
+					!(cause instanceof CalendarApiError && cause.status === 400)
+				) {
+					throw error;
+				}
+				// Retry once without the rejected continuation. A failed original query propagates.
+				if (pendingPrune) pendingPrune = new Set(Object.keys(cursor.toState()));
+				return readPage(null);
+			});
 			await ctx.progress(
 				`Fetched Google Calendar events page ${String(pageNumber)}`,
-				{
-					stream: "events",
-					count: page.value.events.length,
-				},
+				{ stream: "events", count: page.value.events.length },
 			);
 			for (const event of page.value.events) {
+				pendingPrune?.delete(event.id);
 				const record = eventRecord(calendarId, event);
 				if (cursor.shouldEmit(record)) {
 					await ctx.emitRecord("events", record);
 				}
 			}
-			pageToken = page.value.nextPageToken ?? undefined;
+			nextPageToken = page.value.nextPageToken;
 			nextSyncToken = page.value.nextSyncToken ?? nextSyncToken;
-			return Boolean(pageToken);
+			return Boolean(nextPageToken);
 		},
 	});
 	return {
-		nextSyncToken: walk.truncated ? (syncToken ?? null) : nextSyncToken,
-		truncated: walk.truncated,
+		nextPageToken,
+		nextSyncToken: truncated ? (syncToken ?? null) : nextSyncToken,
+		pendingPrune,
+		truncated,
 	};
 }
 
-async function syncCalendarEvents(args: {
-	readonly calendarId: string;
-	readonly client: CalendarClientLike;
-	readonly ctx: CollectContext;
-	readonly cursor: FingerprintCursor;
-	readonly maxPages: number;
-	readonly priorSyncToken: string | undefined;
-}): Promise<EventsSyncResult> {
-	const { calendarId, client, ctx, cursor, maxPages, priorSyncToken } = args;
+async function syncCalendarEvents(
+	walk: CalendarWalk,
+	prior: EventsCalendarState | undefined,
+) {
+	const saved = prior?.continuation;
 	try {
-		const result = await pageThroughEvents({
-			calendarId,
-			client,
-			ctx,
-			cursor,
-			maxPages,
-			syncToken: priorSyncToken,
-		});
-		return { fullResync: false, ...result };
+		return await pageThroughEvents(
+			walk,
+			prior?.sync_token,
+			saved?.page_token,
+			saved?.pending_prune,
+		);
 	} catch (error) {
-		if (!isSyncTokenExpired(error)) {
+		if (!(providerCause(error) instanceof CalendarSyncTokenExpiredError))
 			throw error;
-		}
-		// Expired-token full-resync: discard the syncToken and prior
-		// fingerprints, re-list from scratch. This connector treats the
-		// discarded cursor as a fresh full scan, so dropUnseenIds() below (in the
-		// caller) is safe — a partial-scan cursor must not prune; a full resync
-		// may.
-		const result = await pageThroughEvents({
-			calendarId,
-			client,
-			ctx,
-			cursor,
-			maxPages,
-			syncToken: undefined,
-		});
-		return { fullResync: !result.truncated, ...result };
+		// A 410 invalidates the entire listing, including any saved page token.
+		return pageThroughEvents(
+			walk,
+			undefined,
+			undefined,
+			Object.keys(walk.cursor.toState()),
+		);
 	}
 }
 
@@ -256,11 +243,12 @@ async function persistCalendarEventsResult(args: {
 	readonly cursor: FingerprintCursor;
 	readonly maxPages: number;
 	readonly nextEventsState: Record<string, EventsCalendarState>;
-	readonly result: EventsSyncResult;
+	readonly result: Awaited<ReturnType<typeof pageThroughEvents>>;
 }): Promise<boolean> {
 	const { ctx, calendarId, cursor, maxPages, nextEventsState, result } = args;
-	if (result.fullResync) {
-		cursor.dropUnseenIds();
+	const fingerprints = cursor.toState();
+	if (!result.truncated && result.pendingPrune) {
+		for (const id of result.pendingPrune) delete fingerprints[id];
 	}
 	if (result.truncated) {
 		await ctx.emit({
@@ -280,7 +268,17 @@ async function persistCalendarEventsResult(args: {
 	}
 	nextEventsState[calendarId] = {
 		...(result.nextSyncToken ? { sync_token: result.nextSyncToken } : {}),
-		fingerprints: cursor.toState(),
+		...(result.nextPageToken
+			? {
+					continuation: {
+						page_token: result.nextPageToken,
+						...(result.pendingPrune
+							? { pending_prune: [...result.pendingPrune] }
+							: {}),
+					},
+				}
+			: {}),
+		fingerprints,
 	};
 	return !result.truncated;
 }
@@ -292,7 +290,7 @@ export interface CalendarClientLike {
 	listEventsPage: (
 		calendarId: string,
 		options: { pageToken?: string; syncToken?: string; timeMin?: string },
-	) => Promise<import("./api.ts").EventsPage>;
+	) => Promise<EventsPage>;
 }
 
 interface CalendarCollectOptions {
@@ -380,14 +378,16 @@ export async function collectGoogleCalendar(
 			excludeFromFingerprint: [...EVENT_FINGERPRINT_EXCLUDE],
 		});
 		await ctx.progress("Syncing Google Calendar events", { stream: "events" });
-		const result = await syncCalendarEvents({
-			calendarId: entry.id,
-			client,
-			ctx,
-			cursor: eventsCursor,
-			maxPages: maxPagesPerCalendar,
-			priorSyncToken: priorCalendarState?.sync_token,
-		});
+		const result = await syncCalendarEvents(
+			{
+				calendarId: entry.id,
+				client,
+				ctx,
+				cursor: eventsCursor,
+				maxPages: maxPagesPerCalendar,
+			},
+			priorCalendarState,
+		);
 		// A syncToken response is a PARTIAL delta (only changed/deleted events
 		// surface), so pruning is only valid on the full-resync path — the same
 		// rule Gmail/YNAB apply to their own delta vs. full-scan cursors.
