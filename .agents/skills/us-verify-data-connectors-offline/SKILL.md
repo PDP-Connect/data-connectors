@@ -45,4 +45,4 @@ The recording CLI opens a real socket to the synthetic provider and reports `loo
 
 The fixture closes its own provider and deletes its synthetic scenario. The runner removes its own scratch directory and checks that it is gone before writing a passing receipt. It preserves the proof directory and files. Keep one test suite at a time per worktree. An interrupted run needs a fresh proof directory on retry.
 
-The executable helper is [run.mjs](run.mjs). Maintenance routes to pstack `maintain-verification-skill` after tooling or fixture changes.
+After changing the scenario tools or their fixture, rerun [the helper](run.mjs) and check that the tampered recording still fails for the documented reason.
